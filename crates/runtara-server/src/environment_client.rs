@@ -797,7 +797,10 @@ impl EnvironmentClient {
     /// row; this is how it checks the file is actually there before doing so.
     #[instrument(skip(self), fields(image_id = %image_id), level = "debug")]
     pub async fn image_artifact_present(&self, image_id: &str) -> Result<bool> {
-        Ok(self.image_registry().artifact_present(image_id).await?)
+        Ok(self
+            .image_registry()
+            .artifact_present(image_id, self.state.artifacts.as_ref())
+            .await?)
     }
 
     /// Get one image, scoped to a tenant.

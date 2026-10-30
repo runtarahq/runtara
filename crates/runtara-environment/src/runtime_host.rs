@@ -1,11 +1,11 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Persistence-backed [`RuntimeHost`]: the production implementation of the
-//! `runtara:workflow/runtime` interface.
+//! Persistence-backed [`RuntimeHost`]: the production run services behind
+//! the workflow API.
 //!
-//! Every composed workflow imports `runtara:workflow/runtime`; the
-//! component host binds each function to this implementation, which delegates
-//! straight to `runtara_core::instance_handlers` over the environment's shared
+//! The component host serves every composed workflow's `/v1` calls from this
+//! implementation, which delegates straight to
+//! `runtara_core::instance_handlers` over the environment's shared
 //! `Arc<dyn Persistence>` — no HTTP loopback.
 //!
 //! - Signal polling is rate-limited (default 1s) and non-destructive until
@@ -60,6 +60,8 @@ pub struct PersistenceRuntimeHost {
     debug_mode: bool,
     /// Set once a cancel/shutdown is consumed (per-run, not process-global).
     cancelled: AtomicBool,
+    /// A durable write was refused because another execution holds the run.
+    superseded: AtomicBool,
     /// Signal-poll rate limiter state.
     last_signal_poll: std::sync::Mutex<Option<Instant>>,
     signal_poll_interval: Duration,
@@ -79,6 +81,20 @@ pub struct PersistenceRuntimeHost {
     tenant: tokio::sync::OnceCell<String>,
     /// The durable launch's kind, which trusted calls are judged by.
     trusted_launch: runtara_component_host::trusted::TrustedLaunch,
+    /// Where a run on the workflow API ABI is served from; `None` keeps the
+    /// workflow API unreachable for this run.
+    workflow_api: Option<Arc<runtara_component_host::api_launches::ApiLaunches>>,
+}
+
+impl Drop for PersistenceRuntimeHost {
+    /// The host lives as long as its launch, so dropping it is the one exit
+    /// every path takes (completion, trap, timeout, cancel): stop serving the
+    /// launch's workflow API there.
+    fn drop(&mut self) {
+        if let (Some(launches), Some(lease)) = (&self.workflow_api, self.root_lease.get()) {
+            launches.release(&lease.owner);
+        }
+    }
 }
 
 impl PersistenceRuntimeHost {
@@ -91,6 +107,7 @@ impl PersistenceRuntimeHost {
             debug_mode,
 
             cancelled: AtomicBool::new(false),
+            superseded: AtomicBool::new(false),
             last_signal_poll: std::sync::Mutex::new(None),
             signal_poll_interval: DEFAULT_SIGNAL_POLL_INTERVAL,
             sleep_interrupted: AtomicBool::new(false),
@@ -98,7 +115,17 @@ impl PersistenceRuntimeHost {
             interrupt_guest: None,
             tenant: tokio::sync::OnceCell::new(),
             trusted_launch: Default::default(),
+            workflow_api: None,
         }
+    }
+
+    /// Serve this run's workflow API requests from `launches`.
+    pub fn with_workflow_api(
+        mut self,
+        launches: Arc<runtara_component_host::api_launches::ApiLaunches>,
+    ) -> Self {
+        self.workflow_api = Some(launches);
+        self
     }
 
     /// Bind the root execution lease. A running host cannot be rebound to a
@@ -180,6 +207,7 @@ impl PersistenceRuntimeHost {
         let error = error.into();
         if is_superseded(&error) {
             tracing::warn!(instance_id = %self.instance_id, "Execution superseded; stopping the guest");
+            self.superseded.store(true, Ordering::SeqCst);
             self.cancelled.store(true, Ordering::SeqCst);
             if let Some(token) = &self.cancel_token {
                 token.store(true, Ordering::SeqCst);
@@ -343,19 +371,34 @@ impl PersistenceRuntimeHost {
     }
 
     /// Apply only the command the guest actually observed.
+    /// An execution that no longer holds the run cannot apply it.
     async fn ack_signal(&self, signal_type: SignalType, command_id: &str) -> Result<bool, String> {
-        handle_signal_ack_decision(
-            &self.state,
-            SignalAck {
-                command_id: command_id.to_owned(),
-                instance_id: self.instance_id.clone(),
-                signal_type: signal_type as i32,
-                acknowledged: true,
-            },
-        )
-        .await
-        .map(|decision| decision.accepted())
-        .map_err(Self::err)
+        let owner = self.root_lease.get().cloned();
+        let Some(owner) = owner else {
+            return handle_signal_ack_decision(
+                &self.state,
+                SignalAck {
+                    command_id: command_id.to_owned(),
+                    instance_id: self.instance_id.clone(),
+                    signal_type: signal_type as i32,
+                    acknowledged: true,
+                },
+            )
+            .await
+            .map(|decision| decision.accepted())
+            .map_err(Self::err);
+        };
+        self.state
+            .persistence
+            .apply_owned_lifecycle_command(
+                &self.instance_id,
+                command_id,
+                signal_type.into(),
+                Some(&owner),
+            )
+            .await
+            .map(|decision| decision.accepted())
+            .map_err(|error| self.write_err(error))
     }
 
     /// Record a suspended instance event
@@ -468,12 +511,55 @@ impl RuntimeHost for PersistenceRuntimeHost {
         self.trusted_launch
     }
 
+    fn superseded(&self) -> bool {
+        self.superseded.load(Ordering::SeqCst)
+    }
+
+    async fn holds_run(&self) -> bool {
+        if self.superseded.load(Ordering::SeqCst) {
+            return false;
+        }
+        let (Some(owner), Some(fences)) = (
+            self.root_lease.get(),
+            self.state.persistence.invocation_fences(),
+        ) else {
+            return true;
+        };
+        // A failed read is not proof of loss: the terminal write still fences.
+        let holds = match fences
+            .get_invocation_lease(&owner.tenant_id, &owner.instance_id)
+            .await
+        {
+            Ok(Some(state)) => state.active && state.lease == *owner,
+            Ok(None) => false,
+            Err(_) => true,
+        };
+        if !holds {
+            tracing::warn!(instance_id = %self.instance_id, "Execution no longer holds the run");
+            self.superseded.store(true, Ordering::SeqCst);
+        }
+        holds
+    }
+
     fn in_process_wait(&self) -> Option<Box<dyn std::any::Any + Send>> {
         Some(Box::new(crate::in_process_waits::enter(&self.instance_id)))
     }
 
     fn instance_id(&self) -> Result<String, String> {
         Ok(self.instance_id.clone())
+    }
+
+    /// The binding comes from the root lease the launch holds: its tenant and
+    /// instance, its owner as the launch, its epoch. No lease, no API.
+    fn workflow_api_binding(&self) -> Option<runtara_workflow_api::Binding> {
+        self.workflow_api.as_ref()?;
+        let lease = self.root_lease.get()?;
+        Some(runtara_workflow_api::Binding {
+            tenant_id: lease.tenant_id.clone(),
+            instance_id: lease.instance_id.clone(),
+            launch_id: lease.owner.clone(),
+            root_lease_epoch: u64::try_from(lease.epoch).ok()?,
+        })
     }
 
     /// Persist the terminal result through the same guarded event path the

@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use runtara_agent_trusted::{TrustedContext, error};
 use runtara_dsl::agent_meta::{AgentInfo, canonical_agent_id};
-use runtara_wit::trusted::{EXECUTION as EXECUTION_INTERFACE, EXECUTOR as EXECUTOR_INTERFACE};
+use runtara_wit::trusted::EXECUTION as EXECUTION_INTERFACE;
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 use wasmtime::component::{Component, InstancePre, Linker};
@@ -20,7 +20,37 @@ use crate::host_state::HostState;
 const MAX_INPUT: usize = 1024 * 1024;
 const MAX_OUTPUT: usize = 1024 * 1024;
 const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
-const TIME_LIMIT: Duration = Duration::from_secs(30);
+/// The longest a trusted call runs, whatever deadline its caller passes.
+pub const TIME_LIMIT: Duration = Duration::from_secs(30);
+
+/// Prefix of a trusted artifact pin, an import of the workflow artifact.
+pub const PIN_PREFIX: &str = "runtara:trusted-artifacts/";
+
+/// The trusted artifact pins of the workflow artifact `wasm`: its top-level
+/// `runtara:trusted-artifacts/…` imports, read without compiling it. A host
+/// whose guest runs elsewhere (the fleet) hands these to the run's launch, as
+/// an in-process run takes them from its compiled component.
+pub fn artifact_pins(wasm: &[u8]) -> Result<std::collections::HashSet<String>> {
+    let mut depth = 0usize;
+    let mut pins = std::collections::HashSet::new();
+    for payload in wasmparser::Parser::new(0).parse_all(wasm) {
+        match payload? {
+            wasmparser::Payload::ModuleSection { .. }
+            | wasmparser::Payload::ComponentSection { .. } => depth += 1,
+            wasmparser::Payload::End(_) => depth = depth.saturating_sub(1),
+            wasmparser::Payload::ComponentImportSection(reader) if depth == 0 => {
+                for import in reader {
+                    let name = import?.name.0;
+                    if name.starts_with(PIN_PREFIX) {
+                        pins.insert(name.to_owned());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(pins)
+}
 
 /// Implementations must check tenant ownership, entitlement and the exact type
 /// before decrypting; returned credentials must come from that same record.
@@ -122,20 +152,6 @@ impl TrustedLaunch {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct TrustedCall {
-    pub executor: Arc<TrustedExecutor>,
-    pub tenant: String,
-    pub deadline: tokio::time::Instant,
-    pub pins: Option<Arc<HashSet<String>>>,
-    /// Host-supplied launch kind of the calling run.
-    pub launch: TrustedLaunch,
-}
-
-pub(crate) trait TrustedCaller {
-    fn trusted_call(&self) -> Option<TrustedCall>;
-}
-
 impl TrustedExecutor {
     pub(crate) fn new(engine: Arc<Engine>) -> Self {
         Self {
@@ -193,8 +209,10 @@ impl TrustedExecutor {
                 && matches!(results.as_slice(), [Type::Result(result)] if result.ok().is_some_and(|ty| bytes(&ty)) && matches!(result.err(), Some(Type::String))),
             "trusted execution has incompatible invoke ABI"
         );
+        crate::removed_abi::refuse(&self.engine, &component)?;
         let linker = crate::registry::build_linker(&self.engine)?;
         let pre = linker.instantiate_pre(&component)?;
+        let meta = runtara_dsl::agent_meta::pinned_metadata(meta);
         let mut hash = Sha256::new();
         hash.update(wasm);
         hash.update(meta);
@@ -217,6 +235,11 @@ impl TrustedExecutor {
             },
         );
         Ok(())
+    }
+
+    /// Whether `agent` is a trusted built-in this executor runs.
+    pub fn runs_agent(&self, agent: &str) -> bool {
+        self.agents.contains_key(&canonical_agent_id(agent))
     }
 
     /// Content-bound import names of every installed trusted built-in. The
@@ -326,7 +349,7 @@ impl TrustedExecutor {
     /// a refused call fails with `TRUSTED_VERSION_REQUIRED` before any
     /// credential lookup.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn invoke_pinned(
+    pub async fn invoke_pinned(
         &self,
         pins: Option<&HashSet<String>>,
         launch: TrustedLaunch,
@@ -539,55 +562,36 @@ impl TrustedExecutor {
     }
 }
 
-pub(crate) fn add_to_linker<T: TrustedCaller + Send + 'static>(
-    linker: &mut Linker<T>,
-) -> Result<()> {
-    linker.instance(EXECUTOR_INTERFACE)?.func_wrap_concurrent(
-        "invoke",
-        |accessor, (agent, capability, connection, input): (String, String, String, Vec<u8>)| {
-            let call = accessor.with(|mut access| access.get().trusted_call());
-            Box::pin(async move {
-                let result = match call {
-                    Some(call) => {
-                        call.executor
-                            .invoke_pinned(
-                                call.pins.as_deref(),
-                                call.launch,
-                                &call.tenant,
-                                &agent,
-                                &capability,
-                                &connection,
-                                input,
-                                call.deadline,
-                            )
-                            .await
-                    }
-                    None => Err(error(
-                        "TRUSTED_CAPABILITY_DENIED",
-                        "Trusted execution is not available in this context",
-                    )),
-                };
-                Ok((result,))
-            })
-        },
-    )?;
-    Ok(())
-}
-
-impl TrustedCaller for HostState {
-    fn trusted_call(&self) -> Option<TrustedCall> {
-        Some(TrustedCall {
-            executor: self.trusted.clone()?,
-            tenant: self.ctx.tenant_id.clone(),
-            deadline: self.http_deadline?,
-            pins: None,
-            launch: TrustedLaunch::Start,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
+
+    /// The pins read from the bytes are the ones a compiled run takes from
+    /// its component's imports, nested components' own imports aside.
+    #[test]
+    fn artifact_pins_are_the_top_level_trusted_imports() {
+        let wasm = wat::parse_str(
+            r#"(component
+                (import "runtara:trusted-artifacts/s3-storage-hab-hcd@0.1.0" (instance))
+                (import "runtara:trusted-artifacts/azure-blob-h01-h02@0.1.0" (instance))
+                (import "runtara:agent/types@0.1.0" (instance))
+                (component
+                    (import "runtara:trusted-artifacts/nested-h03-h04@0.1.0" (instance)))
+            )"#,
+        )
+        .unwrap();
+        let pins = artifact_pins(&wasm).unwrap();
+        let engine = crate::engine::build_engine(&crate::engine::EngineConfig::default()).unwrap();
+        let component = wasmtime::component::Component::new(&engine, &wasm).unwrap();
+        let compiled: std::collections::HashSet<String> = component
+            .component_type()
+            .imports(&engine)
+            .filter(|(name, _)| name.starts_with(PIN_PREFIX))
+            .map(|(name, _)| name.to_owned())
+            .collect();
+        assert_eq!(pins, compiled);
+        assert_eq!(pins.len(), 2);
+        assert!(artifact_pins(b"not a component").is_err());
+    }
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -610,31 +614,9 @@ mod tests {
         }
     }
 
-    fn fixture(body: &str, pages: u32, start: &str, timer: bool) -> Vec<u8> {
-        let import = if timer {
-            r#"
-            (import "runtara:host/timers@1.0.0" (instance $timers
-                (export "sleep" (func async (param "ms" u64)))))
-            (alias export $timers "sleep" (func $sleep))
-            (core func $sleep-lower (canon lower (func $sleep)))
-        "#
-        } else {
-            ""
-        };
-        let core_import = if timer {
-            r#"(import "host" "sleep" (func $sleep (param i64)))"#
-        } else {
-            ""
-        };
-        let args = if timer {
-            r#"(with "host" (instance (export "sleep" (func $sleep-lower))))"#
-        } else {
-            ""
-        };
+    fn fixture(body: &str, pages: u32, start: &str) -> Vec<u8> {
         wat::parse_str(format!(r#"(component
-            {import}
             (core module $m
-                {core_import}
                 (memory (export "memory") {pages})
                 (global $heap (mut i32) (i32.const 4096))
                 (global $counter (mut i32) (i32.const 0))
@@ -645,82 +627,13 @@ mod tests {
                 (func (export "invoke") (param i32 i32 i32 i32 i32 i32) (result i32)
                     {body}
                     i32.const 0))
-            (core instance $i (instantiate $m {args}))
+            (core instance $i (instantiate $m))
             (func $invoke async (param "capability-id" string) (param "input" (list u8))
                 (param "context" (list u8)) (result (result (list u8) (error string)))
-                (canon lift (core func $i "invoke") (memory $i "memory") (realloc (func $i "realloc"))))
+                (canon lift (core func $i "invoke") (memory (core memory $i "memory")) (realloc (core func $i "realloc"))))
             (instance $execution (export "invoke" (func $invoke)))
             (export "runtara:trusted/execution@1.0.0" (instance $execution))
         )"#)).unwrap()
-    }
-
-    fn http_probe(startup: bool) -> Vec<u8> {
-        let check = r#"i32.const 0 i32.const 128 call $request
-            i32.const 128 i32.load i32.const 1 i32.ne if unreachable end
-            i32.const 140 i32.load i32.const 16 i32.ne if unreachable end
-            i32.const 136 i32.load i32.load8_u i32.const 72 i32.ne if unreachable end"#;
-        let start = if startup { check } else { "" };
-        let body = if startup { "" } else { check };
-        wat::parse_str(format!(r#"(component
-            (import "runtara:host/http@1.0.0" (instance $http
-                (type $connection-def (record (field "connection-id" string) (field "url" string)
-                    (field "endpoint" (option string)) (field "endpoint-ref" (option string))
-                    (field "ai-provider" (option string)) (field "aws-service" (option string))))
-                (export "connection-destination" (type $connection (eq $connection-def)))
-                (type $destination-def (variant (case "connection" $connection) (case "public" string)))
-                (export "destination" (type $destination (eq $destination-def)))
-                (type $headers (list (tuple string string)))
-                (type $request-def (record (field "destination" $destination) (field "method" string)
-                    (field "headers" $headers) (field "body" (option (list u8)))
-                    (field "timeout-ms" (option u64)) (field "max-response-bytes" (option u64))))
-                (export "request-options" (type $request (eq $request-def)))
-                (type $response-def (record (field "status" u16) (field "headers" $headers) (field "body" (list u8))))
-                (export "response" (type $response (eq $response-def)))
-                (type $error-def (record (field "code" string) (field "message" string)
-                    (field "status" (option u16)) (field "body" (list u8)) (field "retry-after-ms" (option u64))))
-                (export "outbound-error" (type $error (eq $error-def)))
-                (export "request" (func async (param "options" $request) (result (result $response (error $error)))))))
-            (alias export $http "request" (func $request))
-            (core module $memory
-                (memory (export "memory") 1)
-                (global $heap (mut i32) (i32.const 4096))
-                (func (export "realloc") (param i32 i32 i32 i32) (result i32) (local $old i32)
-                    global.get $heap local.tee $old local.get 3 i32.add i32.const 16 i32.add global.set $heap local.get $old))
-            (core instance $memory (instantiate $memory))
-            (core func $request (canon lower (func $request) (memory $memory "memory") (realloc (func $memory "realloc"))))
-            (core module $main
-                (import "memory" "memory" (memory 1))
-                (import "host" "request" (func $request (param i32 i32)))
-                (func $start {start}) (start $start)
-                (func (export "invoke") (param i32 i32 i32 i32 i32 i32) (result i32)
-                    {body}
-                    i32.const 16 i32.const 49 i32.store8
-                    i32.const 4 i32.const 16 i32.store
-                    i32.const 8 i32.const 1 i32.store
-                    i32.const 0))
-            (core instance $i (instantiate $main
-                (with "memory" (instance $memory))
-                (with "host" (instance (export "request" (func $request))))))
-            (func $invoke async (param "capability-id" string) (param "input" (list u8)) (param "context" (list u8))
-                (result (result (list u8) (error string)))
-                (canon lift (core func $i "invoke") (memory $memory "memory") (realloc (func $memory "realloc"))))
-            (instance $execution (export "invoke" (func $invoke)))
-            (export "runtara:trusted/execution@1.0.0" (instance $execution)))"#)).unwrap()
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn http_is_denied_before_parsing_or_sending_in_startup_and_invocation() {
-        for startup in [false, true] {
-            let (executor, _) = executor(&http_probe(startup));
-            let result = call(&executor, Duration::from_secs(5)).await;
-            if startup {
-                // Component initialization cannot block on an async host
-                // import. It traps before any network work can escape.
-                assert!(result.is_err());
-            } else {
-                assert_eq!(result.unwrap(), b"1");
-            }
-        }
     }
 
     fn counting_body() -> &'static str {
@@ -790,7 +703,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn earlier_approved_pins_run_installed_bytes_only_on_wake_or_resume() {
         use runtara_dsl::agent_meta::trusted_artifact_import;
-        let (executor, credentials) = executor(&fixture(counting_body(), 1, "", false));
+        let (executor, credentials) = executor(&fixture(counting_body(), 1, ""));
         let installed = executor.artifact_pins().next().unwrap().to_owned();
         let pin = |agent: &str, seed: &str| {
             trusted_artifact_import(agent, &seed.repeat(64), &"f".repeat(64))
@@ -895,7 +808,7 @@ mod tests {
         let mut info = runtara_agent_crypto::agent_info();
         info.capabilities[0].trusted = true;
         info.supports_connections = true;
-        let wasm = fixture(counting_body(), 1, "", false);
+        let wasm = fixture(counting_body(), 1, "");
         for types in [vec![], vec!["*".into()], vec!["".into()]] {
             info.integration_ids = types;
             assert!(registry.register(&info, &wasm, b"{}").is_err());
@@ -928,7 +841,7 @@ mod tests {
             "i32.const 4 i32.const 16 i32.store i32.const 8 i32.const {} i32.store",
             secret.len()
         ));
-        let (executor, _) = executor(&fixture(&body, 1, "", false));
+        let (executor, _) = executor(&fixture(&body, 1, ""));
         let err = call(&executor, Duration::from_secs(5)).await.unwrap_err();
         assert!(err.contains("TRUSTED_CAPABILITY_FAILED"));
         assert!(!err.contains("fixture-secret"));
@@ -936,7 +849,7 @@ mod tests {
             "i32.const 0 i32.const 1 i32.store8",
             "i32.const 0 i32.const 0 i32.store8",
         );
-        let (bad_output, _) = self::executor(&fixture(&body, 1, "", false));
+        let (bad_output, _) = self::executor(&fixture(&body, 1, ""));
         assert!(
             call(&bad_output, Duration::from_secs(5))
                 .await
@@ -947,7 +860,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn fresh_instances_for_sequential_and_concurrent_calls() {
-        let (executor, _) = executor(&fixture(counting_body(), 1, "", false));
+        let (executor, _) = executor(&fixture(counting_body(), 1, ""));
         for _ in 0..2 {
             assert_eq!(call(&executor, Duration::from_secs(5)).await.unwrap(), b"1");
         }
@@ -974,19 +887,7 @@ mod tests {
             ),
             (counting_body(), 1, "unreachable"),
         ] {
-            let (executor, _) = executor(&fixture(body, pages, start, false));
-            assert!(call(&executor, Duration::from_secs(5)).await.is_err());
-            assert_eq!(executor.permits.available_permits(), 16);
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn denied_timer_import_in_startup_and_invocation() {
-        for (body, start) in [
-            ("i64.const 0 call $sleep", ""),
-            (counting_body(), "i64.const 0 call $sleep"),
-        ] {
-            let (executor, _) = executor(&fixture(body, 1, start, true));
+            let (executor, _) = executor(&fixture(body, pages, start));
             assert!(call(&executor, Duration::from_secs(5)).await.is_err());
             assert_eq!(executor.permits.available_permits(), 16);
         }
@@ -994,8 +895,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn deadlines_and_cancellation_stop_running_guest() {
-        let (executor, credentials) =
-            executor(&fixture("(loop $forever br $forever)", 1, "", false));
+        let (executor, credentials) = executor(&fixture("(loop $forever br $forever)", 1, ""));
         assert!(call(&executor, Duration::from_millis(150)).await.is_err());
         assert_eq!(executor.permits.available_permits(), 16);
         let run = executor.clone();

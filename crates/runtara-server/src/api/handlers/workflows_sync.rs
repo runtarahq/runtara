@@ -56,7 +56,7 @@ use crate::workers::execution_engine::{ExecutionEngine, SyncRequest};
     ),
     tag = "Event Capture"
 )]
-#[instrument(skip(engine, body), fields(workflow_id = %workflow_id))]
+#[instrument(skip(engine, pool, body), fields(workflow_id = %workflow_id))]
 #[allow(clippy::too_many_arguments)]
 pub async fn capture_http_event_sync(
     Path(workflow_id): Path<String>,
@@ -65,10 +65,36 @@ pub async fn capture_http_event_sync(
     uri: Uri,
     headers: HeaderMap,
     State(engine): State<Arc<ExecutionEngine>>,
+    State(pool): State<sqlx::PgPool>,
     body: Bytes,
 ) -> (StatusCode, Json<Value>) {
-    // Events are webhook endpoints — tenant is implicit (single-tenant runtime)
-    let tenant_id = crate::config::tenant_id().to_string();
+    // An unauthenticated webhook: the workflow's tenant, among those this
+    // process serves. A workflow id two served tenants share names neither.
+    let tenants: Vec<String> = match sqlx::query_scalar(
+        "SELECT tenant_id FROM workflows WHERE workflow_id = $1 AND tenant_id = ANY($2) LIMIT 2",
+    )
+    .bind(&workflow_id)
+    .bind(crate::config::served_tenants())
+    .fetch_all(&pool)
+    .await
+    {
+        Ok(tenants) => tenants,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    json!({ "success": false, "error": format!("Failed to look up workflow: {error}") }),
+                ),
+            );
+        }
+    };
+    let [tenant_id] = tenants.as_slice() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Workflow not found" })),
+        );
+    };
+    let tenant_id = tenant_id.clone();
 
     // Build inputs from HTTP request data
     let inputs = build_inputs_from_http_request(&method, &uri, &headers, &body);

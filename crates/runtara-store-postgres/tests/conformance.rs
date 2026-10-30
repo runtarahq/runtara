@@ -42,6 +42,7 @@ async fn postgres_backend_passes_conformance_sequence() {
     runtara_core::persistence::conformance::run_prune_pinned_sequence(&backend).await;
     runtara_core::persistence::conformance::run_lifecycle_policy_matrix(&backend).await;
     runtara_core::persistence::conformance::run_wake_reason_sequence(&backend).await;
+    runtara_core::persistence::conformance::run_claim_by_tenant_sequence(&backend).await;
 }
 
 /// Parallel wakers racing for one instance must produce a single winner.

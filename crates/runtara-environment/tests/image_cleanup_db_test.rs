@@ -271,3 +271,42 @@ async fn protected_images_cannot_fill_the_batch() {
 
     cleanup(&pool, &tenant).await;
 }
+
+/// SYN-777: collection removes an artifact nothing references once it is old
+/// enough, and keeps one an image names.
+#[tokio::test]
+async fn unreferenced_artifacts_are_collected_and_an_images_kept() {
+    use runtara_environment::artifacts::{ArtifactStore, FilesystemArtifactStore};
+    use runtara_environment::image_registry::{ImageBuilder, ImageRegistry};
+    let _sweep = SWEEP_LOCK.lock().await;
+    let pool = pool().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = FilesystemArtifactStore::new(dir.path().join("store"));
+    let registry = ImageRegistry::new(pool.clone());
+    let image = ImageBuilder::new("gc-tenant", format!("gc-{}", Uuid::new_v4())).build();
+    let named = registry
+        .register(&image, b"\0asm named by an image", &store)
+        .await
+        .unwrap();
+    let orphan = store.put(b"\0asm referenced by nothing").await.unwrap();
+
+    // Within the grace, both stay.
+    let (collected, _) = registry
+        .collect_artifacts(&store, std::time::Duration::from_secs(3600))
+        .await
+        .unwrap();
+    assert_eq!(collected.blobs, 0);
+
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let (collected, _) = registry
+        .collect_artifacts(&store, std::time::Duration::ZERO)
+        .await
+        .unwrap();
+    assert!(collected.blobs >= 1, "{collected:?}");
+    assert!(!store.exists(&orphan).await.unwrap(), "the orphan goes");
+    assert!(
+        store.exists(&named).await.unwrap(),
+        "the image's artifact stays"
+    );
+    registry.delete(&image.image_id, &store).await.unwrap();
+}

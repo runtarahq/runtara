@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 
+use crate::agent_release;
 use crate::api;
 use crate::auth;
 use crate::channels;
@@ -26,6 +27,7 @@ use crate::product_events;
 use crate::runtime_client;
 use crate::valkey;
 use crate::workers;
+use crate::workflow_agents;
 
 use api::services::agent_testing::AgentTestingService;
 
@@ -655,6 +657,62 @@ async fn me_handler(
     }))
 }
 
+/// The tenants this process serves that the caller may act in, with their role in each.
+///
+/// A JWT under membership enforcement is listed in every served tenant whose
+/// `{tenant}:member:{sub}` names it and whose denylist does not revoke the token; the SPA
+/// uses this to pick and switch tenants. Every other credential (an API key, the
+/// self-hosted modes, membership off) is bound to the one tenant it authenticated for.
+async fn my_tenants_handler(
+    auth_state: crate::auth::AuthState,
+    auth: crate::auth::AuthContext,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let by_membership = auth.auth_method == crate::auth::AuthMethod::Jwt
+        && auth_state.membership_policy != crate::auth::MembershipPolicy::Disabled;
+    if !by_membership {
+        return Json(serde_json::json!({
+            "tenants": [{ "id": auth.org_id, "role": auth.role.map(|r| r.as_str()) }],
+        }))
+        .into_response();
+    }
+    let Some(manager) = auth_state.valkey.as_ref() else {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Membership unavailable" })),
+        )
+            .into_response();
+    };
+
+    let mut tenants = Vec::new();
+    for tenant in config::served_tenants() {
+        let lookup = async {
+            if let Some(jti) = auth.jti.as_deref()
+                && crate::valkey::auth::token_is_revoked(manager, tenant, jti).await?
+            {
+                return Ok(None);
+            }
+            crate::valkey::auth::get_member_role(manager, tenant, &auth.user_id).await
+        };
+        match lookup.await {
+            Ok(Some(role)) => {
+                tenants.push(serde_json::json!({ "id": tenant, "role": role.as_str() }));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(tenant_id = %tenant, %error, "membership lookup failed");
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({ "error": "Membership unavailable" })),
+                )
+                    .into_response();
+            }
+        }
+    }
+    Json(serde_json::json!({ "tenants": tenants })).into_response()
+}
+
 /// Maximum request body size for tenant-scoped API routes.
 ///
 /// File inputs (workflow `file` fields, CSV imports) travel as base64-encoded
@@ -666,7 +724,151 @@ async fn me_handler(
 /// 96 MB leaves headroom above the base64-encoded size of a 50 MB file.
 const TENANT_REQUEST_BODY_LIMIT_BYTES: usize = 96 * 1024 * 1024;
 
+/// How a host composes the server beyond its environment configuration.
+#[derive(Default, Clone)]
+pub struct ServerOptions {
+    /// Builds the workflow runner; `None` runs workflows on the embedded
+    /// in-process engine.
+    pub runner_factory: Option<runtara_environment::runner::RunnerFactory>,
+    /// Where workflow artifacts are kept; `None` keeps them as files under
+    /// `<DATA_DIR>/artifacts`.
+    pub artifacts: Option<Arc<dyn runtara_environment::artifacts::ArtifactStore>>,
+    /// Where each tenant's entitlements come from; `None` reads them from the
+    /// environment (`RUNTARA_PRICING_TIER` and friends for the primary
+    /// tenant, `RUNTARA_TENANT_ENTITLEMENTS_JSON` for the others).
+    pub entitlements: Option<Arc<dyn config::EntitlementSource>>,
+    /// How connection credentials are sealed at rest; `None` builds the
+    /// AES-GCM keyring from `RUNTARA_CONNECTIONS_ENCRYPTION_KEY` and friends.
+    /// A host that keeps keys per tenant (for example unwrapped from a KMS)
+    /// supplies its own, such as a `runtara_connections::TenantKeyedCipher`;
+    /// every call names the tenant and connection it is for.
+    pub credential_cipher: Option<Arc<dyn runtara_connections::CredentialCipher>>,
+}
+
 pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    start_with(pool, ServerOptions::default()).await
+}
+
+/// `RUNTARA_ARTIFACT_STORE_URL`, when set: where artifacts live instead of
+/// `<DATA_DIR>/artifacts`.
+fn artifact_store_url() -> Option<String> {
+    std::env::var("RUNTARA_ARTIFACT_STORE_URL")
+        .ok()
+        .map(|url| url.trim().to_owned())
+        .filter(|url| !url.is_empty())
+}
+
+/// The store URL without any userinfo or query, for the boot log.
+fn redact_store_url(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(mut parsed) => {
+            let _ = parsed.set_username("");
+            let _ = parsed.set_password(None);
+            parsed.set_query(None);
+            parsed.to_string()
+        }
+        Err(_) => "<unparseable URL>".to_owned(),
+    }
+}
+
+/// [`start`], composed with `options`.
+pub async fn start_with(
+    pool: PgPool,
+    options: ServerOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(source) = options.entitlements.clone() {
+        config::install_entitlement_source(source);
+    }
+
+    // Every artifact lives in one store, shared with Environment and its
+    // runner. The platform components this server runs are a release in it:
+    // published from the components directory when one is set, and the
+    // agent allowlist is that release's agents.
+    let artifacts: Arc<dyn runtara_environment::artifacts::ArtifactStore> =
+        match options.artifacts.clone() {
+            Some(artifacts) => artifacts,
+            None => match artifact_store_url() {
+                // An object store (`s3://bucket/prefix`, `gs://`, `az://`),
+                // configured from the provider's standard environment
+                // variables; content local readers need is cached under
+                // DATA_DIR.
+                Some(url) => {
+                    let cache = embedded_runtara::data_dir().join("artifact-cache");
+                    match runtara_artifact_store::object::ObjectArtifactStore::from_url(&url, cache)
+                    {
+                        Ok(store) => {
+                            println!("✓ Artifact store: {}", redact_store_url(&url));
+                            Arc::new(store)
+                        }
+                        Err(error) => {
+                            eprintln!("❌ RUNTARA_ARTIFACT_STORE_URL: {error}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                None => Arc::new(runtara_environment::image_registry::default_artifact_store(
+                    &embedded_runtara::data_dir(),
+                )),
+            },
+        };
+    let options = ServerOptions {
+        artifacts: Some(artifacts.clone()),
+        ..options
+    };
+    // Published workflow-agents are records in the store; their staging dirs
+    // are a cache, rebuilt here before anything reads them.
+    workflow_agents::install_store(artifacts.clone());
+    match workflow_agents::sync_from_store().await {
+        Ok((imported, staged)) => println!(
+            "✓ Workflow-agents: {staged} staged from the artifact store ({imported} recorded from staging dirs)"
+        ),
+        Err(error) => {
+            eprintln!("❌ Restore published workflow-agents from the artifact store: {error}");
+            std::process::exit(1);
+        }
+    }
+    let release_name = agent_release::release_name();
+    let components_dir = std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
+        .filter(|dir| !dir.to_string_lossy().trim().is_empty())
+        .map(std::path::PathBuf::from);
+    let release =
+        match agent_release::prepare(artifacts.as_ref(), components_dir.as_deref(), &release_name)
+            .await
+        {
+            Ok(release) => release,
+            Err(error) => {
+                eprintln!(
+                    "❌ {error}\n\
+                 The server has NO runnable agents until this is resolved."
+                );
+                std::process::exit(1);
+            }
+        };
+    if let Some(release) = &release {
+        config::install_release_agents(release.agents.iter().map(|agent| agent.id.clone()));
+        // Compilation composes from files: the release, materialized under
+        // the digest of its index, holds exactly the bytes the release pins.
+        let index = release.digest();
+        let dir = embedded_runtara::data_dir()
+            .join("releases")
+            .join(index.as_str());
+        if let Err(error) =
+            runtara_environment::artifacts::release::materialize(artifacts.as_ref(), release, &dir)
+                .await
+        {
+            eprintln!(
+                "❌ Materialize release {release_name} for compilation at {}: {error}",
+                dir.display()
+            );
+            std::process::exit(1);
+        }
+        config::install_component_release(config::ComponentRelease {
+            release: release_name.clone(),
+            index: index.to_string(),
+            dir,
+        });
+    }
+
     // Load all env-derived configuration up front; fails fast on missing/invalid.
     let server_config = config::Config::from_env()?;
 
@@ -814,13 +1016,41 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .clone()
         .filter(|_| config::valkey_admission_enabled())
     {
-        match workers::admission_counter::install(manager, &pool).await {
+        match workers::admission_counter::install(manager, &pool, config::served_tenants().to_vec())
+            .await
+        {
             Ok(()) => println!("✓ Valkey admission counter installed"),
             Err(error) => eprintln!(
                 "⚠ Failed to install Valkey admission counter, using the database counter: {error}"
             ),
         }
     }
+
+    // Per-tenant rate limits share their buckets through Valkey.
+    if let Some(manager) = redis_manager.clone() {
+        crate::tenant_quota::install(manager.clone());
+        crate::tenant_status::install(manager);
+    }
+    // A tenant not served now keeps its parked runs parked.
+    runtara_environment::wake_scheduler::set_wake_gate(Arc::new(
+        crate::tenant_status::TenantWakeGate,
+    ));
+    // RUNTARA_CLAIM_ONLY_SERVED_TENANTS: wake and launch only the served
+    // tenants' runs, where processes serving other tenants share the store.
+    if std::env::var("RUNTARA_CLAIM_ONLY_SERVED_TENANTS").is_ok_and(|raw| {
+        matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    }) {
+        runtara_environment::claim_scope::set_claim_tenants(
+            crate::config::served_tenants().to_vec(),
+        );
+    }
+    // Runs' calls that start external work wait for their tenant's tokens.
+    runtara_component_host::api_launches::set_default_call_limiter(Arc::new(
+        crate::tenant_quota::WorkflowCallLimiter,
+    ));
 
     // Per-tenant Valkey membership enforcement policy. Built here, after the
     // shared manager, so the policy default can see whether Valkey is actually configured.
@@ -875,55 +1105,51 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // through it; `AgentsService` reads its metadata to override the legacy
     // registry for component-backed agents.
     let component_dispatcher: Option<Arc<runtara_component_host::ComponentDispatcherService>> = {
-        let cfg = config::get();
-        if let Some(ref dir) = cfg.agent_components_dir {
-            use runtara_component_host::ComponentDispatcherService;
-            // Agent components reach the host through imports, not HTTP, so
-            // no core URL is exported into their environment.
-            match ComponentDispatcherService::from_dir(dir).await {
-                Ok(dispatcher) => {
-                    let loaded: Vec<&str> = dispatcher.agent_ids().collect();
-                    if loaded.is_empty() {
-                        // The runtime dispatches ONLY WASM components, so zero
-                        // agents means the server can't run any workflow. Fail
-                        // fast rather than silently serving an empty agent
-                        // surface (a `cargo clean` wiping the build-output
-                        // components dir is the usual cause).
-                        eprintln!(
-                            "❌ Component dispatcher loaded 0 agents from {}.\n\
-                             The directory exists but contains no runtara_agent_*.wasm \
-                             components — the server has NO runnable agents.\n\
-                             Rebuild them (scripts/build-agent-components.sh) or point \
-                             RUNTARA_AGENT_COMPONENTS_DIR at a populated bundle.",
-                            dir.display()
-                        );
-                        std::process::exit(1);
-                    }
-                    println!(
-                        "✓ Component dispatcher loaded {} agent(s) from {}: {}",
-                        loaded.len(),
-                        dir.display(),
-                        loaded.join(", ")
-                    );
-                    Some(Arc::new(dispatcher))
-                }
-                Err(e) => {
+        use runtara_component_host::ComponentDispatcherService;
+        let Some(release) = &release else {
+            eprintln!(
+                "❌ RUNTARA_AGENT_COMPONENTS_DIR is not set and the artifact store holds no \
+                 release {release_name} — the server dispatches ONLY WASM agent components \
+                 and has NO runnable agents without them.\n\
+                 Set it to a directory of runtara_agent_*.wasm components, or publish \
+                 release {release_name} into the store."
+            );
+            std::process::exit(1);
+        };
+        // Agent components reach the host through imports, not HTTP, so
+        // no core URL is exported into their environment.
+        match ComponentDispatcherService::from_release(artifacts.as_ref(), release).await {
+            Ok(dispatcher) => {
+                let loaded: Vec<&str> = dispatcher.agent_ids().collect();
+                if loaded.is_empty() {
+                    // The runtime dispatches ONLY WASM components, so zero
+                    // agents means the server can't run any workflow. Fail
+                    // fast rather than silently serving an empty agent
+                    // surface (a `cargo clean` wiping the build-output
+                    // components dir is the usual cause).
                     eprintln!(
-                        "❌ Failed to load WASM agent components from {}: {}\n\
-                         The server has NO runnable agents until this is resolved.",
-                        dir.display(),
-                        e
+                        "❌ Component dispatcher loaded 0 agents from release {release_name}.\n\
+                         It holds no runtara_agent_*.wasm components — the server has NO \
+                         runnable agents.\n\
+                         Rebuild them (scripts/build-agent-components.sh) or point \
+                         RUNTARA_AGENT_COMPONENTS_DIR at a populated bundle."
                     );
                     std::process::exit(1);
                 }
+                println!(
+                    "✓ Component dispatcher loaded {} agent(s) from release {release_name}: {}",
+                    loaded.len(),
+                    loaded.join(", ")
+                );
+                Some(Arc::new(dispatcher))
             }
-        } else {
-            eprintln!(
-                "❌ RUNTARA_AGENT_COMPONENTS_DIR is not set — the server dispatches \
-                 ONLY WASM agent components and has NO runnable agents without them.\n\
-                 Set it to a directory of runtara_agent_*.wasm components."
-            );
-            std::process::exit(1);
+            Err(e) => {
+                eprintln!(
+                    "❌ Failed to load the agents of release {release_name}: {e:#}\n\
+                     The server has NO runnable agents until this is resolved."
+                );
+                std::process::exit(1);
+            }
         }
     };
 
@@ -976,12 +1202,15 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // RUNTARA_REQUIRE_CREDENTIAL_ENCRYPTION or RUNTARA_ENV=production is set, in which
     // case a missing/invalid key hard-fails startup instead of silently degrading. See
     // runtara_connections::crypto::cipher_from_env for details.
-    let cipher = match runtara_connections::cipher_from_env() {
-        Ok(cipher) => cipher,
-        Err(e) => {
-            eprintln!("❌ {}", e);
-            std::process::exit(1);
-        }
+    let cipher = match options.credential_cipher.clone() {
+        Some(cipher) => cipher,
+        None => match runtara_connections::cipher_from_env() {
+            Ok(cipher) => cipher,
+            Err(e) => {
+                eprintln!("❌ {}", e);
+                std::process::exit(1);
+            }
+        },
     };
     // Fixed for the process lifetime — captured here for the `/health` readiness
     // response rather than threading connections-crate state through the public
@@ -1072,42 +1301,63 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Initialize object store manager for object model database
+    // The platform's object model database is optional. Without it there is
+    // no default database: the object model, SQL steps and database tools use
+    // the tenant's own Postgres connections, which the address guard admits.
     let object_model_database_url = config::object_model_database_url();
-
-    println!("Connecting to object model database...");
     let object_model_pool_config = config::object_model_pool_config();
-    let object_model_pool = PgPoolOptions::new()
-        .max_connections(object_model_pool_config.max_connections)
-        .min_connections(object_model_pool_config.min_connections)
-        .acquire_timeout(object_model_pool_config.acquire_timeout)
-        .idle_timeout(object_model_pool_config.idle_timeout)
-        .max_lifetime(object_model_pool_config.max_lifetime)
-        .test_before_acquire(object_model_pool_config.test_before_acquire)
-        .connect(&object_model_database_url)
-        .await
-        .expect("Failed to connect to object model database");
-
-    // Raw SQL runs as the object-model role: warn when that role is a
-    // superuser or the object-model database is the server's own.
-    crate::object_model_privileges::warn_if_overprivileged(&object_model_pool, &pool).await;
 
     // Run server migrations (workflows, api_keys, etc.) against the main pool
     run_server_migrations(&pool).await?;
 
-    // Create ObjectStoreManager from the pool (single-database mode for now)
+    let object_store_manager = match &object_model_database_url {
+        Some(object_model_database_url) => {
+            println!("Connecting to object model database...");
+            let object_model_pool = PgPoolOptions::new()
+                .max_connections(object_model_pool_config.max_connections)
+                .min_connections(object_model_pool_config.min_connections)
+                .acquire_timeout(object_model_pool_config.acquire_timeout)
+                .idle_timeout(object_model_pool_config.idle_timeout)
+                .max_lifetime(object_model_pool_config.max_lifetime)
+                .test_before_acquire(object_model_pool_config.test_before_acquire)
+                .connect(object_model_database_url)
+                .await
+                .expect("Failed to connect to object model database");
+
+            // Raw SQL runs as the object-model role: warn when that role is a
+            // superuser or the object-model database is the server's own.
+            crate::object_model_privileges::warn_if_overprivileged(&object_model_pool, &pool).await;
+
+            // Create ObjectStoreManager from the pool (single-database mode)
+            let manager = ObjectStoreManager::from_pool(object_model_pool)
+                .await
+                .expect("Failed to initialize ObjectStoreManager");
+            println!("✓ Object model database connected successfully");
+            manager
+        }
+        None => {
+            println!(
+                "✓ No platform object model database (OBJECT_MODEL_DATABASE_URL is not set): \
+                 the object model and SQL use the tenant's Postgres connections"
+            );
+            ObjectStoreManager::without_default_database()
+        }
+    };
+    if config::database_connection_guard() {
+        println!(
+            "✓ Database connections must reach public addresses \
+             (RUNTARA_DATABASE_CONNECTION_GUARD; allowlist RUNTARA_PROXY_ALLOWED_HOSTS)"
+        );
+    }
     let object_store_manager = Arc::new(
-        ObjectStoreManager::from_pool(object_model_pool)
-            .await
-            .expect("Failed to initialize ObjectStoreManager")
+        object_store_manager
             .with_pool_config(object_model_pool_config)
             .with_cache_config(
                 config::object_model_pool_cache_max(),
                 config::object_model_pool_cache_ttl(),
-            ),
+            )
+            .with_tenant_pool_max(config::object_model_tenant_pool_max()),
     );
-
-    println!("✓ Object model database connected successfully");
 
     // Spawn background task to report object-model pool stats / warn on pressure.
     let object_model_pool_monitor = object_store_manager.clone();
@@ -1145,29 +1395,38 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    match connections_facade
-        .ensure_default_connection(
-            &tenant_id,
-            "object_model",
-            format!("Default Object Model Database ({})", tenant_id),
-            "postgres".to_string(),
-            serde_json::json!({ "database_url": object_model_database_url }),
-        )
-        .await
-    {
-        Ok(connection_id) => {
-            tracing::info!(
-                tenant_id = %tenant_id,
-                connection_id = %connection_id,
-                "Default object_model connection is configured"
-            );
-        }
-        Err(error) => {
-            tracing::warn!(
-                tenant_id = %tenant_id,
-                error = ?error,
-                "Failed to auto-populate default object_model connection"
-            );
+    // Each served tenant gets the platform database as its default connection.
+    for tenant_id in config::served_tenants() {
+        let default_connection = match &object_model_database_url {
+            Some(object_model_database_url) => Some(
+                connections_facade
+                    .ensure_default_connection(
+                        tenant_id,
+                        "object_model",
+                        format!("Default Object Model Database ({})", tenant_id),
+                        "postgres".to_string(),
+                        serde_json::json!({ "database_url": object_model_database_url }),
+                    )
+                    .await,
+            ),
+            None => None,
+        };
+        match default_connection {
+            None => {}
+            Some(Ok(connection_id)) => {
+                tracing::info!(
+                    tenant_id = %tenant_id,
+                    connection_id = %connection_id,
+                    "Default object_model connection is configured"
+                );
+            }
+            Some(Err(error)) => {
+                tracing::warn!(
+                    tenant_id = %tenant_id,
+                    error = ?error,
+                    "Failed to auto-populate default object_model connection"
+                );
+            }
         }
     }
 
@@ -1237,7 +1496,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         )))?;
     }
 
-    // The control service behind every run's `runtara:control/api` and the
+    // The control service behind every run's `/v1/instances` calls and the
     // control agent's test invocations, on every tier (decision D5). It binds
     // to the runtime once it exists.
     let native_control = Arc::new(
@@ -1265,6 +1524,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             workers::step_counter::StepCounter::new(metrics.meter().clone())
                 as Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>
         }),
+        options.clone(),
     )
     .await
     {
@@ -1312,6 +1572,45 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     println!("✓ Runtime client initialized");
     if let Some(runtime_client) = &runtime_client {
         native_control.install(runtime_client.clone());
+    }
+
+    // Workflow artifacts missing from the store (a restore: the store is not
+    // backed up) are rebuilt from their versions, and workflow-agents staged
+    // by another lowering (an upgrade changed how they compile) republished,
+    // off the boot path. Launches that find no artifact wait for it.
+    {
+        let service = api::services::compilation::CompilationService::new(
+            Arc::new(api::repositories::workflows::WorkflowRepository::new(
+                pool.clone(),
+            )),
+            runtime_client.clone(),
+        )
+        .with_agent_catalog(agent_catalog.clone())
+        .with_direct_compilation(
+            api::services::compilation::direct_compilation_settings_from_config(),
+        );
+        tokio::spawn(async move {
+            for tenant_id in config::served_tenants() {
+                let (rebuilt, failed) = service.restage_missing_artifacts(tenant_id).await;
+                if rebuilt + failed > 0 {
+                    tracing::info!(
+                        %tenant_id,
+                        rebuilt,
+                        failed,
+                        "rebuilt missing workflow artifacts"
+                    );
+                }
+                let (restaged, failed) = service.restage_stale_workflow_agents(tenant_id).await;
+                if restaged + failed > 0 {
+                    tracing::info!(
+                        %tenant_id,
+                        restaged,
+                        failed,
+                        "restaged workflow-agents for this lowering"
+                    );
+                }
+            }
+        });
     }
 
     // Install before any Valkey worker is started. Environment commits its
@@ -1471,11 +1770,13 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         println!("  Trigger intake: {trigger_workers} worker(s), batch {trigger_batch_size}");
         // Keep per-worker bounds and export their aggregate capacity through OTEL.
         let trigger_permits = workers::trigger_worker::TriggerPermits::new(
-            trigger_workers,
+            trigger_workers * config::served_tenants().len(),
             workers::trigger_worker::trigger_concurrency(),
         );
-        for worker_index in 0..trigger_workers {
-            let trigger_worker_tenant_id = tenant_id.clone();
+        // Each served tenant's trigger stream gets its own consumers.
+        let served = config::served_tenants();
+        for worker_index in 0..trigger_workers * served.len() {
+            let trigger_worker_tenant_id = served[worker_index / trigger_workers].clone();
             let permits_for_worker = trigger_permits
                 .for_worker(worker_index)
                 .expect("a semaphore exists for every spawned trigger worker");
@@ -1653,33 +1954,38 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if let (Some(connection), Some(client)) = (valkey_conn.clone(), runtime_client.clone()) {
-        let shutdown = shutdown_signal.clone();
-        let delivery_pool = pool.clone();
-        let delivery_tenant_id = tenant_id.clone();
-        shutdown_coordinator.spawn_intake(async move {
-            workers::session_delivery_worker::run(
-                connection,
-                client,
-                delivery_pool,
-                delivery_tenant_id,
-                shutdown,
-            )
-            .await;
-        });
+        for delivery_tenant_id in config::served_tenants().iter().cloned() {
+            let connection = connection.clone();
+            let client = client.clone();
+            let shutdown = shutdown_signal.clone();
+            let delivery_pool = pool.clone();
+            shutdown_coordinator.spawn_intake(async move {
+                workers::session_delivery_worker::run(
+                    connection,
+                    client,
+                    delivery_pool,
+                    delivery_tenant_id,
+                    shutdown,
+                )
+                .await;
+            });
+        }
     }
 
     // Cron does not publish to Valkey directly. Its durable enqueue remains
     // available during an outage, and the relay delivers it when connectivity
     // returns. Start after the shared engine exists so it uses the exact same
     // admission policy as HTTP, sessions, chat, and webhook sources.
-    {
+    for cron_tenant_id in config::served_tenants().iter().cloned() {
         let cron_pool = pool.clone();
         let cron_engine = Arc::clone(&execution_engine);
-        let cron_tenant_id = tenant_id.clone();
         let cron_shutdown = shutdown_signal.clone();
+        // Triggers no tenant owns run as the primary tenant, fired once.
+        let claims_untenanted = cron_tenant_id == tenant_id;
         shutdown_coordinator.spawn_intake(async move {
             let scheduler_config = workers::cron_scheduler::CronSchedulerConfig {
                 tenant_id: cron_tenant_id,
+                claims_untenanted,
                 check_interval_secs: 60,
             };
             workers::cron_scheduler::run(cron_pool, cron_engine, scheduler_config, cron_shutdown)
@@ -1785,7 +2091,8 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         )
         .route(
             "/api/runtime/workflows/{id}/versions/{version}/compile",
-            post(api::handlers::workflows::compile_workflow_handler),
+            post(api::handlers::workflows::compile_workflow_handler)
+                .route_layer(from_fn(crate::tenant_quota::limit_compilations)),
         )
         .route(
             "/api/runtime/workflows/{id}/versions/{version}/compilation-progress",
@@ -2393,6 +2700,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         config::mcp_allowed_hosts().to_vec(),
         mcp_session_store,
     )
+    // Innermost, after auth: MCP session state is kept under the caller's
+    // tenant (see `mcp::scope_session_tenant`).
+    .layer(from_fn(crate::mcp::scope_session_tenant))
     // Apply the `mcp` entitlement gate at the transport entry. Disabling
     // the feature short-circuits with 403 ENTITLEMENT_REQUIRED before any
     // MCP tool handler is reached. Per-tool gates also exist as a second
@@ -2450,12 +2760,30 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             crate::middleware::auth::authenticate,
         ));
 
+    // `/me/tenants` — where the caller may act. Authenticated without the membership
+    // check of the tenant the request resolves to: it checks every served tenant itself.
+    let my_tenants_routes = Router::new()
+        .route(
+            "/api/runtime/me/tenants",
+            get({
+                let auth_state = auth_state.clone();
+                move |axum::Extension(auth): axum::Extension<crate::auth::AuthContext>| {
+                    my_tenants_handler(auth_state.clone(), auth)
+                }
+            }),
+        )
+        .route_layer(from_fn_with_state(
+            auth_state.clone(),
+            crate::middleware::auth::authenticate_identity,
+        ));
+
     let public_app = Router::new()
         .merge(tenant_routes)
         .nest("/api/runtime", connections_tenant_routes)
         .nest("/api/oauth", oauth_callback_routes)
         .merge(object_model_routes)
         .merge(me_routes)
+        .merge(my_tenants_routes)
         .merge(public_routes)
         .merge(event_routes)
         .merge(channel_routes)
@@ -2590,8 +2918,19 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // this listener: agent calls are in-process host imports and the embedded
     // core stays up until the drain below finishes.
     let public_shutdown = shutdown_signal.clone();
-    let public_server = axum::serve(public_listener, public_app)
-        .with_graceful_shutdown(async move { public_shutdown.wait().await });
+    // A served tenant's path segment is stripped before routing (see
+    // `middleware::tenant_path`), so it wraps the finished router.
+    let public_app = tower::Layer::layer(
+        &tower::util::MapRequestLayer::new(
+            crate::middleware::tenant_path::strip_tenant_segment::<axum::body::Body>,
+        ),
+        public_app,
+    );
+    let public_server = axum::serve(
+        public_listener,
+        axum::ServiceExt::<axum::extract::Request>::into_make_service(public_app),
+    )
+    .with_graceful_shutdown(async move { public_shutdown.wait().await });
 
     // Install SIGINT / SIGTERM handlers that flip the shutdown flag. Runs
     // concurrently with the server — exiting is driven by the flag, not by
@@ -2711,7 +3050,7 @@ pub fn skip_migrations() -> bool {
 /// in `main`), which holds all server-managed tables — never the object-model
 /// pool. Uses ignore_missing since this pool may share the _sqlx_migrations
 /// table with other migrators.
-async fn run_server_migrations(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) async fn run_server_migrations(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     #[derive(Debug)]
     struct Migrations(Vec<sqlx::migrate::Migration>);
 

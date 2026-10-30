@@ -91,6 +91,40 @@ async fn dispatcher_invokes_crypto_hash() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A release published into the artifact store loads the agents its bundle
+/// holds: the same catalog as the directory, and a capability that runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn dispatcher_loads_a_release_from_the_artifact_store() -> anyhow::Result<()> {
+    use runtara_artifact_store::{FilesystemArtifactStore, release};
+    let bundle = build_test_bundle();
+    let store_dir = tempfile::tempdir()?;
+    let store = FilesystemArtifactStore::new(store_dir.path());
+    release::publish_dir(&store, bundle.path(), "test-release").await?;
+    let index = release::load(&store, "test-release")
+        .await?
+        .expect("the published release");
+    // Nothing is read from the bundle once it is published.
+    drop(bundle);
+
+    let dispatcher = ComponentDispatcherService::from_release(&store, &index).await?;
+    let from_dir = ComponentDispatcherService::from_dir(build_test_bundle().path()).await?;
+    assert_eq!(
+        serde_json::to_value(dispatcher.catalog().as_ref())?,
+        serde_json::to_value(from_dir.catalog().as_ref())?
+    );
+    let result = dispatcher
+        .test_capability(TestCapabilityRequest {
+            tenant_id: "tenant-test".into(),
+            agent_id: "crypto".into(),
+            capability_id: "hash".into(),
+            input: serde_json::json!({ "data": "hello" }),
+            connection: None,
+        })
+        .await?;
+    assert!(result.success, "expected success, got {:?}", result.error);
+    Ok(())
+}
+
 /// Agent-id lookups fold to the canonical kebab form — legacy snake_case or
 /// stray capitalization must resolve to the same loaded agent instead of
 /// reporting it missing.

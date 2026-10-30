@@ -47,7 +47,7 @@ async fn compile_workflow_for_mcp(
     // answer: the allowlist may have changed since the version was saved.
     let closure = crate::api::services::compilation::check_compile_agent_allowlist(
         &server.pool,
-        &server.tenant_id,
+        &server.tenant(),
         workflow_id,
         version,
     )
@@ -70,13 +70,13 @@ async fn compile_workflow_for_mcp(
     // invalidated and rebuilt below, and a compile already queued is reused.
     if !force_recompile
         && let Some(image_id) = repository
-            .get_fresh_registered_image_id(&server.tenant_id, workflow_id, version)
+            .get_fresh_registered_image_id(&server.tenant(), workflow_id, version)
             .await
             .map_err(|e| err(format!("Failed to check compilation freshness: {}", e)))?
         && closure
             .may_reuse_cached_image(
                 server.runtime_client.as_deref(),
-                &server.tenant_id,
+                &server.tenant(),
                 &image_id,
             )
             .await
@@ -115,7 +115,7 @@ async fn compile_workflow_for_mcp(
     let redis_url = valkey_config.connection_url();
     let pending = crate::workers::compilation_worker::is_compilation_pending(
         &redis_url,
-        &server.tenant_id,
+        &server.tenant(),
         workflow_id,
         version,
     )
@@ -127,14 +127,22 @@ async fn compile_workflow_for_mcp(
         // it once before queueing; retries after a successful compile will pass
         // the freshness check above and will not rebuild.
         repository
-            .invalidate_compilation(&server.tenant_id, workflow_id, version)
+            .invalidate_compilation(&server.tenant(), workflow_id, version)
             .await
             .map_err(|e| err(format!("Failed to invalidate stale compilation: {}", e)))?;
     }
 
+    if let Err(retry_after_ms) =
+        crate::tenant_quota::take(&server.tenant(), crate::tenant_quota::Quota::Compile).await
+    {
+        return Err(err(format!(
+            "TENANT_RATE_LIMITED: this tenant's compile rate limit is reached; retry in {} s",
+            retry_after_ms.div_ceil(1000).max(1)
+        )));
+    }
     let queued = crate::workers::compilation_worker::enqueue_compilation(
         &redis_url,
-        &server.tenant_id,
+        &server.tenant(),
         workflow_id,
         version,
         force_recompile || !pending,
@@ -145,7 +153,7 @@ async fn compile_workflow_for_mcp(
     let timeout = mcp_compile_wait_timeout();
     let completed = crate::workers::compilation_worker::wait_for_compilation(
         &redis_url,
-        &server.tenant_id,
+        &server.tenant(),
         workflow_id,
         version,
         timeout,
@@ -183,7 +191,7 @@ async fn query_mcp_compilation_result(
         WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3
         "#,
     )
-    .bind(&server.tenant_id)
+    .bind(server.tenant())
     .bind(workflow_id)
     .bind(version)
     .fetch_optional(&server.pool)
@@ -203,7 +211,7 @@ async fn query_mcp_compilation_result(
                     // the same source/mode-aware lookup as execution before
                     // telling MCP that the artifact is deployable.
                     let image_id = WorkflowRepository::new(server.pool.clone())
-                        .get_fresh_registered_image_id(&server.tenant_id, workflow_id, version)
+                        .get_fresh_registered_image_id(&server.tenant(), workflow_id, version)
                         .await
                         .map_err(|e| {
                             err(format!("Failed to check compilation freshness: {}", e))
@@ -340,6 +348,16 @@ pub struct UpdateWorkflowParams {
     )]
     #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub execution_graph: serde_json::Value,
+    #[serde(default)]
+    #[schemars(
+        description = "Linear memory per run for the new version, in MiB (1 to 65536). Omit to keep the current memory. Compiling fails, naming the floor, when the workflow needs more."
+    )]
+    pub memory_mb: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        description = "A memory preset instead of memory_mb: S (8 MiB), M (64 MiB), L (128 MiB) or XL (256 MiB). memory_mb wins when both are given."
+    )]
+    pub memory_tier: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -491,10 +509,10 @@ pub(crate) fn control_agent_reference() -> serde_json::Value {
         "availability": "Every pricing tier, whatever the agent allowlist says. Mutations only run as steps of a workflow run: test_capability answers CONTROL_REQUIRES_INSTANCE for capabilities tagged runtime:requires-run.",
         "capabilities": {
             "start": "Durably admit a child run of another workflow and return {instanceId, workflowId, version, runLabel, replayed} once it is accepted, without waiting for it.",
-            "get": "Read one run of the tenant: status, suspensionReason, parentInstanceId, output or error.",
-            "get-state": "Read one run's published state (what its SetState steps wrote) with its workflow version, without waking it: {instance, state, stateUpdatedAtMs}.",
-            "query": "Page runs of the tenant by createdAtMs or finishedAtMs; parentInstanceId or callerChildren lists children, including ones still queued in admission. state: [{field, op, value}] (op eq, ne, in, lt, lte, gt, gte, exists) keeps runs whose published state matches every filter; it never returns state.",
-            "list-pending-signals": "List open WaitForSignal requests of one run, a workflow, or the calling run's children.",
+            "get": "Read this run or one of its child runs: status, suspensionReason, parentInstanceId, output or error.",
+            "get-state": "Read the published state of this run or one of its child runs (what its SetState steps wrote) with its workflow version, without waking it: {instance, state, stateUpdatedAtMs}.",
+            "query": "Page this run's child runs by createdAtMs or finishedAtMs, including ones still queued in admission. state: [{field, op, value}] (op eq, ne, in, lt, lte, gt, gte, exists) keeps runs whose published state matches every filter; it never returns state.",
+            "list-pending-signals": "List open WaitForSignal requests of this run or a child run, of the calling run's children of a workflow, or of all its children.",
             "send-signal": "Answer the one open request of a WaitForSignal step, validated against its response schema.",
             "cancel": "Cancel a direct child: cooperatively, forced after graceMs. A parked or queued child ends at once.",
             "pause": "Pause a direct child. A waiting child pauses at once, a running one at its next checkpoint.",
@@ -1129,9 +1147,19 @@ pub async fn update_workflow(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("workflow_id", &params.workflow_id)?;
     let execution_graph = normalize_json_arg(params.execution_graph, "execution_graph")?;
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "executionGraph": execution_graph,
     });
+    let tier = match params.memory_tier {
+        Some(tier) => Some(
+            crate::types::MemoryTier::parse(&tier)
+                .ok_or_else(|| err(format!("Unknown memory tier '{tier}': use S, M, L or XL")))?,
+        ),
+        None => None,
+    };
+    if let Some(memory_mb) = crate::types::requested_memory_mb(params.memory_mb, tier) {
+        body["memoryMb"] = memory_mb.into();
+    }
     let result = api_post(
         server,
         &format!("/api/runtime/workflows/{}/update", params.workflow_id),

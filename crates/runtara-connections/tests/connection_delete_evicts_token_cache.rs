@@ -128,6 +128,7 @@ async fn resolve_bearer(connection_id: &str, params: &Value) -> String {
     let mut headers = HashMap::new();
     runtara_connections::auth::provider_auth::resolve_connection_auth(
         &reqwest::Client::new(),
+        "tenant-1",
         connection_id,
         "http_oauth2_client_credentials",
         params,

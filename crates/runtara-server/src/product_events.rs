@@ -148,13 +148,20 @@ pub struct ProductEvent {
 }
 
 impl ProductEvent {
+    /// An event for the process's primary tenant. Work that belongs to a
+    /// tenant (a run, a trigger, a compile) uses [`ProductEvent::for_tenant`].
     pub fn new(event_type: EventType) -> Self {
+        Self::for_tenant(event_type, crate::config::tenant_id())
+    }
+
+    /// An event for `tenant`'s work.
+    pub fn for_tenant(event_type: EventType, tenant: &str) -> Self {
         Self {
             event_id: Uuid::new_v4(),
             occurred_at: Utc::now(),
             event_type,
             event_version: 1,
-            tenant_id: crate::config::tenant_id().to_string(),
+            tenant_id: tenant.to_owned(),
             user_id: None,
             actor_id: None,
             actor_type: None,
@@ -174,7 +181,7 @@ impl ProductEvent {
     /// is the user themselves. Use this in HTTP handlers; use `new` + `no_user_actor` for
     /// worker/trigger events that have no caller.
     pub fn from_auth(event_type: EventType, ctx: &AuthContext) -> Self {
-        let mut event = Self::new(event_type);
+        let mut event = Self::for_tenant(event_type, &ctx.org_id);
         event.user_id = Some(ctx.user_id.clone());
         match ctx.auth_method {
             AuthMethod::ApiKey => {
@@ -274,12 +281,15 @@ const DEFAULT_FLUSH_INTERVAL_MS: u64 = 2_000;
 /// the stream without bound, consistent with this pipeline's existing drop-on-backpressure stance.
 const DEFAULT_STREAM_MAXLEN: usize = 200_000;
 
-/// Valkey stream key product events are `XADD`ed to. Fixed, not tenant-prefixed: this runs
-/// against runtara's local, single-tenant Valkey instance (like the compilation queue), and the
-/// Valkey instance itself is the tenant boundary — see smo-management's `valkey::ValkeyWriter`
-/// doc comment. smo-management's per-tenant consumer reads this same key from each tenant's
-/// Valkey.
+/// Default Valkey stream key product events are `XADD`ed to. Fixed, not tenant-prefixed: this
+/// runs against runtara's local, single-tenant Valkey instance (like the compilation queue), and
+/// the Valkey instance itself is the tenant boundary — see smo-management's
+/// `valkey::ValkeyWriter` doc comment. smo-management's per-tenant consumer reads this same key
+/// from each tenant's Valkey. On a shared Valkey, `RUNTARA_PRODUCT_EVENTS_STREAM_KEY` names a
+/// per-tenant key instead, so each tenant's access rules cover only its own stream.
 const STREAM_KEY: &str = "runtara:product_events:stream";
+/// The placeholder in `RUNTARA_PRODUCT_EVENTS_STREAM_KEY` replaced by the event's tenant.
+const TENANT_PLACEHOLDER: &str = "{tenant}";
 
 /// Tunables for the product-events pipeline. Every field is an independent, optional env
 /// var; unset (or unparseable) means "use the default". Most tenants run entirely on
@@ -295,6 +305,9 @@ pub struct ProductEventConfig {
     pub flush_interval_ms: Option<u64>,
     /// `RUNTARA_PRODUCT_EVENTS_STREAM_MAXLEN` — approximate cap on the Valkey stream length.
     pub stream_maxlen: Option<usize>,
+    /// `RUNTARA_PRODUCT_EVENTS_STREAM_KEY` — the stream each event goes to, with `{tenant}`
+    /// replaced by its tenant (e.g. `{tenant}:product_events` on a shared Valkey).
+    pub stream_key: Option<String>,
 }
 
 impl ProductEventConfig {
@@ -305,6 +318,17 @@ impl ProductEventConfig {
             flush_rows: parse_env("RUNTARA_PRODUCT_EVENTS_FLUSH_ROWS"),
             flush_interval_ms: parse_env("RUNTARA_PRODUCT_EVENTS_FLUSH_INTERVAL_MS"),
             stream_maxlen: parse_env("RUNTARA_PRODUCT_EVENTS_STREAM_MAXLEN"),
+            stream_key: std::env::var("RUNTARA_PRODUCT_EVENTS_STREAM_KEY")
+                .ok()
+                .filter(|key| !key.is_empty()),
+        }
+    }
+
+    /// The stream `tenant`'s events go to.
+    pub fn stream_key(&self, tenant: &str) -> String {
+        match &self.stream_key {
+            Some(key) => key.replace(TENANT_PLACEHOLDER, tenant),
+            None => STREAM_KEY.to_owned(),
         }
     }
 
@@ -425,8 +449,13 @@ impl ProductEventDrain {
         for ev in batch {
             match serde_json::to_string(&ev.to_wire_json()) {
                 Ok(payload) => {
-                    pipe.xadd_maxlen(STREAM_KEY, maxlen, "*", &[("data", payload.as_str())])
-                        .ignore();
+                    pipe.xadd_maxlen(
+                        self.config.stream_key(&ev.tenant_id),
+                        maxlen,
+                        "*",
+                        &[("data", payload.as_str())],
+                    )
+                    .ignore();
                     queued += 1;
                 }
                 Err(e) => {
@@ -502,32 +531,45 @@ impl ConnectionEventBridge {
 }
 
 impl runtara_connections::events::ConnectionEventSink for ConnectionEventBridge {
-    fn emit(&self, event: runtara_connections::events::ConnectionLifecycleEvent) {
+    fn emit(
+        &self,
+        tenant_id: Option<&str>,
+        event: runtara_connections::events::ConnectionLifecycleEvent,
+    ) {
         use runtara_connections::events::ConnectionLifecycleEvent as Lifecycle;
+
+        // An event with no established tenant (an unauthenticated callback that
+        // failed before its state matched) belongs to the process's primary.
+        let tenant_id = match tenant_id {
+            Some(tenant) => tenant,
+            None => crate::config::tenant_id(),
+        };
 
         let product_event = match event {
             Lifecycle::Created {
                 connection_id,
                 integration,
-            } => ProductEvent::new(EventType::ConnectionCreated)
+            } => ProductEvent::for_tenant(EventType::ConnectionCreated, tenant_id)
                 .no_user_actor("connections", ActorType::System)
                 .resource(connection_id, "connection")
                 .properties(serde_json::json!({ "integration": integration })),
-            Lifecycle::Deleted { connection_id } => ProductEvent::new(EventType::ConnectionDeleted)
-                .no_user_actor("connections", ActorType::System)
-                .resource(connection_id, "connection"),
+            Lifecycle::Deleted { connection_id } => {
+                ProductEvent::for_tenant(EventType::ConnectionDeleted, tenant_id)
+                    .no_user_actor("connections", ActorType::System)
+                    .resource(connection_id, "connection")
+            }
             Lifecycle::OAuthStarted { connection_id } => {
-                ProductEvent::new(EventType::ConnectionOauthStarted)
+                ProductEvent::for_tenant(EventType::ConnectionOauthStarted, tenant_id)
                     .no_user_actor("connections", ActorType::System)
                     .resource(connection_id, "connection")
             }
             Lifecycle::OAuthCompleted { connection_id } => {
-                ProductEvent::new(EventType::ConnectionOauthCompleted)
+                ProductEvent::for_tenant(EventType::ConnectionOauthCompleted, tenant_id)
                     .no_user_actor("connections", ActorType::System)
                     .resource(connection_id, "connection")
             }
             Lifecycle::OAuthFailed { reason } => {
-                ProductEvent::new(EventType::ConnectionOauthFailed)
+                ProductEvent::for_tenant(EventType::ConnectionOauthFailed, tenant_id)
                     .no_user_actor("connections", ActorType::System)
                     .properties(serde_json::json!({ "reason": reason }))
             }
@@ -535,7 +577,7 @@ impl runtara_connections::events::ConnectionEventSink for ConnectionEventBridge 
                 connection_id,
                 integration,
                 success,
-            } => ProductEvent::new(EventType::ConnectionTokenRefreshed)
+            } => ProductEvent::for_tenant(EventType::ConnectionTokenRefreshed, tenant_id)
                 .no_user_actor("connections", ActorType::System)
                 .source(EventSource::Worker)
                 .resource(connection_id, "connection")
@@ -574,6 +616,19 @@ pub fn emit_quota_exceeded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stream_key_template_names_each_tenants_stream() {
+        assert_eq!(
+            ProductEventConfig::default().stream_key("acme"),
+            "runtara:product_events:stream"
+        );
+        let per_tenant = ProductEventConfig {
+            stream_key: Some("{tenant}:product_events".into()),
+            ..ProductEventConfig::default()
+        };
+        assert_eq!(per_tenant.stream_key("acme"), "acme:product_events");
+    }
 
     /// A `ProductEvent` built directly via struct literal, bypassing `new()` so the tests
     /// don't depend on the global config singleton (`new` reads `config::tenant_id()`).
@@ -715,6 +770,35 @@ mod tests {
         assert_eq!(e.source, Some(EventSource::Mcp));
     }
 
+    // ---- connection events carry their connection's tenant ----
+
+    #[test]
+    fn connection_events_are_attributed_to_the_connections_tenant() {
+        use runtara_connections::events::{ConnectionEventSink, ConnectionLifecycleEvent};
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let bridge = ConnectionEventBridge::new(ProductEventSink::new(tx));
+        bridge.emit(
+            Some("tenant-b"),
+            ConnectionLifecycleEvent::Created {
+                connection_id: "conn-1".to_string(),
+                integration: Some("hubspot".to_string()),
+            },
+        );
+        bridge.emit(
+            Some("tenant-c"),
+            ConnectionLifecycleEvent::OAuthCompleted {
+                connection_id: "conn-2".to_string(),
+            },
+        );
+        let created = rx.try_recv().expect("created event");
+        assert_eq!(created.event_type, EventType::ConnectionCreated);
+        assert_eq!(created.tenant_id, "tenant-b");
+        assert_eq!(created.resource_id.as_deref(), Some("conn-1"));
+        let completed = rx.try_recv().expect("completed event");
+        assert_eq!(completed.tenant_id, "tenant-c");
+    }
+
     // ---- emit_quota_exceeded: only fires for LimitExceeded ----
 
     #[test]
@@ -791,6 +875,7 @@ mod tests {
             flush_rows: Some(7),
             flush_interval_ms: Some(50),
             stream_maxlen: Some(9),
+            stream_key: None,
         };
         assert_eq!(cfg.channel_capacity(), 5);
         assert_eq!(cfg.flush_rows(), 7);

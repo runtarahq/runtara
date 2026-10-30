@@ -75,7 +75,9 @@ pub async fn teams_webhook(
 
     let activity_type = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
     match activity_type {
-        "message" => handle_message_activity(&router, &connection_id, &payload).await,
+        "message" => {
+            handle_message_activity(&router, &connection_id, &conn.tenant_id, &payload).await
+        }
         // Installation / membership events: capture the conversation's
         // serviceUrl so a proactive target is warm even before the first
         // message. No session is started. (Proactive send itself is a later
@@ -169,6 +171,7 @@ fn is_bot_removal(bot_app_id: &str, payload: &Value) -> bool {
 async fn handle_message_activity(
     router: &Arc<ChannelRouter>,
     connection_id: &str,
+    tenant_id: &str,
     payload: &Value,
 ) -> Response {
     let conversation_id = payload
@@ -205,7 +208,7 @@ async fn handle_message_activity(
     // itself is stored by dispatch, only for a message that was stored: this
     // point is after full JWT validation, including the serviceurl-claim check.
     let target = service_url.and_then(|svc_url| {
-        build_conversation_target(connection_id, conversation_id, svc_url, payload)
+        build_conversation_target(tenant_id, connection_id, conversation_id, svc_url, payload)
     });
 
     let msg = InboundMessage {
@@ -260,6 +263,7 @@ fn strip_teams_mentions_with_entities(text: &str, payload: &Value) -> String {
 /// block. Returns `None` if the ref key is unconfigured (the target is optional;
 /// server-side session replies still work via the in-process serviceUrl map).
 fn build_conversation_target(
+    tenant_id: &str,
     connection_id: &str,
     conversation_id: &str,
     service_url: &str,
@@ -315,7 +319,7 @@ fn build_conversation_target(
     };
     let binding = EndpointBinding {
         v: EndpointBinding::CURRENT_VERSION,
-        tenant_id: crate::config::tenant_id().to_string(),
+        tenant_id: tenant_id.to_string(),
         connection_id: connection_id.to_string(),
         base_url: service_url.trim_end_matches('/').to_string(),
         conversation_id: Some(conversation_id.to_string()),
@@ -383,6 +387,8 @@ fn validate_teams_service_url(service_url: &str) -> Result<(), &'static str> {
 
 /// Auth-relevant fields of a teams_bot connection.
 struct TeamsConnectionAuth {
+    /// The runtara tenant the connection belongs to.
+    tenant_id: String,
     app_id: String,
     /// Configured Microsoft tenant, when present and non-empty.
     azure_tenant_id: Option<String>,
@@ -406,10 +412,10 @@ async fn load_teams_connection(
     router: &ChannelRouter,
     connection_id: &str,
 ) -> anyhow::Result<TeamsConnectionAuth> {
-    let expected_tenant = crate::config::tenant_id();
+    let expected_tenant = router.served_connection_tenant(connection_id).await?;
     let conn = router
         .connections()
-        .get_with_parameters(connection_id, expected_tenant)
+        .get_with_parameters(connection_id, &expected_tenant)
         .await
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?
         .ok_or_else(|| anyhow::anyhow!("Connection not found"))?;
@@ -431,6 +437,7 @@ async fn load_teams_connection(
     let multi_tenant = params["app_type"].as_str() == Some("multi_tenant");
 
     Ok(TeamsConnectionAuth {
+        tenant_id: expected_tenant,
         app_id,
         azure_tenant_id,
         multi_tenant,
@@ -642,6 +649,7 @@ mod tests {
     #[test]
     fn enforced_tenant_only_for_single_tenant_connections() {
         let single = TeamsConnectionAuth {
+            tenant_id: "t".into(),
             app_id: "app".into(),
             azure_tenant_id: Some("tid".into()),
             multi_tenant: false,
@@ -649,6 +657,7 @@ mod tests {
         assert_eq!(single.enforced_activity_tenant(), Some("tid"));
 
         let multi = TeamsConnectionAuth {
+            tenant_id: "t".into(),
             app_id: "app".into(),
             azure_tenant_id: Some("tid".into()),
             multi_tenant: true,
@@ -656,6 +665,7 @@ mod tests {
         assert_eq!(multi.enforced_activity_tenant(), None);
 
         let legacy = TeamsConnectionAuth {
+            tenant_id: "t".into(),
             app_id: "app".into(),
             azure_tenant_id: None,
             multi_tenant: false,

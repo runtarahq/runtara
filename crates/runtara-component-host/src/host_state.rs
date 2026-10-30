@@ -8,16 +8,9 @@
 use std::sync::Arc;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{
-    WasiHttpCtx,
-    p2::{
-        HttpResult, WasiHttpCtxView, WasiHttpHooks, WasiHttpView,
-        bindings::http::types::ErrorCode,
-        body::HyperOutgoingBody,
-        types::{HostFutureIncomingResponse, OutgoingRequestConfig},
-    },
+    Error as HttpError, RequestOptions, WasiBody, WasiHttp, WasiHttpCtx, WasiHttpCtxView,
+    WasiHttpHooks, WasiHttpView,
 };
-
-use crate::host_io::HostIoContext;
 
 /// Per-call context. One of these is built before each component invocation.
 /// Carries authoritative identity only. Credentials belong to injected native
@@ -53,14 +46,46 @@ impl CallContext {
 /// Raw WASI HTTP cannot bypass the typed outbound service.
 pub struct HostHooks;
 
+/// What a denied `send_request` returns.
+pub(crate) type DeniedSend = Box<
+    dyn std::future::Future<
+            Output = Result<
+                (
+                    http::Response<WasiBody>,
+                    Box<dyn std::future::Future<Output = Result<(), HttpError>> + Send>,
+                ),
+                HttpError,
+            >,
+        > + Send,
+>;
+
+/// A send that is refused.
+pub(crate) fn deny_send() -> DeniedSend {
+    Box::new(async { Err(HttpError::HttpRequestDenied) })
+}
+
 impl WasiHttpHooks for HostHooks {
     fn send_request(
         &mut self,
-        _request: http::Request<HyperOutgoingBody>,
-        _config: OutgoingRequestConfig,
-    ) -> HttpResult<HostFutureIncomingResponse> {
-        Err(ErrorCode::HttpRequestDenied.into())
+        _request: http::Request<WasiBody>,
+        _options: Option<RequestOptions>,
+        _fut: Box<dyn std::future::Future<Output = Result<(), HttpError>> + Send>,
+    ) -> DeniedSend {
+        deny_send()
     }
+}
+
+/// Link `wasi:http@0.2` with its own view of a store, so its requests meet
+/// that view's hooks rather than the `wasi:http@0.3` ones of [`WasiHttpView`].
+pub(crate) fn add_p2_http_to_linker<T: Send + 'static>(
+    linker: &mut wasmtime::component::Linker<T>,
+    http: fn(&mut T) -> WasiHttpCtxView<'_>,
+) -> wasmtime::Result<()> {
+    use wasmtime_wasi_http::p2::bindings;
+    let options = bindings::LinkOptions::default();
+    bindings::http::outgoing_handler::add_to_linker::<_, WasiHttp>(linker, http)?;
+    bindings::http::types::add_to_linker::<_, WasiHttp>(linker, &options.into(), http)?;
+    Ok(())
 }
 
 /// Cap on any single guest linear memory for a host-guarded invocation, in
@@ -132,18 +157,18 @@ pub enum Termination {
 }
 
 pub struct HostState {
-    pub(crate) outbound_http: Result<Arc<crate::outbound_http::RunOutboundHttp>, String>,
-    pub(crate) database: Result<Arc<crate::database_host::RunDatabase>, String>,
-    pub(crate) connection_resolver:
-        Result<Arc<crate::connection_resolver_host::RunConnectionResolver>, String>,
     pub(crate) restricted: bool,
-    pub(crate) trusted: Option<Arc<crate::trusted::TrustedExecutor>>,
-    /// The real control service; set only in control executor stores.
-    pub(crate) control_api: Option<crate::control_host::ControlApiCall>,
     pub wasi: WasiCtx,
     pub http: WasiHttpCtx,
     pub table: ResourceTable,
     pub hooks: HostHooks,
+    /// wasi:http@0.3 hooks: the workflow API route when the store is served
+    /// one (an agent test call), denied otherwise.
+    pub(crate) api_hooks: crate::workflow_api::WorkflowApiHooks,
+    /// The store's own standalone workflow API launch, created when it is
+    /// given a connection service: agents on the guest SDK reach that
+    /// service over it.
+    api: Option<StoreApi>,
     pub ctx: Arc<CallContext>,
     /// Memory/table caps for this call, enforced once the store installs it via
     /// `store.limiter(|s| &mut s.limiter)` (see `registry::instantiate`).
@@ -159,17 +184,12 @@ pub struct HostState {
 
 impl HostState {
     pub fn with_outbound_http(mut self, service: Arc<dyn crate::OutboundHttpHost>) -> Self {
-        self.outbound_http = crate::outbound_http::for_run(
-            Some(&service),
-            Some(&self.ctx.tenant_id),
-            self.ctx.instance_id.as_deref(),
-        );
+        let _ = self.store_api().set_outbound_http(service);
         self
     }
 
     pub fn with_database(mut self, database: Arc<dyn crate::DatabaseHost>) -> Self {
-        self.database =
-            crate::database_host::database_for_run(Some(&database), Some(&self.ctx.tenant_id));
+        let _ = self.store_api().set_database(database);
         self
     }
 
@@ -178,11 +198,46 @@ impl HostState {
         mut self,
         resolver: Arc<dyn crate::ConnectionResolverHost>,
     ) -> Self {
-        self.connection_resolver = crate::connection_resolver_host::resolver_for_run(
-            Some(&resolver),
-            Some(&self.ctx.tenant_id),
-        );
+        let _ = self.store_api().set_connection_resolver(resolver);
         self
+    }
+
+    /// The store's standalone workflow API, created on first use as a launch
+    /// of the call's tenant and routed by the store's wasi:http@0.3 hooks.
+    fn store_api(&mut self) -> &Arc<crate::api_launches::ApiLaunches> {
+        if self.api.is_none() {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let launches = Arc::new(crate::api_launches::ApiLaunches::default());
+            let binding = runtara_workflow_api::Binding {
+                tenant_id: self.ctx.tenant_id.clone(),
+                instance_id: self.ctx.instance_id.clone().unwrap_or_default(),
+                launch_id: format!(
+                    "agent-store-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ),
+                root_lease_epoch: 0,
+            };
+            // A fresh registry cannot already hold this launch.
+            // Its registry is given no trusted executor.
+            let _ = launches.begin_standalone(
+                binding.clone(),
+                crate::api_launches::StandaloneTrust::Denied,
+                crate::api_launches::StandaloneControl::Denied,
+            );
+            self.api_hooks = crate::workflow_api::WorkflowApiHooks::for_run(
+                Some(launches.transport()),
+                Some({
+                    let binding = binding.clone();
+                    Arc::new(move || Some(binding.clone()))
+                }),
+            );
+            self.api = Some(StoreApi {
+                launches,
+                launch_id: binding.launch_id,
+            });
+        }
+        &self.api.as_ref().expect("created above").launches
     }
 
     pub(crate) fn restricted() -> Self {
@@ -209,15 +264,12 @@ impl HostState {
 
         Self {
             restricted: false,
-            outbound_http: Err("native outbound HTTP service is not configured".into()),
-            database: Err("native database service is not configured".into()),
-            connection_resolver: Err("native connection resolver is not configured".into()),
-            trusted: None,
-            control_api: None,
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
             hooks: HostHooks,
+            api_hooks: crate::workflow_api::WorkflowApiHooks::denied(),
+            api: None,
             ctx,
             limiter: GuestLimiter::new(
                 DEFAULT_GUEST_MEMORY_MAX_BYTES,
@@ -246,12 +298,15 @@ impl HostState {
     }
 }
 
-impl HostIoContext for HostState {
-    fn cleanup_alarm(&self) -> Option<&crate::cleanup_alarm::CleanupAlarmState> {
-        (!self.restricted).then_some(&self.cleanup_alarm)
-    }
-    fn timers_allowed(&self) -> bool {
-        !self.restricted
+/// A store's standalone launch, released with the store.
+struct StoreApi {
+    launches: Arc<crate::api_launches::ApiLaunches>,
+    launch_id: String,
+}
+
+impl Drop for StoreApi {
+    fn drop(&mut self) {
+        self.launches.release(&self.launch_id);
     }
 }
 
@@ -264,8 +319,20 @@ impl WasiView for HostState {
     }
 }
 
+/// `wasi:http@0.3`: the workflow API route of the store, if any.
 impl WasiHttpView for HostState {
     fn http(&mut self) -> WasiHttpCtxView<'_> {
+        WasiHttpCtxView {
+            ctx: &mut self.http,
+            table: &mut self.table,
+            hooks: &mut self.api_hooks,
+        }
+    }
+}
+
+impl HostState {
+    /// `wasi:http@0.2`: always denied.
+    pub(crate) fn p2_http(&mut self) -> WasiHttpCtxView<'_> {
         WasiHttpCtxView {
             ctx: &mut self.http,
             table: &mut self.table,

@@ -197,6 +197,22 @@ seed_event() {
     " >/dev/null
 }
 
+# A wait's input request, as the runtime records it (`instance_input_requests`):
+# open, or closed once its invocation settled. Its id is the SHA-256 of the
+# signal id, and its spec carries the step presentation the API shows.
+seed_request() {
+    local instance_id="$1" signal_id="$2" state="$3" metadata="$4" closure="NULL" closed="NULL"
+    if [ "${state}" = closed ]; then closure="'invocation_settled'"; closed="now()"; fi
+    psql_quiet -d "${TEST_DB_RUNTIME}" -c "
+        INSERT INTO instance_input_requests
+            (instance_id, tenant_id, request_id, signal_id, invocation_path, spec, state, closure_reason, closed_at)
+        VALUES ('${instance_id}', '${TENANT}', encode(sha256(convert_to('${signal_id}', 'UTF8')), 'hex'),
+                '${signal_id}', '',
+                \$json\${\"signal_id\":\"${signal_id}\",\"response_schema\":null,\"metadata\":${metadata},\"deadline\":null}\$json\$::jsonb,
+                '${state}', ${closure}, ${closed});
+    " >/dev/null
+}
+
 echo "==============================================================="
 echo "E2E: pending input across concurrent branches"
 echo "==============================================================="
@@ -228,10 +244,14 @@ seed_instance "${INSTANCE_BLOCKED}"
 seed_instance "${INSTANCE_ANSWERED}"
 
 # Four iterations of one Split step, each waiting at its own invocation site.
-# The step id is deliberately shared — only the signal ids differ.
+# The step id is deliberately shared — only the signal ids differ. Pending
+# input is the runtime's input requests; the events stay as a run emits them.
 for i in 1 2 3 4; do
     seed_event "${INSTANCE_BLOCKED}" external_input_requested "${i}" \
         "{\"step_id\":\"approve\",\"step_name\":\"Approve order\",\"signal_id\":\"signal-${i}\",\"iteration\":${i}}"
+    state=open; [ "${i}" = 1 ] && state=closed
+    seed_request "${INSTANCE_BLOCKED}" "signal-${i}" "${state}" \
+        "{\"step_id\":\"approve\",\"step_name\":\"Approve order\",\"iteration\":${i}}"
 done
 # Iteration 1 is answered. Its end event lands AFTER every other iteration's
 # request — exactly the ordering the old heuristic read as "all resolved".
@@ -244,6 +264,8 @@ echo "  ${INSTANCE_BLOCKED}: 4 requests, 1 answered, 2 later step completions"
 
 seed_event "${INSTANCE_ANSWERED}" external_input_requested 1 \
     "{\"step_id\":\"approve\",\"step_name\":\"Approve order\",\"signal_id\":\"signal-only\"}"
+seed_request "${INSTANCE_ANSWERED}" signal-only closed \
+    "{\"step_id\":\"approve\",\"step_name\":\"Approve order\"}"
 seed_event "${INSTANCE_ANSWERED}" step_debug_end 2 \
     "{\"step_id\":\"approve\",\"outputs\":{\"signal_id\":\"signal-only\"}}"
 echo "  ${INSTANCE_ANSWERED}: 1 request, answered"

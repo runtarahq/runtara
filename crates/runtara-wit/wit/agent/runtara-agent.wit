@@ -61,14 +61,6 @@ interface types {
     }
 }
 
-/// Continuation delivery for suspending agents: the state saved by the last
-/// suspension of the operation this call runs in, or none on its first
-/// invocation. The host derives the operation from its own execution state,
-/// never from guest arguments.
-interface continuation {
-    continuation: func() -> option<list<u8>>;
-}
-
 interface capabilities {
     use types.{error-info, outcome};
 

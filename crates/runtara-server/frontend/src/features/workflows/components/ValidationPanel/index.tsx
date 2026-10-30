@@ -87,6 +87,12 @@ export function ValidationPanel({
               workflow={workflow}
               onChange={onWorkflowChange}
               readOnly={readOnly}
+              memoryFloorBytes={
+                (selectedVersion != null
+                  ? versions.find((v) => v.versionNumber === selectedVersion)
+                  : versions.at(-1)
+                )?.memoryFloorBytes
+              }
             />
           )}
           {activeTab === 'versions' && (

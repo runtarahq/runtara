@@ -26,6 +26,10 @@ use crate::workers::execution_outbox::source_idempotency_key;
 pub struct CronSchedulerConfig {
     /// Tenant ID (from TENANT_ID env var)
     pub tenant_id: String,
+    /// Whether this scheduler also fires the triggers no tenant owns (a NULL
+    /// tenant), which run as this tenant. Exactly one scheduler does: the
+    /// primary tenant's, so a server serving several fires each once.
+    pub claims_untenanted: bool,
     /// How often to check for due cron triggers (in seconds)
     pub check_interval_secs: u64,
 }
@@ -34,6 +38,7 @@ impl Default for CronSchedulerConfig {
     fn default() -> Self {
         Self {
             tenant_id: std::env::var("TENANT_ID").unwrap_or_else(|_| "default".to_string()),
+            claims_untenanted: true,
             check_interval_secs: 60, // Check every minute
         }
     }
@@ -93,13 +98,14 @@ pub async fn run(
         deactivate_orphaned_triggers(&pool, &tenant_id).await;
 
         // Get all active CRON triggers for this tenant
-        let triggers = match get_active_cron_triggers(&pool, &tenant_id).await {
-            Ok(triggers) => triggers,
-            Err(e) => {
-                error!(error = %e, "Failed to fetch cron triggers");
-                continue;
-            }
-        };
+        let triggers =
+            match get_active_cron_triggers(&pool, &tenant_id, config.claims_untenanted).await {
+                Ok(triggers) => triggers,
+                Err(e) => {
+                    error!(error = %e, "Failed to fetch cron triggers");
+                    continue;
+                }
+            };
 
         let now = Utc::now();
 
@@ -188,18 +194,20 @@ async fn deactivate_orphaned_triggers(pool: &PgPool, tenant_id: &str) {
 async fn get_active_cron_triggers(
     pool: &PgPool,
     tenant_id: &str,
+    claims_untenanted: bool,
 ) -> Result<Vec<InvocationTrigger>, sqlx::Error> {
     sqlx::query_as::<_, InvocationTrigger>(
         r#"
         SELECT id, tenant_id, workflow_id, trigger_type, active, configuration,
                created_at, last_run, updated_at, remote_tenant_id, single_instance
         FROM invocation_trigger
-        WHERE (tenant_id = $1 OR tenant_id IS NULL)
+        WHERE (tenant_id = $1 OR ($2 AND tenant_id IS NULL))
           AND trigger_type = 'CRON'
           AND active = true
         "#,
     )
     .bind(tenant_id)
+    .bind(claims_untenanted)
     .fetch_all(pool)
     .await
 }

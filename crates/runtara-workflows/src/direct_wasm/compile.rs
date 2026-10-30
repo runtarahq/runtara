@@ -33,8 +33,10 @@ mod agent_io;
 mod agent_retry;
 mod agent_suspend;
 mod ai_agent_loop;
+mod api_shims;
 mod artifact_metadata;
 mod branch_parallel;
+mod callback_lift;
 mod checkpoint;
 mod cooperative_wait;
 mod core_imports;
@@ -78,7 +80,6 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use runtara_dsl::ExecutionGraph;
-use runtara_wit::workflow::RUNTIME as RUNTIME_INTERFACE_NAME;
 use sha2::{Digest, Sha256};
 use wasm_encoder::{CustomSection, Encode, Function as WasmFunction, Instruction, Section};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
@@ -87,13 +88,14 @@ use wit_parser::{Resolve, WorldId};
 pub use super::child_workflows::DirectChildWorkflowDependencyMetadata;
 use super::child_workflows::resolve_direct_child_workflow_metadata;
 pub use artifact_metadata::{
-    AGENT_IMPORT_ALLOWLIST, AgentImportGrants, AgentImportKind, CONTROL_AGENT_IMPORTS,
-    DirectArtifactFileMetadata, DirectArtifactMetadata, DirectComponentDependencyMetadata,
-    DirectComponentSidecarMetadata, DirectIsolationMetadata, check_agent_component_imports,
+    AGENT_IMPORT_ALLOWLIST, AgentImportKind, DirectArtifactFileMetadata, DirectArtifactMetadata,
+    DirectComponentDependencyMetadata, DirectComponentSidecarMetadata, DirectIsolationMetadata,
+    check_agent_component_imports,
 };
 use artifact_metadata::{
-    InitialArtifactMetadataInput, initial_artifact_metadata, resolve_agent_component_dependencies,
-    resolve_shared_component_dependencies, write_artifact_metadata,
+    InitialArtifactMetadataInput, initial_artifact_metadata, initial_memory_bytes,
+    resolve_agent_component_dependencies, resolve_shared_component_dependencies,
+    write_artifact_metadata,
 };
 use core_imports::{DirectAgentInvokeImport, DirectCoreFunctionIndices};
 use core_module::{DirectCoreConfig, DirectVariables, emit_direct_core_module};
@@ -586,8 +588,8 @@ pub struct DirectCompilationResult {
     pub component_artifacts: DirectComponentArtifacts,
     /// Dependency/provenance metadata emitted beside the direct artifact.
     pub artifact_metadata: DirectArtifactMetadata,
-    /// Whether this compile dropped the `runtara:workflow/runtime`
-    /// import (a pure, non-durable, invoke-ABI workflow compiled agent-shaped).
+    /// Whether this compile dropped the run services import (a pure,
+    /// non-durable, invoke-ABI workflow compiled agent-shaped).
     /// Re-emit paths (e.g. the composed axis) must honor this to keep the
     /// on-disk world/wac consistent with the emitted module.
     pub omit_runtime: bool,
@@ -727,6 +729,56 @@ fn compose_direct_workflow_selected(
         "compose: resolved + read component dependencies from disk",
     );
 
+    // Logic that imports `runtara:api` gets its api component; a run's own
+    // entry is also wrapped by the run shim, while a published workflow-agent
+    // keeps exporting its capabilities for its parent to compose. A
+    // runtime-free root keeps its `invoke` entry: it runs without a host to
+    // post to.
+    let entry = !result.omit_runtime
+        && result
+            .component_artifacts
+            .world_wit
+            .contains(&format!("export {};", runtara_wit::workflow::ENTRY));
+    // The packages an isolation adapter replaces; each imports `runtara:api`.
+    let isolated: std::collections::BTreeSet<String> = selection
+        .as_ref()
+        .map(|(reviewed, _)| {
+            reviewed
+                .keys()
+                .filter_map(|agent| {
+                    agent_components
+                        .iter()
+                        .find(|c| c.metadata.agent_id.as_ref() == Some(agent))
+                        .map(|c| c.package.clone())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let with_api = !isolated.is_empty()
+        || result
+            .component_artifacts
+            .world_wit
+            .contains(runtara_wit::api::PREFIX);
+    let mut shared_components = shared_components;
+    let mut wac_source = result.component_artifacts.wac_source.clone();
+    if entry || with_api {
+        let mut adapters = if entry {
+            super::component::WORKFLOW_API_ADAPTER_REQUIREMENTS.to_vec()
+        } else {
+            Vec::new()
+        };
+        if with_api {
+            adapters.push(super::component::RUNTARA_API_COMPONENT_REQUIREMENT);
+        }
+        shared_components.extend(resolve_shared_component_dependencies(
+            components_dir,
+            &adapters,
+        )?);
+        wac_source = super::component::http_guest_wac(&wac_source, with_api, entry, &isolated)
+            .map_err(component_error)?;
+        fs::write(result.build_dir.join("workflow.wac"), &wac_source)?;
+    }
+
     let mut overrides: HashMap<String, PathBuf> = HashMap::new();
     overrides.insert(
         "runtara:workflow-logic".to_string(),
@@ -781,11 +833,8 @@ fn compose_direct_workflow_selected(
     }
 
     let compose_start = Instant::now();
-    let mut composed_wasm = compose_workflow_component_in_process(
-        &result.component_artifacts.wac_source,
-        &result.build_dir,
-        overrides,
-    )?;
+    let mut composed_wasm =
+        compose_workflow_component_in_process(&wac_source, &result.build_dir, overrides)?;
     tracing::debug!(
         target: "runtara::direct_compile::profile",
         elapsed_ms = compose_start.elapsed().as_secs_f64() * 1000.0,
@@ -793,6 +842,8 @@ fn compose_direct_workflow_selected(
         "compose: in-process wac-graph composition complete",
     );
     trusted::pin_trusted_dependencies(&mut composed_wasm, &agent_components, components_dir)?;
+    // Before isolated children are appended: they run in Stores of their own.
+    let memory_floor_bytes = initial_memory_bytes(&composed_wasm)?;
     let isolation = if bindings.is_empty() {
         None
     } else {
@@ -842,6 +893,7 @@ fn compose_direct_workflow_selected(
     };
     fs::write(&composed_path, &composed_wasm)?;
     result.artifact_metadata.isolation = isolation;
+    result.artifact_metadata.memory_floor_bytes = Some(memory_floor_bytes);
 
     let composed_wasm_size = composed_wasm.len();
     let composed_wasm_checksum = sha256_hex(&composed_wasm);
@@ -1011,10 +1063,11 @@ pub fn compile_direct_workflow(
     input: DirectCompilationInput,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
     ensure_supported_production_workflow_abi()?;
-    compile_direct_workflow_with_abi(
+    compile_direct_workflow_selected(
         input,
         super::component::WorkflowRole::Root,
         omit_runtime_from_env(),
+        AgentLoweringSelection::Exact(Default::default()),
     )
 }
 
@@ -1044,7 +1097,7 @@ pub fn direct_lowering_tag() -> String {
     // their run permits until the execution timeout, and recompiling reported
     // success without rebuilding anything.
     format!(
-        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v24,agent-composition=standard-v1,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,trusted-artifacts=v1,on-signal-remap=v1,wide-result-errors=v1,control-api=direct-v1,omit_runtime={}",
+        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v24,agent-composition=standard-v1,parent-cancel=callback-v2,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,trusted-artifacts=v1,on-signal-remap=v1,wide-result-errors=v1,control-api=direct-v1,omit_runtime={}",
         workflow_abi_tag(super::component::WorkflowRole::Root),
         DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
         omit_runtime_from_env()
@@ -1062,7 +1115,7 @@ fn workflow_abi_tag(abi: super::component::WorkflowRole) -> &'static str {
     }
 }
 
-/// Opt-in to dropping the `runtara:workflow/runtime` import for a PURE,
+/// Opt-in to dropping the run services import for a PURE,
 /// non-durable, invoke-ABI workflow (see `WorkflowFeatureSummary::needs_runtime`
 /// and the omit path in the emitter). Default OFF — the runtime import is
 /// kept. Set to `1`/`true`
@@ -1309,6 +1362,7 @@ fn compile_direct_workflow_inner(
         super::manifest::needs_monotonic_clock(&manifest.graph, &manifest.child_workflows),
     )
     .with_wait_instances(manifest.has_wait_for_instances())
+    .with_child_runs(manifest.has_child_runs())
     .with_run_state(manifest.publishes_state());
 
     let build_dir = input.output_dir.join(format!(
@@ -1481,8 +1535,12 @@ fn emit_direct_component(
         core_config.static_data.needs_monotonic_clock(),
         manifest.has_wait_for_instances(),
         manifest.publishes_state(),
+        manifest.has_child_runs(),
     )?;
     let mut core_module = emit_direct_core_module(&resolve, world, &core_config)?;
+    if abi == super::component::WorkflowRole::PublishedAgent {
+        core_module = lift_published_agent_with_callback(&core_module, &resolve, world)?;
+    }
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
         .map_err(component_error)?;
 
@@ -1493,6 +1551,28 @@ fn emit_direct_component(
         .encode()
         .map_err(component_error)?;
     Ok((component, parallel_pools))
+}
+
+/// Lift a published workflow-agent's `invoke` with a callback, so it sees its
+/// caller's cancel as an event (see [`callback_lift`]).
+fn lift_published_agent_with_callback(
+    core_module: &[u8],
+    resolve: &Resolve,
+    world: WorldId,
+) -> Result<Vec<u8>, DirectCompileError> {
+    for (key, item) in &resolve.worlds[world].exports {
+        let wit_parser::WorldItem::Interface { id, .. } = item else {
+            continue;
+        };
+        for function in resolve.interfaces[*id].functions.values() {
+            if core_imports::is_capabilities_invoke_export(resolve, Some(key), function) {
+                return callback_lift::lift_with_callback(core_module, resolve, key, function);
+            }
+        }
+    }
+    Err(component_error(
+        "a published workflow-agent exports no capabilities.invoke",
+    ))
 }
 
 #[cfg(test)]
@@ -1578,11 +1658,13 @@ fn build_direct_component_resolve_scoped(
         needs_monotonic_clock,
         false,
         false,
+        false,
     )
 }
 
 /// [`build_direct_component_resolve_scoped`], also importing
-/// `runtara:workflow/waits` when a WaitForInstances step needs it.
+/// `runtara:api/waits` when a WaitForInstances step needs it and
+/// `runtara:api/state` when the run publishes its state.
 #[allow(clippy::too_many_arguments)]
 fn build_direct_component_resolve_with_waits(
     agents: &[String],
@@ -1598,11 +1680,15 @@ fn build_direct_component_resolve_with_waits(
     needs_monotonic_clock: bool,
     wait_instances: bool,
     run_state: bool,
+    child_runs: bool,
 ) -> Result<(Resolve, WorldId), DirectCompileError> {
     // Control sites need the scope without any suspending agent.
     let operation_scope = operation_scope || !suspending_agents.is_empty();
     // Every runtara package, once; the world below imports only what it names.
     let mut resolve = runtara_wit::resolve().map_err(component_error)?;
+    resolve
+        .push_str("runtara-api.wit", runtara_wit::api::WIT)
+        .map_err(component_error)?;
     // Every workflow exports its entry as an agent package: a published
     // workflow-agent under its slug, a top-level run under the reserved entry
     // id. The reserved-slug check at save time guarantees the export package
@@ -1617,7 +1703,6 @@ fn build_direct_component_resolve_with_waits(
     for agent in agents {
         let shape = runtara_wit::AgentShape {
             scoped: scoped_agents.contains(agent),
-            suspendable: suspending_agents.contains(agent),
             ..Default::default()
         };
         resolve
@@ -1652,14 +1737,20 @@ fn build_direct_component_resolve_with_waits(
              import {};\n",
         runtara_wit::stdlib::JSON
     );
+    // Everything the logic reaches is `runtara:api`'s: the runtime (unless
+    // the workflow is runtime-free), connections, timers, operations, waits
+    // and state.
     if !omit_runtime {
-        workflow_wit.push_str(&format!("    import {RUNTIME_INTERFACE_NAME};\n"));
+        for interface in runtara_wit::api::RUN_SERVICES {
+            workflow_wit.push_str(&format!("    import {interface};\n"));
+        }
     }
     if has_connections {
-        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::host::CONNECTIONS));
+        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::api::CONNECTIONS));
     }
-    if needs_timers || !parallel_pools.is_empty() || !agents.is_empty() {
-        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::host::TIMERS));
+    // The timers are `runtara:api/time`'s, which the runtime already imports.
+    if (needs_timers || !parallel_pools.is_empty() || !agents.is_empty()) && omit_runtime {
+        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::api::TIME));
     }
     if needs_monotonic_clock {
         workflow_wit.push_str(&format!(
@@ -1668,16 +1759,18 @@ fn build_direct_component_resolve_with_waits(
         ));
     }
     if operation_scope {
-        workflow_wit.push_str(&format!(
-            "    import {};\n",
-            runtara_wit::workflow::OPERATION
-        ));
+        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::api::OPERATIONS));
     }
-    if wait_instances {
-        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::workflow::WAITS));
+    // A child run is started and read through tasks and waited on through
+    // waits.
+    if wait_instances || child_runs {
+        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::api::WAITS));
+    }
+    if child_runs {
+        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::api::TASKS));
     }
     if run_state {
-        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::workflow::STATE));
+        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::api::STATE));
     }
     for agent in agents {
         let interface = if scoped_agents.contains(agent) {
@@ -1801,6 +1894,9 @@ mod operation_scoped_tests;
 
 #[cfg(test)]
 mod wait_failure_tests;
+
+#[cfg(test)]
+mod asyncify_shape_tests;
 
 #[cfg(test)]
 mod wide_result_tests;

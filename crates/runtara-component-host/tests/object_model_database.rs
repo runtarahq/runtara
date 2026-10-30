@@ -1,4 +1,5 @@
-//! Real built WASM -> native host imports -> isolated PostgreSQL. No HTTP listener.
+//! Real built WASM -> workflow API -> native database service -> isolated
+//! PostgreSQL. No HTTP listener.
 use runtara_component_host::{CallContext, ConnectionResolverHost, DatabaseHost, HostState};
 use runtara_database_contract::*;
 use runtara_object_store::{
@@ -163,6 +164,15 @@ async fn built_object_model_crud_bulk_aggregate_and_memory_use_native_postgres()
         Value::Null,
         "raw SQL must not initialize Object Model metadata"
     );
+    // The service's DatabaseError reaches the agent intact, not as an
+    // invalid response.
+    let missing = agent
+        .invoke("query-sql", json!({"sql":"SELECT * FROM no_such_table"}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(missing.contains("42P01"), "{missing}");
+    assert!(!missing.contains("DATABASE_INVALID_RESPONSE"), "{missing}");
     let empty = agent
         .invoke("load-memory", json!({"conversation_id":"fresh-session"}))
         .await?;

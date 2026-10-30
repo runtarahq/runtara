@@ -10,7 +10,8 @@
 //! of the source — so retirement has been blocked on an inventory nobody could
 //! run.
 //!
-//! This reads `images` and `instance_images`, classifies every artifact on disk
+//! This reads `images` and `instance_images`, classifies every artifact (in the
+//! artifact store under `DATA_DIR`, or at a legacy path an image still names)
 //! by whether it decodes as an isolation package, and reports which legacy
 //! artifacts still back instances that are not terminal. A parked instance is
 //! the sharp case: it will be relaunched later and must find the machinery its
@@ -21,11 +22,13 @@
 //! report says exactly what is holding it.
 //!
 //! ```sh
-//! DATABASE_URL=postgres://... cargo run -p runtara-environment --bin artifact-inventory
-//! DATABASE_URL=postgres://... cargo run -p runtara-environment --bin artifact-inventory -- --json
+//! DATABASE_URL=postgres://... DATA_DIR=... cargo run -p runtara-environment --bin artifact-inventory
+//! DATABASE_URL=postgres://... DATA_DIR=... cargo run -p runtara-environment --bin artifact-inventory -- --json
 //! ```
 use std::collections::BTreeMap;
 
+use runtara_environment::artifacts::{ArtifactStore, Digest, FilesystemArtifactStore};
+use runtara_environment::image_registry::default_artifact_store;
 use runtara_invocation_contract::{PackageLimits, parse};
 
 /// Generous enough to decode any artifact this fleet could have produced:
@@ -67,7 +70,8 @@ struct ImageRow {
     image_id: String,
     tenant_id: String,
     name: String,
-    binary_path: String,
+    binary_path: Option<String>,
+    binary_digest: Option<String>,
     /// Instances that could still run this artifact again.
     live_instances: i64,
     /// Of those, the ones already parked — they WILL be relaunched.
@@ -75,10 +79,17 @@ struct ImageRow {
     total_instances: i64,
 }
 
-fn classify(path: &str) -> Shape {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(_) => return Shape::Missing,
+async fn read_artifact(row: &ImageRow, artifacts: &FilesystemArtifactStore) -> Option<Vec<u8>> {
+    if let Some(path) = &row.binary_path {
+        return std::fs::read(path).ok();
+    }
+    let digest = Digest::parse(row.binary_digest.as_deref()?).ok()?;
+    artifacts.get(&digest).await.ok().flatten()
+}
+
+fn classify(bytes: Option<Vec<u8>>) -> Shape {
+    let Some(bytes) = bytes else {
+        return Shape::Missing;
     };
     match parse(&bytes, limits()) {
         Ok(Some(_)) => Shape::Legacy,
@@ -95,6 +106,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|_| std::env::var("TEST_ENVIRONMENT_DATABASE_URL"))
         .map_err(|_| "set DATABASE_URL to the environment database")?;
     let pool = sqlx::PgPool::connect(&url).await?;
+    let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| ".data".to_string());
+    let artifacts = default_artifact_store(std::path::Path::new(&data_dir));
 
     // `suspended` is counted separately because a parked instance is the one
     // that is guaranteed to need its artifact again.
@@ -104,6 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                i.tenant_id,
                i.name,
                i.binary_path,
+               i.binary_digest,
                COALESCE(COUNT(*) FILTER (
                    WHERE inst.status NOT IN ('completed', 'failed', 'cancelled')
                ), 0) AS live_instances,
@@ -112,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         FROM images i
         LEFT JOIN instance_images ii ON ii.image_id = i.image_id
         LEFT JOIN instances inst ON inst.instance_id = ii.instance_id
-        GROUP BY i.image_id, i.tenant_id, i.name, i.binary_path
+        GROUP BY i.image_id, i.tenant_id, i.name, i.binary_path, i.binary_digest
         ORDER BY i.tenant_id, i.name
         "#,
     )
@@ -123,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut blocking = Vec::new();
     let mut entries = Vec::new();
     for row in &rows {
-        let shape = classify(&row.binary_path);
+        let shape = classify(read_artifact(row, &artifacts).await);
         *counts.entry(shape.label()).or_default() += 1;
         // Unreadable counts as blocking: it cannot be shown safe.
         let holds_back = matches!(shape, Shape::Legacy | Shape::Unreadable)
@@ -205,28 +219,22 @@ mod tests {
             return;
         }
         assert_eq!(
-            classify(component.to_str().expect("utf-8 path")),
+            classify(std::fs::read(&component).ok()),
             Shape::Standard,
             "an ordinary component must not be mistaken for an isolation package"
         );
     }
 
     #[test]
-    fn a_path_with_no_file_is_missing_rather_than_readable() {
-        assert_eq!(
-            classify("/nonexistent/artifact-inventory/probe.wasm"),
-            Shape::Missing
-        );
+    fn an_artifact_that_cannot_be_read_is_missing_rather_than_readable() {
+        assert_eq!(classify(None), Shape::Missing);
     }
 
     /// Anything that is not a decodable artifact must land in a bucket the gate
     /// treats as blocking, never silently as standard.
     #[test]
     fn a_non_wasm_file_is_unreadable_not_standard() {
-        let file = std::env::temp_dir().join("artifact-inventory-not-wasm.bin");
-        std::fs::write(&file, b"this is not a wasm module").expect("fixture write");
-        let shape = classify(file.to_str().expect("utf-8 path"));
-        let _ = std::fs::remove_file(&file);
+        let shape = classify(Some(b"this is not a wasm module".to_vec()));
         assert_eq!(shape, Shape::Unreadable);
     }
 }

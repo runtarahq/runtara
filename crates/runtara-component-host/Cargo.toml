@@ -15,6 +15,11 @@ db-integration-tests = []
 # Test-only experiment: guest-owned orchestration across disposable Stores.
 
 [[test]]
+name = "workflow_api_entry"
+path = "tests/workflow_api_entry.rs"
+required-features = ["component-integration-tests"]
+
+[[test]]
 name = "capability_fixtures"
 path = "tests/capability_fixtures.rs"
 required-features = ["component-integration-tests"]
@@ -66,6 +71,7 @@ required-features = ["component-integration-tests"]
 
 [dependencies]
 runtara-database-contract = { path = "../runtara-database-contract" }
+runtara-artifact-store = { path = "../runtara-artifact-store" }
 runtara-agent-trusted = { path = "../runtara-agent-trusted" }
 runtara-agent-suspension = { path = "../runtara-agent-suspension" }
 runtara-control-contract = { path = "../runtara-control-contract" }
@@ -79,7 +85,7 @@ runtara-wit = { path = "../runtara-wit" }
 runtara-invocation-contract = { path = "../runtara-invocation-contract" }
 
 # Embedded wasmtime engine + WASI Preview 2 support.
-wasmtime = { version = "46", default-features = false, features = [
+wasmtime = { version = "50", default-features = false, features = [
     "std",
     "anyhow",
     "runtime",
@@ -97,8 +103,17 @@ wasmtime = { version = "46", default-features = false, features = [
     # Cranelift compile for every deployed image (see build_engine).
     "cache",
 ] }
-wasmtime-wasi = "46"
-wasmtime-wasi-http = "46"
+# `p3` links wasi:http@0.3, the transport of the workflow API (see
+# workflow_api.rs). Its send hook is the one interception point.
+wasmtime-wasi = { version = "50", features = ["p3"] }
+wasmtime-wasi-http = { version = "50", features = ["p3"] }
+# `server`: the `/v1` router this host serves its runs in process
+# (api_launches.rs).
+runtara-workflow-api = { path = "../runtara-workflow-api", features = ["server"] }
+bytes = "1"
+http-body-util = "0.1"
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
 
 # Plumbing
 zeroize = "1"
@@ -126,7 +141,6 @@ testcontainers = "0.27"
 runtara-connections = { path = "../runtara-connections" }
 chrono.workspace = true
 url = "2"
-axum = "0.8"
 # Standard composition in cancellation integration fixtures.
 wac-graph = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "test-util"] }
@@ -136,7 +150,7 @@ getrandom = "0.3"
 wat = "1"
 # Tests author minimal components in WAT; the `wat` feature lets
 # `Component::from_file` parse text-format components.
-wasmtime = { version = "46", default-features = false, features = ["wat"] }
+wasmtime = { version = "50", default-features = false, features = ["wat"] }
 # Tests build their own bundle (.wasm + sidecar meta.json) at runtime by
 # calling each agent crate's host-only `agent_info()` and serializing the
 # resulting `AgentInfo` to JSON next to the freshly-built `.wasm`.

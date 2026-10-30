@@ -458,6 +458,25 @@ interface json {
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
+    // A `runtara:api` error envelope as the `{code, message, retryAfterMs}`
+    // JSON the wait and state errors above read: how logic built for the
+    // workflow API ABI hands them an API failure.
+    api-error-json: func(
+        code: string,
+        message: string,
+        retry-after-ms: option<u64>,
+    ) -> list<u8>;
+
+    // An operation-scoped Agent's input with its entered operation under
+    // `_operation`: the id (a control site) or the continuation `enter`
+    // loaded, hex-encoded (a suspending site). Replaces whatever the step
+    // mapped there; with neither, removes it.
+    agent-operation-input: func(
+        input: list<u8>,
+        operation-id: option<string>,
+        continuation: option<list<u8>>,
+    ) -> result<list<u8>, string>;
+
     // SetState / GetState: a state error JSON as the step's structured error.
     state-error: func(
         step-id: string,

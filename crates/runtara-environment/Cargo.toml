@@ -20,8 +20,13 @@ scoped-workflow-integration-tests = ["db-integration-tests", "runtara-workflows/
 # Needs the real database: it pre-seeds what the SDK would have reported so
 # run()'s output/error mapping can be exercised against real persistence.
 [[test]]
-name = "embedded_runner_test"
+name = "workflow_api_receipts_test"
 required-features = ["db-integration-tests"]
+
+[[test]]
+name = "embedded_runner_test"
+# Its workflow API runs need the built workflow components.
+required-features = ["scoped-workflow-integration-tests"]
 
 [dependencies]
 sha2 = { workspace = true }
@@ -35,10 +40,19 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-webpki",
 
 # Core persistence layer (for shared database access)
 runtara-core = { path = "../runtara-core", version = "9.0" }
+runtara-artifact-store = { path = "../runtara-artifact-store" }
 runtara-store-postgres = { path = "../runtara-store-postgres" }
 
 # Embedded wasmtime workflow execution (EmbeddedWasmRunner)
 runtara-component-host = { path = "../runtara-component-host", version = "9.0" }
+# The `/v1` router the embedded runner serves runs on the workflow API ABI from.
+runtara-workflow-api = { path = "../runtara-workflow-api", features = ["server"] }
+# The suspension caps operation-scoped agents are held to.
+runtara-agent-suspension = { path = "../runtara-agent-suspension" }
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
+bytes = "1"
+http = "1"
 runtara-invocation-contract = { path = "../runtara-invocation-contract", version = "9.0" }
 
 # Serialization
@@ -63,6 +77,10 @@ getrandom = "0.3"
 async-trait = "0.1"
 
 [dev-dependencies]
+# Fake SQL hosts behind the workflow API connection tests.
+runtara-database-contract = { path = "../runtara-database-contract" }
+# Fake trusted credentials behind the workflow API trusted-call test.
+runtara-agent-trusted = { path = "../runtara-agent-trusted" }
 opentelemetry_sdk = { version = "0.32", features = ["metrics", "testing"] }
 base64 = { workspace = true }
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
@@ -77,6 +95,8 @@ tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
 # Embedded-runner tests author minimal workflow-entry components in WAT.
 wat = "1"
+# The stalled-cleanup fixture is composed with the api component.
+wac-graph = "0.10"
 # Testcontainers for automatic PostgreSQL setup in tests
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
@@ -84,6 +104,8 @@ testcontainers-modules = { version = "0.15", features = ["postgres"] }
 # persistence so they need no database; that backend is gated behind this
 # feature.
 runtara-core = { path = "../runtara-core", features = ["test-support"] }
+# Tests launch components from where they wrote them.
+runtara-artifact-store = { path = "../runtara-artifact-store", features = ["test-support"] }
 
 [[test]]
 name = "container_registry_test"

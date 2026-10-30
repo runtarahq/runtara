@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::crypto::CredentialCipher;
+use crate::crypto::{CipherContext, CredentialCipher};
 use crate::types::*;
 use sqlx::PgPool;
 
@@ -46,12 +46,18 @@ impl ConnectionRepository {
     /// without introducing a new error variant. Logs the underlying cause.
     fn seal(
         &self,
+        tenant_id: &str,
+        connection_id: &str,
         plaintext: Option<&serde_json::Value>,
     ) -> Result<Option<serde_json::Value>, sqlx::Error> {
         let Some(value) = plaintext else {
             return Ok(None);
         };
-        match self.cipher.encrypt(value) {
+        let context = CipherContext {
+            tenant_id,
+            connection_id,
+        };
+        match self.cipher.encrypt(value, &context) {
             Ok(envelope) => Ok(Some(envelope)),
             Err(e) => {
                 tracing::error!(error = %e, "Failed to encrypt connection parameters");
@@ -66,12 +72,18 @@ impl ConnectionRepository {
     /// pass through unchanged — the cipher handles the envelope check.
     fn unseal(
         &self,
+        tenant_id: &str,
+        connection_id: &str,
         stored: Option<serde_json::Value>,
     ) -> Result<Option<serde_json::Value>, sqlx::Error> {
         let Some(value) = stored else {
             return Ok(None);
         };
-        match self.cipher.decrypt(&value) {
+        let context = CipherContext {
+            tenant_id,
+            connection_id,
+        };
+        match self.cipher.decrypt(&value, &context) {
             Ok(plaintext) => Ok(Some(plaintext)),
             Err(e) => {
                 tracing::error!(error = %e, "Failed to decrypt connection parameters");
@@ -137,7 +149,11 @@ impl ConnectionRepository {
             .and_then(|c| serde_json::to_value(c).ok());
 
         // Encrypt connection_parameters at rest (no-op if cipher is NoOp).
-        let sealed_parameters = self.seal(request.connection_parameters.as_ref())?;
+        let sealed_parameters = self.seal(
+            tenant_id,
+            connection_id,
+            request.connection_parameters.as_ref(),
+        )?;
 
         let mut tx = self.pool.begin().await?;
         if request.is_default_file_storage == Some(true) {
@@ -497,7 +513,10 @@ impl ConnectionRepository {
         // Pre-encrypt parameters (if any) before binding — must live long
         // enough for the bind to reference it.
         let sealed_parameters = match values.parameters {
-            Some(plain) => Some(self.seal(Some(plain))?.unwrap_or(serde_json::Value::Null)),
+            Some(plain) => Some(
+                self.seal(tenant_id, id, Some(plain))?
+                    .unwrap_or(serde_json::Value::Null),
+            ),
             None => None,
         };
 
@@ -806,12 +825,13 @@ impl ConnectionRepository {
                     connection_parameters,
                     rate_limit_config,
                 )| {
+                    let connection_parameters = self.unseal(&tid, &id, connection_parameters)?;
                     Ok::<_, sqlx::Error>(ConnectionWithParameters {
                         id,
                         tenant_id: Some(tid),
                         integration_id,
                         connection_subtype,
-                        connection_parameters: self.unseal(connection_parameters)?,
+                        connection_parameters,
                         rate_limit_config,
                     })
                 },
@@ -960,12 +980,13 @@ impl ConnectionRepository {
                     connection_parameters,
                     rate_limit_config,
                 )| {
+                    let connection_parameters = self.unseal(&tid, &id, connection_parameters)?;
                     Ok::<_, sqlx::Error>(ConnectionWithParameters {
                         id,
                         tenant_id: Some(tid),
                         integration_id,
                         connection_subtype,
-                        connection_parameters: self.unseal(connection_parameters)?,
+                        connection_parameters,
                         rate_limit_config,
                     })
                 },
@@ -983,7 +1004,7 @@ impl ConnectionRepository {
         status: &str,
     ) -> Result<u64, sqlx::Error> {
         let sealed = self
-            .seal(Some(parameters))?
+            .seal(tenant_id, id, Some(parameters))?
             .unwrap_or(serde_json::Value::Null);
         let result = sqlx::query(
             r#"
@@ -1046,7 +1067,7 @@ impl ConnectionRepository {
         new_hash: Option<&str>,
     ) -> Result<u64, sqlx::Error> {
         let sealed = self
-            .seal(Some(parameters))?
+            .seal(tenant_id, id, Some(parameters))?
             .unwrap_or(serde_json::Value::Null);
         let result = sqlx::query(
             r#"
@@ -1112,7 +1133,11 @@ impl ConnectionRepository {
                 continue;
             };
             // Decrypt (or passthrough if plaintext), then encrypt with the current cipher.
-            let plaintext = match self.cipher.decrypt(&stored_value) {
+            let context = CipherContext {
+                tenant_id: &tid,
+                connection_id: &id,
+            };
+            let plaintext = match self.cipher.decrypt(&stored_value, &context) {
                 Ok(v) => v,
                 Err(e) => {
                     stats.failed += 1;
@@ -1125,7 +1150,7 @@ impl ConnectionRepository {
                     continue;
                 }
             };
-            let new_envelope = match self.cipher.encrypt(&plaintext) {
+            let new_envelope = match self.cipher.encrypt(&plaintext, &context) {
                 Ok(v) => v,
                 Err(e) => {
                     stats.failed += 1;

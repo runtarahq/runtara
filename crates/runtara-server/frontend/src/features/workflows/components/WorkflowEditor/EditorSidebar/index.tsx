@@ -1,6 +1,5 @@
 import { UIVariable } from './VariablesEditor';
 import { SchemaField } from './SchemaFieldsEditor';
-import type { MemoryTier } from '@/generated/RuntaraRuntimeApi';
 
 export interface WorkflowData {
   id: string;
@@ -15,6 +14,6 @@ export interface WorkflowData {
   durable?: boolean | null;
   entryPoint?: string;
   entryPointOptions?: Array<{ id: string; name: string }>;
-  memoryTier?: MemoryTier | null;
+  memoryMb?: number | null;
   trackEvents?: boolean;
 }

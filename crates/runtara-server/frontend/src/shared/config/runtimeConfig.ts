@@ -14,7 +14,14 @@ type RuntimeConfig = {
   oidcAuthority?: string;
   oidcClientId?: string;
   oidcAudience?: string;
+  /** "false" when the IdP has no Auth0 Organizations: the login then never
+   *  sends an `organization` parameter. */
+  oidcOrganizations?: string;
   apiBaseUrl?: string;
+  /** Where providers and callers deliver events (webhooks, HTTP triggers),
+   *  when that is another host than the console's: the trigger URLs shown
+   *  are made from it. Set from RUNTARA_UI_EVENTS_BASE_URL. */
+  eventsBaseUrl?: string;
   plausibleDomain?: string;
   plausibleHost?: string;
   version?: string;
@@ -76,9 +83,15 @@ export const config = {
     authority: pick(runtime.oidcAuthority, import.meta.env.VITE_OIDC_AUTHORITY),
     clientId: pick(runtime.oidcClientId, import.meta.env.VITE_OIDC_CLIENT_ID),
     audience: pick(runtime.oidcAudience, import.meta.env.VITE_OIDC_AUDIENCE),
+    organizations:
+      pick(
+        runtime.oidcOrganizations,
+        import.meta.env.VITE_OIDC_ORGANIZATIONS
+      ) !== 'false',
   },
   apiBaseUrl:
     pick(runtime.apiBaseUrl, import.meta.env.VITE_RUNTARA_API_BASE_URL) ?? '',
+  eventsBaseUrl: clean(runtime.eventsBaseUrl),
   plausible: {
     domain: pick(
       runtime.plausibleDomain,

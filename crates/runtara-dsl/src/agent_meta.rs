@@ -290,6 +290,37 @@ pub struct CapabilityInfo {
     /// Well-known tags: "memory:read", "memory:write".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// For a workflow-agent: the published workflow version it runs and
+    /// whether that version may park. A caller runs one that may park as a
+    /// child run of its own, not composed into its own Store.
+    #[serde(
+        default,
+        rename = "workflowRun",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub workflow_run: Option<WorkflowRunTarget>,
+}
+
+/// The published workflow version a workflow-agent capability runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct WorkflowRunTarget {
+    #[serde(rename = "workflowId")]
+    pub workflow_id: String,
+    pub version: u32,
+    /// The version has a path that parks (a durable wait or sleep).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parks: bool,
+}
+
+/// `info` with its workflow-agent capability bound to the published version
+/// it runs.
+pub fn with_workflow_run(mut info: AgentInfo, target: WorkflowRunTarget) -> AgentInfo {
+    for capability in &mut info.capabilities {
+        capability.workflow_run = Some(target.clone());
+    }
+    info
 }
 
 /// API-compatible capability field info.
@@ -1521,6 +1552,7 @@ pub fn capability_to_api_with_types(
         suspends: cap.suspends,
         known_errors,
         tags: cap.tags.iter().map(|s| s.to_string()).collect(),
+        workflow_run: None,
     }
 }
 
@@ -1811,8 +1843,8 @@ pub fn validate_agent_metadata_or_panic() {
 // AgentCatalog — runtime-loaded snapshot of every agent's metadata.
 // ============================================================================
 
-/// Canonical id of the built-in control agent, the only agent that may import
-/// `runtara:control/*`. Reserved: no workflow-agent slug may fold onto it.
+/// Canonical id of the built-in control agent, the only agent whose test calls
+/// act for the tenant. Reserved: no workflow-agent slug may fold onto it.
 pub const CONTROL_AGENT_ID: &str = "control";
 
 /// Whether a call to `capability` of `agent_id` is operation-scoped: the
@@ -2069,6 +2101,7 @@ pub fn workflow_agent_info(
             suspends: false,
             known_errors: Vec::new(),
             tags: vec![capability_tags::WORKFLOW_AGENT.to_string()],
+            workflow_run: None,
         }],
     }
 }
@@ -2605,6 +2638,7 @@ mod catalog_tests {
                 suspends: false,
                 known_errors: vec![],
                 tags: vec![],
+                workflow_run: None,
             }],
         }
     }
@@ -2985,6 +3019,24 @@ mod slug_tests {
     }
 }
 
+/// The bytes of an agent's metadata sidecar that its trusted pin binds: the
+/// JSON without the whitespace around it. A release stores the metadata as a
+/// JSON value, which keeps every byte of it but not what surrounds it, so the
+/// compiler (reading the sidecar file) and the host (reading the release)
+/// hash the same bytes only this way.
+pub fn pinned_metadata(meta: &[u8]) -> &[u8] {
+    let json_space = |byte: &u8| matches!(byte, b' ' | b'\t' | b'\n' | b'\r');
+    let start = meta
+        .iter()
+        .position(|byte| !json_space(byte))
+        .unwrap_or(meta.len());
+    let end = meta
+        .iter()
+        .rposition(|byte| !json_space(byte))
+        .map_or(start, |end| end + 1);
+    &meta[start..end]
+}
+
 /// Content-bound import used to pin a workflow's privileged built-in dependency.
 /// The host only provides this marker for its approved installed artifact.
 pub fn trusted_artifact_import(agent_id: &str, wasm_sha256: &str, metadata_sha256: &str) -> String {
@@ -3043,6 +3095,20 @@ fn parse_artifact_import<'a>(prefix: &str, import: &'a str) -> Option<(&'a str, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sidecar's trusted pin binds its JSON, whatever whitespace surrounds
+    /// it, as a release keeps it; any change inside is another version.
+    #[test]
+    fn pinned_metadata_is_the_json_without_surrounding_whitespace() {
+        assert_eq!(pinned_metadata(b"{\"a\":1}"), b"{\"a\":1}");
+        assert_eq!(pinned_metadata(b"\r\n {\"a\": 1}\n\t "), b"{\"a\": 1}");
+        assert_ne!(
+            pinned_metadata(b"{\"a\": 1}"),
+            pinned_metadata(b"{\"a\":1}")
+        );
+        assert_eq!(pinned_metadata(b" \n "), b"");
+        assert_eq!(pinned_metadata(b""), b"");
+    }
 
     #[test]
     fn trusted_artifact_import_names_round_trip_their_component_digest() {
@@ -3466,6 +3532,7 @@ mod tests {
                 },
             ],
             tags: vec![],
+            workflow_run: None,
         };
 
         let json = serde_json::to_value(&info).unwrap();
@@ -3506,6 +3573,7 @@ mod tests {
             suspends: false,
             known_errors: vec![],
             tags: vec![],
+            workflow_run: None,
         };
 
         let json = serde_json::to_value(&info).unwrap();

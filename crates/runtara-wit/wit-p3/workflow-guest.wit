@@ -1,0 +1,25 @@
+// The worlds of a workflow (or launched agent) on the workflow API ABI.
+//
+// They import only WASI: durability, connections, SQL, state and control are
+// reached over `wasi:http` at `http://api.runtara.internal` (see the
+// runtara-workflow-api crate). `run` reads the input and posts the outcome
+// through that API.
+package runtara:workflow-guest@1.0.0;
+
+// What a guest talking to the workflow API imports (the guest SDK's world).
+world client {
+    import wasi:http/client@0.3.0;
+    import wasi:clocks/monotonic-clock@0.3.0;
+    import wasi:random/random@0.3.0;
+}
+
+// The entry every launched artifact exports.
+world run {
+    export wasi:cli/run@0.3.0;
+}
+
+// A whole workflow on the workflow API ABI.
+world workflow {
+    include client;
+    include run;
+}

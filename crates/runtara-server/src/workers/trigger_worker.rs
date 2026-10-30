@@ -541,7 +541,7 @@ async fn process_event(
     let emit_fired = |outcome: &str| {
         if let Some(trigger_id) = trigger_event.trigger_id() {
             event_sink.emit(
-                ProductEvent::new(EventType::TriggerFired)
+                ProductEvent::for_tenant(EventType::TriggerFired, &trigger_event.tenant_id)
                     .no_user_actor(trigger_id, ActorType::Trigger)
                     .resource(trigger_id, "trigger")
                     .source(EventSource::Worker)

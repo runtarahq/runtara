@@ -1031,6 +1031,13 @@ export interface ApiResponseVecWorkflowVersionInfoDto {
     /** Whether this is the current/active version used for execution */
     isActive: boolean;
     /**
+     * Linear memory the compiled workflow allocates when it starts, in
+     * bytes: its memory tier must be at least this. Null if the version
+     * isn't compiled or was compiled before the floor was recorded.
+     * @format int64
+     */
+    memoryFloorBytes?: number | null;
+    /**
      * Size of the generated workflow-logic crate source files in bytes
      * (Cargo.toml + src/lib.rs + wit/world.wit + workflow.wac). Useful for
      * gauging how large the codegen output is for a workflow. Null when
@@ -1093,8 +1100,12 @@ export interface ApiResponseWorkflowDto {
      * @format int32
      */
     lastVersionNumber: number;
-    /** Memory allocation tier for workflow execution */
-    memoryTier?: MemoryTier;
+    /**
+     * Linear memory a run of this version may use, in MiB.
+     * @format int32
+     * @min 0
+     */
+    memoryMb?: number;
     name: string;
     /** Visual notes/annotations for the workflow canvas */
     notes?: Note[];
@@ -1308,6 +1319,12 @@ export interface CapabilityInfo {
   tags?: string[];
   /** Host-enforced execution mode; never a workflow-controlled permission. */
   trusted?: boolean;
+  /**
+   * For a workflow-agent: the published workflow version it runs and
+   * whether that version may park. A caller runs one that may park as a
+   * child run of its own, not composed into its own Store.
+   */
+  workflowRun?: null | WorkflowRunTarget;
 }
 
 /** Request body for starting a chat session with an initial message */
@@ -1914,6 +1931,13 @@ export interface CreateSchemaResponse {
 
 export interface CreateWorkflowRequest {
   description: string;
+  /**
+   * Linear memory a run may use, in MiB (default 256).
+   * @format int32
+   * @min 0
+   */
+  memoryMb?: number | null;
+  /** Deprecated: a memory preset (S 8, M 64, L 128, XL 256 MiB). Use `memoryMb`. */
   memoryTier?: null | MemoryTier;
   name: string;
   /**
@@ -2136,6 +2160,19 @@ export interface EmbedWorkflowStep {
 
 export interface EntitlementLimits {
   /**
+   * Authenticated API requests the tenant may make per minute, counted
+   * across every process serving it.
+   * @format int32
+   * @min 0
+   */
+  apiRequestsPerMinute?: number | null;
+  /**
+   * Compilations the tenant may request per hour.
+   * @format int32
+   * @min 0
+   */
+  compilationsPerHour?: number | null;
+  /**
    * @format int32
    * @min 0
    */
@@ -2154,6 +2191,14 @@ export interface EntitlementLimits {
   maxWorkflows?: number | null;
   /** @min 0 */
   objectModelBulkRequestLimit?: number | null;
+  /**
+   * Calls the tenant's runs may make per minute that start external work
+   * (outbound HTTP, SQL, child runs, trusted capabilities); a run over it
+   * waits rather than fails.
+   * @format int32
+   * @min 0
+   */
+  workflowCallsPerMinute?: number | null;
 }
 
 export interface EntitlementsDto {
@@ -4800,6 +4845,13 @@ export interface UpdateWorkflowRequest {
    * Must include 'name' and optionally 'description' fields.
    */
   executionGraph: any;
+  /**
+   * Linear memory a run may use, in MiB (optional, keeps existing if not provided).
+   * @format int32
+   * @min 0
+   */
+  memoryMb?: number | null;
+  /** Deprecated: a memory preset (S 8, M 64, L 128, XL 256 MiB). Use `memoryMb`. */
   memoryTier?: null | MemoryTier;
   /** Enable step-event tracking for this workflow version (optional, keeps existing if not provided) */
   trackEvents?: boolean | null;
@@ -5201,8 +5253,12 @@ export interface WorkflowDto {
    * @format int32
    */
   lastVersionNumber: number;
-  /** Memory allocation tier for workflow execution */
-  memoryTier?: MemoryTier;
+  /**
+   * Linear memory a run of this version may use, in MiB.
+   * @format int32
+   * @min 0
+   */
+  memoryMb?: number;
   name: string;
   /** Visual notes/annotations for the workflow canvas */
   notes?: Note[];
@@ -5263,6 +5319,12 @@ export interface WorkflowInstanceDto {
    * Absent for an execution that is not live.
    */
   executionPhase?: null | ExecutionPhase;
+  /**
+   * What the run's guest wrote to stdout and stderr, as its runner captured
+   * it (the first capture is kept). Only on a single execution's detail;
+   * absent when the runner keeps no capture, as for a durable embedded run.
+   */
+  guestOutput?: string | null;
   /** Whether this execution has pending human input requests (AI Agent waiting for signal) */
   hasPendingInput?: boolean;
   id: string;
@@ -5443,6 +5505,18 @@ export interface WorkflowMetricsHourlyResponse {
   success: boolean;
 }
 
+/** The published workflow version a workflow-agent capability runs. */
+export interface WorkflowRunTarget {
+  /** The version has a path that parks (a durable wait or sleep). */
+  parks?: boolean;
+  /**
+   * @format int32
+   * @min 0
+   */
+  version: number;
+  workflowId: string;
+}
+
 export interface WorkflowRuntimeAction {
   actionId: string;
   actionKey?: string | null;
@@ -5600,6 +5674,13 @@ export interface WorkflowVersionInfoDto {
   errorMessage?: string | null;
   /** Whether this is the current/active version used for execution */
   isActive: boolean;
+  /**
+   * Linear memory the compiled workflow allocates when it starts, in
+   * bytes: its memory tier must be at least this. Null if the version
+   * isn't compiled or was compiled before the floor was recorded.
+   * @format int64
+   */
+  memoryFloorBytes?: number | null;
   /**
    * Size of the generated workflow-logic crate source files in bytes
    * (Cargo.toml + src/lib.rs + wit/world.wit + workflow.wac). Useful for

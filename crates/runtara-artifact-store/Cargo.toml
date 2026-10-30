@@ -1,0 +1,44 @@
+[package]
+name = "runtara-artifact-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Content-addressed storage for runtara's artifacts: workflow images, agents and shared components, addressed by the SHA-256 of their bytes"
+publish = false
+
+[features]
+# `test_support::FileMapStore`: artifacts that are files where they already are.
+test-support = []
+# `object::ObjectArtifactStore`: S3-compatible storage, Azure Blob, GCS and the
+# local filesystem through the `object_store` crate. TLS uses rustls on ring,
+# like the rest of the workspace (no aws-lc C build).
+object-store = ["dep:object_store", "dep:futures", "dep:url", "dep:reqwest", "dep:rustls"]
+# Tests against a real S3-compatible store (RustFS); needs docker.
+object-store-integration-tests = ["object-store"]
+
+[dependencies]
+async-trait = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
+sha2 = { workspace = true }
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "rt"] }
+uuid = { version = "1", features = ["v4"] }
+object_store = { version = "0.14", default-features = false, features = ["fs", "aws-base", "gcp-base", "azure-base", "reqwest", "ring"], optional = true }
+futures = { version = "0.3", optional = true }
+url = { version = "2", optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+# The S3 test fetches presigned URLs over plain HTTP.
+reqwest = { version = "0.13", default-features = false }
+tokio = { version = "1", features = ["fs", "io-util", "rt", "macros", "time"] }
+
+[[test]]
+name = "object_store_s3"
+path = "tests/object_store_s3.rs"
+required-features = ["object-store-integration-tests"]

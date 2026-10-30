@@ -127,7 +127,6 @@ fn a_wide_result_ok_value_is_untouched() {
 fn wide_result_offsets_match_the_wit_layout() {
     use wit_parser::{Int, Resolve, SizeAlign, Type, TypeDefKind};
     let resolve: Resolve = runtara_wit::resolve().unwrap();
-    let runtime = runtara_package(&resolve, runtara_wit::workflow::PACKAGE);
     let stdlib = runtara_package(&resolve, runtara_wit::stdlib::PACKAGE);
     let mut sizes = SizeAlign::default();
     sizes.fill(&resolve);
@@ -144,7 +143,6 @@ fn wide_result_offsets_match_the_wit_layout() {
             .size_wasm32() as u64
     };
     for (package, interface, function) in [
-        (runtime, "runtime", "now-ms"),
         (stdlib, "json", "delay-duration-ms"),
         (stdlib, "json", "wait-timeout-ms"),
         (stdlib, "json", "wait-poll-interval-ms"),
@@ -158,7 +156,12 @@ fn wide_result_offsets_match_the_wit_layout() {
             "{function}"
         );
     }
-    assert_eq!(err_offset(runtime, "runtime", "instance-id"), 4);
+    // The runtime helpers' own layouts: `now-ms` is the wide one.
+    assert_eq!(
+        super::api_shims::native::error_at("now-ms"),
+        RETPTR_WIDE_ERR_PTR_OFFSET
+    );
+    assert_eq!(super::api_shims::native::error_at("instance-id"), 4);
 }
 
 fn runtara_package(resolve: &wit_parser::Resolve, name: &str) -> wit_parser::PackageId {

@@ -28,25 +28,39 @@ use sqlx::PgPool;
 use tracing::{info, warn};
 
 static MANAGER: OnceLock<ConnectionManager> = OnceLock::new();
+/// The tenants whose counters this process owns. One Valkey may hold other
+/// processes' tenants; their counters are never read or corrected here.
+static TENANTS: OnceLock<Vec<String>> = OnceLock::new();
 
 /// Whether Valkey-backed admission counting is active for this process.
 pub fn is_enabled() -> bool {
     MANAGER.get().is_some()
 }
 
-const KEY_PREFIX: &str = "runtara:admission:reserved:";
-
 fn key(tenant_id: &str) -> String {
-    format!("{KEY_PREFIX}{tenant_id}")
+    format!("{tenant_id}:admission:reserved")
 }
 
-/// Adopt `manager` for admission counting and seed every tenant's counter from
-/// the durable reservation rows.
+/// The key of earlier versions, removed when the counter is seeded.
+fn legacy_key(tenant_id: &str) -> String {
+    format!("runtara:admission:reserved:{tenant_id}")
+}
+
+fn tenants() -> &'static [String] {
+    TENANTS.get().map(Vec::as_slice).unwrap_or_default()
+}
+
+/// Adopt `manager` for admission counting and seed each of `tenants`' counters
+/// from the durable reservation rows.
 ///
 /// Seeding is what makes the counter safe to lose: an empty or stale Valkey
 /// starts over from the same rows the release path maintains. Called once at
 /// startup, before any intake can run.
-pub async fn install(manager: ConnectionManager, pool: &PgPool) -> anyhow::Result<()> {
+pub async fn install(
+    manager: ConnectionManager,
+    pool: &PgPool,
+    tenants: Vec<String>,
+) -> anyhow::Result<()> {
     let rows: Vec<(String, i64)> = sqlx::query_as(
         r#"
         SELECT tenant_id, count(*)
@@ -58,42 +72,25 @@ pub async fn install(manager: ConnectionManager, pool: &PgPool) -> anyhow::Resul
     .fetch_all(pool)
     .await?;
 
+    let durable: HashMap<String, i64> = rows.into_iter().collect();
     let mut conn = manager.clone();
 
-    // Clear first, then write what the rows say. Writing only the tenants that
-    // still hold reservations would leave a stale counter in place for every
-    // tenant that has since drained -- and a counter stuck above the limit
-    // refuses that tenant's work indefinitely, with nothing to bring it back
-    // down. Dropping the whole namespace makes the seed reflect the durable
-    // rows exactly, including the tenants whose correct value is zero.
-    let mut cleared = 0usize;
-    let mut cursor: u64 = 0;
-    loop {
-        let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
-            .arg(cursor)
-            .arg("MATCH")
-            .arg(format!("{KEY_PREFIX}*"))
-            .arg("COUNT")
-            .arg(500)
-            .query_async(&mut conn)
-            .await?;
-        if !batch.is_empty() {
-            cleared += batch.len();
-            let _: () = conn.del(batch).await?;
+    // Write every served tenant's count, zero included: seeding only the
+    // tenants that still hold reservations would leave a stale counter in
+    // place for one that has since drained -- and a counter stuck above the
+    // limit refuses that tenant's work indefinitely.
+    for tenant_id in &tenants {
+        let held = durable.get(tenant_id).copied().unwrap_or(0);
+        let _: () = conn.set(key(tenant_id), held).await?;
+        if !crate::config::valkey_tenant_scoped() {
+            let _: () = conn.del(legacy_key(tenant_id)).await?;
         }
-        cursor = next;
-        if cursor == 0 {
-            break;
-        }
-    }
-
-    for (tenant_id, held) in &rows {
-        let _: () = conn.set(key(tenant_id), *held).await?;
     }
     info!(
-        tenants = rows.len(),
-        cleared, "Valkey admission counter seeded from durable reservations"
+        tenants = tenants.len(),
+        "Valkey admission counter seeded from durable reservations"
     );
+    let _ = TENANTS.set(tenants);
 
     if MANAGER.set(manager).is_err() {
         warn!("Valkey admission counter was already installed; keeping the first manager");
@@ -146,7 +143,7 @@ fn reconcile_interval() -> Duration {
     Duration::from_millis(ms)
 }
 
-/// Read every tenant's counter, pairing it with its durable reservation count.
+/// Read each served tenant's counter, pairing it with its durable reservation count.
 async fn observed_drift(pool: &PgPool) -> anyhow::Result<HashMap<String, i64>> {
     let Some(manager) = MANAGER.get() else {
         return Ok(HashMap::new());
@@ -166,29 +163,10 @@ async fn observed_drift(pool: &PgPool) -> anyhow::Result<HashMap<String, i64>> {
     let durable: HashMap<String, i64> = rows.into_iter().collect();
 
     let mut drift = HashMap::new();
-    let mut cursor: u64 = 0;
-    loop {
-        let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
-            .arg(cursor)
-            .arg("MATCH")
-            .arg(format!("{KEY_PREFIX}*"))
-            .arg("COUNT")
-            .arg(500)
-            .query_async(&mut conn)
-            .await?;
-        for full_key in batch {
-            let Some(tenant_id) = full_key.strip_prefix(KEY_PREFIX) else {
-                continue;
-            };
-            let held: Option<i64> = conn.get(&full_key).await?;
-            let held = held.unwrap_or(0);
-            let owed = durable.get(tenant_id).copied().unwrap_or(0);
-            drift.insert(tenant_id.to_string(), held - owed);
-        }
-        cursor = next;
-        if cursor == 0 {
-            break;
-        }
+    for tenant_id in tenants() {
+        let held: Option<i64> = conn.get(key(tenant_id)).await?;
+        let owed = durable.get(tenant_id).copied().unwrap_or(0);
+        drift.insert(tenant_id.clone(), held.unwrap_or(0) - owed);
     }
     Ok(drift)
 }

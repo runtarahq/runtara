@@ -1,0 +1,35 @@
+[cli]
+url = "https://github.com/WebAssembly/WASI/archive/v0.3.0.tar.gz"
+prefix = "WASI-0.3.0/proposals/cli/wit"
+sha256 = "d9f51b8ac7fb9612ff406783658a254c7873a9ebbcfb790cfd6df74c1ef8b385"
+sha512 = "38f0f890ca7d95a652d4004bb9b0b870fb883f4b90e219e155a853f1ab1f7f13b1d2331db1c986b28747df5a084dd3a0ae7a9f3067ca92167bfb3c34b5adc56b"
+
+[clocks]
+url = "https://github.com/WebAssembly/WASI/archive/v0.3.0.tar.gz"
+prefix = "WASI-0.3.0/proposals/clocks/wit"
+sha256 = "2d288cb781c60ae462537b39e4699de38f88072b501fc7f97d3f20984d550bcf"
+sha512 = "1563eeeacbfea89e44f668b8588ef95b31feac7d9ec3bb5dad932320478b1aff1448031f44afa15ed926981855ac5bd504126389ddb7802f79c63b81b3c5ede7"
+
+[filesystem]
+url = "https://github.com/WebAssembly/WASI/archive/v0.3.0.tar.gz"
+prefix = "WASI-0.3.0/proposals/filesystem/wit"
+sha256 = "2c804c867e34eabd75171119f062a49a1b9758d1ec1956535e467b7353e61dd3"
+sha512 = "db25d5306dc671c7a7db6a273318d056d6e544567636b3759db48ab4e81a06bc5c1fc3aa2d1522d4187a116730b1a8ecc57a4f974925fda6deaaf06d237da6df"
+
+[http]
+url = "https://github.com/WebAssembly/WASI/archive/v0.3.0.tar.gz"
+prefix = "WASI-0.3.0/proposals/http/wit"
+sha256 = "e37369a45a594f93fb3ed31364476551e71fcde8f56a3957228b69850d558003"
+sha512 = "f28bfbe5555e01768b4d2dd4db7cf2ca8abe9142adb57c8d03cc864b4f900b5eef5b2ba49a3231236de2574d8c595b9ac119b38e1fab5bd803adacb960401001"
+
+[random]
+url = "https://github.com/WebAssembly/WASI/archive/v0.3.0.tar.gz"
+prefix = "WASI-0.3.0/proposals/random/wit"
+sha256 = "607700294fdbd7de5c4771628db8830b05ae53c48e66c7645feae98f298a5feb"
+sha512 = "a059c887a04b2927df93b8eb83e0843d9ab804e31dee060bf83b74fa6fdd24fbafbb7f9cfcbfa7838cbf6c7e684de8fd4c0b338f3006db1077dd338bf01445ce"
+
+[sockets]
+url = "https://github.com/WebAssembly/WASI/archive/v0.3.0.tar.gz"
+prefix = "WASI-0.3.0/proposals/sockets/wit"
+sha256 = "663af53b8a4e6aa66fa24618c5d0d6dd4bfaa970121a85951e8ab52cea0b0852"
+sha512 = "4faf0eb9e8f486d3dadddc7f491f87ca6b1626f0296e8e918c529f39696f61398e4c37d0dfa6529a157f65747bbd455487fe0b6bb04e075d65a8d75844225e2a"

@@ -17,11 +17,13 @@
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     let pool = sqlx::PgPool::connect("postgres://...").await?;
-//!     let runner = build_runner(persistence.clone(), None)?;
+//!     let artifacts = Arc::new(FilesystemArtifactStore::new(".data/artifacts"));
+//!     let runner = build_runner(persistence.clone(), None, artifacts.clone())?;
 //!
 //!     let runtime = EnvironmentRuntime::builder()
 //!         .pool(pool)
 //!         .runner(runner)
+//!         .artifacts(artifacts)
 //!         .build()?
 //!         .start()
 //!         .await?;
@@ -55,9 +57,11 @@ use crate::execution_timeout::ExecutionTimeoutPolicy;
 use crate::handlers::{DrainController, EnvironmentHandlerState};
 use crate::heartbeat_monitor::{HeartbeatMonitor, HeartbeatMonitorConfig};
 use crate::image_cleanup_worker::{ImageCleanupWorker, ImageCleanupWorkerConfig};
+use crate::image_registry::{ImageRegistry, default_artifact_store};
 use crate::launch_dispatcher::{LaunchDispatcher, LaunchLifecycleObservers};
 use crate::runner::Runner;
 use crate::wake_scheduler::{WakeScheduler, WakeSchedulerConfig, default_wake_concurrency};
+use runtara_artifact_store::ArtifactStore;
 
 // Every setting here follows `crate::config::positive`, which rejects a
 // non-positive or unparseable value rather than honouring it: a zero interval
@@ -102,6 +106,7 @@ pub struct EnvironmentRuntimeBuilder {
     core_persistence: Option<Arc<dyn Persistence>>,
     runner: Option<Arc<dyn Runner>>,
     data_dir: PathBuf,
+    artifacts: Option<Arc<dyn ArtifactStore>>,
     wake_poll_interval: Duration,
     wake_batch_size: i64,
     wake_concurrency: usize,
@@ -123,6 +128,7 @@ impl Default for EnvironmentRuntimeBuilder {
             core_persistence: None,
             runner: None,
             data_dir: PathBuf::from(".data"),
+            artifacts: None,
             wake_poll_interval: wake_poll_interval(&ProcessEnv),
             wake_batch_size: wake_batch_size(&ProcessEnv),
             wake_concurrency: wake_concurrency(&ProcessEnv),
@@ -171,6 +177,13 @@ impl EnvironmentRuntimeBuilder {
     /// Default: `.data`
     pub fn data_dir(mut self, path: impl Into<PathBuf>) -> Self {
         self.data_dir = path.into();
+        self
+    }
+
+    /// Keep images' workflow artifacts in `artifacts`; the runner must read
+    /// from the same store. Default: files under `<data_dir>/artifacts`.
+    pub fn artifacts(mut self, artifacts: Arc<dyn ArtifactStore>) -> Self {
+        self.artifacts = Some(artifacts);
         self
     }
 
@@ -284,6 +297,9 @@ impl EnvironmentRuntimeBuilder {
             pool,
             persistence,
             runner,
+            artifacts: self
+                .artifacts
+                .unwrap_or_else(|| Arc::new(default_artifact_store(&self.data_dir))),
             data_dir: self.data_dir,
             wake_poll_interval: self.wake_poll_interval,
             wake_batch_size: self.wake_batch_size,
@@ -307,6 +323,7 @@ pub struct EnvironmentRuntimeConfig {
     persistence: Arc<dyn Persistence>,
     runner: Arc<dyn Runner>,
     data_dir: PathBuf,
+    artifacts: Arc<dyn ArtifactStore>,
     wake_poll_interval: Duration,
     wake_batch_size: i64,
     wake_concurrency: usize,
@@ -342,11 +359,21 @@ impl EnvironmentRuntimeConfig {
                 self.runner.clone(),
                 self.data_dir.clone(),
             )
+            .with_artifacts(self.artifacts.clone())
             .with_request_timeout(self.request_timeout)
             .with_execution_timeout_policy(self.execution_timeout_policy)
             .with_drain(drain.clone())
             .with_launch_control(launch_notifier.clone(), lifecycle_observers.clone()),
         );
+
+        // Images registered before the artifact store kept their bytes under
+        // `images/<id>`; move them in before anything can launch one.
+        if let Err(e) = ImageRegistry::new(self.pool.clone())
+            .import_legacy_artifacts(self.artifacts.as_ref())
+            .await
+        {
+            warn!(error = %e, "Failed to move legacy image artifacts into the artifact store");
+        }
 
         // Recover orphaned containers from previous Environment run
         // This handles containers that were running when Environment restarted
@@ -459,7 +486,8 @@ impl EnvironmentRuntimeConfig {
         let mut image_cleanup_config = self.image_cleanup_config;
         image_cleanup_config.data_dir = self.data_dir.clone();
         let image_cleanup_enabled = image_cleanup_config.enabled;
-        let image_cleanup_worker = ImageCleanupWorker::new(self.pool.clone(), image_cleanup_config);
+        let image_cleanup_worker = ImageCleanupWorker::new(self.pool.clone(), image_cleanup_config)
+            .with_artifacts(self.artifacts.clone());
         let image_cleanup = Worker::spawn_configurable(
             "image cleanup",
             image_cleanup_worker.shutdown_handle(),

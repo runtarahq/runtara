@@ -46,6 +46,11 @@ pub struct EmbeddedRuntaraConfig {
     pub execution_timeout_policy: ExecutionTimeoutPolicy,
     /// Runtime approvals for previously compiled isolation artifacts.
     pub isolation_policy: Option<Arc<crate::config::isolation::IsolationPolicy>>,
+    /// Builds the workflow runner; `None` is the embedded engine.
+    pub runner_factory: Option<runtara_environment::runner::RunnerFactory>,
+    /// Where workflow artifacts are kept, shared by the image registry and
+    /// the runner.
+    pub artifacts: Arc<dyn runtara_environment::artifacts::ArtifactStore>,
 }
 
 /// Handle to the running embedded Runtara servers.
@@ -128,23 +133,28 @@ impl EmbeddedRuntara {
         // Create the workflow runner. Workflows are compiled to wasm32-wasip2
         // and executed on the embedded in-process engine; they reach core
         // through host imports, so no core address enters a guest.
+        let parts = runtara_environment::runner::RunnerParts {
+            persistence: persistence.clone(),
+            event_observer,
+            scoped_agents: config
+                .isolation_policy
+                .as_ref()
+                .map(|policy| policy.runner_config()),
+            services: runtara_environment::runner::HostServices {
+                trusted,
+                control_host,
+                instance_waits,
+                connections: Some(connections),
+                database: Some(database),
+                outbound_http: Some(outbound_http),
+            },
+            artifacts: config.artifacts.clone(),
+        };
         let runner: Arc<dyn runtara_environment::runner::Runner> =
-            runtara_environment::runner::build_runner_configured(
-                persistence.clone(),
-                event_observer,
-                config
-                    .isolation_policy
-                    .as_ref()
-                    .map(|policy| policy.runner_config()),
-                runtara_environment::runner::HostServices {
-                    trusted,
-                    control_host,
-                    instance_waits,
-                    connections: Some(connections),
-                    database: Some(database),
-                    outbound_http: Some(outbound_http),
-                },
-            )
+            match config.runner_factory.as_ref() {
+                Some(factory) => factory(parts),
+                None => runtara_environment::runner::build_embedded_runner(parts),
+            }
             .map_err(|e| anyhow::anyhow!("build workflow runner: {e}"))?;
         info!(
             runner_type = runner.runner_type(),
@@ -160,6 +170,7 @@ impl EmbeddedRuntara {
             .runner(runner)
             .core_persistence(persistence.clone())
             .data_dir(config.data_dir)
+            .artifacts(config.artifacts)
             .execution_timeout_policy(config.execution_timeout_policy)
             .build()?
             .start()
@@ -281,7 +292,9 @@ pub async fn create_runtara_pool(
     };
 
     info!("Connecting to Runtara database...");
-    let pool = PgPoolOptions::new()
+    // Shared by every tenant: work inside a tenant's scope (an authenticated
+    // request) sees only that tenant's rows; everything else is the system path.
+    let pool = runtara_store_postgres::tenant_scope::scoping(PgPoolOptions::new())
         .max_connections(pool_config.max_connections)
         .acquire_timeout(pool_config.acquire_timeout)
         .idle_timeout(pool_config.idle_timeout)
@@ -326,6 +339,21 @@ pub async fn create_runtara_pool(
 /// `RUNTARA_RUNTIME_POOL_IDLE_TIMEOUT_SECS`,
 /// `RUNTARA_RUNTIME_POOL_MAX_LIFETIME_SECS`) comes from [`RuntimePoolConfig`],
 /// already parsed at startup. It applies only to the pool this process opens.
+/// `DATA_DIR` (default `.data`), made absolute: what it roots must not move
+/// with the working directory.
+pub fn data_dir() -> PathBuf {
+    let data_dir_raw = std::env::var("DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(".data"));
+    if data_dir_raw.is_absolute() {
+        data_dir_raw
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&data_dir_raw))
+            .unwrap_or(data_dir_raw)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn maybe_start_embedded(
     trusted: Option<Arc<runtara_component_host::trusted::TrustedExecutor>>,
@@ -336,6 +364,7 @@ pub async fn maybe_start_embedded(
     outbound_http: Arc<dyn runtara_component_host::OutboundHttpHost>,
     execution_timeout_policy: ExecutionTimeoutPolicy,
     event_observer: Option<Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>>,
+    options: crate::server::ServerOptions,
 ) -> Result<Option<EmbeddedRuntara>, Box<dyn std::error::Error + Send + Sync>> {
     let embedded_enabled = std::env::var("RUNTARA_EMBEDDED")
         .map(|v| v.to_lowercase() != "false" && v != "0")
@@ -380,18 +409,7 @@ pub async fn maybe_start_embedded(
         .and_then(|s| s.parse().ok())
         .unwrap_or(8003);
 
-    // Get data_dir from environment and convert to absolute path
-    // This is critical: paths stored in the DB must be absolute for the runner
-    let data_dir_raw = std::env::var("DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(".data"));
-    let data_dir = if data_dir_raw.is_absolute() {
-        data_dir_raw
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(&data_dir_raw))
-            .unwrap_or(data_dir_raw)
-    };
+    let data_dir = data_dir();
     info!(
         "Runtara data_dir: {:?} (was raw: {:?})",
         data_dir,
@@ -403,12 +421,18 @@ pub async fn maybe_start_embedded(
     // never over the network.
     let config = EmbeddedRuntaraConfig {
         pool,
-        data_dir,
         core_http_bind_addr: core_instance_api
             .then(|| SocketAddr::from(([127, 0, 0, 1], core_http_port))),
         core_overrides,
         execution_timeout_policy,
         isolation_policy: crate::config::isolation_policy(),
+        artifacts: options.artifacts.unwrap_or_else(|| {
+            Arc::new(runtara_environment::image_registry::default_artifact_store(
+                &data_dir,
+            ))
+        }),
+        runner_factory: options.runner_factory,
+        data_dir,
     };
 
     let runtara = EmbeddedRuntara::start(

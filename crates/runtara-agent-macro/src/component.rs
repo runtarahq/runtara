@@ -5,9 +5,10 @@ struct AgentComponentArgs {
     agent: String,
     #[darling(default)]
     trusted: bool,
-    /// The built-in control agent: an ordinary agent that also imports
-    /// `runtara:control/api`, which the host makes real only for a run's own
-    /// entry and the compiler grants only to the canonical control agent.
+    /// The built-in control agent: an ordinary agent whose capabilities call
+    /// the workflow API's `/v1/instances`, naming the operation they run in
+    /// (`_operation`); the compiler grants that only to the canonical control
+    /// agent.
     #[darling(default)]
     control: bool,
     /// Capabilities that suspend (`#[capability(suspends = true)]`). The one
@@ -70,9 +71,7 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
     // compiler also uses; `path` only supplies the shared packages it names,
     // as absolute directories inside `runtara-wit`.
     let shape = runtara_wit::AgentShape {
-        suspendable: args.suspending.is_some(),
         trusted: args.trusted,
-        control: args.control,
         ..Default::default()
     };
     let package = runtara_wit::agent_package(agent, shape);
@@ -80,17 +79,10 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
     if args.trusted {
         dirs.push(format!("{}/trusted", runtara_wit::WIT_DIR));
     }
-    if args.control {
-        dirs.push(format!("{}/control", runtara_wit::WIT_DIR));
-    }
     let wit_paths = quote! { path: [#(#dirs),*], inline: #package };
     let trusted_export = format!("export:{}#invoke", runtara_wit::trusted::EXECUTION);
     let async_exports = if args.trusted {
         quote! { [#export, #trusted_export] }
-    } else if args.control {
-        // Every `runtara:control/api` function is async-typed; capability
-        // bodies await it, never block on it.
-        quote! { true }
     } else {
         quote! { [#export] }
     };
@@ -308,9 +300,9 @@ fn suspension_assertions(
 
 /// Glue for an ordinary agent that declares suspending capabilities, and the
 /// dispatch `capabilities.invoke` runs first: a suspending capability reads
-/// the continuation of the operation it runs in through
-/// `runtara:agent/continuation`, which the host answers from its own execution
-/// state, and may answer `suspended`. Both empty without `suspending`.
+/// the continuation of the operation it runs in from its input's `_operation`,
+/// which the compiler fills from the entered operation, and may answer
+/// `suspended`. Both empty without `suspending`.
 fn ordinary_suspension(
     args: &AgentComponentArgs,
     agent: &str,
@@ -361,11 +353,25 @@ fn ordinary_suspension(
             capability_id: &str,
             value: serde_json::Value,
         ) -> Result<__Outcome, ErrorInfo> {
-            // The host derives the operation from its own state, never from
-            // this call's arguments.
-            let context = runtara_agent_suspension::SuspendContext::new(
-                bindings::runtara::agent::continuation::continuation(),
-            );
+            // The compiler hands the entered operation's continuation in the
+            // input (`_operation`), replacing anything the step mapped there.
+            let continuation = match value
+                .get(runtara_agent_suspension::OPERATION_INPUT_KEY)
+                .and_then(|operation| operation.get("continuation"))
+            {
+                None | Some(serde_json::Value::Null) => None,
+                Some(text) => Some(
+                    text.as_str()
+                        .and_then(runtara_agent_suspension::decode_continuation)
+                        .ok_or_else(|| ErrorInfo {
+                            code: runtara_agent_suspension::AGENT_CONTINUATION_REJECTED.into(),
+                            message: "the operation's continuation is not hex".into(),
+                            category: "permanent".into(), severity: "error".into(),
+                            retryable: false, retry_after_ms: None, attributes: None, details: None,
+                        })?,
+                ),
+            };
+            let context = runtara_agent_suspension::SuspendContext::new(continuation);
             let result = match capability_id {
                 #(#arms)*
                 other => return Err(ErrorInfo {
@@ -423,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn the_control_agent_is_an_ordinary_agent_importing_the_control_api() {
+    fn the_control_agent_is_an_ordinary_agent_importing_nothing() {
         let glue = expand(quote! {
             agent = "control",
             control = true,
@@ -441,16 +447,11 @@ mod tests {
         assert!(!glue.contains("control::execution"), "{glue}");
         assert!(glue.contains("__invoke_get(value)"));
         assert!(glue.contains("commands::__invoke_cancel(value)"));
-        // The control API is async-typed throughout.
-        assert!(glue.contains("async:true"), "{glue}");
         assert!(glue.contains(r#"world:"runtara:agent-control/agent""#));
         let agent_dir = format!("{}/agent", runtara_wit::WIT_DIR);
-        let control_dir = format!("{}/control", runtara_wit::WIT_DIR);
-        assert!(
-            glue.contains(&format!(r#"path:["{agent_dir}","{control_dir}"]"#)),
-            "{glue}"
-        );
-        assert!(glue.contains("importruntara:control/api@"), "{glue}");
+        assert!(glue.contains(&format!(r#"path:["{agent_dir}"]"#)), "{glue}");
+        // It reaches `/v1/instances` over HTTP, not a host import.
+        assert!(!glue.contains("runtara:control/api"), "{glue}");
     }
 
     #[test]
@@ -469,15 +470,20 @@ mod tests {
             "{glue}"
         );
         assert!(!glue.contains("interfacesuspendable"), "{glue}");
-        assert!(glue.contains("importruntara:agent/continuation@"), "{glue}");
+        assert!(!glue.contains("runtara:agent/continuation"), "{glue}");
         assert!(
             glue.contains("return__invoke_suspending(&capability_id,value).await;"),
             "{glue}"
         );
-        // The continuation comes from the host context, never from arguments.
-        assert!(glue.contains(
-            "runtara_agent_suspension::SuspendContext::new(bindings::runtara::agent::continuation::continuation(),)"
-        ), "{glue}");
+        // The continuation comes from the compiler-filled `_operation`.
+        assert!(
+            glue.contains("runtara_agent_suspension::SuspendContext::new(continuation)"),
+            "{glue}"
+        );
+        assert!(
+            glue.contains("runtara_agent_suspension::OPERATION_INPUT_KEY"),
+            "{glue}"
+        );
         assert!(glue.contains("waits::__suspend_pause(value,&context)"));
         // The plain match keeps every capability's adapter; the suspending one
         // is never reached because the dispatch above returns first.

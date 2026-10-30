@@ -1,0 +1,31 @@
+[package]
+name = "runtara-workflow-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Workflow API v1 contract shared by the host and guest: binding, errors, headers, wakes and run lifecycle shapes"
+keywords = ["wasm", "workflow", "contract", "durable"]
+categories = ["development-tools"]
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+# The host-side `/v1` router. Off for the guest SDK, which only needs the shapes.
+server = ["dep:axum", "dep:async-trait", "dep:bytes", "dep:sha2", "dep:tokio"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+axum = { version = "0.8", optional = true }
+async-trait = { version = "0.1", optional = true }
+bytes = { version = "1", optional = true }
+sha2 = { workspace = true, optional = true }
+tokio = { version = "1", features = ["time", "sync"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+tower = { version = "0.5", features = ["util"] }

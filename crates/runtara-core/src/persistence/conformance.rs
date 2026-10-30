@@ -2241,6 +2241,59 @@ pub async fn run_concurrent_claim_sequence<P: Persistence + 'static>(backend: st
         .expect("delete_instances_batch failed (concurrent claim cleanup)");
 }
 
+/// A claim scoped to some tenants takes only their due instances, so a
+/// process serving those tenants of a shared store never wakes another's.
+pub async fn run_claim_by_tenant_sequence<P: Persistence>(backend: &P) {
+    let run = Uuid::new_v4().simple().to_string();
+    let (a, b) = (
+        format!("conformance-claim-a-{run}"),
+        format!("conformance-claim-b-{run}"),
+    );
+    let mut sleepers = Vec::new();
+    for tenant in [&a, &b] {
+        let instance_id = Uuid::new_v4().to_string();
+        backend
+            .register_instance(&instance_id, tenant)
+            .await
+            .expect("register_instance failed (claim by tenant)");
+        backend
+            .update_instance_status(&instance_id, CoreInstanceStatus::Suspended, None)
+            .await
+            .expect("update_instance_status suspended failed (claim by tenant)");
+        backend
+            .set_instance_sleep(&instance_id, Utc::now() - Duration::seconds(60))
+            .await
+            .expect("set_instance_sleep failed (claim by tenant)");
+        sleepers.push(instance_id);
+    }
+    let lease = Utc::now() + Duration::seconds(120);
+    let claim = |tenants: Vec<String>| async move {
+        backend
+            .claim_sleeping_instances_due_of(100, lease, Some(&tenants))
+            .await
+            .expect("claim_sleeping_instances_due_of failed")
+    };
+
+    assert!(
+        claim(vec![format!("conformance-claim-none-{run}")])
+            .await
+            .is_empty(),
+        "a tenant with nothing due claims nothing"
+    );
+    let claimed = claim(vec![a.clone()]).await;
+    assert_eq!(
+        claimed.iter().map(|r| &r.instance_id).collect::<Vec<_>>(),
+        [&sleepers[0]],
+        "only the named tenant's instance is claimed"
+    );
+    let claimed = claim(vec![b.clone()]).await;
+    assert_eq!(
+        claimed.iter().map(|r| &r.instance_id).collect::<Vec<_>>(),
+        [&sleepers[1]],
+        "the other tenant's instance was left for it"
+    );
+}
+
 /// A batch claim must never expose a row without a wake deadline.
 ///
 /// [`Persistence::claim_sleeping_instances_due`] leases rather than clears, and

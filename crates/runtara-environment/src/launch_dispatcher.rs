@@ -27,7 +27,7 @@ use crate::image_registry::{Image, ImageRegistry};
 use crate::instance_repository::InstanceRepository;
 use crate::launch_queue::{
     LAUNCH_QUEUE_TIMEOUT, Launch, LaunchKind, LaunchRepository, PREPARATION_CAPACITY_UNAVAILABLE,
-    PREPARATION_TIMEOUT, RUNNER_CAPACITY_UNAVAILABLE,
+    PREPARATION_TIMEOUT, RUNNER_CAPACITY_UNAVAILABLE, WORKFLOW_ARTIFACT_MISSING,
 };
 use crate::runner::{
     LaunchOptions, PreparedLaunch, Runner, RunnerError, StartGate, StartGateConfirmation,
@@ -301,7 +301,7 @@ impl Clone for LaunchDispatcher {
             pool: self.pool.clone(),
             persistence: self.persistence.clone(),
             runner: self.runner.clone(),
-            image_registry: ImageRegistry::new(self.pool.clone()),
+            image_registry: self.image_registry.clone(),
             instances: InstanceRepository::new(self.pool.clone()),
             execution_timeout_policy: self.execution_timeout_policy,
             config: self.config.clone(),
@@ -471,10 +471,11 @@ impl LaunchDispatcher {
             .min(local_capacity)
             .min(runner_capacity);
         let launches = repository
-            .claim_ready_for_preparation(
+            .claim_ready_for_preparation_of(
                 &self.owner,
                 self.config.preparation_lease_duration,
                 claim_limit,
+                crate::claim_scope::claim_tenants(),
             )
             .await?;
         let claimed = launches.len();
@@ -684,6 +685,22 @@ impl LaunchDispatcher {
                 .await?;
                 return Ok(());
             }
+            // As at handoff: a missing artifact (a restore) is waited for.
+            Err(RunnerError::BinaryNotFound(missing)) => {
+                warn!(
+                    launch_id = %launch.launch_id,
+                    %missing,
+                    "Workflow artifact missing; the launch waits for it to be rebuilt"
+                );
+                self.requeue_owned_bounded(
+                    &repository,
+                    &launch,
+                    self.config.preparation_retry_delay,
+                    Some(WORKFLOW_ARTIFACT_MISSING),
+                )
+                .await?;
+                return Ok(());
+            }
             Err(error) => {
                 self.fail_before_runner(&launch, &format!("launch preparation failed: {error}"))
                     .await?;
@@ -817,7 +834,7 @@ impl LaunchDispatcher {
                     launch_id: handle.launch_id.clone(),
                     instance_id: handle.instance_id.clone(),
                     tenant_id: handle.tenant_id.clone(),
-                    binary_path: options.wasm_path.to_string_lossy().into_owned(),
+                    binary_path: format!("sha256:{}", options.workflow_digest),
                     started_at: handle.started_at,
                     timeout_seconds: Some(
                         i64::try_from(options.timeout.as_secs())
@@ -929,6 +946,24 @@ impl LaunchDispatcher {
                     &launch,
                     self.config.capacity_retry_delay,
                     Some(RUNNER_CAPACITY_UNAVAILABLE),
+                )
+                .await?;
+            }
+            // The artifact store is not backed up: a launch whose artifact
+            // is gone (a restore) waits, until its queue deadline, for the
+            // server to rebuild it from the workflow version, rather than
+            // failing a run that was only waiting to wake.
+            Err(RunnerError::BinaryNotFound(missing)) => {
+                warn!(
+                    launch_id = %launch.launch_id,
+                    %missing,
+                    "Workflow artifact missing; the launch waits for it to be rebuilt"
+                );
+                self.requeue_owned_bounded(
+                    &repository,
+                    &launch,
+                    self.config.capacity_retry_delay,
+                    Some(WORKFLOW_ARTIFACT_MISSING),
                 )
                 .await?;
             }
@@ -1222,7 +1257,8 @@ impl LaunchDispatcher {
             .map_err(|error| format!("failed to read image: {error}"))?
             .ok_or_else(|| "launch image no longer exists".to_string())?;
         self.validate_image(&image, launch)?;
-        let expected_workflow_checksum = Some(image.workflow_binary_checksum()?.to_owned());
+        let workflow_digest = image.artifact_digest()?;
+        let memory_limit_bytes = image.workflow_memory_limit_bytes();
         let timeout = self
             .execution_timeout_policy
             .resolve_persisted(binding.timeout_seconds)
@@ -1239,8 +1275,7 @@ impl LaunchDispatcher {
             launch_id: launch.launch_id.clone(),
             instance_id: launch.instance_id.clone(),
             tenant_id: launch.tenant_id.clone(),
-            wasm_path: image.binary_path.into(),
-            expected_workflow_checksum,
+            workflow_digest,
             preparation_attempt: Some(launch.attempt_count),
             preparation_deadline,
             input,
@@ -1252,6 +1287,7 @@ impl LaunchDispatcher {
             prepersisted_input: None,
             launch_kind: launch.kind,
             start_gate: None,
+            memory_limit_bytes,
         })
     }
 

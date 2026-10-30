@@ -43,8 +43,8 @@ println!("{}", result.output.unwrap());  // {"hash":"2cf24...","algorithm":"sha2
 
 ## Security posture
 
-Raw WASI HTTP is denied. Guest HTTP uses
-`runtara:host/http@1.0.0`, with explicit connection IDs or public URLs,
+Raw WASI HTTP is denied except to the workflow API origin. Guest HTTP goes
+through its `POST /v1/http`, with explicit connection IDs or public URLs,
 raw body bytes, bounded responses and the invocation's active deadline.
 `OutboundHttpHost` receives tenant and instance identity from host-owned context;
 guest headers and environment cannot override it. Missing services fail explicitly.
@@ -65,12 +65,10 @@ lives in `runtara-wit` and moves as one release.
 
 Run `cargo test -p runtara-component-host --features component-integration-tests --test trusted`
 after building the agent components with `scripts/build-agent-components.sh`.
-The provider roundtrip tests require Docker. The MinIO fixture builds its pinned
-source release with the embedded `tests/trusted/minio.Dockerfile`, rather than
-pulling an upstream MinIO image. Its first run needs access to Docker Hub and
-the Go module proxy and takes longer; subsequent runs use Docker's build cache.
-Azurite uses its published container image. Both providers remain real HTTP
-roundtrip tests of the restricted WASM signing exports.
+The provider roundtrip tests require Docker. S3 runs against a pinned RustFS
+image (`rustfs/rustfs`, which verifies SigV4) and Azure against Azurite's
+published image. Both remain real HTTP roundtrip tests of the restricted WASM
+signing exports.
 
 ## Where it slots in
 

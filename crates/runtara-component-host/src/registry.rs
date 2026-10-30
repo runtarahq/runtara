@@ -36,36 +36,17 @@ pub struct LoadedAgent {
 /// (env, stdio, clocks, random, filesystem, sockets) and `wasi:http/proxy`
 /// for compatibility. Raw WASI HTTP is denied by HostHooks.
 pub fn build_linker(engine: &Engine) -> Result<Linker<HostState>> {
-    let mut linker = build_base_linker(engine)?;
-    // Only the control agent's test stores bind the real control API.
-    crate::control_host::add_denied_control_api_to_linker(&mut linker)?;
-    Ok(linker)
-}
-
-/// [`build_linker`] with the real control API, for the dispatcher's own
-/// control agent: a store answers control calls only when it carries a
-/// [`crate::control_host::ControlApiCall`].
-pub(crate) fn build_control_linker(engine: &Engine) -> Result<Linker<HostState>> {
-    let mut linker = build_base_linker(engine)?;
-    crate::control_host::add_control_api_to_linker(&mut linker)?;
-    Ok(linker)
-}
-
-/// [`build_linker`] without the `runtara:control` binding.
-fn build_base_linker(engine: &Engine) -> Result<Linker<HostState>> {
     let mut linker = Linker::<HostState>::new(engine);
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
     // `add_only_http_to_linker_async` is the slim version that skips
     // re-adding wasi:io (which wasi::p2::add_to_linker_async already added).
-    wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)?;
+    crate::host_state::add_p2_http_to_linker(&mut linker, HostState::p2_http)?;
+    // Agents on the guest SDK reach the workflow API over wasi:http@0.3; a
+    // store without a route (the default) denies every request.
+    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
     // Timers retain their interface; HTTP uses the injected outbound service.
-    crate::host_io::add_host_io_to_linker(&mut linker)?;
-    crate::outbound_http::add_to_linker(&mut linker)?;
-    crate::trusted::add_to_linker(&mut linker)?;
-    crate::connection_resolver_host::add_connection_resolver_to_linker(&mut linker)?;
-    crate::database_host::add_database_to_linker(&mut linker)?;
     // A store outside a workflow run has no operation, so no continuation.
-    crate::operation_scope_host::add_suspension_context_to_linker(&mut linker)?;
     Ok(linker)
 }
 
@@ -93,6 +74,8 @@ pub(crate) fn load_agent_bytes(
     let agent_id = agent_id.into();
     let component = Component::new(engine, wasm)?;
     let capabilities_iface = find_capabilities_iface(engine, &component)
+        .with_context(|| format!("agent `{agent_id}`"))?;
+    crate::removed_abi::refuse(engine, &component)
         .with_context(|| format!("agent `{agent_id}`"))?;
     let pre = linker.instantiate_pre(&component)?;
     Ok(Arc::new(LoadedAgent {

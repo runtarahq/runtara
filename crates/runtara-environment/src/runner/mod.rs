@@ -9,25 +9,30 @@ pub mod embedded;
 pub mod mock;
 mod traits;
 
-use crate::config::Vars;
-
 pub use common::WorkflowRunnerConfig;
-pub use embedded::{EmbeddedWasmRunner, ScopedAgentRunnerConfig};
+pub use embedded::{
+    EmbeddedWasmRunner, LaunchLifecycle, PersistenceRunState, RootLease, ScopedAgentRunnerConfig,
+    publish_terminal, run_launch_lifecycle,
+};
 pub use mock::MockRunner;
 pub use traits::*;
 
-/// Build the workflow runner: the in-process embedded wasmtime engine.
-///
-/// `RUNTARA_RUNNER` selected between backends when more than one existed. It is
-/// now accepted and ignored, with a warning, so a stale operator config does not
-/// fail a boot.
+/// Build the workflow runner: the in-process embedded wasmtime engine,
+/// reading workflow artifacts from `artifacts`.
 pub fn build_runner(
     persistence: std::sync::Arc<dyn runtara_core::persistence::Persistence>,
     event_observer: Option<
         std::sync::Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>,
     >,
+    artifacts: std::sync::Arc<dyn runtara_artifact_store::ArtifactStore>,
 ) -> Result<std::sync::Arc<dyn Runner>> {
-    build_runner_configured(persistence, event_observer, None, HostServices::default())
+    build_embedded_runner(RunnerParts {
+        persistence,
+        event_observer,
+        scoped_agents: None,
+        services: HostServices::default(),
+        artifacts,
+    })
 }
 
 /// Native services shared across runs; each invocation supplies its own identity.
@@ -41,31 +46,47 @@ pub struct HostServices {
     pub database: Option<std::sync::Arc<dyn runtara_component_host::DatabaseHost>>,
     /// Credential-aware outbound HTTP.
     pub outbound_http: Option<std::sync::Arc<dyn runtara_component_host::OutboundHttpHost>>,
-    /// The control service behind every run's `runtara:control/api`.
+    /// The control service behind every run's `/v1/instances` calls.
     pub control_host: Option<std::sync::Arc<dyn runtara_component_host::control_host::ControlHost>>,
     /// Durable instance waits of every run.
     pub instance_waits: Option<std::sync::Arc<dyn runtara_component_host::InstanceWaitHost>>,
 }
 
-/// Build the runner with an explicit shared operator isolation policy.
-/// Keeping this separate preserves defaults for existing embeddings.
-pub fn build_runner_configured(
-    persistence: std::sync::Arc<dyn runtara_core::persistence::Persistence>,
-    event_observer: Option<
-        std::sync::Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>,
-    >,
-    scoped_agents: Option<ScopedAgentRunnerConfig>,
-    services: HostServices,
-) -> Result<std::sync::Arc<dyn Runner>> {
-    if let Some(requested) = crate::config::ProcessEnv.get("RUNTARA_RUNNER")
-        && !requested.is_empty()
-    {
-        tracing::warn!(
-            requested = %requested,
-            "RUNTARA_RUNNER is set but only the embedded in-process engine exists; ignoring"
-        );
-    }
-    let mut runner = EmbeddedWasmRunner::new(WorkflowRunnerConfig::from_env(), persistence)?;
+/// What a workflow runner is built from: the persistence runs record into,
+/// the instance-event observer, the operator isolation policy and the native
+/// services every run reaches.
+pub struct RunnerParts {
+    /// Durable state: instances, checkpoints, events.
+    pub persistence: std::sync::Arc<dyn runtara_core::persistence::Persistence>,
+    /// Observes instance events (step counts and the like).
+    pub event_observer:
+        Option<std::sync::Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>>,
+    /// The operator's isolation policy for scoped agent invocations.
+    pub scoped_agents: Option<ScopedAgentRunnerConfig>,
+    /// The native services every run reaches.
+    pub services: HostServices,
+    /// Where workflow artifacts are kept: a launch names its workflow by
+    /// digest and the runner reads it from here.
+    pub artifacts: std::sync::Arc<dyn runtara_artifact_store::ArtifactStore>,
+}
+
+/// Builds the workflow runner from its parts. A host that runs workflows
+/// elsewhere (another process, a VM) supplies its own; the default is
+/// [`build_embedded_runner`].
+pub type RunnerFactory =
+    std::sync::Arc<dyn Fn(RunnerParts) -> Result<std::sync::Arc<dyn Runner>> + Send + Sync>;
+
+/// The in-process embedded wasmtime engine, built from its parts.
+pub fn build_embedded_runner(parts: RunnerParts) -> Result<std::sync::Arc<dyn Runner>> {
+    let RunnerParts {
+        persistence,
+        event_observer,
+        scoped_agents,
+        services,
+        artifacts,
+    } = parts;
+    let mut runner =
+        EmbeddedWasmRunner::new(WorkflowRunnerConfig::from_env(), persistence, artifacts)?;
     if let Some(config) = scoped_agents {
         runner = runner.with_scoped_agents(config)?;
     }

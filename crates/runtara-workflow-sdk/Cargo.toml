@@ -1,0 +1,21 @@
+[package]
+name = "runtara-workflow-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Guest SDK for the workflow API: run lifecycle calls over wasi:http 0.3"
+keywords = ["wasm", "workflow", "sdk", "durable"]
+categories = ["development-tools"]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+runtara-workflow-api = { path = "../runtara-workflow-api" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wit-bindgen = { workspace = true, features = ["async-spawn"] }

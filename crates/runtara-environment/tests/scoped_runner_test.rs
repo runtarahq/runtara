@@ -14,9 +14,8 @@ use runtara_store_postgres::PostgresPersistence;
 use runtara_workflows::ChildWorkflowInput;
 use runtara_workflows::direct_wasm::{
     AgentIsolationPolicy, AgentIsolationReason, AgentIsolationReview, DirectCompilationInput,
-    DirectCompilationResult, WorkflowRole, compile_direct_workflow,
-    compile_direct_workflow_composed_with_isolation_policy, compose_direct_workflow,
-    compose_direct_workflow_with_isolated_agents,
+    DirectCompilationResult, WorkflowRole, compile_direct_workflow_composed_with_isolation_policy,
+    compose_direct_workflow, compose_direct_workflow_with_isolated_agents,
 };
 use serde_json::{Value, json};
 use std::{
@@ -167,7 +166,7 @@ fn compile_with_children(
         .unwrap();
     }
     assert!(matches!(backend, "legacy" | "live"));
-    let mut result = compile_direct_workflow(input).unwrap();
+    let mut result = runtara_workflows::direct_wasm::compile_direct_workflow(input).unwrap();
     if backend == "legacy" {
         compose_direct_workflow(&mut result, components()).unwrap();
     } else {
@@ -205,6 +204,7 @@ impl Harness {
                 skip_cert_verification: false,
             },
             self.persistence.clone(),
+            artifacts().clone(),
         )
         .unwrap()
         .with_in_process_precompiler_for_tests();
@@ -237,8 +237,7 @@ impl Harness {
             launch_id: format!("launch-{id}"),
             instance_id: id,
             tenant_id: "scoped-runner-test".into(),
-            wasm_path: wasm.to_owned(),
-            expected_workflow_checksum: None,
+            workflow_digest: artifacts().add(wasm),
             preparation_attempt: None,
             preparation_deadline: None,
             input: json!({}),
@@ -248,6 +247,7 @@ impl Harness {
             prepersisted_input: Some(input),
             launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
+            memory_limit_bytes: None,
         }
     }
 }
@@ -2504,4 +2504,12 @@ async fn an_agent_result_keeps_the_child_rows_of_an_on_wait_step_with_its_id() {
             "{backend}: the onWait child never ran again"
         );
     }
+}
+
+/// Where this binary's launches find the components they wrote.
+fn artifacts() -> &'static std::sync::Arc<runtara_artifact_store::test_support::FileMapStore> {
+    static STORE: std::sync::OnceLock<
+        std::sync::Arc<runtara_artifact_store::test_support::FileMapStore>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(Default::default)
 }

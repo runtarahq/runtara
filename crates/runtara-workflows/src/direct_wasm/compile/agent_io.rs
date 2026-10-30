@@ -89,12 +89,53 @@ pub(super) fn emit_connection_description(
         indices.connection_resolver_describe_async,
     ));
     super::cooperative_wait::emit_await_call(body, indices);
+    if let Some(moves) = indices.connection_describe_moves {
+        // A timed-out lookup was cancelled and left no answer.
+        body.instruction(&Instruction::LocalGet(super::cooperative_wait::TIMED_OUT));
+        body.instruction(&Instruction::I32Eqz);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        move_api_answer(body, moves);
+        body.instruction(&Instruction::End);
+    }
     if indices.monotonic_now.is_some() {
         body.instruction(&Instruction::LocalGet(super::cooperative_wait::TIMED_OUT));
         body.instruction(&Instruction::If(BlockType::Empty));
         super::deadline_scope::select(body);
         body.instruction(&Instruction::End);
     }
+}
+
+/// Move a `runtara:api/connections.describe` answer at zero into the old
+/// `result<list<u8>, string>` layout every caller reads: the descriptor, or
+/// the api-error's message as the error string. Sources sit above the
+/// destination, so the words move down in order.
+fn move_api_answer(body: &mut WasmFunction, moves: super::api_shims::DescribeMoves) {
+    let word = |offset: u64| wasm_encoder::MemArg {
+        offset,
+        align: 2,
+        memory_index: 0,
+    };
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::I32Load8U(wasm_encoder::MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    }));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    for n in [0, 4] {
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::I32Load(word(moves.err_from + n)));
+        body.instruction(&Instruction::I32Store(word(moves.to + n)));
+    }
+    body.instruction(&Instruction::Else);
+    for n in [0, 4] {
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::I32Load(word(moves.ok_from + n)));
+        body.instruction(&Instruction::I32Store(word(moves.to + n)));
+    }
+    body.instruction(&Instruction::End);
 }
 
 /// Wrap a workflow-agent child's input in the canonical `{data, variables}`
@@ -115,7 +156,11 @@ pub(super) fn emit_agent_scope_input(
     source_ptr_local: u32,
     source_len_local: u32,
 ) {
-    if !static_data.agent_is_workflow_agent(agent_id) {
+    // A child run is a run of its own, with its own checkpoints: the host
+    // gives it the `{data, variables}` envelope every root run gets.
+    if !static_data.agent_is_workflow_agent(agent_id)
+        || static_data.agent_child_run(agent_id).is_some()
+    {
         return;
     }
 

@@ -1,6 +1,6 @@
 //! A suspending agent parks a real run and a restarted runner resumes it with
 //! its continuation: DSL -> composed WASM -> EmbeddedWasmRunner ->
-//! `runtara:workflow/operation` and `runtara:agent/continuation`
+//! `runtara:api/operations` and the agent's `_operation` input
 //! -> operation continuations on PostgreSQL.
 //!
 //! The agent is a fixture component: its `pause` capability suspends on an
@@ -32,15 +32,18 @@ fn components() -> PathBuf {
 }
 
 /// An ordinary suspending agent `suspend-fixture`. `capabilities.invoke`
-/// answers `plain`; `pause` reads its continuation through the host context
-/// and completes with it, or, without one, suspends at `WAKE_AT_MS` with
-/// `STATE`. Its result lives at 2048: the ok tag, the
-/// outcome discriminant at +8 and its payload at +12; the one wake at 1536.
+/// answers `plain`; `pause` completes with `STATE` when its input's
+/// `_operation` hands back exactly `STATE` as the continuation (hex), or,
+/// without one, suspends at `WAKE_AT_MS` with `STATE`. Its result lives at
+/// 2048: the ok tag, the outcome discriminant at +8 and its payload at +12;
+/// the one wake at 1536.
 fn fixture_component() -> Vec<u8> {
+    let resumed = format!(
+        r#""continuation":"{}""#,
+        runtara_agent_suspension::encode_continuation(STATE)
+    );
     wat::parse_str(format!(
         r#"(component
-  (import "runtara:agent/continuation@1.0.0" (instance $context
-    (export "continuation" (func (result (option (list u8)))))))
   (core module $memory
     (memory (export "memory") 1)
     (global $heap (mut i32) (i32.const 8192))
@@ -49,32 +52,48 @@ fn fixture_component() -> Vec<u8> {
       (global.set $heap (i32.add (local.get $p) (local.get 3)))
       (local.get $p)))
   (core instance $memory (instantiate $memory))
-  (core func $continuation (canon lower (func $context "continuation")
-    (memory $memory "memory") (realloc (func $memory "realloc"))))
   (core module $code
     (import "m" "memory" (memory 1))
-    (import "h" "continuation" (func $continuation (param i32)))
     (data (i32.const 1024) "\22capabilities\22")
     (data (i32.const 1056) "\22paused\22")
+    (data (i32.const 1088) "{resumed_wat}")
     ;; `plain` and `pause` differ in their second byte.
     (func (export "invoke") (param i32 i32 i32 i32) (result i32)
       (if (i32.eq (i32.load8_u offset=1 (local.get 0)) (i32.const 0x6c))
         (then (return (call $plain))))
-      (call $pause))
+      (call $pause (local.get 2) (local.get 3)))
+    ;; Whether the `n`-byte needle at `p` occurs in the `hl` bytes at `h`.
+    (func $contains (param $h i32) (param $hl i32) (param $p i32) (param $n i32)
+      (result i32) (local $i i32) (local $j i32)
+      (block $absent
+        (loop $outer
+          (br_if $absent (i32.gt_u (i32.add (local.get $i) (local.get $n)) (local.get $hl)))
+          (local.set $j (i32.const 0))
+          (block $mismatch
+            (loop $inner
+              (if (i32.eq (local.get $j) (local.get $n)) (then (return (i32.const 1))))
+              (br_if $mismatch (i32.ne
+                (i32.load8_u (i32.add (local.get $h) (i32.add (local.get $i) (local.get $j))))
+                (i32.load8_u (i32.add (local.get $p) (local.get $j)))))
+              (local.set $j (i32.add (local.get $j) (i32.const 1)))
+              (br $inner)))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br $outer)))
+      (i32.const 0))
     (func $plain (result i32)
       (i32.store8 (i32.const 2048) (i32.const 0))
       (i32.store8 (i32.const 2056) (i32.const 0))
       (i32.store (i32.const 2060) (i32.const 1024))
       (i32.store (i32.const 2064) (i32.const 14))
       (i32.const 2048))
-    (func $pause (result i32)
-      (call $continuation (i32.const 3072))
+    (func $pause (param $input i32) (param $len i32) (result i32)
       (i32.store8 (i32.const 2048) (i32.const 0))
-      (if (i32.load8_u (i32.const 3072))
+      (if (call $contains (local.get $input) (local.get $len)
+            (i32.const 1088) (i32.const {resumed_len}))
         (then
           (i32.store8 (i32.const 2056) (i32.const 0))
-          (i32.store (i32.const 2060) (i32.load (i32.const 3076)))
-          (i32.store (i32.const 2064) (i32.load (i32.const 3080))))
+          (i32.store (i32.const 2060) (i32.const 1056))
+          (i32.store (i32.const 2064) (i32.const {state_len})))
         (else
           (i32.store8 (i32.const 2056) (i32.const 1))
           (i32.store (i32.const 2060) (i32.const 1536))
@@ -84,9 +103,7 @@ fn fixture_component() -> Vec<u8> {
           (i32.store8 (i32.const 1536) (i32.const 0))
           (i64.store (i32.const 1544) (i64.const {WAKE_AT_MS}))))
       (i32.const 2048)))
-  (core instance $code (instantiate $code
-    (with "m" (instance $memory))
-    (with "h" (instance (export "continuation" (func $continuation))))))
+  (core instance $code (instantiate $code (with "m" (instance $memory))))
   (type $error (record (field "code" string) (field "message" string)
     (field "category" string) (field "severity" string) (field "retryable" bool)
     (field "retry-after-ms" (option u64)) (field "attributes" (option string)) (field "details" (option string))))
@@ -97,7 +114,7 @@ fn fixture_component() -> Vec<u8> {
   (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
   (func $invoke async (param "capability-id" string) (param "input" (list u8))
     (result (result $outcome (error $error)))
-    (canon lift (core func $code "invoke") (memory $memory "memory") (realloc (func $memory "realloc"))))
+    (canon lift (core func $code "invoke") (memory (core memory $memory "memory")) (realloc (core func $memory "realloc"))))
   (instance $capabilities
     (export "error-info" (type $error))
     (export "signal-wait" (type $signal)) (export "wake" (type $wake))
@@ -105,6 +122,8 @@ fn fixture_component() -> Vec<u8> {
     (export "invoke" (func $invoke)))
   (export "runtara:agent-suspend-fixture/capabilities@1.0.0" (instance $capabilities)))"#,
         state_len = STATE.len(),
+        resumed_wat = resumed.replace('"', "\\22"),
+        resumed_len = resumed.len(),
     ))
     .expect("the fixture agent parses")
 }
@@ -153,6 +172,7 @@ impl Harness {
                 skip_cert_verification: false,
             },
             self.persistence.clone(),
+            artifacts().clone(),
         )
         .unwrap()
         .with_in_process_precompiler_for_tests()
@@ -207,8 +227,7 @@ impl Harness {
             launch_id: format!("launch-{}", uuid::Uuid::new_v4()),
             instance_id: id.to_owned(),
             tenant_id: self.tenant.clone(),
-            wasm_path: wasm.to_owned(),
-            expected_workflow_checksum: None,
+            workflow_digest: artifacts().add(wasm),
             preparation_attempt: None,
             preparation_deadline: None,
             input: json!({}),
@@ -218,6 +237,7 @@ impl Harness {
             prepersisted_input: input,
             launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
+            memory_limit_bytes: None,
         }
     }
 
@@ -499,4 +519,12 @@ async fn a_park_that_never_commits_is_recovered_and_resumes_from_the_continuatio
     let output: Value = serde_json::from_slice(done.output.as_deref().unwrap()).unwrap();
     assert_eq!(output, json!({"plain": "capabilities", "pause": "paused"}));
     assert_eq!(h.continuations_of(&run).await, 0);
+}
+
+/// Where this binary's launches find the components they wrote.
+fn artifacts() -> &'static std::sync::Arc<runtara_artifact_store::test_support::FileMapStore> {
+    static STORE: std::sync::OnceLock<
+        std::sync::Arc<runtara_artifact_store::test_support::FileMapStore>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(Default::default)
 }

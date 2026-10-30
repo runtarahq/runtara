@@ -23,8 +23,8 @@ use crate::mcp::server::SmoMcpServer;
 
 /// Fail with a stable `ENTITLEMENT_REQUIRED` rmcp error when the named
 /// feature is disabled for the running tenant.
-pub fn require_feature(_server: &SmoMcpServer, feature: FeatureKey) -> Result<(), ErrorData> {
-    crate::config::entitlements()
+pub fn require_feature(server: &SmoMcpServer, feature: FeatureKey) -> Result<(), ErrorData> {
+    crate::config::entitlements_for(&server.tenant())
         .require_feature(feature)
         .map_err(EntitlementDenial::from)
         .map_err(|d| d.to_rmcp_error())
@@ -37,9 +37,9 @@ pub fn require_feature(_server: &SmoMcpServer, feature: FeatureKey) -> Result<()
 /// see [`crate::middleware::entitlement::tenant_agent_decision`].
 pub fn require_agent(server: &SmoMcpServer, module_id: &str) -> Result<(), ErrorData> {
     crate::middleware::entitlement::tenant_agent_decision(
-        crate::config::entitlements(),
+        &crate::config::entitlements_for(&server.tenant()),
         module_id,
-        || crate::workflow_agents::published_agent_ids(&server.tenant_id),
+        || crate::workflow_agents::published_agent_ids(&server.tenant()),
     )
     .map_err(|d| d.to_rmcp_error())
 }

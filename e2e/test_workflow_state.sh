@@ -333,31 +333,62 @@ RESP=$(api_post /executions/query "$(jq -nc --arg wf "${APPROVAL_WF}" '{workflow
 expect_true "${RESP}" '[.data.content[] | has("state")] | any | not' "A listing must never return state"
 print_success "The executions API returns and filters published state"
 
-READER_GRAPH=$(jq -n --arg wf "${APPROVAL_WF}" '{
-    name: "state-reader", entryPoint: "q",
+# A run reads itself and its child runs only (SYN-906). The reader starts a
+# child of a copy of the approval workflow, so the approval filter's counts
+# above and below are its own runs only.
+CHILD_GRAPH=$(echo "${APPROVAL_GRAPH}" | jq '.name = "state-child"')
+read -r CHILD_WF _ <<<"$(make_workflow state-child "${CHILD_GRAPH}")"
+READER_GRAPH=$(jq -n --arg wf "${CHILD_WF}" '{
+    name: "state-reader", entryPoint: "start", durable: true,
     steps: {
+        start: { id: "start", stepType: "Agent", agentId: "control", capabilityId: "start", maxRetries: 0,
+                 inputMapping: {
+                     workflowId: { valueType: "immediate", value: $wf },
+                     runLabel: { valueType: "immediate", value: "reader-child" },
+                     parentClosePolicy: { valueType: "immediate", value: "cancel" },
+                     inputs: { valueType: "immediate", value: {
+                         data: { order: "o-7", dueAt: "2026-10-01T00:00:00Z" }, variables: {} } } } },
+        settle: { id: "settle", stepType: "Delay", durationMs: { valueType: "immediate", value: 4000 } },
         q: { id: "q", stepType: "Agent", agentId: "control", capabilityId: "query", maxRetries: 0,
              inputMapping: {
-                 workflowId: { valueType: "immediate", value: $wf },
                  state: { valueType: "immediate", value: [{ field: "stage", op: "eq", value: "approval" }] },
                  sortBy: { valueType: "immediate", value: "created_at" },
                  order: { valueType: "immediate", value: "asc" },
                  pageSize: { valueType: "immediate", value: 10 } } },
         g: { id: "g", stepType: "Agent", agentId: "control", capabilityId: "get-state", maxRetries: 0,
-             inputMapping: { instanceId: { valueType: "reference", value: "steps.q.outputs.items[0].instanceId" } } },
+             inputMapping: { instanceId: { valueType: "reference", value: "steps.start.outputs.instanceId" } } },
         finish: { id: "finish", stepType: "Finish", inputMapping: {
             total: { valueType: "reference", value: "steps.q.outputs.total" },
             order: { valueType: "reference", value: "steps.g.outputs.state.order" },
             version: { valueType: "reference", value: "steps.g.outputs.instance.version" } } }
     },
-    executionPlan: [ { fromStep: "q", toStep: "g" }, { fromStep: "g", toStep: "finish" } ]
+    executionPlan: [ { fromStep: "start", toStep: "settle" }, { fromStep: "settle", toStep: "q" },
+                     { fromStep: "q", toStep: "g" }, { fromStep: "g", toStep: "finish" } ]
 }')
 read -r READER_WF _ <<<"$(make_workflow state-reader "${READER_GRAPH}")"
 R=$(launch "${READER_WF}")
 [ "$(wait_status "${R}" completed 120)" = "completed" ] || fail "Reader run did not complete: $(instance_error "${R}")"
 OUT=$(instance_output "${R}")
-expect_true "${OUT}" '.total == 2 and .order == "o-1" and .version != null' "Reader workflow saw the published state"
-print_success "A workflow lists runs by state (control query) and reads one (get-state)"
+expect_true "${OUT}" '.total == 1 and .order == "o-7" and .version != null' "Reader saw only its child's published state"
+print_success "A workflow lists its child runs by state (control query) and reads one (get-state)"
+
+# Another run of the tenant is not the reader's to read.
+PRYING_GRAPH=$(jq -n --arg target "${A2}" '{
+    name: "state-prying", entryPoint: "g",
+    steps: {
+        g: { id: "g", stepType: "Agent", agentId: "control", capabilityId: "get-state", maxRetries: 0,
+             inputMapping: { instanceId: { valueType: "immediate", value: $target } } },
+        finish: { id: "finish", stepType: "Finish", inputMapping: {
+            order: { valueType: "reference", value: "steps.g.outputs.state.order" } } }
+    },
+    executionPlan: [ { fromStep: "g", toStep: "finish" } ]
+}')
+read -r PRYING_WF _ <<<"$(make_workflow state-prying "${PRYING_GRAPH}")"
+P=$(launch "${PRYING_WF}")
+[ "$(wait_status "${P}" failed 120)" = "failed" ] || fail "Reading another run's state must fail the step: $(instance_status "${P}")"
+instance_error "${P}" | grep -qi "not.child\|only itself and its child runs" \
+    || fail "The refusal must say why: $(instance_error "${P}")"
+print_success "Another run of the tenant is refused (CONTROL_NOT_CHILD)"
 
 approve "${APPROVAL_WF}" "${A1}"
 [ "$(wait_status "${A1}" completed 120)" = "completed" ] || fail "Approved run did not complete: $(instance_error "${A1}")"

@@ -9,7 +9,7 @@ use crate::api::dto::workflows::{
     Note, VersionSchemasResponse, WorkflowDto, WorkflowVersionInfoDto, graph_supports_chat,
     state_schema_from_definition,
 };
-use crate::types::MemoryTier;
+use crate::types::DEFAULT_MEMORY_MB;
 
 #[derive(sqlx::FromRow)]
 struct WorkflowVersionRow {
@@ -33,6 +33,8 @@ struct WorkflowVersionRow {
     compiled_template_major: Option<String>,
     compiled_lowering_mode: Option<String>,
     compiled_trusted_pins: Option<Vec<String>>,
+    compiled_component_release: Option<String>,
+    memory_floor_bytes: Option<i64>,
     definition: Value,
 }
 
@@ -44,10 +46,23 @@ pub fn workflow_definition_checksum(definition: &Value) -> String {
 /// Whether durable compilation provenance still describes this server's
 /// compiler.  Missing fields deliberately miss: legacy rows cannot safely
 /// attest that they were produced by the current template and lowering mode.
-fn compiler_provenance_matches(template_major: Option<&str>, lowering_mode: Option<&str>) -> bool {
+/// The component release is part of it: new agent or stdlib bytes compose a
+/// different artifact.
+fn compiler_provenance_matches(
+    template_major: Option<&str>,
+    lowering_mode: Option<&str>,
+    component_release: Option<&str>,
+) -> bool {
     let current_lowering_mode = crate::config::workflow_lowering_tag();
     template_major == Some(runtara_workflows::TEMPLATE_MAJOR_VERSION)
         && lowering_mode == Some(current_lowering_mode.as_str())
+        && component_release == current_component_release()
+}
+
+/// The index digest of the release this server compiles by; `None` when it
+/// compiles from a raw components directory.
+fn current_component_release() -> Option<&'static str> {
+    crate::config::compile_component_release().map(|release| release.index.as_str())
 }
 
 /// Approved trusted built-in versions installed on this server, as
@@ -185,6 +200,8 @@ pub struct CompilationSuccessRecord<'a> {
     /// Trusted built-in versions the artifact pins; see
     /// `NativeCompilationResult::trusted_pins`.
     pub trusted_pins: &'a [String],
+    /// Linear memory the artifact allocates when instantiated, if known.
+    pub memory_floor_bytes: Option<i64>,
 }
 
 /// The exact artifact identity to attach after Environment has accepted it.
@@ -240,8 +257,8 @@ impl CompilationWriteGuard<'_> {
         sqlx::query(
             r#"
             INSERT INTO workflow_compilations
-                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, wasm_size, wasm_checksum, runtara_version, source_checksum, package_size, compiler_mode, track_events, template_major, lowering_mode, trusted_pins)
-            VALUES ($1, $2, $3, NOW(), $4, 'success', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, wasm_size, wasm_checksum, runtara_version, source_checksum, package_size, compiler_mode, track_events, template_major, lowering_mode, trusted_pins, memory_floor_bytes, component_release)
+            VALUES ($1, $2, $3, NOW(), $4, 'success', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             ON CONFLICT (tenant_id, workflow_id, version)
             DO UPDATE SET
                 compiled_at = NOW(),
@@ -262,7 +279,9 @@ impl CompilationWriteGuard<'_> {
                 track_events = $11,
                 template_major = $12,
                 lowering_mode = $13,
-                trusted_pins = $14
+                trusted_pins = $14,
+                memory_floor_bytes = $15,
+                component_release = $16
             "#,
         )
         .bind(record.tenant_id)
@@ -279,6 +298,8 @@ impl CompilationWriteGuard<'_> {
         .bind(runtara_workflows::TEMPLATE_MAJOR_VERSION)
         .bind(&lowering_mode)
         .bind(record.trusted_pins)
+        .bind(record.memory_floor_bytes)
+        .bind(current_component_release())
         .execute(&mut *self.transaction)
         .await?;
 
@@ -293,8 +314,8 @@ impl CompilationWriteGuard<'_> {
         sqlx::query(
             r#"
             INSERT INTO workflow_compilations
-                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, registered_image_id, runtara_version, source_checksum, compiler_mode, track_events, template_major, lowering_mode, trusted_pins)
-            VALUES ($1, $2, $3, NOW(), '', 'success', $4, $5, $6, $7, $8, $9, $10, $11)
+                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, registered_image_id, runtara_version, source_checksum, compiler_mode, track_events, template_major, lowering_mode, trusted_pins, component_release)
+            VALUES ($1, $2, $3, NOW(), '', 'success', $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (tenant_id, workflow_id, version)
             DO UPDATE SET
                 registered_image_id = $4,
@@ -306,7 +327,8 @@ impl CompilationWriteGuard<'_> {
                 track_events = $8,
                 template_major = $9,
                 lowering_mode = $10,
-                trusted_pins = $11
+                trusted_pins = $11,
+                component_release = $12
             "#,
         )
         .bind(record.tenant_id)
@@ -320,6 +342,7 @@ impl CompilationWriteGuard<'_> {
         .bind(runtara_workflows::TEMPLATE_MAJOR_VERSION)
         .bind(&lowering_mode)
         .bind(record.trusted_pins)
+        .bind(current_component_release())
         .execute(&mut *self.transaction)
         .await?;
 
@@ -341,8 +364,8 @@ impl CompilationWriteGuard<'_> {
         let result = sqlx::query(
             r#"
             INSERT INTO workflow_compilations
-                (tenant_id, workflow_id, version, compilation_status, translated_path, compiled_at, error_message, runtara_version, source_checksum, track_events, template_major, lowering_mode, compiler_build, trusted_pins)
-            VALUES ($1, $2, $3, 'failed', '', NOW(), $4, $5, $6, $7, $8, $9, $10, $12)
+                (tenant_id, workflow_id, version, compilation_status, translated_path, compiled_at, error_message, runtara_version, source_checksum, track_events, template_major, lowering_mode, compiler_build, trusted_pins, component_release)
+            VALUES ($1, $2, $3, 'failed', '', NOW(), $4, $5, $6, $7, $8, $9, $10, $12, $13)
             ON CONFLICT (tenant_id, workflow_id, version)
             DO UPDATE SET
                 compilation_status = 'failed',
@@ -361,6 +384,7 @@ impl CompilationWriteGuard<'_> {
                 -- once they are all installed (a restart onto the matching
                 -- bundle), or after a workflow-agent republish releases it.
                 trusted_pins = $12,
+                component_release = $13,
                 -- A failed row never attests that a previously registered
                 -- image remains executable.
                 registered_image_id = NULL,
@@ -384,6 +408,8 @@ impl CompilationWriteGuard<'_> {
                     IS DISTINCT FROM EXCLUDED.template_major
                OR workflow_compilations.lowering_mode
                     IS DISTINCT FROM EXCLUDED.lowering_mode
+               OR workflow_compilations.component_release
+                    IS DISTINCT FROM EXCLUDED.component_release
                -- An artifact pinning a trusted built-in version this server
                -- no longer has is not ready either, so it must not mask the
                -- failure of the rebuild that was meant to replace it.
@@ -403,6 +429,7 @@ impl CompilationWriteGuard<'_> {
         .bind(compiler_build_id())
         .bind(installed_trusted_pins())
         .bind(trusted_pins)
+        .bind(current_component_release())
         .execute(&mut *self.transaction)
         .await?;
 
@@ -495,6 +522,23 @@ impl WorkflowRepository {
         .await
     }
 
+    /// The live workflow that has `slug` in the tenant.
+    pub async fn find_by_slug(
+        &self,
+        tenant_id: &str,
+        slug: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT workflow_id FROM workflows \
+             WHERE tenant_id = $1 AND slug = $2 AND deleted_at IS NULL",
+        )
+        .bind(tenant_id)
+        .bind(slug)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(workflow_id,)| workflow_id))
+    }
+
     /// Read a workflow's slug from the identity row.
     pub async fn get_slug(
         &self,
@@ -562,7 +606,7 @@ impl WorkflowRepository {
         workflow_id: &str,
         name: &str,
         description: &str,
-        memory_tier: MemoryTier,
+        memory_mb: u32,
         track_events: bool,
     ) -> Result<(), sqlx::Error> {
         let initial_definition = serde_json::json!({
@@ -577,7 +621,7 @@ impl WorkflowRepository {
 
         sqlx::query(
             r#"
-            INSERT INTO workflow_definitions (tenant_id, workflow_id, version, definition, file_size, memory_tier, track_events)
+            INSERT INTO workflow_definitions (tenant_id, workflow_id, version, definition, file_size, memory_mb, track_events)
             VALUES ($1, $2, 1, $3, $4, $5, $6)
             "#,
         )
@@ -585,7 +629,7 @@ impl WorkflowRepository {
         .bind(workflow_id)
         .bind(initial_definition)
         .bind(file_size as i32)
-        .bind(memory_tier as MemoryTier)
+        .bind(memory_mb as i32)
         .bind(track_events)
         .execute(&self.pool)
         .await?;
@@ -804,7 +848,7 @@ impl WorkflowRepository {
         let main_query = format!(
             r#"
             SELECT s.workflow_id, s.latest_version, s.current_version, s.created_at, s.updated_at,
-                   sd.memory_tier, sd.track_events,
+                   sd.memory_mb, sd.track_events,
                    sd.definition,
                    s.path, s.slug
             FROM workflows s
@@ -835,7 +879,7 @@ impl WorkflowRepository {
             Option<i32>,    // current_version
             DateTime<Utc>,  // created_at
             DateTime<Utc>,  // updated_at
-            Option<String>, // memory_tier
+            Option<i32>,    // memory_mb
             Option<bool>,   // track_events
             Option<Value>,  // definition (execution_graph)
             String,         // path
@@ -851,11 +895,7 @@ impl WorkflowRepository {
         let workflows = rows
             .iter()
             .map(|row| {
-                let memory_tier = row
-                    .5
-                    .as_ref()
-                    .and_then(|s| MemoryTier::parse(s))
-                    .unwrap_or_default();
+                let memory_mb = row.5.map_or(DEFAULT_MEMORY_MB, |mb| mb as u32);
                 let current_version = row.2.unwrap_or_else(|| row.1.unwrap_or(0));
 
                 // Extract name, description, schemas, variables, and execution_timeout from execution_graph
@@ -905,7 +945,7 @@ impl WorkflowRepository {
                     variables,
                     current_version_number: current_version,
                     last_version_number: row.1.unwrap_or(0),
-                    memory_tier,
+                    memory_mb,
                     track_events: row.6.unwrap_or(false),
                     notes: Vec::new(), // Empty for list view (no execution graph loaded)
                     path: row.8.clone(),
@@ -952,7 +992,7 @@ impl WorkflowRepository {
             Value,          // definition (execution_graph)
             DateTime<Utc>,  // created_at
             DateTime<Utc>,  // updated_at
-            String,         // memory_tier
+            i32,            // memory_mb
             bool,           // track_events
             Option<i32>,    // latest_version
             Option<i32>,    // current_version
@@ -960,7 +1000,7 @@ impl WorkflowRepository {
             Option<String>, // slug
         )> = sqlx::query_as(
             r#"
-            SELECT sd.definition, sd.created_at, sd.updated_at, sd.memory_tier, sd.track_events,
+            SELECT sd.definition, sd.created_at, sd.updated_at, sd.memory_mb, sd.track_events,
                    s.latest_version, s.current_version, s.path, s.slug
             FROM workflow_definitions sd
             JOIN workflows s ON sd.tenant_id = s.tenant_id AND sd.workflow_id = s.workflow_id
@@ -975,7 +1015,7 @@ impl WorkflowRepository {
         .await?;
 
         Ok(row.map(|r| {
-            let memory_tier = MemoryTier::parse(&r.3).unwrap_or_default();
+            let memory_mb = r.3 as u32;
             let current_version = r.6.unwrap_or_else(|| r.5.unwrap_or(0));
 
             // Extract name, description, schemas, variables, and execution_timeout from the definition (which is the execution_graph)
@@ -1025,7 +1065,7 @@ impl WorkflowRepository {
                 variables,
                 current_version_number: current_version,
                 last_version_number: r.5.unwrap_or(0),
-                memory_tier,
+                memory_mb,
                 track_events: r.4,
                 notes: Note::extract_from_execution_graph(&r.0),
                 path: r.7.clone(),
@@ -1130,16 +1170,16 @@ impl WorkflowRepository {
         Ok(row)
     }
 
-    /// Get workflow definition, memory tier, and track-events mode.
-    pub async fn get_definition_with_memory_tier(
+    /// Get workflow definition, memory (MiB), and track-events mode.
+    pub async fn get_definition_with_memory(
         &self,
         tenant_id: &str,
         workflow_id: &str,
         version: i32,
-    ) -> Result<Option<(Value, MemoryTier, bool)>, sqlx::Error> {
-        let row: Option<(Value, String, bool)> = sqlx::query_as(
+    ) -> Result<Option<(Value, u32, bool)>, sqlx::Error> {
+        let row: Option<(Value, i32, bool)> = sqlx::query_as(
             r#"
-            SELECT definition, memory_tier, track_events
+            SELECT definition, memory_mb, track_events
             FROM workflow_definitions
             WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3 AND deleted_at IS NULL
             "#,
@@ -1150,10 +1190,7 @@ impl WorkflowRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|r| {
-            let memory_tier = MemoryTier::parse(&r.1).unwrap_or_default();
-            (r.0, memory_tier, r.2)
-        }))
+        Ok(row.map(|r| (r.0, r.1 as u32, r.2)))
     }
 
     /// Check if a specific version exists
@@ -1214,6 +1251,8 @@ impl WorkflowRepository {
                 sc.template_major AS compiled_template_major,
                 sc.lowering_mode AS compiled_lowering_mode,
                 sc.trusted_pins AS compiled_trusted_pins,
+                sc.component_release AS compiled_component_release,
+                sc.memory_floor_bytes,
                 sd.definition
             FROM workflow_definitions sd
             LEFT JOIN workflow_compilations sc
@@ -1251,6 +1290,7 @@ impl WorkflowRepository {
                     && compiler_provenance_matches(
                         row.compiled_template_major.as_deref(),
                         row.compiled_lowering_mode.as_deref(),
+                        row.compiled_component_release.as_deref(),
                     )
                     && trusted_pins_installed(row.compiled_trusted_pins.as_deref());
 
@@ -1272,6 +1312,11 @@ impl WorkflowRepository {
                     },
                     wasm_size: if is_compiled { row.wasm_size } else { None },
                     package_size: if is_compiled { row.package_size } else { None },
+                    memory_floor_bytes: if is_compiled {
+                        row.memory_floor_bytes
+                    } else {
+                        None
+                    },
                     compilation_status,
                     error_message: row.error_message.clone(),
                 }
@@ -1676,6 +1721,32 @@ impl WorkflowRepository {
         Ok(result.and_then(|r| r.registered_image_id))
     }
 
+    /// Every successfully compiled live workflow version of the tenant with
+    /// its registered image: `(workflow_id, version, image_id)`.
+    pub async fn registered_images(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<(String, i32, String)>, sqlx::Error> {
+        sqlx::query_as(
+            r#"
+            SELECT sc.workflow_id, sc.version, sc.registered_image_id
+            FROM workflow_compilations sc
+            JOIN workflow_definitions wd
+              ON wd.tenant_id = sc.tenant_id
+             AND wd.workflow_id = sc.workflow_id
+             AND wd.version = sc.version
+             AND wd.deleted_at IS NULL
+            WHERE sc.tenant_id = $1
+              AND sc.compilation_status = 'success'
+              AND sc.registered_image_id IS NOT NULL
+            ORDER BY sc.workflow_id, sc.version
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await
+    }
+
     pub async fn get_fresh_registered_image_id(
         &self,
         tenant_id: &str,
@@ -1690,6 +1761,7 @@ impl WorkflowRepository {
                    sc.template_major AS compiled_template_major,
                    sc.lowering_mode AS compiled_lowering_mode,
                    sc.trusted_pins AS compiled_trusted_pins,
+                   sc.component_release AS compiled_component_release,
                    wd.definition,
                    wd.track_events AS definition_track_events
             FROM workflow_definitions wd
@@ -1720,6 +1792,8 @@ impl WorkflowRepository {
         let compiled_template_major: Option<String> = row.try_get("compiled_template_major")?;
         let compiled_lowering_mode: Option<String> = row.try_get("compiled_lowering_mode")?;
         let compiled_trusted_pins: Option<Vec<String>> = row.try_get("compiled_trusted_pins")?;
+        let compiled_component_release: Option<String> =
+            row.try_get("compiled_component_release")?;
         let definition: Value = row.try_get("definition")?;
         let definition_track_events: bool = row.try_get("definition_track_events")?;
         let current_checksum = workflow_definition_checksum(&definition);
@@ -1731,6 +1805,7 @@ impl WorkflowRepository {
                     && compiler_provenance_matches(
                         compiled_template_major.as_deref(),
                         compiled_lowering_mode.as_deref(),
+                        compiled_component_release.as_deref(),
                     )
                     && trusted_pins_installed(compiled_trusted_pins.as_deref()) =>
             {
@@ -1757,6 +1832,7 @@ impl WorkflowRepository {
                    sc.template_major AS compiled_template_major,
                    sc.lowering_mode AS compiled_lowering_mode,
                    sc.trusted_pins AS compiled_trusted_pins,
+                   sc.component_release AS compiled_component_release,
                    wd.definition,
                    wd.track_events AS definition_track_events
             FROM workflow_definitions wd
@@ -1788,6 +1864,8 @@ impl WorkflowRepository {
         let compiled_template_major: Option<String> = row.try_get("compiled_template_major")?;
         let compiled_lowering_mode: Option<String> = row.try_get("compiled_lowering_mode")?;
         let compiled_trusted_pins: Option<Vec<String>> = row.try_get("compiled_trusted_pins")?;
+        let compiled_component_release: Option<String> =
+            row.try_get("compiled_component_release")?;
         let definition: Value = row.try_get("definition")?;
         let definition_track_events: bool = row.try_get("definition_track_events")?;
         let current_checksum = workflow_definition_checksum(&definition);
@@ -1811,6 +1889,7 @@ impl WorkflowRepository {
                     && compiler_provenance_matches(
                         compiled_template_major.as_deref(),
                         compiled_lowering_mode.as_deref(),
+                        compiled_component_release.as_deref(),
                     )
                     && trusted_pins_installed(compiled_trusted_pins.as_deref()) =>
                 {
@@ -1831,19 +1910,19 @@ impl WorkflowRepository {
         tenant_id: &str,
         workflow_id: &str,
         definition: &Value,
-        memory_tier: Option<MemoryTier>,
+        memory_mb: Option<u32>,
         track_events: Option<bool>,
     ) -> Result<i32, sqlx::Error> {
         let definition_bytes = serde_json::to_vec(definition).unwrap_or_default();
         let file_size = definition_bytes.len() as i32;
 
-        // Get the next version number, current memory tier, and track-events value if not provided
-        let current: (i32, Option<String>, Option<bool>) = sqlx::query_as(
+        // Get the next version number, current memory, and track-events value if not provided
+        let current: (i32, Option<i32>, Option<bool>) = sqlx::query_as(
             r#"
             SELECT (COALESCE(MAX(version), 0) + 1)::INT as next_version,
-                   (SELECT memory_tier FROM workflow_definitions
+                   (SELECT memory_mb FROM workflow_definitions
                     WHERE tenant_id = $1 AND workflow_id = $2
-                    ORDER BY version DESC LIMIT 1) as current_memory_tier,
+                    ORDER BY version DESC LIMIT 1) as current_memory_mb,
                    (SELECT track_events FROM workflow_definitions
                     WHERE tenant_id = $1 AND workflow_id = $2
                     ORDER BY version DESC LIMIT 1) as current_track_events
@@ -1857,15 +1936,10 @@ impl WorkflowRepository {
         .await?;
 
         let next_version = current.0;
-        // Use provided memory tier or fall back to current tier or default
-        let tier = memory_tier
-            .or_else(|| {
-                current
-                    .1
-                    .as_ref()
-                    .and_then(|tier_str| MemoryTier::parse(tier_str))
-            })
-            .unwrap_or_default();
+        // Use provided memory or fall back to the current version's or the default
+        let memory_mb = memory_mb
+            .or(current.1.map(|mb| mb as u32))
+            .unwrap_or(DEFAULT_MEMORY_MB);
 
         // Use provided track_events or fall back to current value or default (true)
         let track_events_value = track_events.or(current.2).unwrap_or(true);
@@ -1873,7 +1947,7 @@ impl WorkflowRepository {
         // Insert new version
         sqlx::query(
             r#"
-            INSERT INTO workflow_definitions (tenant_id, workflow_id, version, definition, file_size, memory_tier, track_events)
+            INSERT INTO workflow_definitions (tenant_id, workflow_id, version, definition, file_size, memory_mb, track_events)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             "#,
         )
@@ -1882,7 +1956,7 @@ impl WorkflowRepository {
         .bind(next_version)
         .bind(definition)
         .bind(file_size)
-        .bind(tier as MemoryTier)
+        .bind(memory_mb as i32)
         .bind(track_events_value)
         .execute(&self.pool)
         .await?;
@@ -2179,9 +2253,9 @@ impl WorkflowRepository {
         };
 
         // Fetch the version definition to clone
-        let source_version: Option<(Value, i32, String, bool)> = sqlx::query_as(
+        let source_version: Option<(Value, i32, i32, bool)> = sqlx::query_as(
             r#"
-            SELECT definition, file_size, memory_tier, track_events
+            SELECT definition, file_size, memory_mb, track_events
             FROM workflow_definitions
             WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3 AND deleted_at IS NULL
             "#,
@@ -2230,7 +2304,7 @@ impl WorkflowRepository {
         sqlx::query(
             r#"
             INSERT INTO workflow_definitions (
-                tenant_id, workflow_id, version, definition, file_size, memory_tier, track_events, created_at
+                tenant_id, workflow_id, version, definition, file_size, memory_mb, track_events, created_at
             )
             VALUES ($1, $2, 1, $3, $4, $5, $6, NOW())
             "#,
@@ -2239,7 +2313,7 @@ impl WorkflowRepository {
         .bind(new_workflow_id)
         .bind(&cloned_definition)
         .bind(cloned_size)
-        .bind(&source_version.2)
+        .bind(source_version.2)
         .bind(source_version.3)
         .execute(&mut *tx)
         .await?;
@@ -2674,6 +2748,7 @@ impl WorkflowRepository {
                    sc.lowering_mode AS compiled_lowering_mode,
                    sc.compiler_build AS compiled_build,
                    sc.trusted_pins AS compiled_trusted_pins,
+                   sc.component_release AS compiled_component_release,
                    wd.definition,
                    wd.track_events AS definition_track_events,
                    wd.version AS resolved_version
@@ -2722,6 +2797,8 @@ impl WorkflowRepository {
                 let compiled_build: Option<String> = record.try_get("compiled_build")?;
                 let compiled_trusted_pins: Option<Vec<String>> =
                     record.try_get("compiled_trusted_pins")?;
+                let compiled_component_release: Option<String> =
+                    record.try_get("compiled_component_release")?;
                 let definition: Value = record.try_get("definition")?;
                 let definition_track_events: bool = record.try_get("definition_track_events")?;
                 let execution_timeout = match execution_timeout_from_definition(&definition) {
@@ -2741,6 +2818,7 @@ impl WorkflowRepository {
                 let artifact_matches_current_compiler = compiler_provenance_matches(
                     compiled_template_major.as_deref(),
                     compiled_lowering_mode.as_deref(),
+                    compiled_component_release.as_deref(),
                 );
                 let artifact_matches_tracking_mode = compiled_track_events
                     == Some(definition_track_events)
@@ -2853,6 +2931,7 @@ impl WorkflowRepository {
                               AND lowering_mode IS NOT DISTINCT FROM $7
                               AND compiler_build IS NOT DISTINCT FROM $8
                               AND trusted_pins IS NOT DISTINCT FROM $9
+                              AND component_release IS NOT DISTINCT FROM $10
                             "#,
                         )
                         .bind(tenant_id)
@@ -2864,6 +2943,7 @@ impl WorkflowRepository {
                         .bind(compiled_lowering_mode.as_deref())
                         .bind(compiled_build.as_deref())
                         .bind(compiled_trusted_pins.as_deref())
+                        .bind(compiled_component_release.as_deref())
                         .execute(&self.pool)
                         .await;
                     }

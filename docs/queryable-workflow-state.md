@@ -335,8 +335,9 @@ list accepts a state filter but returns no state. The filter is a `POST` query
 endpoint taking the same filter JSON, since it does not fit in query
 parameters.
 
-**Visibility.** Any workflow in the tenant can read any workflow's state, as
-control reads already do. State reaches report viewers through workflows, so
+**Visibility.** A run reads the state of itself and its child runs only, as
+every control read does (decided 2026-10-28, SYN-906); the executions API
+and the operations UI read across the tenant. State reaches report viewers through workflows, so
 authors keep in state only what may be shown.
 
 **Versions.** Runs of different workflow versions can carry different state
@@ -419,7 +420,7 @@ Settled on 2026-09-28:
 | Non-durable workflows | Local state, W082 warning; nothing made durable automatically |
 | Retention | State lives and is deleted with its run |
 | Filtering | Every top-level scalar state field is filterable; values are literals (no `now`) |
-| Visibility | Any workflow in the tenant can read any workflow's state |
+| Visibility | A run reads its own and its child runs' state; the API reads across the tenant |
 | Schema evolution | Readers see each run's version |
 | Derived fields | Dropped; time-based questions are filters with a caller-supplied time |
 | Who acted | Not needed |

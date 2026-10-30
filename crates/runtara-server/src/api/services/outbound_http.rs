@@ -210,12 +210,7 @@ impl OutboundHttpHost for NativeOutboundHttp {
         let mut internal = OutboundRequest {
             method: request.method,
             url: String::new(),
-            headers: request
-                .headers
-                .into_iter()
-                .filter(|(name, _)| !name.to_ascii_lowercase().starts_with("x-runtara-"))
-                .map(|(name, value)| (name.to_ascii_lowercase(), value))
-                .collect(),
+            headers: guest_headers(request.headers),
             body: request.body,
             connection_id: None,
             ai_provider: None,
@@ -664,7 +659,7 @@ async fn execute_request(
         // durable_sleep() (suspendable/resumable) to wait.
         if crate::config::adaptive_rate_limiting_enabled()
             && let Err(retry_after_ms) = facade
-                .check_rate_limit(connection_id, &conn.rate_limit_config)
+                .check_rate_limit(tenant_id, connection_id, &conn.rate_limit_config)
                 .await
         {
             record_credential_request_async(
@@ -1012,6 +1007,31 @@ fn record_credential_request_async(
 /// once at process start and is intended for local Azurite/MinIO-style
 /// emulators reachable on loopback. **Do not set this in production** — it
 /// re-opens the SSRF surface for every connection routed through the proxy.
+/// The headers a guest's outbound request keeps: not the host's own
+/// (`x-runtara-*`), and not the ones that frame or route the request, which
+/// are the client's to set. A guest-chosen `Host` would otherwise reach
+/// another virtual host behind the pinned address with the connection's
+/// credentials.
+fn guest_headers<H: IntoIterator<Item = (String, String)>>(headers: H) -> HashMap<String, String> {
+    const FRAMING: &[&str] = &[
+        "host",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "keep-alive",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "upgrade",
+    ];
+    headers
+        .into_iter()
+        .map(|(name, value)| (name.to_ascii_lowercase(), value))
+        .filter(|(name, _)| !name.starts_with("x-runtara-") && !FRAMING.contains(&name.as_str()))
+        .collect()
+}
+
 async fn reject_private_url(url: &str) -> Result<(), (u16, Value)> {
     let parsed = url::Url::parse(url).map_err(|_| (400, json!({"error": "Invalid URL"})))?;
 
@@ -1023,7 +1043,30 @@ async fn reject_private_url(url: &str) -> Result<(), (u16, Value)> {
         return Ok(());
     }
 
-    let host = parsed.host_str().unwrap_or("");
+    let private = |ip: std::net::IpAddr| {
+        (
+            403,
+            json!({"error": format!("Requests to private/internal addresses are not allowed: {}", ip)}),
+        )
+    };
+    let host = match parsed.host() {
+        // An IP literal is connected to as is, without the resolver that
+        // guards hostnames at connect time, so it is classified here.
+        Some(url::Host::Ipv4(ip)) => {
+            return match proxy_url::is_private_ip(&ip.into()) {
+                true => Err(private(ip.into())),
+                false => Ok(()),
+            };
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            return match proxy_url::is_private_ip(&ip.into()) {
+                true => Err(private(ip.into())),
+                false => Ok(()),
+            };
+        }
+        Some(url::Host::Domain(host)) => host,
+        None => return Err((400, json!({"error": "URL must include a host"}))),
+    };
 
     // Block localhost by name
     if host == "localhost" || host.ends_with(".localhost") {
@@ -1033,18 +1076,14 @@ async fn reject_private_url(url: &str) -> Result<(), (u16, Value)> {
         ));
     }
 
-    // Resolve hostname to IP and check
-    if let Ok(addrs) =
-        tokio::net::lookup_host((host, parsed.port_or_known_default().unwrap_or(80))).await
-    {
-        for addr in addrs {
-            let ip = addr.ip();
-            if proxy_url::is_private_ip(&ip) {
-                return Err((
-                    403,
-                    json!({"error": format!("Requests to private/internal addresses are not allowed: {}", ip)}),
-                ));
-            }
+    // Resolve the hostname and check every address. A name that does not
+    // resolve here is refused rather than let through unchecked.
+    let addrs = tokio::net::lookup_host((host, parsed.port_or_known_default().unwrap_or(80)))
+        .await
+        .map_err(|_| (502, json!({"error": format!("Could not resolve {host}")})))?;
+    for addr in addrs {
+        if proxy_url::is_private_ip(&addr.ip()) {
+            return Err(private(addr.ip()));
         }
     }
 
@@ -1081,6 +1120,50 @@ fn is_explicitly_allowed_host(url: &url::Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_guest_sets_neither_the_host_nor_the_framing() {
+        let kept = guest_headers([
+            ("Host".to_string(), "other-vhost.example".to_string()),
+            ("Content-Length".into(), "1".into()),
+            ("Transfer-Encoding".into(), "chunked".into()),
+            ("Connection".into(), "upgrade".into()),
+            ("X-Runtara-Connection".into(), "forged".into()),
+            ("Accept".into(), "application/json".into()),
+        ]);
+        assert_eq!(
+            kept,
+            HashMap::from([("accept".to_string(), "application/json".to_string())])
+        );
+    }
+
+    #[tokio::test]
+    async fn private_ip_literals_are_refused_in_every_form() {
+        for url in [
+            "http://127.0.0.1:6379/",
+            "http://10.1.2.3/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::1]:7001/",
+            "http://[::ffff:127.0.0.1]:6379/",
+            "http://[::ffff:169.254.169.254]/",
+            "http://[fd00::1]/",
+            "http://[fe80::1]/",
+            "http://[::]/",
+            "http://localhost:7001/",
+        ] {
+            let refused = reject_private_url(url).await;
+            assert_eq!(refused.map_err(|(status, _)| status), Err(403), "{url}");
+        }
+        for url in ["http://93.184.216.34/", "http://[2606:4700:4700::1111]/"] {
+            assert!(reject_private_url(url).await.is_ok(), "{url}");
+        }
+        // A name that does not resolve is refused, not let through unchecked.
+        assert!(
+            reject_private_url("http://no-such-host.invalid/")
+                .await
+                .is_err()
+        );
+    }
 
     #[test]
     fn credential_headers_override_guest_case_variants() {

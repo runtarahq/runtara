@@ -30,7 +30,11 @@ impl OidcProvider {
 
 #[async_trait]
 impl AuthProvider for OidcProvider {
-    async fn authenticate(&self, headers: &HeaderMap) -> Result<AuthContext, AuthError> {
+    async fn authenticate(
+        &self,
+        headers: &HeaderMap,
+        requested_tenant: Option<&str>,
+    ) -> Result<AuthContext, AuthError> {
         let auth_header = headers
             .get("Authorization")
             .and_then(|v| v.to_str().ok())
@@ -57,11 +61,20 @@ impl AuthProvider for OidcProvider {
                 AuthError::InvalidToken
             })?;
 
-        let org_id = claims
-            .org_id
-            .expect("org_id presence validated in validate_token");
+        // A token naming its tenant acts only there; one that names none (accepted only
+        // under required membership) acts for the tenant the request names, else the
+        // primary.
+        let org_id = match (claims.org_id, requested_tenant) {
+            (Some(org_id), Some(requested)) if org_id != requested => {
+                return Err(AuthError::TenantMismatch(requested.to_owned()));
+            }
+            (Some(org_id), _) => org_id,
+            (None, Some(requested)) => requested.to_owned(),
+            (None, None) => self.tenant_id.clone(),
+        };
 
-        if org_id != self.tenant_id {
+        // A token for a tenant this process does not serve is refused.
+        if org_id != self.tenant_id && !crate::config::is_served_tenant(&org_id) {
             return Err(AuthError::TenantMismatch(org_id));
         }
 
@@ -78,6 +91,7 @@ impl AuthProvider for OidcProvider {
             email: claims.email,
             name: claims.name,
             tenant_slug: claims.tenant_slug,
+            issuer: claims.iss,
         })
     }
 

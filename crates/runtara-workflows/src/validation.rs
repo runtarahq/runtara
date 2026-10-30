@@ -2078,7 +2078,7 @@ impl std::fmt::Display for ValidationWarning {
             } => {
                 write!(
                     f,
-                    "[W073] Split step '{}' sets parallelism={} — a concurrent window requires a single-Agent body whose maxRetries is 0 (unset defaults to 3, which forces sequential execution), with no breakpoint, not a workflow-agent child and no operation-scoped (suspending or control) step, on a Split with no retries; enclosing and Split timeouts retain the concurrent window, while other shapes run sequentially.",
+                    "[W073] Split step '{}' sets parallelism={} — a concurrent window requires a single-Agent body whose maxRetries is 0 (unset defaults to 3, which forces sequential execution), with no breakpoint, not a workflow-agent child that runs in this run (a workflow-agent whose published version parks runs as a child run of its own, and at most 15 of those start at once) and no operation-scoped (suspending or control) step, on a Split with no retries; enclosing and Split timeouts retain the concurrent window, while other shapes run sequentially.",
                     step_id, parallelism
                 )
             }
@@ -17007,6 +17007,9 @@ mod tests {
         // The unset-maxRetries default is the trap that silently forces
         // sequential execution; the advisory must name it.
         assert!(display.contains("maxRetries"), "{display}");
+        // A workflow-agent that parks runs as a child run, and runs
+        // concurrently; the advisory must not claim every one serializes.
+        assert!(display.contains("child run"), "{display}");
     }
 
     #[test]

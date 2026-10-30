@@ -4163,6 +4163,7 @@ mod tests {
             durable: true,
             rate_limited,
             is_workflow_agent: false,
+            child_run: None,
             suspends: false,
             operation_scoped: false,
             input_mapping_id: 0,

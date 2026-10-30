@@ -1,9 +1,8 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Contract of the control service (`runtara:control@1.0.0`).
+//! Contract of the control service (the workflow API's `/v1/instances`).
 //!
-//! The WIT in `runtara-wit/wit/control` fixes the ABI; this crate
-//! fixes the numbers and names every side agrees on: size and paging caps,
+//! This crate fixes the numbers and names every side agrees on: size and paging caps,
 //! lineage depth, the control share of the concurrency limit, retry hints,
 //! cancel bounds, the agent-facing `CONTROL_<CODE>` error codes and the
 //! `start` input schema. It is serde-only, so the control agent, the host
@@ -112,7 +111,7 @@ pub const CONTROL_CAPACITY_UNSATISFIABLE: &str = "CONTROL_CAPACITY_UNSATISFIABLE
 /// [`REQUIRES_RUN_TAG`] capability gets.
 pub const CONTROL_REQUIRES_INSTANCE: &str = "CONTROL_REQUIRES_INSTANCE";
 
-/// `runtara:control/types.error-code`, case for case and in WIT order.
+/// The control error codes, case for case and in their wire order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
     Denied,
@@ -251,9 +250,8 @@ pub fn agent_error(code: ErrorCode, message: &str, retry_after_ms: Option<u64>) 
     error
 }
 
-/// `runtara:control/types.parent-close-policy`. The agent input spells the
-/// cases `cancel` and `leave_running`; the WIT spells them `cancel` and
-/// `leave-running`.
+/// The parent-close policy. The agent input spells the cases `cancel` and
+/// `leave_running`; the workflow API spells them `cancel` and `leaveRunning`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ParentClosePolicy {

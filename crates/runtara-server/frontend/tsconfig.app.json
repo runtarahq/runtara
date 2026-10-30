@@ -23,7 +23,8 @@
     "checkJs": false,
     "allowJs": true,
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@edition": ["./src/edition"]
     }
   },
   "include": ["src"]

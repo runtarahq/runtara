@@ -11,12 +11,19 @@ function resolveBaseUrl(): string {
   return `${window.location.origin}${configured}`;
 }
 
+// Events (webhooks, HTTP triggers) may be taken on a host of their own, which
+// is what callers are given; otherwise the console's.
+function resolveEventsBaseUrl(): string {
+  const configured = (config.eventsBaseUrl ?? '').replace(/\/$/, '');
+  return /^https?:\/\//i.test(configured) ? configured : resolveBaseUrl();
+}
+
 export function getHttpTriggerUrl(
   triggerId: string,
   tenantId: string,
   eventType: string = 'http'
 ): string {
-  return `${resolveBaseUrl()}/api/events/${tenantId}/${eventType}/${triggerId}/my-action`;
+  return `${resolveEventsBaseUrl()}/api/events/${tenantId}/${eventType}/${triggerId}/my-action`;
 }
 
 /**
@@ -26,7 +33,7 @@ export function getHttpTriggerUrl(
  * id, and accepts any HTTP method.
  */
 export function getHttpSyncUrl(workflowId: string, tenantId: string): string {
-  return `${resolveBaseUrl()}/api/events/${tenantId}/http-sync/${workflowId}`;
+  return `${resolveEventsBaseUrl()}/api/events/${tenantId}/http-sync/${workflowId}`;
 }
 
 export function getEmailTriggerAddress(triggerId: string): string {
@@ -40,5 +47,5 @@ export function getChannelWebhookUrl(
   connectionId: string,
   platform: string = 'telegram'
 ): string {
-  return `${resolveBaseUrl()}/api/events/${tenantId}/webhook/${platform}/${connectionId}`;
+  return `${resolveEventsBaseUrl()}/api/events/${tenantId}/webhook/${platform}/${connectionId}`;
 }

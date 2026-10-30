@@ -1219,6 +1219,22 @@ pub trait Persistence: Send + Sync {
         signal_type: SignalType,
     ) -> Result<crate::lifecycle::Decision, CoreError>;
 
+    /// [`Self::apply_lifecycle_command`], acknowledged by the execution
+    /// `owner` names: refused as [`CoreError::Superseded`] unless it still
+    /// holds the run, so a lost executor cannot pause or cancel for its
+    /// replacement.
+    async fn apply_owned_lifecycle_command(
+        &self,
+        instance_id: &str,
+        command_id: &str,
+        signal_type: SignalType,
+        owner: ExecutionWriter<'_>,
+    ) -> Result<crate::lifecycle::Decision, CoreError> {
+        unfenced_default(owner, "apply_owned_lifecycle_command")?;
+        self.apply_lifecycle_command(instance_id, command_id, signal_type)
+            .await
+    }
+
     /// Evaluate the core parking guard and commit suspension metadata and its
     /// deadline atomically. A concurrent terminal transition cannot be overwritten.
     async fn park_instance(
@@ -1668,6 +1684,26 @@ pub trait Persistence: Send + Sync {
         limit: i64,
         retry_at: DateTime<Utc>,
     ) -> Result<Vec<InstanceRecord>, CoreError>;
+
+    /// [`Self::claim_sleeping_instances_due`], of `tenants`' instances only
+    /// when given: a process serving some tenants of a store that others
+    /// share never wakes another's runs, which it has neither the keys nor
+    /// the routing for. A backend that cannot filter refuses a list rather
+    /// than claim every tenant's.
+    async fn claim_sleeping_instances_due_of(
+        &self,
+        limit: i64,
+        retry_at: DateTime<Utc>,
+        tenants: Option<&[String]>,
+    ) -> Result<Vec<InstanceRecord>, CoreError> {
+        match tenants {
+            None => self.claim_sleeping_instances_due(limit, retry_at).await,
+            Some(_) => Err(CoreError::PersistenceError {
+                operation: "claim_sleeping_instances_due_of".into(),
+                details: "this store cannot claim by tenant".into(),
+            }),
+        }
+    }
 
     /// List events for an instance with filtering and pagination.
     ///

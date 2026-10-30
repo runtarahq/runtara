@@ -5,6 +5,9 @@ use runtara_core::persistence::ListEventsFilter;
 
 #[path = "invocation_io_tests.rs"]
 mod invocation_io_tests;
+// Its children reach their run over the workflow API, through the staged api
+// component.
+#[cfg(feature = "scoped-workflow-integration-tests")]
 #[path = "invocation_tests.rs"]
 mod invocation_tests;
 #[path = "root_tests.rs"]
@@ -12,6 +15,25 @@ mod root_tests;
 #[path = "signal_poll_tests.rs"]
 mod signal_poll_tests;
 
+/// `guest` with its `runtara:api` imports satisfied by the staged api
+/// component, as the compiler composes it.
+#[cfg(feature = "scoped-workflow-integration-tests")]
+fn with_api_component(guest: Vec<u8>) -> Vec<u8> {
+    use wac_graph::{CompositionGraph, EncodeOptions, types::Package};
+    let dir = std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
+        .expect("scoped-workflow-integration-tests requires RUNTARA_AGENT_COMPONENTS_DIR");
+    let api = std::fs::read(std::path::Path::new(&dir).join("runtara_api_component.wasm"))
+        .expect("staged api component");
+    let mut graph = CompositionGraph::new();
+    let socket = Package::from_bytes("test:guest", None, guest, graph.types_mut()).unwrap();
+    let socket = graph.register_package(socket).unwrap();
+    let plug = Package::from_bytes("runtara:api-component", None, api, graph.types_mut()).unwrap();
+    let plug = graph.register_package(plug).unwrap();
+    wac_graph::plug(&mut graph, vec![plug], socket).unwrap();
+    graph.encode(EncodeOptions::default()).unwrap()
+}
+
+#[cfg(feature = "scoped-workflow-integration-tests")]
 /// Component-level declarations of the workflow entry, with `invoke` from
 /// core instance `code` and `memory`/`realloc` from core instance `mem`.
 fn entry_export(code: &str, mem: &str) -> String {
@@ -27,8 +49,8 @@ fn entry_export(code: &str, mem: &str) -> String {
       (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
       (func $invoke async (param "capability-id" string) (param "input" (list u8))
         (result (result $outcome (error $error)))
-        (canon lift (core func ${code} "invoke") (memory ${mem} "memory")
-          (realloc (func ${mem} "realloc"))))
+        (canon lift (core func ${code} "invoke") (memory (core memory ${mem} "memory"))
+          (realloc (core func ${mem} "realloc"))))
       (instance $entry (export "error-info" (type $error)) (export "signal-wait" (type $signal))
         (export "wake" (type $wake)) (export "suspension" (type $suspension))
         (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
@@ -495,6 +517,7 @@ async fn scoped_runtime_root_commands_supersede_child_breakpoints() {
     }
 }
 
+#[cfg(feature = "scoped-workflow-integration-tests")]
 #[tokio::test]
 async fn scoped_runtime_wasm_imports_keep_child_completion_and_pause_off_root() {
     use runtara_component_host::precompile::{
@@ -508,11 +531,21 @@ async fn scoped_runtime_wasm_imports_keep_child_completion_and_pause_off_root() 
         .await
         .unwrap();
     let wasm = wat::parse_str(format!(r#"(component
-      (import "runtara:workflow/runtime@1.0.0" (instance $runtime
-        (export "get-checkpoint" (func (param "checkpoint-id" string) (result (result (option (list u8)) (error string)))))
-        (export "check-signals" (func (result (result bool (error string)))))))
-      (alias export $runtime "get-checkpoint" (func $get))
-      (alias export $runtime "check-signals" (func $signals))
+      (import "runtara:api/types@1.0.0" (instance $types
+        (type $error-def (record (field "code" string) (field "message" string)
+          (field "retry-after-ms" (option u64)) (field "details" (option string))))
+        (export "api-error" (type (eq $error-def)))))
+      (alias export $types "api-error" (type $api-error))
+      (import "runtara:api/checkpoints@1.0.0" (instance $checkpoints
+        (alias outer 1 $api-error (type $api-error-outer))
+        (export "api-error" (type $e (eq $api-error-outer)))
+        (export "get" (func async (param "checkpoint-id" string) (result (result (option (list u8)) (error $e)))))))
+      (import "runtara:api/signals@1.0.0" (instance $signals
+        (alias outer 1 $api-error (type $api-error-outer))
+        (export "api-error" (type $e (eq $api-error-outer)))
+        (export "check-lifecycle" (func async (result (result bool (error $e)))))))
+      (alias export $checkpoints "get" (func $get))
+      (alias export $signals "check-lifecycle" (func $signals))
       (core module $memory
         (memory (export "memory") 1)
         (global $heap (mut i32) (i32.const 4096))
@@ -520,8 +553,8 @@ async fn scoped_runtime_wasm_imports_keep_child_completion_and_pause_off_root() 
           (local $base i32) global.get $heap local.set $base
           global.get $heap local.get 3 i32.add i32.const 7 i32.add i32.const -8 i32.and global.set $heap local.get $base))
       (core instance $memory (instantiate $memory))
-      (core func $get (canon lower (func $get) (memory $memory "memory") (realloc (func $memory "realloc"))))
-      (core func $signals (canon lower (func $signals) (memory $memory "memory") (realloc (func $memory "realloc"))))
+      (core func $get (canon lower (func $get) (memory (core memory $memory "memory")) (realloc (core func $memory "realloc"))))
+      (core func $signals (canon lower (func $signals) (memory (core memory $memory "memory")) (realloc (core func $memory "realloc"))))
       (core module $code
         (import "memory" "memory" (memory 1))
         (import "host" "get" (func $get (param i32 i32 i32)))
@@ -533,12 +566,14 @@ async fn scoped_runtime_wasm_imports_keep_child_completion_and_pause_off_root() 
           (if (i32.ne (i32.load8_u (i32.const 64)) (i32.const 1)) (then unreachable))
           (call $signals (i32.const 64))
           (if (i32.load8_u (i32.const 64)) (then unreachable))
-          (if (i32.eqz (i32.load8_u (i32.const 68))) (then unreachable))
+          ;; `result<bool, api-error>` is 8-aligned: the bool at +8.
+          (if (i32.eqz (i32.load8_u (i32.const 72))) (then unreachable))
           ;; A zeroed result area: `Ok(completed(""))`.
           i32.const 2048))
       (core instance $host (export "get" (func $get)) (export "signals" (func $signals)))
       (core instance $code (instantiate $code (with "host" (instance $host)) (with "memory" (instance $memory))))
       {entry})"#, entry = entry_export("code", "memory"))).unwrap();
+    let wasm = with_api_component(wasm);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("scoped-runtime.wasm");
     std::fs::write(&path, wasm).unwrap();
@@ -606,6 +641,7 @@ async fn scoped_runtime_wasm_imports_keep_child_completion_and_pause_off_root() 
     assert_eq!(fx.status().await, InstanceStatus::Suspended);
 }
 
+#[cfg(feature = "scoped-workflow-integration-tests")]
 // The precompile worker echoes a per-launch nonce; draw it like production does.
 fn fixture_nonce() -> [u8; 32] {
     let mut nonce = [0_u8; 32];

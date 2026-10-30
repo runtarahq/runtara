@@ -17,6 +17,11 @@ pub use runtara_wit::workflow::ENTRY as ENTRY_INTERFACE_NAME;
 /// The capability id a workflow entry answers.
 pub use runtara_wit::workflow::ENTRY_CAPABILITY;
 
+/// Export of a workflow on the workflow API ABI: `run` reads its input and
+/// posts its outcome over `http://api.runtara.internal` instead of taking and
+/// returning them (see `crate::workflow_api`).
+pub const CLI_RUN_EXPORT: &str = "wasi:cli/run@0.3.0";
+
 /// WIT mirror of `runtara:agent/types.error-info`.
 #[derive(
     Debug,
@@ -131,6 +136,8 @@ pub enum WorkflowOutcome {
 pub enum WorkflowEntrypoint {
     /// The component exports the workflow entry's `capabilities.invoke`.
     LifecycleInvoke,
+    /// The component exports [`CLI_RUN_EXPORT`] and speaks the workflow API.
+    CliRun,
     /// The workflow entry is not exported.
     Other,
 }
@@ -157,6 +164,7 @@ pub fn inspect_workflow_entrypoint_file(
 pub fn inspect_workflow_entrypoint(wasm: &[u8]) -> anyhow::Result<WorkflowEntrypoint> {
     let mut depth = 0usize;
     let mut lifecycle = false;
+    let mut cli_run = false;
 
     for payload in wasmparser::Parser::new(0).parse_all(wasm) {
         match payload? {
@@ -168,6 +176,8 @@ pub fn inspect_workflow_entrypoint(wasm: &[u8]) -> anyhow::Result<WorkflowEntryp
                     let export = export?;
                     if export.name.0 == ENTRY_INTERFACE_NAME {
                         lifecycle = true;
+                    } else if export.name.0 == CLI_RUN_EXPORT {
+                        cli_run = true;
                     }
                 }
             }
@@ -177,6 +187,8 @@ pub fn inspect_workflow_entrypoint(wasm: &[u8]) -> anyhow::Result<WorkflowEntryp
 
     Ok(if lifecycle {
         WorkflowEntrypoint::LifecycleInvoke
+    } else if cli_run {
+        WorkflowEntrypoint::CliRun
     } else {
         WorkflowEntrypoint::Other
     })
@@ -195,7 +207,7 @@ pub fn require_workflow_entry(wasm: &[u8]) -> anyhow::Result<()> {
 
 fn require_entry(entrypoint: WorkflowEntrypoint) -> anyhow::Result<()> {
     match entrypoint {
-        WorkflowEntrypoint::LifecycleInvoke => Ok(()),
+        WorkflowEntrypoint::LifecycleInvoke | WorkflowEntrypoint::CliRun => Ok(()),
         WorkflowEntrypoint::Other => Err(anyhow::anyhow!(
             "compiled workflow does not export the workflow entry `{ENTRY_INTERFACE_NAME}`; \
              rebuild or republish this workflow"
@@ -212,7 +224,7 @@ pub fn component_exports_workflow_entry(
     component
         .component_type()
         .exports(engine)
-        .any(|(name, _)| name == ENTRY_INTERFACE_NAME)
+        .any(|(name, _)| name == ENTRY_INTERFACE_NAME || name == CLI_RUN_EXPORT)
 }
 
 #[cfg(test)]
@@ -238,6 +250,26 @@ mod tests {
         );
         let fixture = write_fixture(&wasm);
         require_workflow_entry_file(fixture.path()).expect("invoke component accepted");
+    }
+
+    #[test]
+    fn recognizes_the_workflow_api_entry() {
+        let wasm = wat::parse_str(
+            r#"(component
+                (core module $m (func (export "run")))
+                (core instance $i (instantiate $m))
+                (func $run (canon lift (core func $i "run")))
+                (instance $cli (export "run" (func $run)))
+                (export "wasi:cli/run@0.3.0" (instance $cli))
+            )"#,
+        )
+        .expect("valid component fixture");
+        assert_eq!(
+            inspect_workflow_entrypoint(&wasm).expect("inspect component"),
+            WorkflowEntrypoint::CliRun
+        );
+        let fixture = write_fixture(&wasm);
+        require_workflow_entry_file(fixture.path()).expect("cli/run component accepted");
     }
 
     #[test]

@@ -116,9 +116,9 @@ fn compiled_mode(
             fs::hard_link(entry.path(), components.join(entry.file_name()))?;
         }
     }
-    // The fixture observes itself through the workflow runtime's custom events,
-    // an import the agent allowlist admits only for staged workflow-agents, so
-    // it is staged as one: tagged, and in an extra (staging) dir rather than the
+    // The fixture observes itself through the workflow API's events, composed
+    // with its own api component as a published workflow-agent is, so it is
+    // staged as one: tagged, and in an extra (staging) dir rather than the
     // primary components dir. Its own sidecar copy: the bundle's stays untouched.
     let staging = dir.join("staging");
     fs::create_dir(&staging)?;
@@ -134,13 +134,17 @@ fn compiled_mode(
         staging.join("runtara_agent_http.meta.json"),
         serde_json::to_vec(&meta)?,
     )?;
+    let fixture = wat::parse_str(if complete {
+        include_str!("late-return-agent.wat").replace("i64.const 300000000000", "i64.const 0")
+    } else {
+        include_str!("late-return-agent.wat").to_owned()
+    })?;
     fs::write(
         staging.join("runtara_agent_http.wasm"),
-        wat::parse_str(if complete {
-            include_str!("late-return-agent.wat").replace("i64.const 300000", "i64.const 0")
-        } else {
-            include_str!("late-return-agent.wat").to_owned()
-        })?,
+        with_api_component(
+            fixture,
+            &fs::read(bundle.join("runtara_api_component.wasm"))?,
+        )?,
     )?;
     crate::direct_wasm::compose_direct_workflow_with_extra_dirs(
         &mut compiled,
@@ -281,4 +285,21 @@ async fn ready_value_is_accepted_without_cancellation_or_recovery() -> anyhow::R
         assert!(!host.acknowledged.load(Ordering::SeqCst));
     }
     Ok(())
+}
+
+/// `fixture` with its `runtara:api` imports satisfied by the api component.
+fn with_api_component(fixture: Vec<u8>, api: &[u8]) -> anyhow::Result<Vec<u8>> {
+    use wac_graph::{CompositionGraph, EncodeOptions, types::Package};
+    let mut graph = CompositionGraph::new();
+    let socket = Package::from_bytes("test:late-return", None, fixture, graph.types_mut())?;
+    let socket = graph.register_package(socket)?;
+    let plug = Package::from_bytes(
+        "runtara:api-component",
+        None,
+        api.to_vec(),
+        graph.types_mut(),
+    )?;
+    let plug = graph.register_package(plug)?;
+    wac_graph::plug(&mut graph, vec![plug], socket)?;
+    Ok(graph.encode(EncodeOptions::default())?)
 }

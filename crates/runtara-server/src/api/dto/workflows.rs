@@ -1,5 +1,5 @@
 /// Workflow-related DTOs
-use crate::types::{ExecutionStatus, MemoryTier, TerminationType};
+use crate::types::{ExecutionStatus, TerminationType};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
@@ -934,9 +934,10 @@ pub struct WorkflowDto {
     /// The highest version number that exists for this workflow
     #[serde(rename = "lastVersionNumber")]
     pub last_version_number: i32,
-    #[serde(default)]
-    #[serde(rename = "memoryTier")]
-    pub memory_tier: MemoryTier,
+    /// Linear memory a run of this version may use, in MiB.
+    #[serde(default = "default_memory_mb")]
+    #[serde(rename = "memoryMb")]
+    pub memory_mb: u32,
     /// Whether this version is compiled with step-event tracking instrumentation
     #[serde(default)]
     #[serde(rename = "trackEvents")]
@@ -1003,6 +1004,12 @@ pub struct WorkflowVersionInfoDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "packageSize")]
     pub package_size: Option<i32>,
+    /// Linear memory the compiled workflow allocates when it starts, in
+    /// bytes: its memory tier must be at least this. Null if the version
+    /// isn't compiled or was compiled before the floor was recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "memoryFloorBytes")]
+    pub memory_floor_bytes: Option<i64>,
     /// Raw compilation status from `workflow_compilations.compilation_status`.
     /// `"success"`, `"failed"`, or `"pending"`. Null when the worker has
     /// never written a row for this version (brand-new save). Lets the UI
@@ -1125,6 +1132,15 @@ pub struct WorkflowInstanceDto {
         rename = "stateUpdatedAt"
     )]
     pub state_updated_at: Option<String>,
+    /// What the run's guest wrote to stdout and stderr, as its runner captured
+    /// it (the first capture is kept). Only on a single execution's detail;
+    /// absent when the runner keeps no capture, as for a durable embedded run.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "guestOutput"
+    )]
+    pub guest_output: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -1673,6 +1689,10 @@ pub struct RenameFolderResponse {
 // ============================================================================
 // Tests
 // ============================================================================
+
+fn default_memory_mb() -> u32 {
+    crate::types::DEFAULT_MEMORY_MB
+}
 
 #[cfg(test)]
 mod tests {

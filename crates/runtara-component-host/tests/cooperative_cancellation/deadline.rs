@@ -48,7 +48,9 @@ async fn run_deadline_with_parent(case: Case, source: &str) -> anyhow::Result<()
     let second = serde_json::to_vec(&serde_json::json!({
         "url":format!("{base}/after"), "response_type":"text"
     }))?;
-    let parent = source.replace("{{TIMEOUT}}", &(timeout as i64).to_string());
+    // The parent's timer is `wasi:clocks/monotonic-clock.wait-for`, in nanoseconds.
+    let timeout_ns = timeout.saturating_mul(1_000_000);
+    let parent = source.replace("{{TIMEOUT}}", &(timeout_ns as i64).to_string());
     let bytes = if matches!(case, Case::ReturnsDuringCancel) {
         real_agent::compose_agent_bytes(
             &parent,

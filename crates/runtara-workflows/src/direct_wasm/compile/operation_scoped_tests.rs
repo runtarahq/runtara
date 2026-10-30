@@ -111,7 +111,7 @@ fn the_backstops_refuse_what_validation_reports() {
         .expect("a workflow-agent may call control");
     assert!(!result.omit_runtime);
     let world = fs::read_to_string(&result.world_wit_path).unwrap();
-    assert!(world.contains(runtara_wit::workflow::OPERATION), "{world}");
+    assert!(world.contains(runtara_wit::api::OPERATIONS), "{world}");
 
     let dir = tempfile::tempdir().unwrap();
     let text = refusal(compile_direct_workflow_with_abi(
@@ -375,7 +375,8 @@ fn control_sites_import_the_operation_scope_even_when_not_durable() {
         let result = compile(graph, WorkflowRole::Root).expect("compiles");
         let (world, logic) = world_and_logic(&result);
         assert!(
-            world.contains(&format!("import {};", runtara_wit::workflow::OPERATION)),
+            // The default (workflow API) ABI names operations explicitly.
+            world.contains(&format!("import {};", runtara_wit::api::OPERATIONS)),
             "durable={durable}: {world}"
         );
         assert!(
@@ -386,10 +387,7 @@ fn control_sites_import_the_operation_scope_even_when_not_durable() {
             contains(&logic, b"AGENT_OPERATION_SCOPE"),
             "durable={durable}"
         );
-        assert!(contains(
-            &logic,
-            runtara_wit::workflow::OPERATION.as_bytes()
-        ));
+        assert!(contains(&logic, runtara_wit::api::OPERATIONS.as_bytes()));
     }
 }
 
@@ -428,14 +426,10 @@ fn unscoped_workflows_carry_nothing_of_the_operation_scope() {
 fn the_emitted_result_offsets_match_the_wit_layout() {
     use wit_parser::{Int, Resolve, SizeAlign, Type, TypeDefKind};
     let mut resolve: Resolve = runtara_wit::resolve().unwrap();
-    let shape = runtara_wit::AgentShape {
-        suspendable: true,
-        ..Default::default()
-    };
     let package = resolve
         .push_str(
             "probe.wit",
-            &runtara_wit::agent_package("suspend-probe", shape),
+            &runtara_wit::agent_package("suspend-probe", Default::default()),
         )
         .unwrap();
     let mut sizes = SizeAlign::default();

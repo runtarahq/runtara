@@ -1,4 +1,4 @@
-use super::super::test_support::{Ticker, bounded, parent_wat, spec};
+use super::super::test_support::{Ticker, bounded, parent_wat, spec, with_api_component};
 use super::*;
 use crate::execution_host::{
     Entry, ExecutionError, InvocationLauncher, PreparedInvocation, StartRequest,
@@ -112,7 +112,11 @@ impl Fixture {
     }
 
     fn pre(&self, root_exit: &str) -> InstancePre<WorkflowState> {
-        let component = Component::new(self.executor.engine(), parent_wat(root_exit)).unwrap();
+        let component = Component::new(
+            self.executor.engine(),
+            with_api_component(&parent_wat(root_exit)),
+        )
+        .unwrap();
         self.executor.linker.instantiate_pre(&component).unwrap()
     }
 
@@ -204,7 +208,7 @@ fn suspending_parent(fx: &Fixture) -> InstancePre<WorkflowState> {
     (i32.store (i32.const 2068) (i32.const 3500))
     (i32.store (i32.const 2072) (i32.const 2))"#,
     );
-    let component = Component::new(fx.executor.engine(), wat).unwrap();
+    let component = Component::new(fx.executor.engine(), with_api_component(&wat)).unwrap();
     fx.executor.linker.instantiate_pre(&component).unwrap()
 }
 
@@ -286,7 +290,7 @@ async fn root_timeout_and_cancel_reap_cpu_and_pending_join_children() {
         let root_exit = if timeout {
             "(loop $forever (br $forever))"
         } else {
-            "(call $join (local.get $pending) (i32.const 512)) unreachable"
+            "(call $join (local.get $pending) (local.get $pending_len) (i32.const 512)) unreachable"
         };
         let run = fx.run(root_exit, config);
         bounded(fx.signals.ready.notified()).await;
@@ -400,7 +404,7 @@ async fn isolated_lifecycle_entry_uses_task_and_root_cancellation_with_separate_
         let fx = Fixture::new(true, false);
         let registry = IsolatedTasks::new(fx.executor.engine().clone(), 2, 1024).unwrap();
         let executor = fx.executor.clone();
-        let pre = fx.pre("(call $join (local.get $pending) (i32.const 512)) unreachable");
+        let pre = fx.pre("(call $join (local.get $pending) (local.get $pending_len) (i32.const 512)) unreachable");
         let cancel = Arc::new(AtomicBool::new(false));
         let mut config = spec();
         config.cancel = Some(cancel.clone());

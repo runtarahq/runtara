@@ -170,6 +170,7 @@ impl OAuthService {
     /// are captured.
     pub async fn handle_callback(
         &self,
+        tenant_id: &str,
         state: &str,
         code: &str,
         callback_params: &std::collections::HashMap<String, String>,
@@ -181,6 +182,11 @@ impl OAuthService {
             .await
             .map_err(|e| OAuthError::Internal(e.to_string()))?
             .ok_or(OAuthError::InvalidState)?;
+        // A state is redeemed only at the callback URL of the tenant it was
+        // issued for; it is consumed either way.
+        if state_row.tenant_id != tenant_id {
+            return Err(OAuthError::InvalidState);
+        }
 
         // Look up OAuthConfig
         let meta = find_connection_type(&state_row.integration_id)

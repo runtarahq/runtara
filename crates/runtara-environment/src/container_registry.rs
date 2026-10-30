@@ -26,7 +26,7 @@ pub struct ContainerInfo {
     pub instance_id: String,
     /// Tenant ID
     pub tenant_id: String,
-    /// Path to the executable binary
+    /// The workflow artifact the container runs, as `sha256:<digest>`.
     pub binary_path: String,
     /// When the container was started
     pub started_at: DateTime<Utc>,

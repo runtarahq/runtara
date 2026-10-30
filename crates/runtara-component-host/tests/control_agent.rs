@@ -1,8 +1,7 @@
 //! The real control agent in the dispatcher, against a fake control service:
 //! the reads map the WIT records to their JSON outputs, errors surface as
 //! `CONTROL_*` codes, a test invocation has the tenant but no calling run,
-//! and outside the dispatcher's control linker every control call is
-//! `denied`. Run `scripts/build-agent-components.sh` first.
+//! and a call from any other agent is `denied`. Run `scripts/build-agent-components.sh` first.
 
 mod common;
 

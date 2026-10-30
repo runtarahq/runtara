@@ -347,7 +347,7 @@ fn emit_register(
     body.instruction(&Instruction::LocalSet(DEADLINE_PRESENT));
     push_retptr_i64_load(body, PROGRESS_DEADLINE_VALUE_OFFSET);
     body.instruction(&Instruction::LocalSet(DEADLINE));
-    emit_park(body, indices);
+    emit_park(body, indices, DEADLINE_PRESENT, DEADLINE);
     body.instruction(&Instruction::End);
 
     // Settled: checkpoint the wait, then drop its row. The release returns
@@ -382,11 +382,16 @@ fn fail_if_retptr_error(body: &mut WasmFunction) {
 /// Exit `suspended([at(deadline)])` when a deadline is present (after the
 /// enclosing loop deadline clamped it), else `suspended([on-resume])`; the
 /// pending wait the host recorded is what wakes the run.
-fn emit_park(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
-    super::loop_deadline::clamp(body, DEADLINE, Some(DEADLINE_PRESENT));
-    body.instruction(&Instruction::LocalGet(DEADLINE_PRESENT));
+pub(super) fn emit_park(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    deadline_present: u32,
+    deadline: u32,
+) {
+    super::loop_deadline::clamp(body, deadline, Some(deadline_present));
+    body.instruction(&Instruction::LocalGet(deadline_present));
     body.instruction(&Instruction::If(BlockType::Empty));
-    emit_entry_suspend_at(body, indices, DEADLINE);
+    emit_entry_suspend_at(body, indices, deadline);
     body.instruction(&Instruction::Else);
     emit_entry_suspend_return(body, indices);
     body.instruction(&Instruction::End);

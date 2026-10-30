@@ -1,11 +1,15 @@
 //! Execute the actual emitted shared helper with deterministic canonical-event
 //! fixtures. Real Component Model handle semantics have a separate integration
 //! contract; this suite controls event ordering and verifies emitter decisions.
+use super::super::api_shims::{API_SCRATCH_BYTES, Step, api_result_offset};
 use super::super::*;
 use super::*;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use wasm_encoder::{ExportKind, ExportSection, Module, RawSection};
 use wasmtime::{Caller, ExternType, Linker, Val};
+
+/// The runtime shims' result area: every `runtara:api` result fits it.
+const API_SCRATCH: usize = API_SCRATCH_BYTES as usize;
 
 #[derive(Default)]
 struct Events {
@@ -136,6 +140,36 @@ fn instantiate_events(
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, emitted_helper(context, scope_alarm)).unwrap();
     let mut linker = Linker::<Events>::new(&engine);
+    // The runtime shims answer from the `runtara:api` results they read.
+    let mut resolve = runtara_wit::resolve().unwrap();
+    resolve
+        .push_str("runtara-api.wit", runtara_wit::api::WIT)
+        .unwrap();
+    let offset = |interface, name, path: &[Step]| {
+        api_result_offset(&resolve, interface, name, path) as usize
+    };
+    let polled = offset("signals", "poll-lifecycle", &[Step::Ok]);
+    let signal_type = offset(
+        "signals",
+        "poll-lifecycle",
+        &[
+            Step::Ok,
+            Step::Some,
+            Step::Field("notice"),
+            Step::Field("signal-type"),
+        ],
+    );
+    let command_id = offset(
+        "signals",
+        "poll-lifecycle",
+        &[
+            Step::Ok,
+            Step::Some,
+            Step::Field("notice"),
+            Step::Field("command-id"),
+        ],
+    );
+    let applied = offset("signals", "ack-lifecycle", &[Step::Ok]);
     for import in module.imports() {
         let ExternType::Func(ty) = import.ty() else {
             panic!("nonfunction import");
@@ -189,15 +223,19 @@ fn instantiate_events(
                                 results[0] = Val::I32(0);
                             }
                         }
-                        "heartbeat" | "poll-signal" => {
+                        "heartbeat" | "poll-lifecycle" => {
                             let mem = memory(&mut caller);
-                            mem.write(&mut caller, arg(0) as usize, &[0; 48])?;
-                            if name == "poll-signal" && caller.data().root_cancel {
+                            mem.write(&mut caller, arg(0) as usize, &[0; API_SCRATCH])?;
+                            if name == "poll-lifecycle" && caller.data().root_cancel {
                                 mem.write(&mut caller, 400, b"cancel")?;
                                 mem.write(&mut caller, 416, b"cancel-test")?;
-                                for (offset, value) in
-                                    [(4, 1i32), (8, 400), (12, 6), (16, 416), (20, 11)]
-                                {
+                                for (offset, value) in [
+                                    (polled, 1i32),
+                                    (signal_type, 400),
+                                    (signal_type + 4, 6),
+                                    (command_id, 416),
+                                    (command_id + 4, 11),
+                                ] {
                                     mem.write(
                                         &mut caller,
                                         arg(0) as usize + offset,
@@ -206,9 +244,10 @@ fn instantiate_events(
                                 }
                             }
                         }
-                        "handle-checkpoint-signal" => {
+                        "ack-lifecycle" => {
                             let mem = memory(&mut caller);
-                            mem.write(&mut caller, arg(4) as usize, &[0, 0, 0, 0, 1, 0, 0, 0])?;
+                            mem.write(&mut caller, arg(4) as usize, &[0; API_SCRATCH])?;
+                            mem.write(&mut caller, arg(4) as usize + applied, &[1])?;
                         }
                         "[async-lower]sleep" => {
                             assert!(caller.data_mut().live.insert(3));

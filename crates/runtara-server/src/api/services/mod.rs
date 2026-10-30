@@ -24,6 +24,7 @@ pub mod trusted;
 pub mod connection_resolver;
 pub mod control;
 pub mod database;
+pub mod database_guard;
 
 pub mod outbound_http;
 

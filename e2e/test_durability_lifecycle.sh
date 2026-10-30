@@ -216,7 +216,9 @@ echo "  lease owner=${L_OWNER} epoch=${L_EPOCH} active=${L_ACTIVE} released_by=$
 [ "${L_EPOCH}" = "1" ] || { print_error "the first run must hold epoch 1, got '${LEASE}'"; exit 1; }
 [ "${L_ACTIVE}" = "false" ] || { print_error "a parked run must not keep its lease active: '${LEASE}'"; exit 1; }
 [ "${L_RELEASED}" = "park" ] || { print_error "the lease must record that its execution parked: '${LEASE}'"; exit 1; }
-[[ "${L_OWNER}" == wasm_* ]] || { print_error "the lease owner must be the runner registration, got '${L_OWNER}'"; exit 1; }
+# A runner registration: the runner's handle id (the embedded runner's
+# `wasm_<uuid>`, another runner's own prefix).
+[[ "${L_OWNER}" =~ ^[a-z]+_[0-9a-f-]{32,36}$ ]] || { print_error "the lease owner must be the runner registration, got '${L_OWNER}'"; exit 1; }
 PHASE=$(field "${INST}" executionPhase)
 REASON=$(field "${INST}" suspensionReason)
 echo "  executionPhase=${PHASE} suspensionReason=${REASON}"

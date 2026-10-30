@@ -26,8 +26,8 @@
     (export "outcome" (type $outcome (eq $outcome-def)))
     (export "invoke" (func async (param "capability-id" string) (param "input" (list u8))
       (result (result $outcome (error $error)))))))
-  (import "runtara:host/timers@1.0.0" (instance $timers
-    (export "sleep" (func async (param "ms" u64)))))
+  (import "wasi:clocks/monotonic-clock@0.3.0" (instance $timers
+    (export "wait-for" (func async (param "how-long" u64)))))
   (import "ready-barrier" (func $barrier async))
   (import "sibling" (func $sibling async (result u32)))
   (core module $memory
@@ -39,16 +39,16 @@
       (local.get $p)))
   (core instance $memory (instantiate $memory))
   (core func $invoke (canon lower (func $http "invoke") async
-    (memory $memory "memory") (realloc (func $memory "realloc"))))
+    (memory (core memory $memory "memory")) (realloc (core func $memory "realloc"))))
   (core func $barrier (canon lower (func $barrier)))
-  (core func $sibling (canon lower (func $sibling) async (memory $memory "memory")))
-  (core func $sleep (canon lower (func $timers "sleep") async))
-  (core func $poll (canon waitable-set.poll (memory $memory "memory")))
+  (core func $sibling (canon lower (func $sibling) async (memory (core memory $memory "memory"))))
+  (core func $sleep (canon lower (func $timers "wait-for") async))
+  (core func $poll (canon waitable-set.poll (memory (core memory $memory "memory"))))
   (core func $cancel (canon subtask.cancel))
   (core func $drop (canon subtask.drop))
   (core func $new (canon waitable-set.new))
   (core func $join (canon waitable.join))
-  (core func $wait (canon waitable-set.wait (memory $memory "memory")))
+  (core func $wait (canon waitable-set.wait (memory (core memory $memory "memory"))))
   (core func $drop-set (canon waitable-set.drop))
   (core module $code
     (import "m" "memory" (memory 2))
@@ -183,4 +183,4 @@
   (func (export "ready-mask") (result u32) (canon lift (core func $code "ready-mask")))
   (func (export "cancel-resolution") (result u32) (canon lift (core func $code "cancel-resolution")))
   (func (export "run") async (result (list u8))
-    (canon lift (core func $code "run") (memory $memory "memory") (realloc (func $memory "realloc")))))
+    (canon lift (core func $code "run") (memory (core memory $memory "memory")) (realloc (core func $memory "realloc")))))

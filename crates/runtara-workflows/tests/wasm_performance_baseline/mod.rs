@@ -358,7 +358,7 @@ fn workflow_performance_baseline() {
     let _ = runtime.block_on(ticker);
     println!(
         "WORKFLOW_BASELINE_JSON={}",
-        json!({"format_version":1,"backend":"legacy-production-default","profile":"release","wasmtime":"46.0.1",
+        json!({"format_version":1,"backend":"legacy-production-default","profile":"release","wasmtime":"50.0.0",
         "os":std::env::consts::OS,"arch":std::env::consts::ARCH,"workers":4,"disk_cache":false,"engine_and_executor_setup_us":engine_setup,
         "runtime":"in-memory CapturingRuntimeHost; no database/network/server queue","dependency_hashes":dependency_hashes,"warmup_runs":5,"reports":reports})
     );

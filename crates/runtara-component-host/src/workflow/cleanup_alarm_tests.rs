@@ -18,6 +18,20 @@ impl Drop for Active {
     }
 }
 
+/// Arm the store's cleanup alarm the way `POST /v1/run/alarm` does: the
+/// call never succeeds, expiry aborts the execution and dropping it disarms.
+fn define_abort_after<T: 'static>(
+    linker: &mut wasmtime::component::Linker<T>,
+    alarm: fn(&T) -> &crate::cleanup_alarm::CleanupAlarmState,
+) -> Result<()> {
+    linker
+        .root()
+        .func_wrap_concurrent("abort-after", move |accessor, (ms,): (u64,)| {
+            accessor.with(|mut access| alarm(access.get()).arm(ms))
+        })?;
+    Ok(())
+}
+
 async fn run(cleanup: Cleanup) -> Result<()> {
     let engine = crate::engine::build_engine(&crate::engine::EngineConfig {
         cache_dir: None,
@@ -68,6 +82,7 @@ async fn run(cleanup: Cleanup) -> Result<()> {
             })
         }
     })?;
+    define_abort_after(&mut executor.linker, |state| &state.cleanup_alarm)?;
     executor.linker.root().func_wrap("trace", {
         let trace = trace.clone();
         move |ctx, (event,): (u32,)| {
@@ -84,7 +99,7 @@ async fn run(cleanup: Cleanup) -> Result<()> {
         .split_once("  (component $workflow")
         .unwrap();
     let agent = agent
-        .replace("(export \"sleep\" (func async (param \"ms\" u64))))", "(export \"sleep\" (func async (param \"ms\" u64)))\n(export \"abort-after\" (func async (param \"ms\" u64))))")
+        .replace("(export \"wait-for\" (func async (param \"how-long\" u64)))))", "(export \"wait-for\" (func async (param \"how-long\" u64)))))\n  (import \"abort-after\" (func $abort-after async (param \"ms\" u64)))")
         .replace("{{CLEANUP}}", if matches!(cleanup, Cleanup::CpuLoop) { "(loop $spin (br $spin))" } else { "" })
         .replace("{{RESOLVE}}", "(call $cancelled)");
     let agent = if matches!(cleanup, Cleanup::CpuBody) {
@@ -171,14 +186,13 @@ async fn latched_cleanup_abort_rejects_a_late_successful_return() -> Result<()> 
     run(Cleanup::ReturnAfterAlarmFires).await
 }
 
-/// Arms the host cleanup alarm, then spins; exported both as the workflow
+/// Arms the store's cleanup alarm, then spins; exported both as the workflow
 /// entry and as a bare `probe` for the agent dispatcher.
 fn alarm_loop() -> String {
     format!(
         r#"(component
-  (import "runtara:host/timers@1.0.0" (instance $timers
-    (export "abort-after" (func async (param "ms" u64)))))
-  (core func $alarm (canon lower (func $timers "abort-after") async))
+  (import "abort-after" (func $abort-after async (param "ms" u64)))
+  (core func $alarm (canon lower (func $abort-after) async))
   (core module $m
     (import "h" "alarm" (func $alarm (param i64) (result i32)))
     (memory (export "memory") 1)
@@ -203,7 +217,8 @@ async fn production_alarm_also_bounds_workflow_entry_execution() -> Result<()> {
         enable_epoch_interruption: true,
     })?;
     let _ticker = test_support::Ticker::new(engine.clone());
-    let executor = WorkflowExecutor::new(engine.clone())?;
+    let mut executor = WorkflowExecutor::new(engine.clone())?;
+    define_abort_after(&mut executor.linker, |state| &state.cleanup_alarm)?;
     let prepared = executor
         .prepare_precompiled(Component::new(&engine, alarm_loop())?)
         .await?;
@@ -231,7 +246,8 @@ async fn production_alarm_also_bounds_dispatcher_execution() -> Result<()> {
         enable_epoch_interruption: true,
     })?;
     let _ticker = test_support::Ticker::new(engine.clone());
-    let linker = crate::build_linker(&engine)?;
+    let mut linker = crate::build_linker(&engine)?;
+    define_abort_after(&mut linker, |state: &crate::HostState| &state.cleanup_alarm)?;
     let mut store = Store::new(
         &engine,
         crate::HostState::new(Arc::new(crate::CallContext::placeholder_for_metadata())),

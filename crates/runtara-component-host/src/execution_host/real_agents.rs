@@ -1,4 +1,4 @@
-//! Exercise the execution ABI with actual built HTTP and utils Agent components.
+//! Exercise child runs with actual built HTTP and utils Agent components.
 use super::*;
 use crate::{
     CapabilityInvocation, WorkflowExecutor, WorkflowLimits, WorkflowRunSpec, WorkflowState,
@@ -62,7 +62,7 @@ impl InvocationLauncher for RealLauncher {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn guest_owned_control_cancels_real_http_agent_after_random_sibling_completes() {
+async fn a_parent_cancels_a_real_http_agent_after_its_random_sibling_completes() {
     let engine = crate::build_engine(&crate::EngineConfig {
         cache_dir: None,
         ..Default::default()
@@ -115,80 +115,29 @@ async fn guest_owned_control_cancels_real_http_agent_after_random_sibling_comple
         // No response headers: the workflow must cancel its own waiting child.
         socket
     });
-    let mut linker = Linker::<State>::new(&engine);
-    add_execution_to_linker(&mut linker).unwrap();
-    linker
-        .root()
-        .func_wrap_concurrent("wait-started", move |_accessor, (): ()| {
-            let started = started.clone();
-            Box::pin(async move {
-                started.notified().await;
-                Ok(())
-            })
-        })
-        .unwrap();
-    let encoded = input
-        .iter()
-        .map(|byte| format!("\\{byte:02x}"))
-        .collect::<String>();
-    let wat = include_str!("parent.wat")
-        .replace("{{INTERFACE}}", INTERFACE)
-        .replace("{{EARLY_EXIT}}", "")
-        .replace(
-            "(data (i32.const 1024) \"child\")",
-            "(data (i32.const 1024) \"http\") (data (i32.const 1112) \"utils\")",
-        )
-        .replace("\"pending\"", "\"http-request\"")
-        .replace("\"echo\"", "\"random-double\"")
-        .replace(
-            "(i32.const 1024) (i32.const 5) (i32.const 0) (i32.const 1040) (i32.const 7)",
-            "(i32.const 1024) (i32.const 4) (i32.const 0) (i32.const 1040) (i32.const 12)",
-        )
-        .replace(
-            "(i32.const 1024) (i32.const 5) (i32.const 0) (i32.const 1056) (i32.const 4)",
-            "(i32.const 1112) (i32.const 5) (i32.const 0) (i32.const 1056) (i32.const 13)",
-        )
-        .replace(
-            "(i32.const 0) (i32.const 0) (i32.const 1072)",
-            &format!(
-                "(i32.const 4096) (i32.const {}) (i32.const 1072)",
-                input.len()
-            ),
-        )
-        .replace(
-            "(data (i32.const 1096) \"\\09\")",
-            &format!("(data (i32.const 1096) \"{{}}\") (data (i32.const 4096) \"{encoded}\")"),
-        )
-        .replace(
-            "(i32.const 1096) (i32.const 1)",
-            "(i32.const 1096) (i32.const 2)",
-        )
-        .replace(
-            "(i32.ne (i32.load8_u (i32.load (i32.const 272))) (i32.const 9))",
-            "(i32.eqz (i32.load (i32.const 276)))",
-        );
-    let component = Component::new(&engine, wat).unwrap();
-    let mut store = Store::new(
-        &engine,
-        State {
-            table: ResourceTable::new(),
-            context: Some(context.clone()),
+    let start = |binding: &str, capability: &str, input: Vec<u8>| StartRequest {
+        binding: binding.into(),
+        entry: Entry::Capability(capability.into()),
+        input,
+        context: InvocationContext {
+            path: "parent/step".into(),
+            attempt: 1,
         },
-    );
-    store.set_epoch_deadline(1 << 40);
-    let instance = linker
-        .instantiate_async(&mut store, &component)
+    };
+    let http = context
+        .start_task(start("http", "http-request", input))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
         .await
         .unwrap();
-    let run = instance
-        .get_typed_func::<(), (u32,)>(&mut store, "run")
+    let random = context
+        .start_task(start("utils", "random-double", b"{}".to_vec()))
         .unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(5), run.call_async(&mut store, ()))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(result, (42,), "parent recovery did not execute");
-    drop(store);
+    assert!(matches!(random.join().await, Ok(TaskOutcome::Completed(_))));
+    // The parent cancels its own waiting child once the sibling completes.
+    assert_eq!(http.request_cancel(), Ok(CancelStatus::Requested));
+    assert_eq!(http.join().await, Ok(TaskOutcome::Cancelled));
+    drop((http, random));
     context.shutdown().await.unwrap();
     drop(server.await.unwrap());
     let results = results.lock().unwrap();

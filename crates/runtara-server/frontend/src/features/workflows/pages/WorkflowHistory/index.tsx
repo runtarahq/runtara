@@ -42,6 +42,7 @@ import {
   type ExecutionStats,
 } from '@/features/workflows/components/ExecutionTimeline';
 import { RunOverviewCard } from './RunOverviewCard';
+import { GuestOutputCard } from './GuestOutputCard';
 import { canResume } from '@/features/workflows/utils/suspension';
 import { ChildRunsCard } from '@/features/invocation-history/components/RunLinks';
 
@@ -330,6 +331,8 @@ function WorkflowHistoryContent() {
 
         {/* Runs this run started through control:start */}
         {data.id && <ChildRunsCard instanceId={data.id} />}
+
+        <GuestOutputCard output={data.guestOutput} />
 
         <PayloadExplorer
           ariaLabel="Run data"

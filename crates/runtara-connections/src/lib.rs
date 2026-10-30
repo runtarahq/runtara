@@ -23,7 +23,7 @@ pub use auth::token_cache::AuthResolutionError;
 pub use config::{ConnectionsConfig, ConnectionsState};
 pub use crypto::{
     CipherError, CredentialCipher, ENCRYPTION_KEY_ENV, ENVELOPE_ALG, ENVELOPE_VERSION,
-    cipher_from_env,
+    TenantKeyedCipher, cipher_from_env,
 };
 pub use error::ConnectionsError;
 pub use events::{ConnectionEventSink, ConnectionEvents, ConnectionLifecycleEvent};

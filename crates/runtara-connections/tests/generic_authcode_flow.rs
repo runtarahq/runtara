@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use runtara_connections::crypto::noop::NoOpCipher;
-use runtara_connections::service::oauth::OAuthService;
+use runtara_connections::service::oauth::{OAuthError, OAuthService};
 use serde_json::json;
 use sqlx::PgPool;
 use sqlx::Row;
@@ -181,11 +181,52 @@ async fn generic_authcode_full_flow_from_params() {
         auth_url.contains("code_challenge_method=S256"),
         "PKCE must default ON for the generic type: {auth_url}"
     );
+    assert!(
+        auth_url.contains("%2Fapi%2Foauth%2Ftenant_gen%2Fcallback"),
+        "the redirect URI names the connection's tenant"
+    );
+
+    // A state redeemed at another tenant's callback URL is refused, and spent:
+    // the token endpoint is never called for it.
+    let foreign = extract_query_param(&auth_url, "state").expect("state in authorize url");
+    let refused = service
+        .handle_callback(
+            "tenant_other",
+            &foreign,
+            "authcode-123",
+            &std::collections::HashMap::new(),
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(OAuthError::InvalidState)),
+        "a state redeemed under another tenant must be refused"
+    );
+    let replayed = service
+        .handle_callback(
+            "tenant_gen",
+            &foreign,
+            "authcode-123",
+            &std::collections::HashMap::new(),
+        )
+        .await;
+    assert!(
+        matches!(replayed, Err(OAuthError::InvalidState)),
+        "the refused state is consumed"
+    );
+    let auth_url = service
+        .generate_authorization_url("conn_gen", "tenant_gen")
+        .await
+        .expect("authorize url");
 
     // 2. Callback: exchange the code at the param token_url (Basic auth), store tokens.
     let state = extract_query_param(&auth_url, "state").expect("state in authorize url");
     let connection_id = service
-        .handle_callback(&state, "authcode-123", &std::collections::HashMap::new())
+        .handle_callback(
+            "tenant_gen",
+            &state,
+            "authcode-123",
+            &std::collections::HashMap::new(),
+        )
         .await
         .expect("callback exchange");
     assert_eq!(connection_id, "conn_gen");
@@ -228,6 +269,7 @@ async fn generic_authcode_full_flow_from_params() {
     let mut headers = std::collections::HashMap::new();
     let resolved = runtara_connections::auth::provider_auth::resolve_connection_auth(
         &client,
+        "tenant-1",
         "conn_gen",
         "http_oauth2_authorization_code",
         &expired,
@@ -334,6 +376,7 @@ async fn rule_e_endpoint_edit_clears_tokens_and_evicts_cache() {
     let mut headers = std::collections::HashMap::new();
     runtara_connections::auth::provider_auth::resolve_connection_auth(
         &client,
+        "tenant-1",
         "conn_rule_e",
         "http_oauth2_authorization_code",
         &params,
@@ -417,6 +460,7 @@ async fn rule_e_endpoint_edit_clears_tokens_and_evicts_cache() {
     let mut headers2 = std::collections::HashMap::new();
     runtara_connections::auth::provider_auth::resolve_connection_auth(
         &client,
+        "tenant-1",
         "conn_rule_e",
         "http_oauth2_authorization_code",
         &params,

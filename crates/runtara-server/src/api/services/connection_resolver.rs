@@ -7,10 +7,15 @@ use runtara_connections::{ConnectionsError, ConnectionsFacade};
 pub struct NativeConnectionResolver(pub Arc<ConnectionsFacade>);
 
 // Errors crossing into a guest never contain provider bodies, parameters, or
-// database diagnostics. Detailed failures stay behind the native boundary.
-fn guest_error(error: ConnectionsError) -> String {
+// database diagnostics. Detailed failures stay behind the native boundary; a
+// missing connection is named by the id the guest itself asked for.
+fn guest_error(connection_id: &str, error: ConnectionsError) -> String {
     let (code, message) = match error {
-        ConnectionsError::NotFound(_) => ("CONNECTION_NOT_FOUND", "Connection not found"),
+        ConnectionsError::NotFound(_) => {
+            let message = format!("Connection '{connection_id}' not found");
+            return serde_json::json!({"code": "CONNECTION_NOT_FOUND", "message": message})
+                .to_string();
+        }
         ConnectionsError::Validation(_) => (
             "INVALID_RESOURCE_REQUEST",
             "Invalid connection resource request",
@@ -31,8 +36,10 @@ impl ConnectionResolverHost for NativeConnectionResolver {
             .0
             .describe_connection(&connection_id, tenant)
             .await
-            .map_err(guest_error)?
-            .ok_or_else(|| guest_error(ConnectionsError::NotFound(String::new())))?;
+            .map_err(|error| guest_error(&connection_id, error))?
+            .ok_or_else(|| {
+                guest_error(&connection_id, ConnectionsError::NotFound(String::new()))
+            })?;
         if descriptor.integration_id == "postgres" {
             let config = runtara_object_store::StoreConfig::builder("")
                 .soft_delete(crate::config::object_model_soft_delete())
@@ -51,13 +58,14 @@ impl ConnectionResolverHost for NativeConnectionResolver {
         connection_id: String,
         request: Vec<u8>,
     ) -> Result<Vec<u8>, String> {
-        let request = serde_json::from_slice(&request)
-            .map_err(|_| guest_error(ConnectionsError::Validation(String::new())))?;
+        let request = serde_json::from_slice(&request).map_err(|_| {
+            guest_error(&connection_id, ConnectionsError::Validation(String::new()))
+        })?;
         let page = self
             .0
             .resolve_connection_resource(&connection_id, tenant, &request)
             .await
-            .map_err(guest_error)?;
+            .map_err(|error| guest_error(&connection_id, error))?;
         serde_json::to_vec(&page).map_err(|_| "Cannot encode connection resource".into())
     }
 }
@@ -71,11 +79,19 @@ mod tests {
             ConnectionsError::Validation("synthetic-private-detail".into()),
             ConnectionsError::NotFound("synthetic-private-detail".into()),
         ] {
-            let message = guest_error(error);
+            let message = guest_error("conn-1", error);
             assert!(!message.contains("synthetic-private-detail"));
             assert!(
                 serde_json::from_str::<serde_json::Value>(&message).unwrap()["code"].is_string()
             );
         }
+    }
+
+    #[test]
+    fn a_missing_connection_is_named_by_the_requested_id() {
+        let message = guest_error("conn-1", ConnectionsError::NotFound(String::new()));
+        let body: serde_json::Value = serde_json::from_str(&message).unwrap();
+        assert_eq!(body["code"], "CONNECTION_NOT_FOUND");
+        assert_eq!(body["message"], "Connection 'conn-1' not found");
     }
 }

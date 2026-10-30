@@ -42,6 +42,23 @@ impl PostgresPersistence {
         }
     }
 
+    /// Persistence for one tenant: every connection names the tenant
+    /// (`runtara.tenant_id`), so row-level security confines its reads and
+    /// writes to that tenant's rows, and a read of another tenant's fails
+    /// closed. An unscoped [`PostgresPersistence::new`] is the system path.
+    pub async fn for_tenant(
+        options: sqlx::postgres::PgConnectOptions,
+        tenant: &str,
+        max_connections: u32,
+    ) -> Result<Self, sqlx::Error> {
+        let options = options.options([("runtara.tenant_id", tenant)]);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(max_connections)
+            .connect_with(options)
+            .await?;
+        Ok(Self::new(pool))
+    }
+
     /// Report terminal-state metrics to `sink`.
     ///
     /// Core assembles the facts; the host decides what they mean and where
@@ -927,8 +944,24 @@ impl Persistence for PostgresPersistence {
         command_id: &str,
         signal_type: CoreSignalType,
     ) -> Result<runtara_core::lifecycle::Decision, CoreError> {
+        self.apply_owned_lifecycle_command(instance_id, command_id, signal_type, None)
+            .await
+    }
+
+    async fn apply_owned_lifecycle_command(
+        &self,
+        instance_id: &str,
+        command_id: &str,
+        signal_type: CoreSignalType,
+        owner: runtara_core::persistence::ExecutionWriter<'_>,
+    ) -> Result<runtara_core::lifecycle::Decision, CoreError> {
         use runtara_core::lifecycle::{self, Decision, Receipt};
         let mut tx = self.pool.begin().await.db()?;
+        // An owned acknowledgement applies only while its execution holds
+        // the run (an unowned one, from the control plane, is not fenced).
+        if owner.is_some() {
+            crate::root_owner::admit_row_writer(&mut tx, instance_id, owner).await?;
+        }
         let status = crate::lifecycle::lock_instance(&mut tx, instance_id).await?;
         let ids = [instance_id.to_owned()];
         let commands = crate::lifecycle::lock_commands(&mut tx, &ids).await?;
@@ -1271,7 +1304,16 @@ impl Persistence for PostgresPersistence {
         limit: i64,
         retry_at: DateTime<Utc>,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
-        Self::op_claim_sleeping_instances_due(&self.pool, limit, retry_at).await
+        Self::op_claim_sleeping_instances_due(&self.pool, limit, retry_at, None).await
+    }
+
+    async fn claim_sleeping_instances_due_of(
+        &self,
+        limit: i64,
+        retry_at: DateTime<Utc>,
+        tenants: Option<&[String]>,
+    ) -> Result<Vec<InstanceRecord>, CoreError> {
+        Self::op_claim_sleeping_instances_due(&self.pool, limit, retry_at, tenants).await
     }
 
     async fn list_events(
@@ -2678,6 +2720,109 @@ mod tests {
 
         assert_eq!(checkpoints.len(), 1);
         assert_eq!(checkpoints[0].checkpoint_id, "cp-1");
+
+        cleanup_misc_instance(&pool, &instance_id).await;
+    }
+
+    /// A tenant-scoped store sees only its tenant: another tenant's instance
+    /// and checkpoints read as absent, and a write into them is refused.
+    #[tokio::test]
+    async fn a_tenant_scoped_store_cannot_cross_tenants() {
+        let pool = test_pool().await;
+        let system = PostgresPersistence::new(pool.clone());
+        let (own, other) = (misc_instance_id("rls-own"), misc_instance_id("rls-other"));
+        let (own_tenant, other_tenant) = (misc_tenant_id("rls-own"), misc_tenant_id("rls-other"));
+        system.register_instance(&own, &own_tenant).await.unwrap();
+        system
+            .register_instance(&other, &other_tenant)
+            .await
+            .unwrap();
+        system.save_checkpoint(&own, "cp", b"own").await.unwrap();
+        system
+            .save_checkpoint(&other, "cp", b"other")
+            .await
+            .unwrap();
+
+        // Row-level security does not bind a superuser or a BYPASSRLS role,
+        // which the test database's own role may be: the scoped store acts as
+        // a plain role made for this test, switched to at connection start.
+        let role = format!("rls_probe_{}", Uuid::new_v4().simple());
+        for statement in [
+            format!("CREATE ROLE {role} NOLOGIN NOSUPERUSER NOBYPASSRLS"),
+            format!("GRANT USAGE ON SCHEMA public TO {role}"),
+            format!(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {role}"
+            ),
+            format!("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {role}"),
+        ] {
+            sqlx::query(&statement).execute(&pool).await.unwrap();
+        }
+        let url = std::env::var("TEST_RUNTARA_DATABASE_URL").unwrap();
+        let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
+        let scoped = PostgresPersistence::for_tenant(
+            options.options([("role", role.as_str())]),
+            &own_tenant,
+            2,
+        )
+        .await
+        .unwrap();
+        assert!(scoped.get_instance(&own).await.unwrap().is_some());
+        assert!(scoped.load_checkpoint(&own, "cp").await.unwrap().is_some());
+        assert!(
+            scoped.get_instance(&other).await.unwrap().is_none(),
+            "fails closed"
+        );
+        assert!(
+            scoped
+                .load_checkpoint(&other, "cp")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            scoped
+                .insert_signal(&other, CoreSignalType::Pause, b"")
+                .await
+                .is_err(),
+            "a write into another tenant is refused"
+        );
+        // The system path still sees both.
+        assert!(system.get_instance(&other).await.unwrap().is_some());
+
+        scoped.pool.close().await;
+        for statement in [format!("DROP OWNED BY {role}"), format!("DROP ROLE {role}")] {
+            sqlx::query(&statement).execute(&pool).await.unwrap();
+        }
+        cleanup_misc_instance(&pool, &own).await;
+        cleanup_misc_instance(&pool, &other).await;
+    }
+
+    /// Instance-scoped rows record their instance's tenant without the write
+    /// path naming it (migration 053's fill trigger).
+    #[tokio::test]
+    async fn instance_scoped_rows_take_their_instances_tenant() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+        let instance_id = misc_instance_id("row-tenant");
+        let tenant = misc_tenant_id("row-tenant");
+        p.register_instance(&instance_id, &tenant).await.unwrap();
+        p.save_checkpoint(&instance_id, "cp-1", b"state")
+            .await
+            .unwrap();
+        p.insert_signal(&instance_id, CoreSignalType::Pause, b"")
+            .await
+            .unwrap();
+
+        for table in ["checkpoints", "pending_signals"] {
+            let recorded: Option<String> = sqlx::query_scalar(&format!(
+                "SELECT tenant_id FROM {table} WHERE instance_id = $1 LIMIT 1"
+            ))
+            .bind(&instance_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(recorded.as_deref(), Some(tenant.as_str()), "{table}");
+        }
 
         cleanup_misc_instance(&pool, &instance_id).await;
     }

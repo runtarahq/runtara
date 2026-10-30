@@ -1,6 +1,7 @@
 //! Execute emitted wait error handling with canonical ABI runtime responses.
 //! These imports return Err in linear memory, unlike the native close import
 //! which traps itself. This covers the composed SDK runtime boundary.
+use super::api_shims::{API_SCRATCH_BYTES, Step, api_result_offset};
 use super::*;
 use crate::direct_wasm::component::WorkflowRole;
 use wasmtime::{ExternType, Linker, Val};
@@ -41,6 +42,9 @@ fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
         )
         .unwrap();
         let bytes = emit_direct_core_module(&resolve, world, &config).unwrap();
+        // The runtime shims answer from the `runtara:api` results they read:
+        // `inputs.close` returns the `input-read` the old `close-input` did.
+        let closed_read = api_result_offset(&resolve, "inputs", "close", &[Step::Ok]) as usize;
         let engine = wasmtime::Engine::default();
         let module = wasmtime::Module::new(&engine, bytes).unwrap();
         let memory_name = module
@@ -80,11 +84,15 @@ fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
                                 .unwrap();
                             let retptr = args.last().and_then(Val::i32).unwrap_or(0) as usize;
                             assert!(results.is_empty(), "unexpected direct result from {name}");
-                            let mut response = [0u8; 48];
+                            let mut response = vec![0u8; 48];
                             match name.as_str() {
-                                "init-manifest" | "build-source" | "instance-id"
-                                | "wait-signal-id" | "wait-timeout-ms" | "wait-event"
-                                | "register-input" | "custom-event" => {}
+                                // `register` is `inputs.register`, `append`
+                                // `events.append`.
+                                "init-manifest" | "build-source" | "wait-signal-id"
+                                | "wait-timeout-ms" | "wait-event" | "register" | "append" => {}
+                                // `run.info` (the instance id): its record is larger
+                                // than the others; zero the shim's whole result area.
+                                "info" => response = vec![0; API_SCRATCH_BYTES as usize],
                                 "wait-poll-interval-ms-scoped" => {
                                     let address = memory.data_size(&caller) - 128;
                                     memory.write(&mut caller, address, ORIGINAL_ERROR)?;
@@ -99,11 +107,11 @@ fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
                                         &(ORIGINAL_ERROR.len() as u32).to_le_bytes(),
                                     );
                                 }
-                                "close-input" => {
+                                "close" => {
                                     caller.data_mut().closed += 1;
                                     response[0] = u8::from(close_fails);
-                                    // A successful closure returns InputState::Closed.
-                                    response[4] = 2;
+                                    // A successful closure returns InputRead::Closed.
+                                    response[closed_read] = 2;
                                 }
                                 "invoke-error-fields" => {
                                     let address = args[0].i32().unwrap() as usize;

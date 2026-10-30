@@ -19,7 +19,7 @@ use runtara_workflows::direct_wasm::{
     DIRECT_SHARED_COMPONENT_REQUIREMENTS, DirectArtifactMetadata, DirectCompilationInput,
     DirectCompileError, WorkflowRole, analyze_direct_wasm_support, compile_direct_workflow,
     compile_direct_workflow_composed, compile_direct_workflow_composed_configured,
-    compose_direct_workflow, emit_direct_component_artifacts,
+    compose_direct_workflow,
 };
 use runtara_workflows::{
     CompilationInput, DirectWorkflowCompileOptions, ExecutionGraph, WorkflowCompilerMode,
@@ -582,9 +582,7 @@ fn shared_components_dir() -> PathBuf {
 /// a compile failure of whichever workflow first uses it.
 #[test]
 fn bundled_agents_satisfy_import_allowlist() {
-    use runtara_workflows::direct_wasm::{
-        AgentImportGrants, AgentImportKind, check_agent_component_imports,
-    };
+    use runtara_workflows::direct_wasm::{AgentImportKind, check_agent_component_imports};
     let dir = shared_components_dir();
     let mut checked = Vec::new();
     for entry in fs::read_dir(&dir).expect("read staged component bundle") {
@@ -599,19 +597,13 @@ fn bundled_agents_satisfy_import_allowlist() {
             continue;
         };
         let wasm = fs::read(&path).unwrap_or_else(|error| panic!("read {path:?}: {error}"));
-        let meta: serde_json::Value = serde_json::from_slice(
+        // Every bundled agent ships a parseable sidecar.
+        let _: serde_json::Value = serde_json::from_slice(
             &fs::read(path.with_extension("meta.json"))
                 .unwrap_or_else(|error| panic!("read the sidecar of {path:?}: {error}")),
         )
         .expect("bundled sidecar parses");
-        let declares = |flag: &str| {
-            meta["capabilities"]
-                .as_array()
-                .is_some_and(|capabilities| capabilities.iter().any(|c| c[flag] == true))
-        };
-        let grants =
-            AgentImportGrants::for_agent(agent, declares("suspends"), declares("trusted"), true);
-        check_agent_component_imports(agent, &wasm, AgentImportKind::Agent, grants).unwrap_or_else(
+        check_agent_component_imports(agent, &wasm, AgentImportKind::Agent).unwrap_or_else(
             |error| panic!("bundled agent `{agent}` breaks the allowlist: {error}"),
         );
         checked.push(agent.to_string());
@@ -654,6 +646,9 @@ impl runtara_component_host::ConnectionResolverHost for FixtureConnectionResolve
             .push(connection_id.clone());
         if connection_id == "om-conn" {
             return Ok(sql_fixture::descriptor(&connection_id));
+        }
+        if connection_id == "missing-conn" {
+            return Err("Connection missing-conn was not found".into());
         }
         let (integration_id, resources) = if connection_id == "conn-bedrock" {
             (
@@ -1829,20 +1824,18 @@ fn top_level_component_imports(bytes: &[u8]) -> Vec<String> {
     imports
 }
 
-/// Spike B of the agent/workflow unification: wac-graph must compose a
-/// workflow whose directly-declared `runtara:workflow/runtime` import
-/// is left unsatisfied (no runtime component instantiated), surfacing it as a
-/// component-level import — the same path WASI interfaces already ride. This
-/// is the load-bearing assumption of the host-import migration: proven here
-/// for a DIRECT workflow-logic import, not just transitive WASI ones.
+/// On the workflow API ABI (the default) a composed workflow imports no
+/// runtara interface from its host: its logic's `runtara:api` imports are
+/// satisfied inside the artifact, WASI is all that surfaces, and its one
+/// export is `wasi:cli/run`.
 #[test]
-fn direct_compose_host_import_binding_surfaces_runtime_as_component_import() {
+fn direct_compose_leaves_only_wasi_for_the_host() {
     let components_dir = direct_e2e_components_dir();
     let graph: ExecutionGraph = serde_json::from_str(SIMPLE_PASSTHROUGH).expect("fixture parses");
     let temp = tempfile::tempdir().expect("tempdir");
 
     let mut result = compile_direct_workflow(DirectCompilationInput {
-        workflow_id: "spike-b-host-import-runtime".to_string(),
+        workflow_id: "composed-imports".to_string(),
         version: 1,
         source_checksum: None,
         execution_graph: graph,
@@ -1853,31 +1846,53 @@ fn direct_compose_host_import_binding_surfaces_runtime_as_component_import() {
         agent_slug: None,
     })
     .expect("direct emit succeeds");
+    compose_direct_workflow(&mut result, &components_dir).expect("compose");
 
-    let agent_ids: Vec<String> = result
-        .component_artifacts
-        .agent_components
-        .iter()
-        .map(|component| component.agent_id.clone())
-        .collect();
-
-    // Spike: re-emit the scaffolding and recompose. wac must type-check + encode (validate: true inside compose)
-    // with the runtime interface unbound, and the interface must surface as a
-    // top-level import.
-    result.component_artifacts = emit_direct_component_artifacts(&agent_ids);
-    compose_direct_workflow(&mut result, &components_dir).expect("host-import-binding compose");
-
-    let host_import_bytes = fs::read(&result.wasm_path).expect("read host-import artifact");
-    let host_imports = top_level_component_imports(&host_import_bytes);
+    let bytes = fs::read(&result.wasm_path).expect("read artifact");
+    let imports = top_level_component_imports(&bytes);
     assert!(
-        host_imports
+        imports
             .iter()
-            .any(|name| name == "runtara:workflow/runtime@1.0.0"),
-        "host-import binding must surface the runtime interface; imports: {host_imports:?}"
+            .all(|name| name.starts_with("wasi:") || name == "runtara:agent/types@1.0.0"),
+        "only WASI (and the type-only agent types) reach the host; imports: {imports:?}"
     );
     assert!(
-        host_imports.iter().any(|name| name.starts_with("wasi:")),
-        "WASI imports must survive the binding change; imports: {host_imports:?}"
+        imports
+            .iter()
+            .any(|name| name.starts_with("wasi:http/client@0.3")),
+        "the workflow API transport is imported; imports: {imports:?}"
+    );
+}
+
+/// Everything the workflow logic and its agents use goes through the
+/// workflow API: an artifact with agents (which need the timers) and a
+/// connection lookup imports nothing under `runtara:host`.
+#[test]
+fn direct_compose_reaches_the_host_only_through_the_workflow_api() {
+    let components_dir = direct_e2e_components_dir();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let compiled = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "composed-connection-imports".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_str(dynamic_single_shot_ai_agent_graph_json())
+                .expect("fixture parses"),
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        &components_dir,
+        WorkflowRole::Root,
+        false,
+    )
+    .expect("direct composed compile");
+    let imports = top_level_component_imports(&fs::read(&compiled.wasm_path).expect("read"));
+    assert!(
+        !imports.iter().any(|name| name.starts_with("runtara:host/")),
+        "imports: {imports:?}"
     );
 }
 
@@ -3366,6 +3381,33 @@ fn direct_wasm_execute_ai_agent_resolves_connection_ref_and_runtime_model_parame
 /// envelope (`timeout_ms`). With `turnTimeout` set it carries the configured
 /// value; unset, it defaults to DEFAULT_STEP_TIMEOUT_MS (180000) rather than the
 /// old 30s no-timeout proxy floor. This is the core "30s floor is gone" check.
+/// A failed connection lookup fails the step with the host's own message,
+/// and the Agent is never called.
+#[test]
+fn direct_wasm_execute_failed_connection_lookup_keeps_the_hosts_message() {
+    let components_dir = direct_e2e_components_dir();
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-missing-connection",
+        dynamic_single_shot_ai_agent_graph_json(),
+        br#"{"connection":"missing-conn","prompt":"Say hello","provider":"bedrock","model":"gpt-4.1-mini","temperature":0.25,"maxTokens":321}"#,
+        vec![],
+    );
+
+    assert!(!result.status_success, "the run must fail");
+    assert_eq!(result.connection_metadata_requests, ["missing-conn"]);
+    assert!(result.llm_requests.is_empty(), "no model call");
+    let error = result
+        .error_json
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+    assert!(
+        format!("{error} {}", result.stderr).contains("Connection missing-conn was not found"),
+        "error: {error}; stderr: {}",
+        result.stderr
+    );
+}
+
 #[test]
 fn direct_wasm_execute_ai_agent_turn_timeout_reaches_proxy() {
     let components_dir = direct_e2e_components_dir();
@@ -4111,11 +4153,13 @@ fn ai_agent_loop_long_conversation_stays_bounded() {
         "long AiAgent conversation should complete; stderr={:?} error_json={:?}",
         captured.stderr, captured.error_json,
     );
+    // The peak sums every memory in the run (~55 MiB healthy); a regression
+    // runs into the 96 MiB cap.
     let peak = captured
         .memory_peak_bytes
         .expect("embedded executor reports a memory peak");
     assert!(
-        peak < 48 * 1024 * 1024,
+        peak < 64 * 1024 * 1024,
         "per-turn scratch not reclaimed: peak {peak} bytes over {} turns \
          (expected bounded to ~the final conversation's working set)",
         AI_LEAK_TURNS,
@@ -6739,14 +6783,14 @@ fn while_growing_accumulator_stays_bounded() {
 
     // Without the GC the un-reclaimed O(N²) interned blobs climb past this bound and
     // OOM at the 96 MiB cap; with it the peak is just one iteration's working set.
-    // 48 MiB sits above the GC'd working set and far below the GC-regression peak,
-    // so a linear→quadratic regression trips it while a healthy run — or an early
-    // HTTP flake — passes.
+    // 64 MiB sits above the GC'd working set (~55 MiB, summed over every memory in
+    // the run) and below the GC-regression peak, so a linear→quadratic regression
+    // trips it while a healthy run — or an early HTTP flake — passes.
     let peak = captured
         .memory_peak_bytes
         .expect("embedded executor reports a memory peak");
     assert!(
-        peak < 48 * 1024 * 1024,
+        peak < 64 * 1024 * 1024,
         "accumulator not reclaimed across iterations: peak {peak} bytes over {} \
          iterations (expected bounded to one accumulator's working set)",
         WHILE_ACC_ITERATIONS,
@@ -7099,8 +7143,8 @@ fn direct_wasm_execute_invoke_omit_runtime_pure_workflow_runs_with_no_runtime_ho
     assert!(
         kept.component_artifacts
             .world_wit
-            .contains("runtara:workflow/runtime"),
-        "control artifact must keep the runtime import"
+            .contains(runtara_wit::api::CHECKPOINTS),
+        "control artifact must keep the run services (through runtara:api)"
     );
 
     // Soundness: a workflow that WOULD call runtime keeps the import even when
@@ -7119,7 +7163,7 @@ fn direct_wasm_execute_invoke_omit_runtime_pure_workflow_runs_with_no_runtime_ho
         agentful
             .component_artifacts
             .world_wit
-            .contains("runtara:workflow/runtime")
+            .contains(runtara_wit::api::CHECKPOINTS)
     );
 }
 
@@ -7204,8 +7248,8 @@ fn direct_wasm_execute_agent_capabilities_workflow_invocable_as_agent() {
 }
 
 /// P6: ANY workflow can compile as an agent. A runtime-needing workflow (here
-/// a durable Delay) is no longer rejected — it keeps the runtime import
-/// (satisfied by the composing parent's runtime host / the embedding host),
+/// a durable Delay) is no longer rejected — it keeps its runtime (on the
+/// default ABI `runtara:api`, served by the api component it composes),
 /// while a pure workflow still omits it. The graph-level `durable: false`
 /// off-switch turns a durability-only runtime need back into the pure shape.
 #[test]
@@ -7236,8 +7280,8 @@ fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
         compiled
             .component_artifacts
             .world_wit
-            .contains("import runtara:workflow/runtime@1.0.0;"),
-        "durable agent must keep the runtime import:\n{}",
+            .contains(&format!("import {};", runtara_wit::api::CHECKPOINTS)),
+        "durable agent must keep its runtime (`runtara:api` on the default ABI):\n{}",
         compiled.component_artifacts.world_wit
     );
     assert!(
@@ -14037,8 +14081,9 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
 
     // Packaging a separately instantiated child must keep its approval pin on
     // the root before the package section, where precompilation can validate it.
-    let mut scoped = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
-        DirectCompilationInput {
+    // Isolated packages exist only on the WIT guest ABI.
+    let mut scoped =
+        runtara_workflows::direct_wasm::compile_direct_workflow(DirectCompilationInput {
             workflow_id: "trusted-scoped".into(),
             version: 1,
             source_checksum: None,
@@ -14048,11 +14093,8 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             track_events: false,
             agent_catalog: Some(dispatcher.catalog()),
             agent_slug: None,
-        },
-        WorkflowRole::Root,
-        false,
-    )
-    .unwrap();
+        })
+        .unwrap();
     use sha2::Digest;
     let digest = format!(
         "{:x}",
@@ -14222,9 +14264,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
     // (root, Split and workflow-agent routes); their trusted call fails with
     // TRUSTED_VERSION_REQUIRED before any credential is resolved.
     let sidecar = _bundle.path().join("runtara_agent_s3_storage.meta.json");
-    let mut metadata = fs::read(&sidecar).unwrap();
-    metadata.push(b'\n');
-    fs::write(&sidecar, metadata).unwrap();
+    upgrade_trusted_metadata(&sidecar);
     let replacement = runtara_component_host::ComponentDispatcherService::from_dir(_bundle.path())
         .await
         .unwrap();
@@ -14689,7 +14729,20 @@ async fn production_compile_entry_records_installed_trusted_pins() {
         serde_json::from_str(SIMPLE_PASSTHROUGH).unwrap(),
         vec![],
     );
-    assert!(plain.trusted_pins.is_empty(), "{:?}", plain.trusted_pins);
+    assert!(plain.trusted_pins.is_empty());
+}
+
+/// Approves a new version of the agent whose metadata is at `sidecar`: its
+/// JSON changes (whitespace around it does not count, as a release drops it).
+fn upgrade_trusted_metadata(sidecar: &std::path::Path) {
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(sidecar).unwrap()).unwrap();
+    let description = metadata["description"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    metadata["description"] = serde_json::Value::String(format!("{description} "));
+    fs::write(sidecar, serde_json::to_vec(&metadata).unwrap()).unwrap();
 }
 
 /// The per-call check is per agent. An artifact pinning the installed version
@@ -14756,9 +14809,7 @@ async fn a_stale_trusted_pin_fails_only_its_own_agent_calls() {
         // Upgrade only `upgraded`.
         let file = format!("runtara_agent_{}.meta.json", upgraded.replace('-', "_"));
         let sidecar = bundle.path().join(file);
-        let mut metadata = fs::read(&sidecar).unwrap();
-        metadata.push(b'\n');
-        fs::write(&sidecar, metadata).unwrap();
+        upgrade_trusted_metadata(&sidecar);
         let replacement =
             runtara_component_host::ComponentDispatcherService::from_dir(bundle.path())
                 .await

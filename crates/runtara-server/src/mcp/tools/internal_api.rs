@@ -25,6 +25,11 @@ tokio::task_local! {
     static CALLER_AUTH: AuthContext;
 }
 
+/// The tenant of the caller bound to the current tool invocation, if any.
+pub(crate) fn caller_tenant() -> Option<String> {
+    CALLER_AUTH.try_with(|caller| caller.org_id.clone()).ok()
+}
+
 /// Run `fut` with the MCP caller's [`AuthContext`] bound as the ambient identity for
 /// any in-process API call it makes. Tool handlers `await` their `api_*` calls inline
 /// on this same task, so the task-local is visible at [`build_request`] time.
@@ -502,13 +507,23 @@ pub async fn api_delete_with_body(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_request, encode_path_param, normalize_json_arg, translate_api_error_response,
-        validate_identifier_param, validate_path_param, with_caller_auth,
+        build_request, caller_tenant, encode_path_param, normalize_json_arg,
+        translate_api_error_response, validate_identifier_param, validate_path_param,
+        with_caller_auth,
     };
     use crate::auth::{AuthContext, AuthMethod};
     use crate::authz::Role;
     use axum::http::{Method, StatusCode};
     use serde_json::json;
+
+    /// A tool acts for its caller's tenant; outside a call there is none.
+    #[tokio::test]
+    async fn the_bound_caller_names_the_tenant() {
+        assert_eq!(caller_tenant(), None);
+        let caller = AuthContext::new("tenant-b".into(), "u".into(), AuthMethod::Jwt);
+        let tenant = with_caller_auth(caller, async { caller_tenant() }).await;
+        assert_eq!(tenant.as_deref(), Some("tenant-b"));
+    }
 
     // ── caller identity propagation into in-process requests ───────────
 

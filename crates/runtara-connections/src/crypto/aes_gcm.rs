@@ -9,19 +9,47 @@
 //! per key before birthday bounds matter, well beyond any realistic
 //! per-tenant throughput.
 
-use aes_gcm::aead::{Aead, OsRng};
+use aes_gcm::aead::{Aead, OsRng, Payload};
 use aes_gcm::{AeadCore, Aes256Gcm, Key, KeyInit, Nonce};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
-use super::cipher::{CipherError, CredentialCipher, ENVELOPE_ALG, ENVELOPE_VERSION, is_envelope};
+use super::cipher::{
+    BOUND_ENVELOPE_VERSION, CipherContext, CipherError, CredentialCipher, ENVELOPE_ALG,
+    ENVELOPE_VERSION, is_envelope,
+};
 
-/// AES-256-GCM cipher. See module docs.
+/// AES-256-GCM cipher, and a keyring: the current key encrypts, and any key
+/// the ring holds decrypts the envelopes that name it (`kid`), so a key can be
+/// rotated and the old one retired once `reencrypt-connections` has moved
+/// everything over. See module docs.
 pub struct AesGcmCipher {
     cipher: Aes256Gcm,
     key_id: String,
+    retired: Vec<(String, Aes256Gcm)>,
+}
+
+fn aes_key(key_bytes: &[u8]) -> Result<Aes256Gcm, CipherError> {
+    if key_bytes.len() != 32 {
+        return Err(CipherError::InvalidKey(format!(
+            "expected 32 bytes, got {}",
+            key_bytes.len()
+        )));
+    }
+    Ok(Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key_bytes)))
+}
+
+fn decode_key(key_b64: &str) -> Result<Zeroizing<Vec<u8>>, CipherError> {
+    let trimmed = key_b64.trim();
+    // Try standard base64 first, then URL-safe as a fallback.
+    BASE64
+        .decode(trimmed)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(trimmed))
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(trimmed))
+        .map(Zeroizing::new)
+        .map_err(|e| CipherError::InvalidKey(format!("base64 decode failed: {}", e)))
 }
 
 impl AesGcmCipher {
@@ -30,48 +58,80 @@ impl AesGcmCipher {
         key_bytes: Zeroizing<Vec<u8>>,
         key_id: impl Into<String>,
     ) -> Result<Self, CipherError> {
-        if key_bytes.len() != 32 {
+        Ok(Self {
+            cipher: aes_key(&key_bytes)?,
+            key_id: key_id.into(),
+            retired: Vec::new(),
+        })
+    }
+
+    /// Also decrypt envelopes made with a retired key `key_id`.
+    pub fn with_retired_key(
+        mut self,
+        key_bytes: Zeroizing<Vec<u8>>,
+        key_id: impl Into<String>,
+    ) -> Result<Self, CipherError> {
+        let key_id = key_id.into();
+        if key_id == self.key_id {
             return Err(CipherError::InvalidKey(format!(
-                "expected 32 bytes, got {}",
-                key_bytes.len()
+                "retired key id {key_id} is the current key's"
             )));
         }
-        let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
-        let cipher = Aes256Gcm::new(key);
-        Ok(Self {
-            cipher,
-            key_id: key_id.into(),
-        })
+        self.retired.push((key_id, aes_key(&key_bytes)?));
+        Ok(self)
+    }
+
+    /// [`with_retired_key`](Self::with_retired_key) for a base64 key.
+    pub fn with_retired_base64_key(
+        self,
+        key_b64: &str,
+        key_id: impl Into<String>,
+    ) -> Result<Self, CipherError> {
+        self.with_retired_key(decode_key(key_b64)?, key_id)
+    }
+
+    /// The key an envelope names; one without a `kid` predates key ids and
+    /// was made with the current key.
+    fn key_for(&self, kid: Option<&str>) -> Result<&Aes256Gcm, CipherError> {
+        match kid {
+            None => Ok(&self.cipher),
+            Some(kid) if kid == self.key_id => Ok(&self.cipher),
+            Some(kid) => self
+                .retired
+                .iter()
+                .find(|(retired, _)| retired == kid)
+                .map(|(_, cipher)| cipher)
+                .ok_or_else(|| CipherError::Decrypt(format!("no key {kid} in the keyring"))),
+        }
     }
 
     /// Build a cipher from a base64-encoded 32-byte key.
     ///
     /// Accepts both standard and URL-safe base64, with or without padding.
     pub fn from_base64_key(key_b64: &str, key_id: impl Into<String>) -> Result<Self, CipherError> {
-        let trimmed = key_b64.trim();
-        // Try standard base64 first, then URL-safe as a fallback.
-        let bytes = BASE64
-            .decode(trimmed)
-            .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(trimmed))
-            .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(trimmed))
-            .map_err(|e| CipherError::InvalidKey(format!("base64 decode failed: {}", e)))?;
-        Self::new(Zeroizing::new(bytes), key_id)
+        Self::new(decode_key(key_b64)?, key_id)
     }
 }
 
 impl CredentialCipher for AesGcmCipher {
-    fn encrypt(&self, plaintext: &Value) -> Result<Value, CipherError> {
+    fn encrypt(&self, plaintext: &Value, context: &CipherContext) -> Result<Value, CipherError> {
         let plaintext_bytes = serde_json::to_vec(plaintext)
             .map_err(|e| CipherError::Encrypt(format!("json serialize: {}", e)))?;
 
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
         let ciphertext = self
             .cipher
-            .encrypt(&nonce, plaintext_bytes.as_slice())
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: plaintext_bytes.as_slice(),
+                    aad: &context.aad(),
+                },
+            )
             .map_err(|e| CipherError::Encrypt(format!("aead: {}", e)))?;
 
         Ok(json!({
-            "v": ENVELOPE_VERSION,
+            "v": BOUND_ENVELOPE_VERSION,
             "alg": ENVELOPE_ALG,
             "kid": self.key_id,
             "nonce": BASE64.encode(nonce.as_slice()),
@@ -79,7 +139,7 @@ impl CredentialCipher for AesGcmCipher {
         }))
     }
 
-    fn decrypt(&self, stored: &Value) -> Result<Value, CipherError> {
+    fn decrypt(&self, stored: &Value, context: &CipherContext) -> Result<Value, CipherError> {
         // Rollout passthrough: plaintext values flow through unchanged.
         if !is_envelope(stored) {
             return Ok(stored.clone());
@@ -101,7 +161,8 @@ impl CredentialCipher for AesGcmCipher {
         }
 
         let version = obj.get("v").and_then(Value::as_u64).unwrap_or(0);
-        if version != u64::from(ENVELOPE_VERSION) {
+        let bound = version == u64::from(BOUND_ENVELOPE_VERSION);
+        if !bound && version != u64::from(ENVELOPE_VERSION) {
             return Err(CipherError::InvalidEnvelope(format!(
                 "unsupported envelope version: {}",
                 version
@@ -132,9 +193,18 @@ impl CredentialCipher for AesGcmCipher {
             .decode(ct_b64)
             .map_err(|e| CipherError::InvalidEnvelope(format!("ct decode: {}", e)))?;
 
-        let plaintext_bytes = self
-            .cipher
-            .decrypt(nonce, ct_bytes.as_slice())
+        let key = self.key_for(obj.get("kid").and_then(Value::as_str))?;
+        // A bound envelope authenticates its tenant and connection; a
+        // version 1 envelope predates the binding.
+        let aad = if bound { context.aad() } else { Vec::new() };
+        let plaintext_bytes = key
+            .decrypt(
+                nonce,
+                Payload {
+                    msg: ct_bytes.as_slice(),
+                    aad: &aad,
+                },
+            )
             .map_err(|_| CipherError::Decrypt("aead authentication failed".into()))?;
 
         serde_json::from_slice(&plaintext_bytes)
@@ -155,6 +225,11 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const CTX: CipherContext = CipherContext {
+        tenant_id: "tenant-a",
+        connection_id: "conn-1",
+    };
+
     fn test_key() -> Zeroizing<Vec<u8>> {
         Zeroizing::new(vec![0x42u8; 32])
     }
@@ -173,19 +248,19 @@ mod tests {
             "base_url": "https://api.example.com",
             "nested": {"foo": [1, 2, 3]}
         });
-        let envelope = cipher.encrypt(&plaintext).unwrap();
+        let envelope = cipher.encrypt(&plaintext, &CTX).unwrap();
         assert_ne!(envelope, plaintext);
         assert!(is_envelope(&envelope));
-        let decrypted = cipher.decrypt(&envelope).unwrap();
+        let decrypted = cipher.decrypt(&envelope, &CTX).unwrap();
         assert_eq!(decrypted, plaintext);
     }
 
     #[test]
     fn envelope_has_expected_fields() {
         let cipher = AesGcmCipher::new(test_key(), "kid-123").unwrap();
-        let envelope = cipher.encrypt(&json!({"secret": "value"})).unwrap();
+        let envelope = cipher.encrypt(&json!({"secret": "value"}), &CTX).unwrap();
         let obj = envelope.as_object().unwrap();
-        assert_eq!(obj["v"], json!(1));
+        assert_eq!(obj["v"], json!(BOUND_ENVELOPE_VERSION));
         assert_eq!(obj["alg"], json!("aes-256-gcm"));
         assert_eq!(obj["kid"], json!("kid-123"));
         assert!(!obj["nonce"].as_str().unwrap().is_empty());
@@ -196,27 +271,27 @@ mod tests {
     fn nonces_are_unique() {
         let cipher = AesGcmCipher::new(test_key(), "k").unwrap();
         let plaintext = json!({"secret": "value"});
-        let e1 = cipher.encrypt(&plaintext).unwrap();
-        let e2 = cipher.encrypt(&plaintext).unwrap();
+        let e1 = cipher.encrypt(&plaintext, &CTX).unwrap();
+        let e2 = cipher.encrypt(&plaintext, &CTX).unwrap();
         // Same plaintext + same key, but different nonces => different ciphertexts.
         assert_ne!(e1["nonce"], e2["nonce"]);
         assert_ne!(e1["ct"], e2["ct"]);
         // Both decrypt to the same plaintext.
-        assert_eq!(cipher.decrypt(&e1).unwrap(), plaintext);
-        assert_eq!(cipher.decrypt(&e2).unwrap(), plaintext);
+        assert_eq!(cipher.decrypt(&e1, &CTX).unwrap(), plaintext);
+        assert_eq!(cipher.decrypt(&e2, &CTX).unwrap(), plaintext);
     }
 
     #[test]
     fn decrypt_rejects_tampered_ciphertext() {
         let cipher = AesGcmCipher::new(test_key(), "k").unwrap();
-        let mut envelope = cipher.encrypt(&json!({"secret": "value"})).unwrap();
+        let mut envelope = cipher.encrypt(&json!({"secret": "value"}), &CTX).unwrap();
         // Flip a byte in the ciphertext.
         let ct = envelope["ct"].as_str().unwrap().to_string();
         let mut bytes = BASE64.decode(&ct).unwrap();
         bytes[0] ^= 0x01;
         envelope["ct"] = json!(BASE64.encode(&bytes));
         assert!(matches!(
-            cipher.decrypt(&envelope),
+            cipher.decrypt(&envelope, &CTX),
             Err(CipherError::Decrypt(_))
         ));
     }
@@ -225,8 +300,11 @@ mod tests {
     fn decrypt_fails_with_wrong_key() {
         let a = AesGcmCipher::new(Zeroizing::new(vec![0x11; 32]), "a").unwrap();
         let b = AesGcmCipher::new(Zeroizing::new(vec![0x22; 32]), "b").unwrap();
-        let envelope = a.encrypt(&json!({"secret": "value"})).unwrap();
-        assert!(matches!(b.decrypt(&envelope), Err(CipherError::Decrypt(_))));
+        let envelope = a.encrypt(&json!({"secret": "value"}), &CTX).unwrap();
+        assert!(matches!(
+            b.decrypt(&envelope, &CTX),
+            Err(CipherError::Decrypt(_))
+        ));
     }
 
     #[test]
@@ -234,7 +312,7 @@ mod tests {
         let cipher = AesGcmCipher::new(test_key(), "k").unwrap();
         let plaintext = json!({"api_key": "sk-123", "base_url": "https://x"});
         // Simulates reading a row that was written before encryption was enabled.
-        assert_eq!(cipher.decrypt(&plaintext).unwrap(), plaintext);
+        assert_eq!(cipher.decrypt(&plaintext, &CTX).unwrap(), plaintext);
     }
 
     #[test]
@@ -248,7 +326,7 @@ mod tests {
             "ct": "AAAA"
         });
         assert!(matches!(
-            cipher.decrypt(&envelope),
+            cipher.decrypt(&envelope, &CTX),
             Err(CipherError::InvalidEnvelope(_))
         ));
     }
@@ -276,5 +354,76 @@ mod tests {
     fn is_encrypting_reports_true() {
         let cipher = AesGcmCipher::new(test_key(), "k").unwrap();
         assert!(cipher.is_encrypting());
+    }
+
+    /// A ciphertext belongs to its tenant and connection: moved to another
+    /// connection or tenant, it does not decrypt.
+    #[test]
+    fn a_ciphertext_moved_to_another_connection_does_not_decrypt() {
+        let cipher = AesGcmCipher::new(test_key(), "k").unwrap();
+        let envelope = cipher.encrypt(&json!({"token": "t"}), &CTX).unwrap();
+        assert_eq!(envelope["v"], BOUND_ENVELOPE_VERSION);
+        for context in [
+            CipherContext {
+                tenant_id: "tenant-a",
+                connection_id: "conn-2",
+            },
+            CipherContext {
+                tenant_id: "tenant-b",
+                connection_id: "conn-1",
+            },
+        ] {
+            assert!(
+                matches!(
+                    cipher.decrypt(&envelope, &context),
+                    Err(CipherError::Decrypt(_))
+                ),
+                "{context:?}"
+            );
+        }
+        assert_eq!(
+            cipher.decrypt(&envelope, &CTX).unwrap(),
+            json!({"token": "t"})
+        );
+    }
+
+    /// An envelope written before the binding (version 1, no associated
+    /// data) still decrypts, so re-encryption can move it to version 2.
+    #[test]
+    fn an_unbound_version_1_envelope_still_decrypts() {
+        let key = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&test_key()));
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let ct = key.encrypt(&nonce, br#"{"token":"t"}"#.as_slice()).unwrap();
+        let legacy = json!({
+            "v": ENVELOPE_VERSION, "alg": ENVELOPE_ALG, "kid": "k",
+            "nonce": BASE64.encode(nonce.as_slice()), "ct": BASE64.encode(&ct),
+        });
+        let cipher = AesGcmCipher::new(test_key(), "k").unwrap();
+        assert_eq!(
+            cipher.decrypt(&legacy, &CTX).unwrap(),
+            json!({"token": "t"})
+        );
+    }
+
+    /// Rotation: envelopes of a retired key still decrypt, new ones use the
+    /// current key, and a key the ring does not hold is refused.
+    #[test]
+    fn a_rotated_keyring_reads_retired_keys_and_writes_the_current_one() {
+        let old = AesGcmCipher::new(test_key(), "old").unwrap();
+        let envelope = old.encrypt(&json!({"token": "t"}), &CTX).unwrap();
+        let rotated = AesGcmCipher::new(Zeroizing::new(vec![0x24u8; 32]), "new")
+            .unwrap()
+            .with_retired_key(test_key(), "old")
+            .unwrap();
+        assert_eq!(
+            rotated.decrypt(&envelope, &CTX).unwrap(),
+            json!({"token": "t"})
+        );
+        assert_eq!(rotated.encrypt(&json!({}), &CTX).unwrap()["kid"], "new");
+        let stranger = AesGcmCipher::new(Zeroizing::new(vec![0x24u8; 32]), "new").unwrap();
+        assert!(matches!(
+            stranger.decrypt(&envelope, &CTX),
+            Err(CipherError::Decrypt(_))
+        ));
     }
 }

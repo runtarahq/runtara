@@ -35,8 +35,10 @@ use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
 use crate::error::Result;
-use crate::image_registry::ImageRegistry;
+use crate::image_registry::{ARTIFACT_GRACE, ImageRegistry, default_artifact_store};
 use crate::periodic::PeriodicLoop;
+use runtara_artifact_store::ArtifactStore;
+use runtara_artifact_store::Digest;
 
 /// Configuration for the image cleanup worker.
 #[derive(Debug, Clone)]
@@ -103,6 +105,9 @@ impl ImageCleanupWorkerConfig {
 pub struct ImageCleanupWorker {
     pool: PgPool,
     config: ImageCleanupWorkerConfig,
+    /// Where the images' artifacts are kept; a deleted image's artifact is
+    /// released here once no other image names it.
+    artifacts: Arc<dyn ArtifactStore>,
     shutdown: Arc<Notify>,
 }
 
@@ -111,9 +116,17 @@ impl ImageCleanupWorker {
     pub fn new(pool: PgPool, config: ImageCleanupWorkerConfig) -> Self {
         Self {
             pool,
+            artifacts: Arc::new(default_artifact_store(&config.data_dir)),
             config,
             shutdown: Arc::new(Notify::new()),
         }
+    }
+
+    /// Release artifacts from `artifacts` instead of the default store under
+    /// the data directory.
+    pub fn with_artifacts(mut self, artifacts: Arc<dyn ArtifactStore>) -> Self {
+        self.artifacts = artifacts;
+        self
     }
 
     /// Get a handle that can be used to signal shutdown.
@@ -154,10 +167,11 @@ impl ImageCleanupWorker {
         self.cleanup_images().await
     }
 
-    /// Run both cleanup phases.
+    /// Run every cleanup phase.
     async fn cleanup_images(&self) -> Result<()> {
         let orphaned_cleaned = self.cleanup_orphaned_directories().await;
         let stale_cleaned = self.cleanup_stale_images().await?;
+        self.collect_artifacts().await;
 
         if orphaned_cleaned > 0 || stale_cleaned > 0 {
             info!(
@@ -172,10 +186,61 @@ impl ImageCleanupWorker {
         Ok(())
     }
 
-    /// Phase 1: Clean up image directories on disk that have no corresponding DB record.
-    ///
-    /// These orphans are created when `ImageRegistry::register()` upserts on
-    /// `(tenant_id, name)` with a new `image_id` — the old directory is left behind.
+    /// Phase 3: what nothing in the artifact store references any more, and
+    /// the compile views (`releases/<index digest>`) of releases it no longer
+    /// holds, once older than [`ARTIFACT_GRACE`] (SYN-777). A store that
+    /// cannot list its artifacts is skipped.
+    async fn collect_artifacts(&self) {
+        let images = ImageRegistry::new(self.pool.clone());
+        let releases = match images
+            .collect_artifacts(self.artifacts.as_ref(), ARTIFACT_GRACE)
+            .await
+        {
+            Ok((collected, releases)) => {
+                if collected != Default::default() {
+                    info!(
+                        records = collected.records,
+                        artifacts = collected.blobs,
+                        "Collected unreferenced artifacts"
+                    );
+                }
+                releases
+            }
+            Err(error) => {
+                debug!(error = %error, "Artifact collection skipped");
+                return;
+            }
+        };
+        let views = self.config.data_dir.join("releases");
+        let Ok(mut entries) = tokio::fs::read_dir(&views).await else {
+            return;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Ok(digest) = Digest::parse(&name) else {
+                continue;
+            };
+            let old = entry
+                .metadata()
+                .await
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|at| at.elapsed().ok())
+                .is_some_and(|age| age > ARTIFACT_GRACE);
+            if old && !releases.contains(&digest) {
+                match tokio::fs::remove_dir_all(entry.path()).await {
+                    Ok(()) => info!(release = %name, "Removed an old release's compile view"),
+                    Err(error) => {
+                        warn!(release = %name, error = %error, "Failed to remove a compile view")
+                    }
+                }
+            }
+        }
+    }
+
+    /// Phase 1: Clean up legacy `images/<id>` directories on disk that have no
+    /// corresponding DB record. Artifacts live in the artifact store now; these
+    /// are left from before, by an upsert that replaced the row's `image_id`.
     async fn cleanup_orphaned_directories(&self) -> u64 {
         let images_dir = self.config.data_dir.join("images");
 
@@ -292,7 +357,7 @@ impl ImageCleanupWorker {
         let mut cleaned = 0u64;
         for (image_id, tenant_id, name) in &stale_images {
             // Delete from DB (CASCADE handles instance_images)
-            if let Err(e) = images.delete(image_id).await {
+            if let Err(e) = images.delete(image_id, self.artifacts.as_ref()).await {
                 warn!(
                     image_id = %image_id,
                     error = %e,
@@ -301,7 +366,7 @@ impl ImageCleanupWorker {
                 continue;
             }
 
-            // Delete disk directory
+            // A legacy image directory, if this image still had one.
             let image_dir = self.config.data_dir.join("images").join(image_id);
             if let Err(e) = tokio::fs::remove_dir_all(&image_dir).await
                 && e.kind() != std::io::ErrorKind::NotFound

@@ -103,6 +103,31 @@ pub struct ComponentDispatcherService {
     test_timeout: Duration,
     /// Per-call guest linear-memory cap for `test_capability`, in bytes.
     memory_max_bytes: usize,
+    /// The workflow API test calls are served (standalone launches), built
+    /// from this dispatcher's services on first use, and its transport.
+    workflow_api: std::sync::OnceLock<(
+        Arc<crate::api_launches::ApiLaunches>,
+        Arc<dyn crate::workflow_api::WorkflowApiTransport>,
+    )>,
+}
+
+/// One agent to load: its canonical id, `.wasm` bytes and `.meta.json` bytes.
+struct AgentSource {
+    id: String,
+    wasm: Vec<u8>,
+    meta: Vec<u8>,
+}
+
+/// A test call's standalone launch, released when dropped.
+struct TestLaunch {
+    launches: Arc<crate::api_launches::ApiLaunches>,
+    launch_id: String,
+}
+
+impl Drop for TestLaunch {
+    fn drop(&mut self) {
+        self.launches.release(&self.launch_id);
+    }
 }
 
 impl ComponentDispatcherService {
@@ -136,19 +161,7 @@ impl ComponentDispatcherService {
     /// server without metadata. Mismatched ids (filename stem vs.
     /// `meta.id`) are also rejected so registration can't silently misroute.
     pub async fn from_dir(component_dir: &Path) -> Result<Self> {
-        let engine = build_engine(&EngineConfig::default())?;
-        // Drive the epoch clock for this engine so the per-call deadlines set in
-        // `test_capability` can actually fire — without a ticker the epoch never
-        // advances and an unbounded guest would run forever.
-        spawn_epoch_ticker(Arc::clone(&engine));
-        let linker = build_linker(&engine)?;
-
-        let mut trusted = crate::trusted::TrustedExecutor::new(Arc::clone(&engine));
-        // The control agent alone links the real control API.
-        let control_linker = crate::registry::build_control_linker(&engine)?;
-        let mut agents = HashMap::new();
-        let mut agent_info: HashMap<String, AgentInfo> = HashMap::new();
-
+        let mut sources = Vec::new();
         let entries = std::fs::read_dir(component_dir)
             .with_context(|| format!("read component directory {}", component_dir.display()))?;
         for entry in entries {
@@ -171,18 +184,62 @@ impl ComponentDispatcherService {
             let agent_id = canonical_agent_id(stem_id);
 
             let meta_path = path.with_extension("meta.json");
-            let meta_bytes = std::fs::read(&meta_path).with_context(|| {
+            let meta = std::fs::read(&meta_path).with_context(|| {
                 format!(
                     "agent `{agent_id}`: missing sidecar metadata at {}",
                     meta_path.display()
                 )
             })?;
-            let mut info: AgentInfo = serde_json::from_slice(&meta_bytes).with_context(|| {
-                format!(
-                    "agent `{agent_id}`: failed to parse sidecar metadata {}",
-                    meta_path.display()
-                )
-            })?;
+            sources.push(AgentSource {
+                id: agent_id,
+                wasm: std::fs::read(&path)?,
+                meta,
+            });
+        }
+        Self::from_sources(sources)
+    }
+
+    /// Build the service from a release in the artifact store: each agent's
+    /// record holds its `.wasm` digest and its `.meta.json`, so the two are
+    /// loaded together or not at all.
+    pub async fn from_release(
+        store: &dyn runtara_artifact_store::ArtifactStore,
+        index: &runtara_artifact_store::release::ReleaseIndex,
+    ) -> Result<Self> {
+        let mut sources = Vec::with_capacity(index.agents.len());
+        for entry in &index.agents {
+            let component = runtara_artifact_store::release::read(store, entry)
+                .await
+                .with_context(|| format!("agent `{}` of release {}", entry.id, index.release))?;
+            sources.push(AgentSource {
+                id: canonical_agent_id(&component.id),
+                meta: component.manifest.metadata_bytes().to_vec(),
+                wasm: component.wasm,
+            });
+        }
+        Self::from_sources(sources)
+    }
+
+    fn from_sources(sources: Vec<AgentSource>) -> Result<Self> {
+        let engine = build_engine(&EngineConfig::default())?;
+        // Drive the epoch clock for this engine so the per-call deadlines set in
+        // `test_capability` can actually fire — without a ticker the epoch never
+        // advances and an unbounded guest would run forever.
+        spawn_epoch_ticker(Arc::clone(&engine));
+        let linker = build_linker(&engine)?;
+
+        let mut trusted = crate::trusted::TrustedExecutor::new(Arc::clone(&engine));
+        let mut agents = HashMap::new();
+        let mut agent_info: HashMap<String, AgentInfo> = HashMap::new();
+
+        for AgentSource {
+            id: agent_id,
+            wasm: bytes,
+            meta: meta_bytes,
+        } in sources
+        {
+            let mut info: AgentInfo = serde_json::from_slice(&meta_bytes)
+                .with_context(|| format!("agent `{agent_id}`: failed to parse sidecar metadata"))?;
             // Normalize both sides to kebab for the equality check —
             // cargo-component drops snake_case filenames, but the canonical
             // id everywhere else is kebab, so an agent crate can sensibly
@@ -201,14 +258,8 @@ impl ComponentDispatcherService {
             // returns None while `agent_ids()` yields it.
             info.id = agent_id.clone();
 
-            let bytes = std::fs::read(&path)?;
             trusted.register(&info, &bytes, &meta_bytes)?;
-            let agent_linker = if agent_id == runtara_dsl::agent_meta::CONTROL_AGENT_ID {
-                &control_linker
-            } else {
-                &linker
-            };
-            let loaded = load_agent_bytes(&engine, agent_linker, &bytes, &agent_id)?;
+            let loaded = load_agent_bytes(&engine, &linker, &bytes, &agent_id)?;
 
             agent_info.insert(agent_id.clone(), info);
             agents.insert(agent_id, loaded);
@@ -218,7 +269,6 @@ impl ComponentDispatcherService {
         // is pre-instantiated we drop it — InstancePre carries everything we
         // need for repeated per-call instantiation.
         drop(linker);
-        drop(control_linker);
 
         // Build the public catalog from the parsed `AgentInfo`s. Sorted by
         // id so API output + tests are deterministic.
@@ -241,6 +291,37 @@ impl ComponentDispatcherService {
             memory_max_bytes: parse_memory_max(
                 std::env::var("RUNTARA_TEST_CAPABILITY_MEMORY_MAX_BYTES").ok(),
             ),
+            workflow_api: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// The workflow API test calls are served, built from this dispatcher's
+    /// services on first use (so after they are configured).
+    fn workflow_api(
+        &self,
+    ) -> &(
+        Arc<crate::api_launches::ApiLaunches>,
+        Arc<dyn crate::workflow_api::WorkflowApiTransport>,
+    ) {
+        self.workflow_api.get_or_init(|| {
+            let launches = crate::api_launches::ApiLaunches::default();
+            // Each is set once on a fresh value, so none can fail.
+            if let Some(service) = self.outbound_http.get() {
+                let _ = launches.set_outbound_http(Arc::clone(service));
+            }
+            if let Some(database) = self.database.get() {
+                let _ = launches.set_database(Arc::clone(database));
+            }
+            if let Some(resolver) = self.connection_resolver.get() {
+                let _ = launches.set_connection_resolver(Arc::clone(resolver));
+            }
+            if let Some(host) = self.control_host.get() {
+                let _ = launches.set_control_host(Arc::clone(host));
+            }
+            let _ = launches.set_trusted_executor(Arc::clone(&self.trusted));
+            let launches = Arc::new(launches);
+            let transport = launches.transport();
+            (launches, transport)
         })
     }
 
@@ -323,32 +404,49 @@ impl ComponentDispatcherService {
         // invocation's shorter watchdog expires.
         let deadline = tokio::time::Instant::now() + self.test_timeout;
         let mut state = HostState::new(ctx).with_http_deadline(deadline);
-        state.trusted = Some(Arc::clone(&self.trusted));
-        state.outbound_http =
-            crate::outbound_http::for_run(self.outbound_http.get(), Some(&req.tenant_id), None);
-        state.database =
-            crate::database_host::database_for_run(self.database.get(), Some(&req.tenant_id));
-        state.connection_resolver = crate::connection_resolver_host::resolver_for_run(
-            self.connection_resolver.get(),
-            Some(&req.tenant_id),
-        );
-        // A test call of the control agent has the tenant but no calling
-        // instance or operation: reads work tenant-wide, identity calls and
-        // caller-relative filters answer `requires-instance`.
-        if canonical_agent_id(&req.agent_id) == runtara_dsl::agent_meta::CONTROL_AGENT_ID {
-            state.control_api =
-                self.control_host
-                    .get()
-                    .map(|host| crate::control_host::ControlApiCall {
-                        host: Arc::clone(host),
-                        authority: crate::control_host::ControlAuthority {
-                            tenant: req.tenant_id.clone(),
-                            caller: None,
-                            operation: None,
-                        },
-                        deadline: Some(deadline),
-                    });
-        }
+        // An agent on the guest SDK reaches its connections over the
+        // workflow API: a standalone launch of the call's tenant.
+        let _launch = {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let (launches, transport) = self.workflow_api();
+            let binding = runtara_workflow_api::Binding {
+                tenant_id: req.tenant_id.clone(),
+                instance_id: String::new(),
+                launch_id: format!(
+                    "agent-test-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ),
+                root_lease_epoch: 0,
+            };
+            launches
+                .begin_standalone_with_alarm(
+                    binding.clone(),
+                    // Unpinned, as test calls always were. Only the control
+                    // agent acts for the tenant (with no calling run).
+                    crate::api_launches::StandaloneTrust::Unpinned,
+                    if canonical_agent_id(&req.agent_id)
+                        == runtara_dsl::agent_meta::CONTROL_AGENT_ID
+                    {
+                        crate::api_launches::StandaloneControl::Tenant
+                    } else {
+                        crate::api_launches::StandaloneControl::Denied
+                    },
+                    // The call's own cleanup alarm, which its guards watch.
+                    Some(state.cleanup_alarm.clone()),
+                    None,
+                )
+                .map_err(|error| anyhow::anyhow!(error))?;
+            let launch = TestLaunch {
+                launches: Arc::clone(launches),
+                launch_id: binding.launch_id.clone(),
+            };
+            state.api_hooks = crate::workflow_api::WorkflowApiHooks::for_run(
+                Some(Arc::clone(transport)),
+                Some(Arc::new(move || Some(binding.clone()))),
+            );
+            launch
+        };
         state.set_limits(self.memory_max_bytes, DEFAULT_GUEST_TABLE_MAX_ELEMENTS);
         let (mut store, instance) = instantiate(&self.engine, &agent.pre, state).await?;
 

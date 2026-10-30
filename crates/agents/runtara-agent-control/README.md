@@ -23,11 +23,11 @@ lifecycle) is "As built" in
 
 ## How it runs
 
-An ordinary composed agent: each capability makes one `runtara:control/api`
-call, which the host makes real in the run's own store (and `denied` anywhere
-else), bounded by the step's deadline and 90 s. The compiler grants
-`runtara:control` to this agent alone. Mutations run in a compiler-emitted
-`runtara:workflow/operation` scope, so a replayed step never applies twice.
+An ordinary composed agent: each capability makes one workflow API control
+call (`/v1/instances`), which the host serves only for a run's own launch
+(and `denied` anywhere else), bounded by the step's deadline and 90 s.
+Mutations run under the operation the compiler enters for the step (its
+`_operation` input), so a replayed step never applies twice.
 
 ## Building
 
@@ -37,7 +37,8 @@ else), bounded by the step's deadline and 90 s. The compiler grants
 
 The `agent_component!` macro generates its `runtara:agent-control@1.0.0`
 package from `runtara_wit::agent_package`; there is no WIT file to edit. The
-component imports `runtara:control/api@1.0.0` and exports `capabilities`.
+component imports only WASI (its control calls go over `wasi:http`) and
+exports `capabilities`.
 Output:
 `target/wasm32-wasip2/release/runtara_agent_control.wasm` and its
 `.meta.json` sidecar.

@@ -51,7 +51,7 @@ use crate::config::{ProcessEnv, Vars, positive};
 use super::common::{self, WorkflowRunnerConfig};
 use super::traits::{
     CancelToken, ContainerMetrics, LaunchOptions, PreparationOccupancy, PreparedLaunch, Result,
-    RunExitReport, Runner, RunnerError, RunnerHandle, RunnerOccupancy, StartGateOutcome,
+    RunExitReport, Runner, RunnerError, RunnerHandle, RunnerOccupancy, StartGate, StartGateOutcome,
 };
 
 /// Mark a run `running`, clearing what a previous stop left behind.
@@ -161,7 +161,9 @@ impl WorkflowStartConfirmation for GateWorkflowStartConfirmation {
 }
 
 mod root_lease;
+pub use root_lease::RootLease;
 mod run_state;
+pub use run_state::PersistenceRunState;
 mod scoped;
 pub use scoped::ScopedAgentRunnerConfig;
 
@@ -217,9 +219,13 @@ impl Drop for TaskCompletionGuard {
 /// In-process workflow runner backed by an embedded wasmtime engine.
 pub struct EmbeddedWasmRunner {
     config: WorkflowRunnerConfig,
+    /// Launches serving the workflow API (runs on the `wasi:cli/run` ABI).
+    workflow_api: Arc<runtara_component_host::api_launches::ApiLaunches>,
     scoped_agents: Option<Arc<ScopedAgentRunnerConfig>>,
     limits: WorkflowLimits,
     persistence: Arc<dyn Persistence>,
+    /// Where launches' workflow artifacts are read from, by digest.
+    artifacts: Arc<dyn runtara_artifact_store::ArtifactStore>,
     executor: Arc<WorkflowExecutor>,
     tasks: TaskRegistry,
     /// Exit facts a run's task left for its monitor, by handle id.
@@ -285,10 +291,13 @@ struct EmbeddedPreparedLaunch {
 /// over a private pipe and links it without a filesystem read.
 #[async_trait]
 trait ComponentPrecompiler: Send + Sync {
+    /// Prepare the workflow at `wasm_path`, a local file holding the
+    /// launch's workflow artifact.
     async fn prepare(
         &self,
         executor: &WorkflowExecutor,
         options: &LaunchOptions,
+        wasm_path: &Path,
     ) -> Result<PreparedWorkflow>;
 }
 
@@ -340,6 +349,7 @@ impl ChildComponentPrecompiler {
     async fn exchange(
         &self,
         options: &LaunchOptions,
+        wasm_path: &Path,
     ) -> Result<(PrecompileRequest, PrecompileResponse)> {
         let deadline = options
             .preparation_deadline
@@ -363,10 +373,9 @@ impl ChildComponentPrecompiler {
             .as_ref()
             .map(|metrics| metrics.hold("precompile"));
         let nonce = precompile_nonce()?;
-        let request =
-            PrecompileRequest::for_artifact(nonce, &options.wasm_path).map_err(|error| {
-                RunnerError::StartFailed(format!("build precompile request: {error:#}"))
-            })?;
+        let request = PrecompileRequest::for_artifact(nonce, wasm_path).map_err(|error| {
+            RunnerError::StartFailed(format!("build precompile request: {error:#}"))
+        })?;
         let program = self.worker_program()?;
         let mut command = Command::new(&program);
         command
@@ -425,7 +434,7 @@ impl ChildComponentPrecompiler {
                     // preserve that bounded diagnostic rather than reducing it
                     // to a platform-specific exit status.
                     return Err(match validate_precompile_response(&request, &response) {
-                        Err(error) => map_precompile_error(&options.wasm_path, error),
+                        Err(error) => map_precompile_error(wasm_path, error),
                         Ok(_) => RunnerError::StartFailed(format!(
                             "precompile worker exited with unexpected status {status}"
                         )),
@@ -453,20 +462,21 @@ impl ComponentPrecompiler for ChildComponentPrecompiler {
         &self,
         executor: &WorkflowExecutor,
         options: &LaunchOptions,
+        wasm_path: &Path,
     ) -> Result<PreparedWorkflow> {
         // A prepared artifact for this exact image may already be linked in
         // this process. Reusing it skips a process spawn and a full component
         // compile that are otherwise paid on every launch of the same
         // workflow. The cache still hands back the digest recorded when the
         // artifact was verified, so the checksum fence below runs unchanged.
-        if let Some((cached, source_digest)) = executor.cached_prepared(&options.wasm_path).await {
+        if let Some((cached, source_digest)) = executor.cached_prepared(wasm_path).await {
             validate_expected_workflow_checksum(options, source_digest)?;
             return Ok(cached);
         }
 
-        let (request, response) = self.exchange(options).await?;
+        let (request, response) = self.exchange(options, wasm_path).await?;
         let source_digest = validate_precompile_response(&request, &response)
-            .map_err(|error| map_precompile_error(&options.wasm_path, error))?
+            .map_err(|error| map_precompile_error(wasm_path, error))?
             .source_digest();
         validate_expected_workflow_checksum(options, source_digest)?;
         // SAFETY: `response` was read from the private stdout pipe of the
@@ -476,7 +486,7 @@ impl ComponentPrecompiler for ChildComponentPrecompiler {
         let component = unsafe {
             deserialize_trusted_precompiled_package(executor.engine(), &request, &response)
         }
-        .map_err(|error| map_precompile_error(&options.wasm_path, error))?;
+        .map_err(|error| map_precompile_error(wasm_path, error))?;
         let workflow = executor
             .prepare_precompiled_package(component)
             .await
@@ -484,7 +494,7 @@ impl ComponentPrecompiler for ChildComponentPrecompiler {
                 RunnerError::StartFailed(format!("link precompiled workflow: {error:#}"))
             })?;
         executor
-            .cache_prepared(&options.wasm_path, source_digest, &workflow)
+            .cache_prepared(wasm_path, source_digest, &workflow)
             .await;
         Ok(workflow)
     }
@@ -507,9 +517,10 @@ impl ComponentPrecompiler for InProcessTestComponentPrecompiler {
         &self,
         executor: &WorkflowExecutor,
         options: &LaunchOptions,
+        wasm_path: &Path,
     ) -> Result<PreparedWorkflow> {
-        let request = PrecompileRequest::for_artifact(precompile_nonce()?, &options.wasm_path)
-            .map_err(|error| {
+        let request =
+            PrecompileRequest::for_artifact(precompile_nonce()?, wasm_path).map_err(|error| {
                 RunnerError::StartFailed(format!("build test precompile request: {error:#}"))
             })?;
         let worker_request = request.clone();
@@ -519,9 +530,9 @@ impl ComponentPrecompiler for InProcessTestComponentPrecompiler {
         })
         .await
         .map_err(|error| RunnerError::Other(format!("test precompile worker panicked: {error}")))?
-        .map_err(|error| map_precompile_error(&options.wasm_path, error))?;
+        .map_err(|error| map_precompile_error(wasm_path, error))?;
         let source_digest = validate_precompile_response(&request, &response)
-            .map_err(|error| map_precompile_error(&options.wasm_path, error))?
+            .map_err(|error| map_precompile_error(wasm_path, error))?
             .source_digest();
         validate_expected_workflow_checksum(options, source_digest)?;
         // SAFETY: this test helper invokes the same component-host precompile
@@ -530,7 +541,7 @@ impl ComponentPrecompiler for InProcessTestComponentPrecompiler {
         let component = unsafe {
             deserialize_trusted_precompiled_package(executor.engine(), &request, &response)
         }
-        .map_err(|error| map_precompile_error(&options.wasm_path, error))?;
+        .map_err(|error| map_precompile_error(wasm_path, error))?;
         let workflow = executor
             .prepare_precompiled_package(component)
             .await
@@ -654,7 +665,11 @@ fn compute_occupancy(limit: usize, available: usize) -> RunnerOccupancy {
 
 impl EmbeddedWasmRunner {
     /// Build the runner with its own engine + epoch ticker.
-    pub fn new(config: WorkflowRunnerConfig, persistence: Arc<dyn Persistence>) -> Result<Self> {
+    pub fn new(
+        config: WorkflowRunnerConfig,
+        persistence: Arc<dyn Persistence>,
+        artifacts: Arc<dyn runtara_artifact_store::ArtifactStore>,
+    ) -> Result<Self> {
         let engine = build_engine(&EngineConfig::default())
             .map_err(|e| RunnerError::Other(format!("build wasmtime engine: {e:#}")))?;
         spawn_epoch_ticker(Arc::clone(&engine));
@@ -670,6 +685,16 @@ impl EmbeddedWasmRunner {
         let handler_state = Arc::new(runtara_core::instance_handlers::InstanceHandlerState::new(
             Arc::clone(&persistence),
         ));
+        // Every run reaches the `/v1` router in process; the executor registers
+        // each launch with `workflow_api`.
+        let workflow_api = Arc::new(
+            runtara_component_host::api_launches::ApiLaunches::with_run_state(Arc::new(
+                run_state::PersistenceRunState(Arc::clone(&persistence)),
+            )),
+        );
+        executor
+            .set_workflow_api(Arc::clone(&workflow_api))
+            .map_err(|e| RunnerError::Other(e.to_string()))?;
         let run_limit = max_concurrent_runs();
         warn_if_run_bound_exceeds_memory(run_limit);
         let preparation_limit = max_concurrent_preparations();
@@ -683,6 +708,7 @@ impl EmbeddedWasmRunner {
         }
         Ok(Self {
             config,
+            workflow_api,
             scoped_agents: None,
             limits: limits_from_env(),
             preparation_permits,
@@ -692,11 +718,17 @@ impl EmbeddedWasmRunner {
             run_limit,
             metrics,
             persistence,
+            artifacts,
             executor: Arc::new(executor),
             tasks: Arc::new(Mutex::new(HashMap::new())),
             exit_reports: Arc::new(Mutex::new(HashMap::new())),
             handler_state,
         })
+    }
+
+    /// Launches currently serving the workflow API.
+    pub fn workflow_api_launches(&self) -> &Arc<runtara_component_host::api_launches::ApiLaunches> {
+        &self.workflow_api
     }
 
     /// Opt into reviewed scoped Agent packages. Legacy artifacts retain their
@@ -712,6 +744,11 @@ impl EmbeddedWasmRunner {
         self,
         service: Arc<dyn runtara_component_host::OutboundHttpHost>,
     ) -> Result<Self> {
+        self.workflow_api
+            .set_outbound_http(Arc::clone(&service))
+            .map_err(|_| {
+                RunnerError::Other("outbound_http already configured for the workflow API".into())
+            })?;
         self.executor
             .set_outbound_http(service)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
@@ -723,6 +760,11 @@ impl EmbeddedWasmRunner {
         self,
         database: Arc<dyn runtara_component_host::DatabaseHost>,
     ) -> Result<Self> {
+        self.workflow_api
+            .set_database(Arc::clone(&database))
+            .map_err(|_| {
+                RunnerError::Other("database already configured for the workflow API".into())
+            })?;
         self.executor
             .set_database(database)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
@@ -734,39 +776,62 @@ impl EmbeddedWasmRunner {
         self,
         resolver: Arc<dyn runtara_component_host::ConnectionResolverHost>,
     ) -> Result<Self> {
+        self.workflow_api
+            .set_connection_resolver(Arc::clone(&resolver))
+            .map_err(|_| {
+                RunnerError::Other(
+                    "connection_resolver already configured for the workflow API".into(),
+                )
+            })?;
         self.executor
             .set_connection_resolver(resolver)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
         Ok(self)
     }
 
-    /// Attach the control service behind every run's `runtara:control/api`.
+    /// Attach the control service behind every run's `/v1/instances` calls.
     pub fn with_control_host(
         self,
         host: Arc<dyn runtara_component_host::control_host::ControlHost>,
     ) -> Result<Self> {
+        self.workflow_api
+            .set_control_host(Arc::clone(&host))
+            .map_err(|_| {
+                RunnerError::Other("control host already configured for the workflow API".into())
+            })?;
         self.executor
             .set_control_host(host)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
         Ok(self)
     }
 
-    /// Attach the durable instance wait service shared by all runs.
+    /// Attach the durable instance wait service shared by all runs, on both
+    /// ABIs.
     pub fn with_instance_wait_host(
         self,
         host: Arc<dyn runtara_component_host::InstanceWaitHost>,
     ) -> Result<Self> {
+        self.workflow_api
+            .set_instance_wait_host(Arc::clone(&host))
+            .map_err(RunnerError::Other)?;
         self.executor
             .set_instance_wait_host(host)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
         Ok(self)
     }
 
-    /// Attach the approved built-in trusted capability executor.
+    /// Attach the approved built-in trusted capability executor, on both ABIs.
     pub fn with_trusted_executor(
         self,
         executor: Arc<runtara_component_host::trusted::TrustedExecutor>,
     ) -> Result<Self> {
+        self.workflow_api
+            .set_trusted_executor(Arc::clone(&executor))
+            .map_err(|_| {
+                RunnerError::Other(
+                    "trusted executor already configured for the workflow API".into(),
+                )
+            })?;
         self.executor
             .set_trusted_executor(executor)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
@@ -841,7 +906,8 @@ impl EmbeddedWasmRunner {
         )
         // Host authority for trusted calls under an earlier approved pin:
         // only a wake or resume of a parked run may make them.
-        .with_trusted_launch(trusted_launch(options.launch_kind));
+        .with_trusted_launch(trusted_launch(options.launch_kind))
+        .with_workflow_api(Arc::clone(&self.workflow_api));
         // Share the run's cancel flag: it is how the host stops a guest that
         // woke from an interrupted sleep and ignored the cancel, without
         // routing the cancel through the guest's catchable error channel.
@@ -864,7 +930,7 @@ impl EmbeddedWasmRunner {
                 stderr,
                 timeout,
                 cancel,
-                limits: self.limits.clone(),
+                limits: launch_limits(&self.limits, options.memory_limit_bytes),
                 runtime: Some(runtime.clone()),
             },
             runtime,
@@ -926,10 +992,24 @@ impl EmbeddedWasmRunner {
     /// omitted for durable prepared launches: reopening either file in the
     /// parent would reintroduce an unkillable filesystem operation before a
     /// guest permit.
+    /// A local file holding the launch's workflow artifact.
+    async fn workflow_path(&self, options: &LaunchOptions) -> Result<PathBuf> {
+        let digest = &options.workflow_digest;
+        self.artifacts
+            .local_path(digest)
+            .await
+            .map_err(|error| RunnerError::StartFailed(format!("read workflow artifact: {error}")))?
+            .ok_or_else(|| RunnerError::BinaryNotFound(format!("workflow artifact {digest}")))
+    }
+
     async fn prepare_embedded_launch(&self, options: &LaunchOptions) -> Result<PreparedLaunch> {
         let preparation_slot = self.try_take_preparation_slot()?;
         // Preparation refuses a component without the workflow entry.
-        let workflow = self.precompiler.prepare(&self.executor, options).await?;
+        let wasm_path = self.workflow_path(options).await?;
+        let workflow = self
+            .precompiler
+            .prepare(&self.executor, options, &wasm_path)
+            .await?;
 
         scoped::admit(&workflow, &self.executor, self.scoped_agents.as_deref())?;
 
@@ -1070,21 +1150,16 @@ fn map_precompile_error(wasm_path: &Path, error: anyhow::Error) -> RunnerError {
     }
 }
 
-/// Match the child-read digest to the immutable direct-workflow metadata.
-///
-/// When the image metadata records a checksum it is the source-of-truth
-/// identity, and a changed file is terminalized before it reaches a guest
-/// permit. Images registered without one have nothing to compare.
+/// Match the digest of the bytes the child read to the launch's artifact
+/// digest, so bytes that changed under their address are terminalized before
+/// they reach a guest permit.
 fn validate_expected_workflow_checksum(
     options: &LaunchOptions,
     actual: [u8; PRECOMPILE_NONCE_BYTES],
 ) -> Result<()> {
-    let Some(expected) = options.expected_workflow_checksum.as_deref() else {
-        return Ok(());
-    };
-    let expected = expected.strip_prefix("sha256:").unwrap_or(expected);
+    let expected = options.workflow_digest.as_str();
     let actual = hex_digest(actual);
-    if expected.len() != actual.len() || !expected.eq_ignore_ascii_case(&actual) {
+    if expected != actual {
         return Err(RunnerError::StartFailed(format!(
             "generated workflow artifact digest does not match immutable image metadata (expected {expected}, got {actual})"
         )));
@@ -1135,6 +1210,17 @@ fn warn_if_run_bound_exceeds_memory(permits: usize) {
              be killed. Each live guest holds a wasmtime store."
         );
     }
+}
+
+/// The runner's limits narrowed by the workflow's memory setting, which never
+/// raises the runner's ceiling.
+fn launch_limits(ceiling: &WorkflowLimits, memory_limit_bytes: Option<u64>) -> WorkflowLimits {
+    let mut limits = ceiling.clone();
+    if let Some(setting) = memory_limit_bytes {
+        let setting = usize::try_from(setting).unwrap_or(usize::MAX);
+        limits.max_memory_bytes = limits.max_memory_bytes.min(setting);
+    }
+    limits
 }
 
 fn limits_from_env() -> WorkflowLimits {
@@ -1297,6 +1383,255 @@ async fn wake_if_signal_already_arrived(
 /// leave the command pending and mark an unclean exit only if still running.
 /// With the run's root lease the write is owned: a superseded run cannot
 /// stamp its replacement.
+/// What a launch's durable lifecycle needs besides its guest: the run it
+/// executes, its gate and cancel flag, and where it reports how it ended.
+pub struct LaunchLifecycle {
+    /// The durable store the run writes to.
+    pub persistence: Arc<dyn Persistence>,
+    /// The run's instance.
+    pub instance_id: String,
+    /// The instance's tenant.
+    pub tenant_id: String,
+    /// This launch of the instance.
+    pub launch_id: String,
+    /// This execution's runner identity; it owns a root lease it claims.
+    pub invocation_owner: String,
+    /// The durable dispatcher's gate; without one the runner promotes the run.
+    pub start_gate: Option<StartGate>,
+    /// Raised by a stop. One that wins before the guest starts leaves it unrun.
+    pub cancel: CancelToken,
+    /// Whether this execution owns its root even under a durable supervisor.
+    pub requires_root_lease: bool,
+    /// Where an exit the durable state cannot show is filed, by owner.
+    pub exit_reports: Arc<Mutex<HashMap<String, RunExitReport>>>,
+}
+
+/// The durable lifecycle of one launch around its guest, shared by every
+/// runner: wait for the gate, refuse a stop that won before the guest starts,
+/// own and bind the root lease, run `execute`, then park a suspension, record
+/// a trap, cleanup abort or late cancel, and release the lease. `execute`
+/// runs the guest wherever it runs and publishes its terminal (see
+/// [`publish_terminal`]); it is given the root lease. `None` when the guest
+/// never ran.
+pub async fn run_launch_lifecycle<F, Fut>(
+    lifecycle: LaunchLifecycle,
+    runtime_host: Arc<crate::runtime_host::PersistenceRuntimeHost>,
+    execute: F,
+) -> Option<runtara_component_host::InvokeRunResult>
+where
+    F: FnOnce(Option<Arc<root_lease::RootLease>>) -> Fut,
+    Fut: std::future::Future<Output = runtara_component_host::InvokeRunResult>,
+{
+    let LaunchLifecycle {
+        persistence,
+        instance_id,
+        tenant_id,
+        launch_id,
+        invocation_owner,
+        start_gate,
+        cancel,
+        requires_root_lease,
+        exit_reports,
+    } = lifecycle;
+    let supervisor_owns_lifecycle = start_gate.is_some();
+    if let Some(gate) = start_gate.as_ref() {
+        // The durable dispatcher may open the in-memory gate once it
+        // owns the running generation. Do not clear the durable
+        // marker here: Store/WASI setup below can still pause or
+        // crash. Component host confirms exactly before
+        // `instantiate_async`, the first guest-controlled boundary.
+        match gate.wait().await {
+            StartGateOutcome::Opened => {}
+            StartGateOutcome::Cancelled
+            | StartGateOutcome::TimedOut
+            | StartGateOutcome::ConfirmationFailed => {
+                info!(
+                    instance_id = %instance_id,
+                    launch_id = %launch_id,
+                    "Detached launch gate did not permit guest execution"
+                );
+                return None;
+            }
+        }
+    }
+    // A stop can win in the small interval after the dispatcher has
+    // durably promoted this generation but before it opens the gate.
+    // `Runner::stop` cannot hold the supervisor's in-memory gate, so
+    // re-check the task-local cancellation fence here. This keeps a
+    // cancelled handoff from loading (let alone invoking) guest code
+    // if the supervisor subsequently opens its gate.
+    if cancel.load(Ordering::SeqCst) {
+        info!(
+            instance_id = %instance_id,
+            launch_id = %launch_id,
+            "Detached launch was cancelled before guest execution"
+        );
+        return None;
+    }
+    // The verified component and persisted input were both prepared
+    // before the run permit. Only guest invocation remains after
+    // the durable gate confirmation.
+    if !supervisor_owns_lifecycle {
+        mark_running(persistence.as_ref(), &instance_id).await;
+    }
+    // Own the root execution lease for the whole run. Whoever promotes
+    // the run claims it: the durable supervisor in its promotion
+    // transaction, otherwise this task, which promoted the run just
+    // above. A scoped root always owns one. Every durable write
+    // presents it, and a run that cannot own its root must not
+    // execute as a stale writer.
+    let claims_lease = !supervisor_owns_lifecycle || requires_root_lease;
+    let root_lease = match start_gate.as_ref().and_then(|gate| gate.root_lease()) {
+        Some(token) => Some(Arc::new(root_lease::RootLease::adopt(
+            persistence.clone(),
+            token,
+        ))),
+        None if claims_lease && persistence.invocation_fences().is_some() => {
+            match root_lease::RootLease::claim(
+                persistence.clone(),
+                &tenant_id,
+                &instance_id,
+                &invocation_owner,
+                root_lease::ROOT_LEASE_CONTROL_TIMEOUT,
+            )
+            .await
+            {
+                Ok(lease) => Some(Arc::new(lease)),
+                Err(error) => {
+                    error!(
+                        instance_id = %instance_id,
+                        launch_id = %launch_id,
+                        error = %error,
+                        "Run could not own its root; not executing"
+                    );
+                    return None;
+                }
+            }
+        }
+        None => None,
+    };
+    if requires_root_lease && root_lease.is_none() {
+        error!(instance_id = %instance_id, "Scoped root requires a root lease; not executing");
+        return None;
+    }
+    if let Some(lease) = &root_lease
+        && let Err(error) = runtime_host.bind_root_lease(lease.token.clone())
+    {
+        error!(instance_id = %instance_id, %error, "Run could not bind its root lease; not executing");
+        return None;
+    }
+    let run = execute(root_lease.clone()).await;
+    use runtara_component_host::InvokeExit;
+    match &run.exit {
+        InvokeExit::Completed(_) => {
+            info!(instance_id = %instance_id, "Embedded workflow run completed");
+        }
+        InvokeExit::Suspended(wakes) => {
+            info!(instance_id = %instance_id, ?wakes, "Embedded workflow run suspended");
+            // Store-freeing durable sleep: the guest exited with a
+            // timed wake instead of blocking; park it so the wake
+            // scheduler relaunches at the deadline.
+            if let Err(error) = park_with_retry(
+                persistence.as_ref(),
+                &instance_id,
+                root_lease.as_ref().map(|lease| &lease.token),
+                wakes,
+                &run.instance_waits,
+            )
+            .await
+            {
+                // Execution stopped but the suspension is not
+                // committed: the row is still `running`. Tell the
+                // monitor, which hands it to recovery instead of
+                // recording a crash.
+                error!(instance_id, %error, "Park did not commit after retries; handing the run to recovery");
+                exit_reports
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(
+                        invocation_owner.clone(),
+                        RunExitReport::SuspendNotParked {
+                            error: error.to_string(),
+                        },
+                    );
+            }
+        }
+        InvokeExit::Failed(_) => {
+            warn!(instance_id = %instance_id, "Embedded workflow run returned error");
+        }
+        InvokeExit::Trapped { reason } => {
+            error!(instance_id = %instance_id, reason = %reason, "Embedded workflow run failed");
+            // A durable launch has no stderr file to carry the reason.
+            exit_reports
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(
+                    invocation_owner.clone(),
+                    RunExitReport::Trapped {
+                        reason: reason.clone(),
+                    },
+                );
+        }
+        InvokeExit::Timeout => {
+            warn!(instance_id = %instance_id, "Embedded workflow run timed out");
+        }
+        InvokeExit::Cancelled => {
+            warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
+        }
+        InvokeExit::CleanupAborted => {
+            record_cleanup_aborted_exit(
+                &persistence,
+                &instance_id,
+                root_lease.as_ref().map(|lease| &lease.token),
+            )
+            .await;
+        }
+    }
+    if matches!(&run.exit, InvokeExit::Suspended(_)) {
+        // A cancel may arrive after the guest's last poll but before
+        // it parks. Resolve it now; the scheduler recovers this if
+        // the process stops before reaching this point.
+        if let Err(error) = persistence
+            .cancel_suspended_instances(Some(&instance_id), 1)
+            .await
+        {
+            warn!(instance_id, %error, "Parked cancellation deferred to scheduler recovery");
+        }
+    } else {
+        record_unacknowledged_cancel_exit(
+            &persistence,
+            &instance_id,
+            root_lease.as_ref().map(|lease| &lease.token),
+        )
+        .await;
+    }
+    // Nothing of this execution writes after this point. Leaving
+    // `running` already revoked the lease; this covers an exit that
+    // left the row running for the monitor to settle.
+    if let Some(lease) = &root_lease
+        && let Err(error) = lease.release().await
+    {
+        warn!(instance_id = %instance_id, error = %error, "Root lease release deferred to the status transition");
+    }
+    Some(run)
+}
+
+/// Persist a run's terminal once, from its exit, as its only terminal
+/// channel. A scoped root publishes after its own cleanup instead.
+pub async fn publish_terminal(
+    runtime_host: &crate::runtime_host::PersistenceRuntimeHost,
+    instance_id: &str,
+    run: &runtara_component_host::InvokeRunResult,
+) {
+    if let Some(terminal) = runtara_component_host::runtime_host::RunTerminal::from_exit(&run.exit)
+        && let Err(error) =
+            runtara_component_host::runtime_host::RuntimeHost::terminal(runtime_host, terminal)
+                .await
+    {
+        error!(instance_id = %instance_id, %error, "Terminal write failed");
+    }
+}
+
 async fn record_unacknowledged_cancel_exit(
     persistence: &Arc<dyn Persistence>,
     instance_id: &str,
@@ -1678,228 +2013,67 @@ impl Runner for EmbeddedWasmRunner {
             Arc::new(GateWorkflowStartConfirmation { gate: gate.clone() })
                 as Arc<dyn WorkflowStartConfirmation>
         });
-        // Durable dispatchers promote the matching Core instance in the same
-        // transaction that changes their queue row to `running`, before they
-        // open `start_gate`. Direct callers retain the historical runner-side
-        // promotion below.
-        let supervisor_owns_lifecycle = start_gate.is_some();
         // The run slot was already claimed without waiting before any per-run
         // allocation. It moves into the task so every completion/error/panic
         // returns capacity and records the optional permit duration together.
+        let lifecycle = LaunchLifecycle {
+            persistence: Arc::clone(&persistence),
+            instance_id: instance_id.clone(),
+            tenant_id,
+            launch_id,
+            invocation_owner,
+            start_gate,
+            cancel: Arc::clone(&task_for_run.cancel),
+            requires_root_lease: scoped_authority.is_some(),
+            exit_reports,
+        };
         tokio::spawn(async move {
             let _completion = completion;
-            if let Some(gate) = start_gate.as_ref() {
-                // The durable dispatcher may open the in-memory gate once it
-                // owns the running generation. Do not clear the durable
-                // marker here: Store/WASI setup below can still pause or
-                // crash. Component host confirms exactly before
-                // `instantiate_async`, the first guest-controlled boundary.
-                match gate.wait().await {
-                    StartGateOutcome::Opened => {}
-                    StartGateOutcome::Cancelled
-                    | StartGateOutcome::TimedOut
-                    | StartGateOutcome::ConfirmationFailed => {
-                        info!(
-                            instance_id = %instance_id,
-                            launch_id = %launch_id,
-                            "Detached launch gate did not permit guest execution"
-                        );
-                        return;
+            let lifecycle_host = Arc::clone(&runtime_host);
+            let ran =
+                run_launch_lifecycle(lifecycle, lifecycle_host, move |root_lease| async move {
+                    if let Some(authority) = scoped_authority {
+                        // The lifecycle refused to execute without one.
+                        let lease = root_lease.expect("a scoped root owns its root lease");
+                        scoped::execute(
+                            &executor,
+                            &workflow,
+                            spec,
+                            runtime_host,
+                            input,
+                            start_confirmation.clone(),
+                            authority,
+                            scoped_config.as_ref().expect("admitted scoped policy"),
+                            &lease,
+                        )
+                        .await
+                    } else {
+                        let run = executor
+                            .execute_prepared_invoke_with_start_confirmation(
+                                &workflow,
+                                spec,
+                                input,
+                                start_confirmation.clone(),
+                            )
+                            .await;
+                        // The return value is the run's only terminal channel:
+                        // persist it once, here, before the completion guard drops
+                        // and the monitor would record a still-running run as
+                        // crashed. (A scoped root publishes after its cleanup.)
+                        publish_terminal(&runtime_host, &instance_id, &run).await;
+                        run
                     }
-                }
-            }
-            // A stop can win in the small interval after the dispatcher has
-            // durably promoted this generation but before it opens the gate.
-            // `Runner::stop` cannot hold the supervisor's in-memory gate, so
-            // re-check the task-local cancellation fence here. This keeps a
-            // cancelled handoff from loading (let alone invoking) guest code
-            // if the supervisor subsequently opens its gate.
-            if task_for_run.cancel.load(Ordering::SeqCst) {
-                info!(
-                    instance_id = %instance_id,
-                    launch_id = %launch_id,
-                    "Detached launch was cancelled before guest execution"
-                );
-                return;
-            }
-            // The verified component and persisted input were both prepared
-            // before the run permit. Only guest invocation remains after
-            // the durable gate confirmation.
-            if !supervisor_owns_lifecycle {
-                mark_running(persistence.as_ref(), &instance_id).await;
-            }
-            // Own the root execution lease for the whole run. Whoever promotes
-            // the run claims it: the durable supervisor in its promotion
-            // transaction, otherwise this task, which promoted the run just
-            // above. A scoped root always owns one. Every durable write
-            // presents it, and a run that cannot own its root must not
-            // execute as a stale writer.
-            let claims_lease = !supervisor_owns_lifecycle || scoped_authority.is_some();
-            let root_lease = match start_gate.as_ref().and_then(|gate| gate.root_lease()) {
-                Some(token) => Some(root_lease::RootLease::adopt(persistence.clone(), token)),
-                None if claims_lease && persistence.invocation_fences().is_some() => {
-                    match root_lease::RootLease::claim(
-                        persistence.clone(),
-                        &tenant_id,
-                        &instance_id,
-                        &invocation_owner,
-                        root_lease::ROOT_LEASE_CONTROL_TIMEOUT,
-                    )
-                    .await
-                    {
-                        Ok(lease) => Some(lease),
-                        Err(error) => {
-                            error!(
-                                instance_id = %instance_id,
-                                launch_id = %launch_id,
-                                error = %error,
-                                "Run could not own its root; not executing"
-                            );
-                            return;
-                        }
-                    }
-                }
-                None => None,
-            };
-            if let Some(lease) = &root_lease
-                && let Err(error) = runtime_host.bind_root_lease(lease.token.clone())
-            {
-                error!(instance_id = %instance_id, %error, "Run could not bind its root lease; not executing");
-                return;
-            }
-            let run = if let Some(authority) = scoped_authority {
-                let Some(lease) = root_lease.as_ref() else {
-                    error!(instance_id = %instance_id, "Scoped root requires a root lease; not executing");
-                    return;
-                };
-                scoped::execute(
-                    &executor,
-                    &workflow,
-                    spec,
-                    runtime_host,
-                    input,
-                    start_confirmation.clone(),
-                    authority,
-                    scoped_config.as_ref().expect("admitted scoped policy"),
-                    lease,
-                )
-                .await
-            } else {
-                let run = executor
-                    .execute_prepared_invoke_with_start_confirmation(
-                        &workflow,
-                        spec,
-                        input,
-                        start_confirmation.clone(),
-                    )
-                    .await;
-                // The return value is the run's only terminal channel:
-                // persist it once, here, before the completion guard drops
-                // and the monitor would record a still-running run as
-                // crashed. (A scoped root publishes after its cleanup.)
-                if let Some(terminal) =
-                    runtara_component_host::runtime_host::RunTerminal::from_exit(&run.exit)
-                    && let Err(error) = runtara_component_host::runtime_host::RuntimeHost::terminal(
-                        runtime_host.as_ref(),
-                        terminal,
-                    )
-                    .await
-                {
-                    error!(instance_id = %instance_id, %error, "Terminal write failed");
-                }
-                run
-            };
-            {
+                })
+                .await;
+            if let Some(run) = ran {
                 let mut guard = metrics_for_task.lock().await;
                 *guard = invoke_metrics_of(&run);
-            }
-            use runtara_component_host::InvokeExit;
-            match &run.exit {
-                InvokeExit::Completed(_) => {
-                    info!(instance_id = %instance_id, "Embedded workflow run completed");
-                }
-                InvokeExit::Suspended(wakes) => {
-                    info!(instance_id = %instance_id, ?wakes, "Embedded workflow run suspended");
-                    // Store-freeing durable sleep: the guest exited with a
-                    // timed wake instead of blocking; park it so the wake
-                    // scheduler relaunches at the deadline.
-                    if let Err(error) = park_with_retry(
-                        persistence.as_ref(),
-                        &instance_id,
-                        root_lease.as_ref().map(|lease| &lease.token),
-                        wakes,
-                        &run.instance_waits,
-                    )
-                    .await
-                    {
-                        // Execution stopped but the suspension is not
-                        // committed: the row is still `running`. Tell the
-                        // monitor, which hands it to recovery instead of
-                        // recording a crash.
-                        error!(instance_id, %error, "Park did not commit after retries; handing the run to recovery");
-                        exit_reports
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .insert(
-                                invocation_owner.clone(),
-                                RunExitReport::SuspendNotParked {
-                                    error: error.to_string(),
-                                },
-                            );
-                    }
-                }
-                InvokeExit::Failed(_) => {
-                    warn!(instance_id = %instance_id, "Embedded workflow run returned error");
-                }
-                InvokeExit::Trapped { reason } => {
-                    error!(instance_id = %instance_id, reason = %reason, "Embedded workflow run failed");
-                }
-                InvokeExit::Timeout => {
-                    warn!(instance_id = %instance_id, "Embedded workflow run timed out");
-                }
-                InvokeExit::Cancelled => {
-                    warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
-                }
-                InvokeExit::CleanupAborted => {
-                    record_cleanup_aborted_exit(
-                        &persistence,
-                        &instance_id,
-                        root_lease.as_ref().map(|lease| &lease.token),
-                    )
-                    .await;
-                }
-            }
-            if matches!(&run.exit, InvokeExit::Suspended(_)) {
-                // A cancel may arrive after the guest's last poll but before
-                // it parks. Resolve it now; the scheduler recovers this if
-                // the process stops before reaching this point.
-                if let Err(error) = persistence
-                    .cancel_suspended_instances(Some(&instance_id), 1)
-                    .await
-                {
-                    warn!(instance_id, %error, "Parked cancellation deferred to scheduler recovery");
-                }
-            } else {
-                record_unacknowledged_cancel_exit(
-                    &persistence,
-                    &instance_id,
-                    root_lease.as_ref().map(|lease| &lease.token),
-                )
-                .await;
-            }
-            // Nothing of this execution writes after this point. Leaving
-            // `running` already revoked the lease; this covers an exit that
-            // left the row running for the monitor to settle.
-            if let Some(lease) = &root_lease
-                && let Err(error) = lease.release().await
-            {
-                warn!(instance_id = %instance_id, error = %error, "Root lease release deferred to the status transition");
             }
         });
 
         info!(
             instance_id = %options.instance_id,
-            wasm = %options.wasm_path.display(),
+            workflow = %options.workflow_digest,
             "Launched embedded workflow run (detached)"
         );
 
@@ -1990,9 +2164,10 @@ impl Runner for EmbeddedWasmRunner {
 #[cfg(test)]
 mod tests {
     use super::{
-        InstanceTask, RunSlot, TaskCompletionGuard, TaskRegistry, compute_occupancy,
+        InstanceTask, RunSlot, TaskCompletionGuard, TaskRegistry, compute_occupancy, launch_limits,
         remove_task_if_current,
     };
+    use runtara_component_host::WorkflowLimits;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -2005,6 +2180,18 @@ mod tests {
             finished: AtomicBool::new(false),
             done: tokio::sync::Notify::new(),
         })
+    }
+
+    #[test]
+    fn workflow_memory_setting_narrows_but_never_raises_the_ceiling() {
+        let ceiling = WorkflowLimits {
+            max_memory_bytes: 1024,
+            max_table_elements: 10,
+        };
+        assert_eq!(launch_limits(&ceiling, None).max_memory_bytes, 1024);
+        assert_eq!(launch_limits(&ceiling, Some(512)).max_memory_bytes, 512);
+        assert_eq!(launch_limits(&ceiling, Some(4096)).max_memory_bytes, 1024);
+        assert_eq!(launch_limits(&ceiling, Some(512)).max_table_elements, 10);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2347,14 +2534,16 @@ mod tests {
                 skip_cert_verification: false,
             },
             Arc::new(runtara_core::persistence::memory::InMemoryPersistence::new()),
+            Arc::new(runtara_artifact_store::FilesystemArtifactStore::new(
+                std::env::temp_dir().join("runtara-unused-artifacts"),
+            )),
         )
         .expect("runner builds");
         let mut options = super::LaunchOptions {
             launch_id: "launch-env".into(),
             instance_id: "instance-env".into(),
             tenant_id: "tenant-env".into(),
-            wasm_path: std::path::PathBuf::from("/unused/workflow.wasm"),
-            expected_workflow_checksum: None,
+            workflow_digest: runtara_artifact_store::Digest::of(b"workflow"),
             preparation_attempt: None,
             preparation_deadline: None,
             input: serde_json::Value::Null,
@@ -2364,6 +2553,7 @@ mod tests {
             prepersisted_input: None,
             launch_kind: crate::launch_queue::LaunchKind::Start,
             start_gate: None,
+            memory_limit_bytes: None,
         };
         let env = runner.merged_env(&options);
         assert!(!env.contains_key(super::common::RUNTIME_URL_ENV), "{env:?}");

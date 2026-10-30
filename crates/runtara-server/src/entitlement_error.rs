@@ -20,6 +20,8 @@ pub mod codes {
     pub const ENTITLEMENT_REQUIRED: &str = "ENTITLEMENT_REQUIRED";
     pub const AGENT_NOT_ENABLED: &str = "AGENT_NOT_ENABLED";
     pub const ENTITLEMENT_LIMIT_EXCEEDED: &str = "ENTITLEMENT_LIMIT_EXCEEDED";
+    pub const TENANT_NOT_READY: &str = "TENANT_NOT_READY";
+    pub const TENANT_STATUS_UNAVAILABLE: &str = "TENANT_STATUS_UNAVAILABLE";
 }
 
 /// The three documented entitlement denials.
@@ -42,6 +44,14 @@ pub enum EntitlementDenial {
         /// The configured maximum the caller would breach.
         maximum: u64,
     },
+
+    /// The tenant's status says it is not served now: not yet provisioned,
+    /// or suspended. Wire `code`: `TENANT_NOT_READY`.
+    TenantNotReady,
+
+    /// The tenant's status could not be read, so it is not served (fails
+    /// closed). Wire `code`: `TENANT_STATUS_UNAVAILABLE`; HTTP 503.
+    TenantStatusUnavailable,
 }
 
 impl EntitlementDenial {
@@ -51,6 +61,20 @@ impl EntitlementDenial {
             EntitlementDenial::FeatureRequired(_) => codes::ENTITLEMENT_REQUIRED,
             EntitlementDenial::AgentNotEnabled(_) => codes::AGENT_NOT_ENABLED,
             EntitlementDenial::LimitExceeded { .. } => codes::ENTITLEMENT_LIMIT_EXCEEDED,
+            EntitlementDenial::TenantNotReady => codes::TENANT_NOT_READY,
+            EntitlementDenial::TenantStatusUnavailable => codes::TENANT_STATUS_UNAVAILABLE,
+        }
+    }
+
+    /// The HTTP status a refusal answers with: 429 for transient capacity,
+    /// 503 when the tenant's status cannot be read, 403 otherwise.
+    pub fn status(&self) -> StatusCode {
+        if self.is_transient_capacity() {
+            StatusCode::TOO_MANY_REQUESTS
+        } else if matches!(self, EntitlementDenial::TenantStatusUnavailable) {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::FORBIDDEN
         }
     }
 
@@ -60,6 +84,8 @@ impl EntitlementDenial {
             EntitlementDenial::FeatureRequired(_) => "Entitlement required",
             EntitlementDenial::AgentNotEnabled(_) => "Agent not enabled",
             EntitlementDenial::LimitExceeded { .. } => "Tier limit exceeded",
+            EntitlementDenial::TenantNotReady => "Tenant not served",
+            EntitlementDenial::TenantStatusUnavailable => "Tenant status unavailable",
         }
     }
 
@@ -76,6 +102,12 @@ impl EntitlementDenial {
             }
             EntitlementDenial::LimitExceeded { limit, maximum } => {
                 format!("Tenant has reached the {limit} limit (maximum {maximum}).")
+            }
+            EntitlementDenial::TenantNotReady => {
+                "This tenant is not served now: it is not ready, or it is suspended.".into()
+            }
+            EntitlementDenial::TenantStatusUnavailable => {
+                "This tenant's status cannot be read, so it is not served.".into()
             }
         }
     }
@@ -103,6 +135,13 @@ impl EntitlementDenial {
                 "maximum": maximum,
                 "message": self.message(),
             }),
+            EntitlementDenial::TenantNotReady | EntitlementDenial::TenantStatusUnavailable => {
+                json!({
+                    "error": self.error_summary(),
+                    "code": self.code(),
+                    "message": self.message(),
+                })
+            }
         }
     }
 
@@ -142,6 +181,7 @@ impl EntitlementDenial {
                 fields.limit = Some(*limit);
                 fields.maximum = Some(*maximum);
             }
+            EntitlementDenial::TenantNotReady | EntitlementDenial::TenantStatusUnavailable => {}
         }
         fields
     }
@@ -225,7 +265,7 @@ impl IntoResponse for EntitlementDenial {
             )
                 .into_response()
         } else {
-            (StatusCode::FORBIDDEN, body).into_response()
+            (self.status(), body).into_response()
         }
     }
 }
@@ -255,6 +295,25 @@ mod tests {
     }
 
     // ── code strings ────────────────────────────────────────────────────
+
+    #[test]
+    fn a_tenant_not_served_is_refused_403_and_an_unread_status_503() {
+        assert_eq!(EntitlementDenial::TenantNotReady.code(), "TENANT_NOT_READY");
+        assert_eq!(
+            EntitlementDenial::TenantNotReady.status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            EntitlementDenial::TenantStatusUnavailable.code(),
+            "TENANT_STATUS_UNAVAILABLE"
+        );
+        assert_eq!(
+            EntitlementDenial::TenantStatusUnavailable.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let body = EntitlementDenial::TenantNotReady.json_body();
+        assert_eq!(body["code"], "TENANT_NOT_READY");
+    }
 
     #[test]
     fn feature_required_code_is_stable() {

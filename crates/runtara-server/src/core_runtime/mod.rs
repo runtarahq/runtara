@@ -8,9 +8,9 @@
 //! and [`CoreRuntime`] owns the listener's lifecycle, including the drain
 //! sequence that lets an instance mid-checkpoint finish writing.
 //!
-//! Workflows do not come through here. They bind `runtara:workflow/runtime`
-//! as a host import, and those calls reach the same core handlers in-process
-//! without a socket. This transport is a test and debugging surface, and the
+//! Workflows do not come through here. They call the workflow API, which the
+//! embedded host serves in process, and those calls reach the same core
+//! handlers without a socket. This transport is a test and debugging surface, and the
 //! server serves it only when `RUNTARA_CORE_INSTANCE_API` is enabled, on
 //! loopback. An instance registered through it has no launch or registration
 //! in the Environment, so the heartbeat monitor recovers it as orphaned once it

@@ -99,6 +99,15 @@ fn image_lowering_mode(image: &ImageSummary) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
+/// The digest of the release index an image was composed from.
+fn image_component_release(image: &ImageSummary) -> Option<&str> {
+    image
+        .metadata
+        .as_ref()
+        .and_then(|m| m.pointer("/workflow/componentRelease/index"))
+        .and_then(|v| v.as_str())
+}
+
 fn image_compiler_mode(image: &ImageSummary) -> Option<&str> {
     image
         .metadata
@@ -119,6 +128,30 @@ fn image_track_events(image: &ImageSummary) -> Option<bool> {
         .as_ref()
         .and_then(|m| m.pointer("/workflow/trackEvents"))
         .and_then(|v| v.as_bool())
+}
+
+/// The memory setting an image was registered with, in bytes. A launch
+/// enforces it; an image without one runs under the runner's ceiling only.
+fn image_memory_limit_bytes(image: &ImageSummary) -> Option<u64> {
+    image
+        .metadata
+        .as_ref()
+        .and_then(|m| m.pointer("/workflow/memoryLimitBytes"))
+        .and_then(|v| v.as_u64())
+}
+
+/// Refuse a memory setting below what the composed workflow allocates when
+/// it is instantiated: such a workflow could never start.
+fn check_memory_floor(memory_mb: u32, floor_bytes: Option<u64>) -> Result<(), ServiceError> {
+    let limit = u64::from(memory_mb) * 1024 * 1024;
+    match floor_bytes {
+        Some(floor) if floor > limit => Err(ServiceError::WorkflowAuthoringError(format!(
+            "Memory of {memory_mb} MiB is below this workflow's memory floor of {} MiB; \
+             raise its memory",
+            floor.div_ceil(1024 * 1024),
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// SHA-256 of the exact uploaded workflow binary.
@@ -142,7 +175,8 @@ fn image_binary_checksum(image: &ImageSummary) -> Option<&str> {
 /// Lowering belongs in the key because it changes the emitted artifact for an
 /// unchanged definition: a workflow compiled before store-freeing sleep was
 /// turned on would otherwise keep serving its blocking-sleep artifact forever,
-/// since nothing else about it changed.
+/// since nothing else about it changed. The component release belongs there
+/// for the same reason: new agent or stdlib bytes compose a different artifact.
 fn image_cache_hits(
     image: &ImageSummary,
     source_checksum: &str,
@@ -154,6 +188,8 @@ fn image_cache_hits(
         && image_compiler_mode(image) == Some(compiler_mode.as_str())
         && image_lowering_mode(image) == Some(crate::config::workflow_lowering_tag().as_str())
         && image_track_events(image) == Some(track_events)
+        && image_component_release(image)
+            == crate::config::compile_component_release().map(|release| release.index.as_str())
 }
 
 /// Whether `image` is the exact compiled artifact about to be registered.
@@ -182,11 +218,15 @@ fn workflow_compilation_fingerprint(
     let lowering_mode = crate::config::workflow_lowering_tag();
     let mut fingerprint = Sha256::new();
 
+    let component_release = crate::config::compile_component_release()
+        .map(|release| release.index.as_str())
+        .unwrap_or_default();
     for field in [
         source_checksum,
         runtara_workflows::TEMPLATE_MAJOR_VERSION,
         compiler_mode.as_str(),
         lowering_mode.as_str(),
+        component_release,
     ] {
         fingerprint.update(field.as_bytes());
         fingerprint.update([0]);
@@ -251,6 +291,15 @@ fn workflow_image_metadata(
         },
     });
 
+    // Which platform release the agent and shared components came from; the
+    // digests of each are in `directArtifact`.
+    if let Some(release) = crate::config::compile_component_release() {
+        workflow["componentRelease"] = serde_json::json!({
+            "release": release.release,
+            "index": release.index,
+        });
+    }
+
     if let Some(direct_artifact) = direct_artifact {
         workflow["directWasm"]["entryAbi"] = serde_json::json!(direct_artifact.entry_abi);
         workflow["directArtifact"] = serde_json::to_value(direct_artifact)
@@ -306,6 +355,8 @@ struct WorkflowImageRegistration<'a> {
     version: u32,
     source_checksum: &'a str,
     track_events: bool,
+    /// The version's memory setting, recorded on the image for its launches.
+    memory_limit_bytes: u64,
 }
 
 /// The exact workflow source a compilation attempt consumes.
@@ -318,6 +369,8 @@ pub(crate) struct CompilationSource {
     pub(crate) definition: serde_json::Value,
     pub(crate) source_checksum: String,
     pub(crate) track_events: bool,
+    /// The version's memory, in MiB.
+    pub(crate) memory_mb: u32,
 }
 
 /// Direct WASM compilation settings.
@@ -638,7 +691,7 @@ pub async fn check_compile_agent_allowlist(
     let children = load_child_workflows(pool, tenant_id, workflow_id, version, &definition).await;
     let checked_children = children.as_ref().ok().cloned().unwrap_or_default();
     compile_agent_allowlist_decision(
-        crate::config::entitlements(),
+        &crate::config::entitlements_for(tenant_id),
         &definition,
         children,
         &crate::workflow_agents::published_agent_ids(tenant_id),
@@ -853,9 +906,9 @@ impl CompilationService {
         workflow_id: &str,
         version: i32,
     ) -> Result<CompilationSource, ServiceError> {
-        let (definition, track_events) = self
+        let (definition, memory_mb, track_events) = self
             .repository
-            .get_definition_with_track_events(tenant_id, workflow_id, version)
+            .get_definition_with_memory(tenant_id, workflow_id, version)
             .await
             .map_err(|e| ServiceError::DatabaseError(format!("Failed to fetch definition: {e}")))?
             .ok_or_else(|| {
@@ -868,6 +921,7 @@ impl CompilationService {
             source_checksum: workflow_definition_checksum(&definition),
             definition,
             track_events,
+            memory_mb,
         })
     }
 
@@ -938,7 +992,9 @@ impl CompilationService {
             definition,
             source_checksum,
             track_events,
+            memory_mb,
         } = source;
+        let memory_limit_bytes = u64::from(memory_mb) * 1024 * 1024;
 
         let version_u32 = version as u32;
 
@@ -1186,6 +1242,16 @@ impl CompilationService {
             }
             return Err(error);
         }
+        let floor = direct_artifact_metadata_for_image(&result)
+            .await
+            .and_then(|metadata| metadata.memory_floor_bytes);
+        let memory_floor_bytes = floor.and_then(|floor| i64::try_from(floor).ok());
+        if let Err(error) = check_memory_floor(memory_mb, floor) {
+            if let Some(r) = &progress_reporter {
+                r.clear().await;
+            }
+            return Err(error);
+        }
 
         // 7. Lock the source through registration. Image names are immutable
         // per artifact identity, but the source lock still prevents an old
@@ -1233,6 +1299,7 @@ impl CompilationService {
                 compiler_mode: result.compiler_mode.as_str(),
                 track_events,
                 trusted_pins: &result.trusted_pins,
+                memory_floor_bytes,
             })
             .await
             .map_err(|e| {
@@ -1264,6 +1331,7 @@ impl CompilationService {
             version: version_u32,
             source_checksum: &source_checksum,
             track_events,
+            memory_limit_bytes,
         };
         let image_name = workflow_image_name(
             registration.workflow_id,
@@ -1292,7 +1360,8 @@ impl CompilationService {
                     result.compiler_mode,
                     track_events,
                     &result.binary_checksum,
-                ) && image_agent_ids(&existing_image).is_some()
+                ) && image_memory_limit_bytes(&existing_image) == Some(memory_limit_bytes)
+                    && image_agent_ids(&existing_image).is_some()
                     && self
                         .artifact_present_for_reuse(client, &existing_image.image_id)
                         .await =>
@@ -1449,6 +1518,111 @@ impl CompilationService {
         })
     }
 
+    /// Rebuild every registered workflow image of the tenant whose artifact
+    /// is not in the store, from its version. The artifact store is not
+    /// backed up: after a restore this puts each artifact back (compilation
+    /// is deterministic, so under the same digest), and the launches that
+    /// waited for one proceed. Answers how many were rebuilt and how many
+    /// failed.
+    pub async fn restage_missing_artifacts(&self, tenant_id: &str) -> (usize, usize) {
+        let Some(client) = self.runtime_client.clone() else {
+            return (0, 0);
+        };
+        let images = match self.repository.registered_images(tenant_id).await {
+            Ok(images) => images,
+            Err(error) => {
+                warn!(%tenant_id, %error, "could not list registered workflow images");
+                return (0, 1);
+            }
+        };
+        let (mut rebuilt, mut failed) = (0, 0);
+        for (workflow_id, version, image_id) in images {
+            if self.artifact_present_for_reuse(&client, &image_id).await {
+                continue;
+            }
+            match self
+                .compile_workflow(tenant_id, &workflow_id, version, true)
+                .await
+            {
+                Ok(_) => {
+                    rebuilt += 1;
+                    info!(%tenant_id, %workflow_id, version, "rebuilt a missing workflow artifact");
+                }
+                Err(error) => {
+                    failed += 1;
+                    warn!(
+                        %tenant_id, %workflow_id, version, %error,
+                        "could not rebuild a missing workflow artifact; compile it again"
+                    );
+                }
+            }
+        }
+        (rebuilt, failed)
+    }
+
+    /// Republish the tenant's staged workflow-agents that another lowering
+    /// built (see [`crate::workflow_agents::stale_agents`]), from the version
+    /// each was published from, or the workflow's current version when it
+    /// recorded none. A parent compiled afterwards composes the new
+    /// artifact. Answers how many were republished and how many failed.
+    pub async fn restage_stale_workflow_agents(&self, tenant_id: &str) -> (usize, usize) {
+        let lowering = crate::config::workflow_lowering_tag();
+        let (mut restaged, mut failed) = (0, 0);
+        for agent in crate::workflow_agents::stale_agents(tenant_id, &lowering) {
+            let target = match agent.published.clone() {
+                Some((workflow_id, version)) => Ok(Some((workflow_id, version as i32))),
+                None => self.current_version_of_slug(tenant_id, &agent.slug).await,
+            };
+            let outcome = match target {
+                Ok(Some((workflow_id, version))) => self
+                    .publish_workflow_agent(tenant_id, &workflow_id, version, agent.slug.clone())
+                    .await
+                    .map(|_| ()),
+                Ok(None) => Err(ServiceError::NotFound(format!(
+                    "no live workflow has the slug `{}`",
+                    agent.slug
+                ))),
+                Err(error) => Err(error),
+            };
+            match outcome {
+                Ok(()) => {
+                    restaged += 1;
+                    info!(%tenant_id, slug = %agent.slug, "restaged workflow-agent for this lowering");
+                }
+                Err(error) => {
+                    failed += 1;
+                    warn!(
+                        %tenant_id, slug = %agent.slug, %error,
+                        "could not restage workflow-agent; republish it"
+                    );
+                }
+            }
+        }
+        (restaged, failed)
+    }
+
+    async fn current_version_of_slug(
+        &self,
+        tenant_id: &str,
+        slug: &str,
+    ) -> Result<Option<(String, i32)>, ServiceError> {
+        let database = |e: sqlx::Error| ServiceError::DatabaseError(e.to_string());
+        let Some(workflow_id) = self
+            .repository
+            .find_by_slug(tenant_id, slug)
+            .await
+            .map_err(database)?
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .repository
+            .get_current_or_latest_version(tenant_id, &workflow_id)
+            .await
+            .map_err(database)?
+            .map(|version| (workflow_id, version)))
+    }
+
     /// Publish a workflow version AS an agent: compile it with the
     /// `PublishedAgent` ABI (exports `runtara:agent-<slug>/capabilities`),
     /// synthesize the catalog `AgentInfo` from its input/output schemas, and
@@ -1552,17 +1726,42 @@ impl CompilationService {
         .map_err(|e| ServiceError::CompilationError(format!("Agent publish failed: {e}")))?;
         drop(permit);
 
+        // A caller runs a workflow-agent that may park as a child run of its
+        // own: it needs the version it runs, and that version's root image.
+        let parks = result
+            .artifact_metadata
+            .workflow_agent_safety
+            .may_suspend_or_sleep;
+        let info = runtara_dsl::agent_meta::with_workflow_run(
+            info,
+            runtara_dsl::agent_meta::WorkflowRunTarget {
+                workflow_id: workflow_id.to_string(),
+                version: version as u32,
+                parks,
+            },
+        );
+        if parks {
+            self.compile_workflow(tenant_id, workflow_id, version, false)
+                .await
+                .map_err(|error| {
+                    ServiceError::CompilationError(format!(
+                        "the agent parks, so it runs as a child run of its own, \
+                         and compiling its run failed: {error}"
+                    ))
+                })?;
+        }
+
         // 3. Stage the composed artifact + synthesized meta.
         let (wasm_path, meta_path) =
-            crate::workflow_agents::stage(tenant_id, &slug, &result.wasm_path, &info).map_err(
-                |e| match e.kind() {
+            crate::workflow_agents::stage(tenant_id, &slug, &result.wasm_path, &info)
+                .await
+                .map_err(|e| match e.kind() {
                     // A reserved slug or metadata only built-ins may claim.
                     std::io::ErrorKind::InvalidInput => {
                         ServiceError::WorkflowAuthoringError(e.to_string())
                     }
                     _ => ServiceError::CompilationError(format!("Staging failed: {e}")),
-                },
-            )?;
+                })?;
 
         info!(
             %tenant_id, %workflow_id, version, %slug,
@@ -1702,14 +1901,19 @@ impl CompilationService {
                     registration.workflow_id, registration.version
                 ))
                 .with_sha256(&compilation_result.binary_checksum)
-                .with_metadata(workflow_image_metadata(
-                    compilation_result,
-                    registration.workflow_id,
-                    registration.version,
-                    registration.source_checksum,
-                    registration.track_events,
-                    direct_artifact.as_ref(),
-                ));
+                .with_metadata({
+                    let mut metadata = workflow_image_metadata(
+                        compilation_result,
+                        registration.workflow_id,
+                        registration.version,
+                        registration.source_checksum,
+                        registration.track_events,
+                        direct_artifact.as_ref(),
+                    );
+                    metadata["workflow"]["memoryLimitBytes"] =
+                        registration.memory_limit_bytes.into();
+                    metadata
+                });
 
         // Open the binary file for streaming
         let file = tokio::fs::File::open(&binary_path).await.map_err(|e| {
@@ -2293,6 +2497,20 @@ mod tests {
     }
 
     #[test]
+    fn memory_below_the_workflow_floor_is_refused() {
+        let mib = 1024 * 1024;
+        let refused = check_memory_floor(8, Some(9 * mib)).unwrap_err();
+        assert!(
+            matches!(&refused, ServiceError::WorkflowAuthoringError(message)
+                if message.contains("Memory of 8 MiB is below this workflow's memory floor of 9 MiB")),
+            "{refused:?}"
+        );
+        assert!(check_memory_floor(8, Some(8 * mib)).is_ok());
+        assert!(check_memory_floor(9, Some(9 * mib)).is_ok());
+        assert!(check_memory_floor(8, None).is_ok());
+    }
+
+    #[test]
     fn workflow_image_metadata_records_lowering_mode() {
         let result = NativeCompilationResult {
             binary_path: "/tmp/workflow.wasm".into(),
@@ -2505,6 +2723,7 @@ mod tests {
             support_report_checksum: "support-sha256".to_string(),
             workflow_logic_wasm: wasm("workflow-logic.wasm", "logic-sha256"),
             composed_wasm: Some(wasm("workflow.wasm", "composed-sha256")),
+            memory_floor_bytes: None,
             isolation: None,
             isolation_selection: None,
             shared_components: vec![DirectComponentDependencyMetadata {

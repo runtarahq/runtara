@@ -1,5 +1,12 @@
 (component
+  (import "wasi:io/poll@0.2.3" (instance $poll
+    (export "pollable" (type $p (sub resource)))
+    (type $borrow-p (borrow $p))
+    (export "[method]pollable.block" (func (param "self" $borrow-p)))))
+  (alias export $poll "pollable" (type $pollable))
   (import "wasi:http/types@0.2.3" (instance $types
+    (alias outer 1 $pollable (type $pollable-o))
+    (export "pollable" (type $pollable-e (eq $pollable-o)))
     (type $dns (record (field "rcode" (option string)) (field "info-code" (option u16))))
     (export "DNS-error-payload" (type $dns-e (eq $dns)))
     (type $tls (record (field "alert-id" (option u8)) (field "alert-message" (option string))))
@@ -35,6 +42,7 @@
     (export "outgoing-request" (type $request (sub resource)))
     (export "request-options" (type $options (sub resource)))
     (export "future-incoming-response" (type $future (sub resource)))
+    (export "incoming-response" (type $response (sub resource)))
     (type $scheme (variant (case "HTTP") (case "HTTPS") (case "other" string)))
     (export "scheme" (type $scheme-e (eq $scheme)))
     (type $own-fields (own $fields))
@@ -48,7 +56,15 @@
     (export "[method]outgoing-request.set-authority"
       (func (param "self" $borrow-request) (param "authority" (option string)) (result $unit)))
     (export "[method]outgoing-request.set-path-with-query"
-      (func (param "self" $borrow-request) (param "path-with-query" (option string)) (result $unit)))))
+      (func (param "self" $borrow-request) (param "path-with-query" (option string)) (result $unit)))
+    (type $borrow-future (borrow $future))
+    (type $own-pollable (own $pollable-e))
+    (type $own-response (own $response))
+    (export "[method]future-incoming-response.subscribe"
+      (func (param "self" $borrow-future) (result $own-pollable)))
+    (export "[method]future-incoming-response.get"
+      (func (param "self" $borrow-future)
+        (result (option (result (result $own-response (error $error-code-e)))))))))
   (alias export $types "outgoing-request" (type $request))
   (alias export $types "request-options" (type $options))
   (alias export $types "future-incoming-response" (type $future))
@@ -77,12 +93,18 @@
   (alias export $types "[method]outgoing-request.set-authority" (func $set-authority))
   (alias export $types "[method]outgoing-request.set-path-with-query" (func $set-path))
   (alias export $handler "handle" (func $handle))
+  (alias export $types "[method]future-incoming-response.subscribe" (func $subscribe))
+  (alias export $types "[method]future-incoming-response.get" (func $get))
+  (alias export $poll "[method]pollable.block" (func $block))
   (core func $new-fields (canon lower (func $new-fields)))
   (core func $new-request (canon lower (func $new-request)))
-  (core func $set-scheme (canon lower (func $set-scheme) (memory $mem "memory")))
-  (core func $set-authority (canon lower (func $set-authority) (memory $mem "memory")))
-  (core func $set-path (canon lower (func $set-path) (memory $mem "memory")))
-  (core func $handle (canon lower (func $handle) (memory $mem "memory") (realloc (func $mem "realloc"))))
+  (core func $set-scheme (canon lower (func $set-scheme) (memory (core memory $mem "memory"))))
+  (core func $set-authority (canon lower (func $set-authority) (memory (core memory $mem "memory"))))
+  (core func $set-path (canon lower (func $set-path) (memory (core memory $mem "memory"))))
+  (core func $handle (canon lower (func $handle) (memory (core memory $mem "memory")) (realloc (core func $mem "realloc"))))
+  (core func $subscribe (canon lower (func $subscribe)))
+  (core func $get (canon lower (func $get) (memory (core memory $mem "memory")) (realloc (core func $mem "realloc"))))
+  (core func $block (canon lower (func $block)))
   (core module $code
     (import "mem" "memory" (memory 1))
     (import "host" "new-fields" (func $new-fields (result i32)))
@@ -91,11 +113,16 @@
     (import "host" "set-authority" (func $set-authority (param i32 i32 i32 i32) (result i32)))
     (import "host" "set-path" (func $set-path (param i32 i32 i32 i32) (result i32)))
     (import "host" "handle" (func $handle (param i32 i32 i32 i32)))
+    (import "host" "subscribe" (func $subscribe (param i32) (result i32)))
+    (import "host" "get" (func $get (param i32 i32)))
+    (import "host" "block" (func $block (param i32)))
     (data (i32.const 0) "/")
     (data (i32.const 16) "{{AUTHORITY}}")
     ;; Build `GET http://{{AUTHORITY}}/` and hand it to the raw outgoing
     ;; handler. The completed output is two bytes: the result discriminant
-    ;; (1 = error) and the error-code case (15 = HTTP-request-denied).
+    ;; (1 = error) and the error-code case (15 = HTTP-request-denied), from
+    ;; `handle` itself or, when it hands back a response future, from that
+    ;; future once it resolves.
     (func (export "invoke") (param i32 i32 i32 i32) (result i32)
       (local $request i32)
       (call $new-request (call $new-fields)) local.set $request
@@ -106,8 +133,19 @@
       (call $set-path (local.get $request) (i32.const 1) (i32.const 0) (i32.const 1))
       if unreachable end
       (call $handle (local.get $request) (i32.const 0) (i32.const 0) (i32.const 256))
-      (i32.store8 (i32.const 3000) (i32.load8_u (i32.const 256)))
-      (i32.store8 (i32.const 3001) (i32.load8_u (i32.const 264)))
+      (if (i32.load8_u (i32.const 256))
+        (then
+          (i32.store8 (i32.const 3000) (i32.load8_u (i32.const 256)))
+          (i32.store8 (i32.const 3001) (i32.load8_u (i32.const 264))))
+        (else
+          ;; option @512, result<_, ()> @520, result<response, error-code>
+          ;; @528, error-code case @536.
+          (call $block (call $subscribe (i32.load (i32.const 264))))
+          (call $get (i32.load (i32.const 264)) (i32.const 512))
+          (if (i32.eqz (i32.load8_u (i32.const 512))) (then unreachable))
+          (if (i32.load8_u (i32.const 520)) (then unreachable))
+          (i32.store8 (i32.const 3000) (i32.load8_u (i32.const 528)))
+          (i32.store8 (i32.const 3001) (i32.load8_u (i32.const 536)))))
       (i32.store (i32.const 2048) (i32.const 0))
       (i32.store (i32.const 2056) (i32.const 0))
       (i32.store (i32.const 2060) (i32.const 3000))
@@ -117,7 +155,9 @@
     (with "host" (instance
       (export "new-fields" (func $new-fields)) (export "new-request" (func $new-request))
       (export "set-scheme" (func $set-scheme)) (export "set-authority" (func $set-authority))
-      (export "set-path" (func $set-path)) (export "handle" (func $handle))))))
+      (export "set-path" (func $set-path)) (export "handle" (func $handle))
+      (export "subscribe" (func $subscribe)) (export "get" (func $get))
+      (export "block" (func $block))))))
   (type $error (record (field "code" string) (field "message" string) (field "category" string)
     (field "severity" string) (field "retryable" bool) (field "retry-after-ms" (option u64)) (field "attributes" (option string)) (field "details" (option string))))
   (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
@@ -125,7 +165,7 @@
   (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
   (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
   (func $invoke async (param "capability-id" string) (param "input" (list u8)) (result (result $outcome (error $error)))
-    (canon lift (core func $code "invoke") (memory $mem "memory") (realloc (func $mem "realloc"))))
+    (canon lift (core func $code "invoke") (memory (core memory $mem "memory")) (realloc (core func $mem "realloc"))))
   (instance $lifecycle
     (export "error-info" (type $error)) (export "signal-wait" (type $signal)) (export "wake" (type $wake))
     (export "suspension" (type $suspension)) (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))

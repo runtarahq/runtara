@@ -113,26 +113,24 @@ impl TestContext {
         }
 
         let image_id = Uuid::new_v4();
-        let binary = self.data_dir.join("test_binary");
-        // Every image records the checksum of its bytes; tests that launch it
-        // keep these bytes.
-        std::fs::write(&binary, TEST_BINARY).expect("write test binary");
-        let binary_path = binary.to_string_lossy().to_string();
-        let checksum = {
-            use sha2::{Digest, Sha256};
-            format!("{:x}", Sha256::digest(TEST_BINARY))
-        };
+        // Every image names its bytes by digest; tests that launch it read
+        // them from the default store under this data directory.
+        use runtara_environment::artifacts::ArtifactStore;
+        let digest = runtara_environment::image_registry::default_artifact_store(&self.data_dir)
+            .put(TEST_BINARY)
+            .await
+            .expect("store test binary");
         sqlx::query(
             r#"
-            INSERT INTO images (image_id, tenant_id, name, description, binary_path, metadata)
+            INSERT INTO images (image_id, tenant_id, name, description, binary_digest, metadata)
             VALUES ($1, $2, $3, 'Test image', $4, $5)
             "#,
         )
         .bind(image_id.to_string())
         .bind(tenant_id)
         .bind(name)
-        .bind(&binary_path)
-        .bind(serde_json::json!({ "workflow": { "binaryChecksum": checksum } }))
+        .bind(digest.as_str())
+        .bind(serde_json::json!({ "workflow": { "binaryChecksum": digest.as_str() } }))
         .execute(&self.pool)
         .await
         .expect("Failed to create test image");

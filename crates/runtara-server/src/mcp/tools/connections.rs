@@ -409,6 +409,7 @@ mod tests {
                 &Default::default(),
             ),
         )
+        .await
         .unwrap();
 
         let pool = PgPoolOptions::new()

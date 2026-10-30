@@ -120,6 +120,7 @@ async fn build_provider_full(
             audience: audience.map(str::to_string),
             require_jti,
             require_audience_present,
+            require_org_id: true,
         },
         jwks_cache,
         tenant_id.to_string(),
@@ -144,7 +145,7 @@ async fn accepts_valid_token_with_matching_tenant() {
         "exp": chrono::Utc::now().timestamp() + 3600,
     }));
 
-    let ctx = provider.authenticate(&bearer(&token)).await.unwrap();
+    let ctx = provider.authenticate(&bearer(&token), None).await.unwrap();
     assert_eq!(ctx.org_id, "org_123");
     assert_eq!(ctx.user_id, "user-1");
 }
@@ -161,7 +162,7 @@ async fn rejects_token_with_mismatched_tenant() {
         "exp": chrono::Utc::now().timestamp() + 3600,
     }));
 
-    match provider.authenticate(&bearer(&token)).await {
+    match provider.authenticate(&bearer(&token), None).await {
         Err(AuthError::TenantMismatch(id)) => assert_eq!(id, "org_other"),
         other => panic!("expected TenantMismatch, got {other:?}"),
     }
@@ -172,7 +173,7 @@ async fn rejects_missing_authorization_header() {
     let idp = TestIdp::start().await;
     let provider = build_provider(&idp, "org_123").await;
 
-    match provider.authenticate(&HeaderMap::new()).await {
+    match provider.authenticate(&HeaderMap::new(), None).await {
         Err(AuthError::MissingToken) => {}
         other => panic!("expected MissingToken, got {other:?}"),
     }
@@ -185,7 +186,7 @@ async fn rejects_empty_bearer_token() {
 
     let mut headers = HeaderMap::new();
     headers.insert("Authorization", "Bearer ".parse().unwrap());
-    match provider.authenticate(&headers).await {
+    match provider.authenticate(&headers, None).await {
         Err(AuthError::EmptyToken) => {}
         other => panic!("expected EmptyToken, got {other:?}"),
     }
@@ -206,7 +207,7 @@ async fn rejects_token_signed_with_unknown_kid() {
         "unknown-kid",
     );
 
-    match provider.authenticate(&bearer(&token)).await {
+    match provider.authenticate(&bearer(&token), None).await {
         Err(AuthError::InvalidToken) => {}
         other => panic!("expected InvalidToken, got {other:?}"),
     }
@@ -226,7 +227,7 @@ async fn rejects_expired_token() {
         "exp": chrono::Utc::now().timestamp() - 3600,
     }));
 
-    match provider.authenticate(&bearer(&token)).await {
+    match provider.authenticate(&bearer(&token), None).await {
         Err(AuthError::InvalidToken) => {}
         other => panic!("expected InvalidToken for expired token, got {other:?}"),
     }
@@ -247,7 +248,7 @@ async fn accepts_token_with_namespaced_claims() {
         "exp": chrono::Utc::now().timestamp() + 3600,
     }));
 
-    let ctx = provider.authenticate(&bearer(&token)).await.unwrap();
+    let ctx = provider.authenticate(&bearer(&token), None).await.unwrap();
     assert_eq!(ctx.org_id, "org_123");
     assert_eq!(ctx.user_id, "user-1");
 }
@@ -264,7 +265,7 @@ async fn rejects_token_without_jti_when_required() {
         "exp": chrono::Utc::now().timestamp() + 3600,
     }));
 
-    match provider.authenticate(&bearer(&token)).await {
+    match provider.authenticate(&bearer(&token), None).await {
         Err(AuthError::InvalidToken) => {}
         other => panic!("expected InvalidToken for missing jti, got {other:?}"),
     }
@@ -283,7 +284,7 @@ async fn accepts_token_with_jti_when_required() {
         "exp": chrono::Utc::now().timestamp() + 3600,
     }));
 
-    let ctx = provider.authenticate(&bearer(&token)).await.unwrap();
+    let ctx = provider.authenticate(&bearer(&token), None).await.unwrap();
     assert_eq!(ctx.org_id, "org_123");
 }
 
@@ -306,7 +307,7 @@ async fn accepts_token_with_matching_audience() {
         "exp": chrono::Utc::now().timestamp() + 3600,
     }));
 
-    let ctx = provider.authenticate(&bearer(&token)).await.unwrap();
+    let ctx = provider.authenticate(&bearer(&token), None).await.unwrap();
     assert_eq!(ctx.org_id, "org_123");
     assert_eq!(ctx.user_id, "user-1");
 }
@@ -324,7 +325,7 @@ async fn rejects_token_with_wrong_audience() {
         "exp": chrono::Utc::now().timestamp() + 3600,
     }));
 
-    match provider.authenticate(&bearer(&token)).await {
+    match provider.authenticate(&bearer(&token), None).await {
         Err(AuthError::InvalidToken) => {}
         other => panic!("expected InvalidToken for wrong audience, got {other:?}"),
     }
@@ -348,7 +349,7 @@ async fn accepts_token_without_aud_claim_even_when_audience_configured() {
         "exp": chrono::Utc::now().timestamp() + 3600,
     }));
 
-    let ctx = provider.authenticate(&bearer(&token)).await.unwrap();
+    let ctx = provider.authenticate(&bearer(&token), None).await.unwrap();
     assert_eq!(ctx.org_id, "org_123");
 }
 
@@ -369,7 +370,7 @@ async fn rejects_token_without_aud_claim_under_strict_audience() {
         "exp": chrono::Utc::now().timestamp() + 3600,
     }));
 
-    match provider.authenticate(&bearer(&token)).await {
+    match provider.authenticate(&bearer(&token), None).await {
         Err(AuthError::InvalidToken) => {}
         other => panic!("expected InvalidToken for missing aud under strict mode, got {other:?}"),
     }
@@ -390,7 +391,7 @@ async fn accepts_token_with_correct_aud_under_strict_audience() {
         "exp": chrono::Utc::now().timestamp() + 3600,
     }));
 
-    let ctx = provider.authenticate(&bearer(&token)).await.unwrap();
+    let ctx = provider.authenticate(&bearer(&token), None).await.unwrap();
     assert_eq!(ctx.org_id, "org_123");
     assert_eq!(ctx.user_id, "user-1");
 }
@@ -412,7 +413,7 @@ async fn accepts_token_with_any_audience_when_unconfigured() {
         "exp": chrono::Utc::now().timestamp() + 3600,
     }));
 
-    let ctx = provider.authenticate(&bearer(&token)).await.unwrap();
+    let ctx = provider.authenticate(&bearer(&token), None).await.unwrap();
     assert_eq!(ctx.org_id, "org_123");
 }
 
@@ -434,7 +435,7 @@ async fn accepts_native_org_id_claim_with_audience() {
         "exp": chrono::Utc::now().timestamp() + 3600,
     }));
 
-    let ctx = provider.authenticate(&bearer(&token)).await.unwrap();
+    let ctx = provider.authenticate(&bearer(&token), None).await.unwrap();
     assert_eq!(ctx.org_id, "org_abc12345XYZ");
 }
 
@@ -454,7 +455,7 @@ async fn rejects_native_org_id_mismatch_with_audience() {
         "exp": chrono::Utc::now().timestamp() + 3600,
     }));
 
-    match provider.authenticate(&bearer(&token)).await {
+    match provider.authenticate(&bearer(&token), None).await {
         Err(AuthError::TenantMismatch(id)) => assert_eq!(id, "org_intruder"),
         other => panic!("expected TenantMismatch, got {other:?}"),
     }
@@ -474,6 +475,84 @@ async fn accepts_token_without_jti_when_not_required() {
         "exp": chrono::Utc::now().timestamp() + 3600,
     }));
 
-    let ctx = provider.authenticate(&bearer(&token)).await.unwrap();
+    let ctx = provider.authenticate(&bearer(&token), None).await.unwrap();
     assert_eq!(ctx.org_id, "org_123");
+}
+
+/// A provider for a deployment that requires membership: tokens need not name a tenant.
+async fn build_tenantless_provider(idp: &TestIdp, tenant_id: &str) -> OidcProvider {
+    let jwks_cache = JwksCache::new(idp.jwks_uri()).await;
+    OidcProvider::new(
+        JwtConfig {
+            jwks_uri: idp.jwks_uri(),
+            issuer: idp.issuer.clone(),
+            audience: None,
+            require_jti: false,
+            require_audience_present: false,
+            require_org_id: false,
+        },
+        jwks_cache,
+        tenant_id.to_string(),
+    )
+}
+
+#[tokio::test]
+async fn rejects_token_without_org_id_by_default() {
+    let idp = TestIdp::start().await;
+    let provider = build_provider(&idp, "org_123").await;
+    let token = idp.sign(&json!({
+        "sub": "user-1",
+        "iss": idp.issuer,
+        "exp": chrono::Utc::now().timestamp() + 3600,
+    }));
+
+    match provider
+        .authenticate(&bearer(&token), Some("org_123"))
+        .await
+    {
+        Err(AuthError::InvalidToken) => {}
+        other => panic!("expected InvalidToken, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_token_without_org_id_acts_for_the_requested_tenant_when_membership_decides() {
+    let idp = TestIdp::start().await;
+    let provider = build_tenantless_provider(&idp, "org_123").await;
+    let token = idp.sign(&json!({
+        "sub": "user-1",
+        "iss": idp.issuer,
+        "exp": chrono::Utc::now().timestamp() + 3600,
+    }));
+
+    let ctx = provider
+        .authenticate(&bearer(&token), Some("org_123"))
+        .await
+        .unwrap();
+    assert_eq!(ctx.org_id, "org_123");
+    assert_eq!(ctx.issuer.as_deref(), Some(idp.issuer.as_str()));
+
+    // Naming no tenant, it acts for the primary.
+    let ctx = provider.authenticate(&bearer(&token), None).await.unwrap();
+    assert_eq!(ctx.org_id, "org_123");
+}
+
+#[tokio::test]
+async fn a_token_naming_its_tenant_is_refused_under_another_tenants_path() {
+    let idp = TestIdp::start().await;
+    let provider = build_tenantless_provider(&idp, "org_123").await;
+    let token = idp.sign(&json!({
+        "sub": "user-1",
+        "org_id": "org_123",
+        "iss": idp.issuer,
+        "exp": chrono::Utc::now().timestamp() + 3600,
+    }));
+
+    match provider
+        .authenticate(&bearer(&token), Some("org_other"))
+        .await
+    {
+        Err(AuthError::TenantMismatch(id)) => assert_eq!(id, "org_other"),
+        other => panic!("expected TenantMismatch, got {other:?}"),
+    }
 }

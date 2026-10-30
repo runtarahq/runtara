@@ -365,6 +365,8 @@ pub enum RecoveryCause {
     EnvironmentRestart,
     /// The run exited to suspend, but its park could not be committed.
     ParkFailed,
+    /// The runner lost the executor (see `RunExitReport::Lost`).
+    ExecutorLost,
 }
 
 impl RecoveryCause {
@@ -373,6 +375,7 @@ impl RecoveryCause {
         match self {
             Self::EnvironmentRestart => "environment_restart",
             Self::ParkFailed => "park_failed",
+            Self::ExecutorLost => "executor_lost",
         }
     }
 }
