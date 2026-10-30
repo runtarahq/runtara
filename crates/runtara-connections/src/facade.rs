@@ -419,8 +419,12 @@ impl ConnectionsFacade {
             )
             .await
         {
+            // The message holds the token endpoint's status and OAuth error fields
+            // (`invalid_scope`, `invalid_client`, …), never its body or a credential;
+            // without it the reason is only in a debug log.
             Ok(_) => tracing::warn!(
                 connection_id,
+                reason = %error.message,
                 "oauth grant is dead (reauth error) — connection flipped to REQUIRES_RECONNECTION"
             ),
             Err(e) => tracing::error!(

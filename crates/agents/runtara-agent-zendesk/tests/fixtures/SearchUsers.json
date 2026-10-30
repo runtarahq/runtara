@@ -1,0 +1,21 @@
+{
+  "users": [
+    {
+      "id": 35436,
+      "name": "Robert Jones",
+      "notes": "sigil issue",
+      "separation": {
+        "brand_id": 123,
+        "scope": "brand"
+      }
+    },
+    {
+      "id": 9873843,
+      "name": "Terry Gilliam",
+      "separation": {
+        "brand_id": 123,
+        "scope": "brand"
+      }
+    }
+  ]
+}

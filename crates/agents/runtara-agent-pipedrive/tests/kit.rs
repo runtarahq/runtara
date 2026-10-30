@@ -109,3 +109,18 @@ fn exploded_arrays_repeat_the_parameter() {
         ]
     );
 }
+
+#[test]
+fn envelope_wraps_the_fields_set_before_it() {
+    let body = kit::Body::new()
+        .field("title", &"Deal")
+        .field_opt("value", &None::<i64>)
+        .envelope("deal");
+    let request = kit::Request::new("POST", "/x".into())
+        .json_body(body, "PIPEDRIVE")
+        .unwrap();
+    assert_eq!(
+        request.body_json(),
+        Some(json!({"deal": {"title": "Deal"}}))
+    );
+}

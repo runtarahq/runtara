@@ -4192,6 +4192,7 @@ dependencies = [
  "runtara-agent-utils",
  "runtara-agent-xlsx",
  "runtara-agent-xml",
+ "runtara-agent-zendesk",
  "runtara-dsl",
  "serde_json",
 ]
@@ -4586,6 +4587,18 @@ dependencies = [
  "runtara-agent-encoding",
  "runtara-agent-macro",
  "runtara-dsl",
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.58.0",
+]
+
+[[package]]
+name = "runtara-agent-zendesk"
+version = "9.0.1"
+dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
+ "runtara-http",
  "serde",
  "serde_json",
  "wit-bindgen 0.58.0",

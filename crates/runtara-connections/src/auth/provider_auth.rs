@@ -1,5 +1,6 @@
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use reqwest::Client;
+use runtara_agents::extractors::connection_types::{ZENDESK_DEFAULT_SCOPE, zendesk_base_url};
 use runtara_agents::registry::find_connection_type;
 use runtara_dsl::agent_meta::{OAuthConfig, TokenEndpointAuth};
 use serde_json::Value;
@@ -207,6 +208,14 @@ fn describe_connection_auth(
                 deferred_auth: None,
             }
         }
+        // Zendesk: every account has its own host. An invalid subdomain leaves no
+        // base URL, so a credentialed request fails closed at the proxy's pin step.
+        "zendesk_client_credentials" => ConnectionAuthDescriptor {
+            base_url: zendesk_account_url(params),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: describe_zendesk_client_credentials_auth(connection_id, params),
+        },
         "slack_bot" => {
             if let Some(token) = params["bot_token"].as_str() {
                 headers.insert("Authorization".into(), format!("Bearer {}", token));
@@ -436,6 +445,46 @@ fn describe_shopify_client_credentials_auth(
         header_name: "X-Shopify-Access-Token".to_string(),
         header_value_prefix: None,
         request_body: TokenRequestBody::Json(Value::Object(body)),
+        basic_auth: None,
+        default_ttl_seconds: DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
+    })
+}
+
+fn zendesk_account_url(params: &Value) -> Option<String> {
+    zendesk_base_url(params["subdomain"].as_str()?).ok()
+}
+
+/// Zendesk mints client-credentials tokens on the account's own host from a
+/// JSON body. `expires_in` is always sent: Zendesk's default is a token that
+/// never expires, and every cache miss would leave one more of them behind.
+fn describe_zendesk_client_credentials_auth(
+    connection_id: &str,
+    params: &Value,
+) -> Option<DeferredAuth> {
+    let base_url = zendesk_account_url(params)?;
+    let client_id = params["client_id"].as_str()?;
+    let client_secret = params["client_secret"].as_str()?;
+    let scope = params["scope"]
+        .as_str()
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .unwrap_or(ZENDESK_DEFAULT_SCOPE);
+
+    Some(DeferredAuth::OAuth2ClientCredentials {
+        cache_key: token_cache::build_token_cache_key(
+            connection_id,
+            &["zendesk_client_credentials", &base_url, client_id, scope],
+        ),
+        token_url: format!("{base_url}/oauth/tokens"),
+        header_name: "Authorization".to_string(),
+        header_value_prefix: Some("Bearer ".to_string()),
+        request_body: TokenRequestBody::Json(serde_json::json!({
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "scope": scope,
+            "expires_in": DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
+        })),
         basic_auth: None,
         default_ttl_seconds: DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
     })
@@ -1114,6 +1163,61 @@ mod tests {
             descriptor.base_url.as_deref(),
             Some("https://api.pipedrive.com")
         );
+    }
+
+    #[test]
+    fn zendesk_client_credentials_mint_a_bearer_token_on_the_account() {
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "zendesk_client_credentials",
+            &json!({ "subdomain": "acme", "client_id": "runtara", "client_secret": "csec" }),
+            &mut headers,
+        );
+        assert!(headers.is_empty());
+        assert_eq!(
+            descriptor.base_url.as_deref(),
+            Some("https://acme.zendesk.com")
+        );
+        match descriptor.deferred_auth {
+            Some(DeferredAuth::OAuth2ClientCredentials {
+                token_url,
+                header_name,
+                header_value_prefix,
+                request_body: TokenRequestBody::Json(body),
+                basic_auth,
+                ..
+            }) => {
+                assert_eq!(token_url, "https://acme.zendesk.com/oauth/tokens");
+                assert_eq!(header_name, "Authorization");
+                assert_eq!(header_value_prefix.as_deref(), Some("Bearer "));
+                assert!(basic_auth.is_none());
+                assert_eq!(
+                    body,
+                    json!({
+                        "grant_type": "client_credentials",
+                        "client_id": "runtara",
+                        "client_secret": "csec",
+                        "scope": "read write",
+                        "expires_in": DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
+                    })
+                );
+            }
+            _ => panic!("expected a JSON client-credentials token request"),
+        }
+    }
+
+    #[test]
+    fn zendesk_foreign_subdomain_leaves_no_destination() {
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "zendesk_client_credentials",
+            &json!({ "subdomain": "evil.com#", "client_id": "c", "client_secret": "s" }),
+            &mut headers,
+        );
+        assert_eq!(descriptor.base_url, None);
+        assert!(descriptor.deferred_auth.is_none());
     }
 
     #[test]

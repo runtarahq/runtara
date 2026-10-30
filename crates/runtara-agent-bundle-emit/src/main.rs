@@ -52,6 +52,7 @@ fn agents() -> Vec<(&'static str, AgentInfo)> {
         ("utils", runtara_agent_utils::agent_info()),
         ("xlsx", runtara_agent_xlsx::agent_info()),
         ("xml", runtara_agent_xml::agent_info()),
+        ("zendesk", runtara_agent_zendesk::agent_info()),
         // Subsequent agents are added here as they migrate to the macro-derived
         // metadata path.
     ]

@@ -108,7 +108,7 @@ pub struct {{operationIdCamelCase}}Input {
     module_description = r##"{{{agentDescription}}}"##,
     module_has_side_effects = true,
     module_supports_connections = true,
-    module_integration_ids = "{{integrationId}}",
+    module_integration_ids = "{{integrationIdList}}",
     module_secure = true{{/vendorExtensions.x-runtara-first}}
 )]
 pub async fn {{operationId}}(input: {{operationIdCamelCase}}Input) -> Result<{{#returnProperty}}{{>rt_type}}{{/returnProperty}}{{^returnProperty}}Value{{/returnProperty}}, AgentError> {
@@ -146,6 +146,10 @@ impl {{operationIdCamelCase}}Input {
                 .{{#required}}field{{/required}}{{^required}}field_opt{{/required}}("{{baseName}}", &self.{{name}})
 {{/isReadOnly}}
 {{/vars}}
+{{! `fetch` unwrapped a body envelope (the fields were sent inside "ticket", say): wrap them back. }}
+{{#vendorExtensions.x-runtara-body-envelope}}
+                .envelope("{{.}}")
+{{/vendorExtensions.x-runtara-body-envelope}}
             ,
             "{{errorPrefix}}",
         )
@@ -233,7 +237,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         description: r##"{{{agentDescription}}}"##.into(),
         has_side_effects: true,
         supports_connections: true,
-        integration_ids: vec!["{{integrationId}}".to_string()],
+        integration_ids: vec![{{#integrationIds}}"{{.}}".to_string(){{^-last}}, {{/-last}}{{/integrationIds}}],
         capabilities,
     }
 }

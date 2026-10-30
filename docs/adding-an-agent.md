@@ -14,8 +14,9 @@ Written for people and coding assistants alike; the rules in
 
 The generator does not support Swagger 2.0 specs yet, and `fetch` refuses
 operations it cannot send correctly: form-encoded or multipart request bodies,
-object (`deepObject`) query parameters, and required cookie parameters. Such an
-operation needs a hand-written capability, or the generic `http` agent.
+object query parameters without declared scalar fields or in a style other
+than `deepObject` or exploded `form`, and required cookie parameters. Such an operation needs a hand-written capability,
+or the generic `http` agent.
 
 ## For coding assistants
 
@@ -31,6 +32,10 @@ operation needs a hand-written capability, or the generic `http` agent.
 - Do not add capabilities by hand to a generated agent: list the operation in
   `connector.yaml`. The templates cannot yet include hand-written capabilities,
   so a vendor quirk that needs one is a template change (see the rule above).
+- When a vendor's spec does not fetch, generate or compile, fix
+  `connector_gen.py` (or, with approval, the templates) so the spec works as
+  published, add a test to `test_connector_gen.py`, and say so in the change's
+  description: it is a gap in the generator, not in the agent.
 - A crate under `crates/agents/` must be registered in
   `runtara-agent-bundle-emit` in the same change, or the server fails at boot.
 
@@ -55,11 +60,11 @@ Written by hand for each new agent:
 
 | What | Where |
 | -- | -- |
-| `connector.yaml`: agent id, name, description, `integration_id`, error prefix, spec URL and sha256, operations, label overrides | the crate |
+| `connector.yaml`: agent id, name, description, `integration_id` (one connection type or a list), error prefix, spec URL and sha256, operations, label overrides, body envelopes | the crate |
 | `Cargo.toml`, `src/lib.rs`, `src/kit.rs` (copied from `runtara-agent-pipedrive`) | the crate |
-| Tests: response examples round-trip, metadata lists the capabilities and inputs | `tests/*.rs` in the crate |
+| Tests: response examples round-trip, metadata lists the capabilities and inputs, inputs build the expected requests | `tests/*.rs` in the crate (`runtara-agent-zendesk` shows envelopes and pagination) |
 | Registration: path dependency and `agents()` entry | `crates/runtara-agent-bundle-emit/Cargo.toml`, `src/main.rs` |
-| A [connection type](#connection-type), unless an existing one fits | `runtara-agents` (params, extractor, two registries), `runtara-connections` (auth arm, rate-limit default), form snapshot |
+| A [connection type](#connection-type), unless an existing one fits | `runtara-agents` (params, extractor, two registries, tests), `runtara-connections` (auth arm, rate-limit default, tests), form snapshot |
 | Optional icon | `service-icon.tsx` |
 | Release note | `CHANGELOG.md` |
 
@@ -88,14 +93,18 @@ workspace `Cargo.toml` (it includes `crates/agents/*`).
 4. **Register the agent** in `crates/runtara-agent-bundle-emit`: a path
    dependency in `Cargo.toml` and an entry in `agents()` in `src/main.rs`.
 5. **Add or reuse a [connection type](#connection-type)** whose
-   `integration_id` matches `agent.integration_id` in `connector.yaml`.
+   `integration_id` matches `agent.integration_id` in `connector.yaml`. An
+   agent that accepts several credential flows for one API (an OAuth client
+   and an API token, say) lists all of them there.
 6. **Add tests** like `runtara-agent-pipedrive/tests/examples.rs`: the spec's
-   response examples deserialize and round-trip, and the metadata lists the
-   expected capabilities and inputs.
-7. **[Verify](#verify).**
+   response examples deserialize and round-trip, the metadata lists the
+   expected capabilities and inputs, and representative inputs build the
+   expected method, path, query and body.
+7. **Add a release note** to `CHANGELOG.md`.
+8. **[Verify](#verify).**
 
 To change an existing generated agent, edit its `connector.yaml` (operations,
-spec pin) and repeat steps 3, 6 and 7.
+spec pin) and repeat steps 3, 6 and 8.
 
 ### How the generated file is wired in
 
@@ -126,7 +135,7 @@ Follow `crates/agents/runtara-agent-stripe`:
 - `agent_info()` listing every capability, input and output type, and
   `agent_component!` listing every capability function.
 
-Then do steps 4–7 of the generated path.
+Then do steps 4–8 of the generated path.
 
 ## Connection type
 
@@ -135,25 +144,51 @@ existing connection type (`http_bearer`, `http_api_key`,
 `http_oauth2_client_credentials`, `http_oauth2_authorization_code`, …).
 
 1. `crates/runtara-agents/src/agents/extractors/connection_types.rs`: a
-   `#[derive(ConnectionParams)]` struct with `#[connection(integration_id = …)]`
-   and its `HttpConnectionExtractor`.
+   `#[derive(ConnectionParams)]` struct with `#[connection(integration_id = …,
+   category = …, auth_type = …)]` and its `HttpConnectionExtractor`.
+   - `category` must be a `ConnectionCategory` (`ecommerce`, `file_storage`,
+     `llm`, `crm`, `erp`, `database`, `email`, `messaging`, `payment`, `cloud`,
+     `api`); anything else is a compile error. A new category is its own
+     change: the enum and its `ALL`, `id`, `display_name`, `description` and
+     `parse` in `runtara-dsl/src/agent_meta.rs`, the category match in
+     `runtara-agent-macro`, `category-icons.ts` and `CATEGORY_ICONS` in
+     `service-icon.tsx`, and the regenerated frontend API client.
+   - `auth_type` is a `ConnectionAuthType`: `api_key`,
+     `oauth2_client_credentials`, `oauth2_authorization_code`, ….
+   - When the host depends on the account (a subdomain, a region), build the
+     base URL in one function that validates the value, as
+     `zendesk_base_url` does, and use it in the extractor (an invalid value is
+     an error) and in step 4 (an invalid value leaves no base URL, so a
+     credentialed request fails closed at the proxy's pin step).
 2. `crates/runtara-agents/src/agents/extractors/mod.rs`: add the extractor to
    `HTTP_EXTRACTORS`. This also lets the generic `http` agent use the
    connection.
 3. `crates/runtara-agents/src/static_registry.rs`: add the
    `__CONNECTION_META_<Struct>` entry.
 4. `crates/runtara-connections/src/auth/provider_auth.rs`: a match arm that
-   injects the credential and sets the base URL. OAuth2 authorization-code
-   types are descriptor-driven: add the `integration_id` to the existing
-   `hubspot_private_app | quickbooks_online | …` arm instead.
+   injects the credential and sets the base URL.
+   - OAuth2 authorization-code types are descriptor-driven: add the
+     `integration_id` to the existing `hubspot_private_app | quickbooks_online
+     | …` arm instead.
+   - OAuth2 client credentials against the vendor's own token endpoint get a
+     `describe_<vendor>_client_credentials_auth` returning
+     `DeferredAuth::OAuth2ClientCredentials` (Shopify, Zendesk): the token is
+     minted, cached and injected at request time. Send the body the vendor
+     documents (`TokenRequestBody::Json` or `FormUrlEncoded`), and ask for a
+     token lifetime when the vendor's default is a token that never expires.
 5. `crates/runtara-connections/src/util/rate_limit_defaults.rs`: a default
    rate limit from the vendor's documented limits, or, only when they are
    genuinely unknowable, an entry in `RATE_LIMIT_OPT_OUT`. Required: a test
-   fails for any connection type with neither.
-6. Optional: an icon in
-   `crates/runtara-server/frontend/src/shared/components/service-icon.tsx`
-   (it falls back to the category icon).
-7. Refresh the connection form snapshot:
+   fails for any connection type with neither. Connection types for the same
+   API share one default.
+6. Tests: the extractor in `runtara-agents/src/agents/extractors/tests.rs`
+   (headers, base URL, registration, a rejected host), the match arm in
+   `provider_auth.rs`, and the default in `rate_limit_defaults.rs`.
+7. Optional: an icon in
+   `crates/runtara-server/frontend/src/shared/components/service-icon.tsx`,
+   keyed by the connection type's `integration_id` (it falls back to the
+   category icon).
+8. Refresh the connection form snapshot:
    ```bash
    UPDATE_CONNECTION_FORM_SNAPSHOTS=1 cargo test -p runtara-connections --test form_definition_snapshots
    ```
@@ -169,5 +204,9 @@ cargo build -p runtara-agent-<id> --target wasm32-wasip2 --release
 scripts/build-agent-components.sh
 ```
 
-With a new connection type, also run `cargo test -p runtara-connections` and
+With a new connection type, also run
+`cargo test -p runtara-agents -p runtara-connections` and
 `cargo clippy -p runtara-agents -p runtara-connections --all-targets -- -D warnings`.
+A change to `connector_gen.py` or the templates also needs
+`scripts/connector_gen/test_connector_gen.py` and `check` over every
+generated agent (`$(dirname crates/agents/*/connector.yaml)`), as CI runs them.
