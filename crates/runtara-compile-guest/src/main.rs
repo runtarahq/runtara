@@ -8,31 +8,14 @@
 //! 2. `GET /v1/artifacts/{sha256}`: each component, when the compile first
 //!    reads it.
 //! 3. `PUT /v1/artifacts`: the composed `workflow.wasm`.
-//! 4. `POST /v1/run/outcome` (`completed`): a [`GuestOutcome`].
+//! 4. `POST /v1/run/outcome` (`completed`): a `GuestOutcome`
+//!    (`runtara_workflows::compile_request`).
 //!
 //! It reaches the API at `http://api.runtara.internal`, or at
 //! `RUNTARA_COMPILE_API` (for tests).
 
 #[cfg(target_os = "wasi")]
-use runtara_workflows::compile_request::CompileRequest;
-use runtara_workflows::compile_request::{CompileFailure, CompileOutcome};
-use serde::{Deserialize, Serialize};
-
-/// What the compiler posts as its run's outcome.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GuestOutcome {
-    /// It compiled: what it made, and the SHA-256 of the composed component
-    /// it uploaded.
-    Compiled {
-        /// What the compile made, but the composed component.
-        outcome: Box<CompileOutcome>,
-        /// The SHA-256 the host answered for the uploaded component.
-        workflow_wasm: String,
-    },
-    /// It did not.
-    Failed(CompileFailure),
-}
+use runtara_workflows::compile_request::{CompileRequest, GuestOutcome};
 
 #[cfg(target_os = "wasi")]
 mod http;

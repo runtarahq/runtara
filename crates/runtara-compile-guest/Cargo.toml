@@ -11,7 +11,6 @@ publish = false
 [dependencies]
 runtara-workflows = { path = "../runtara-workflows" }
 runtara-workflow-api = { path = "../runtara-workflow-api" }
-serde = { workspace = true }
 serde_json = { workspace = true }
 
 [target.'cfg(target_os = "wasi")'.dependencies]

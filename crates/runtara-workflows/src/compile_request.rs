@@ -116,6 +116,22 @@ pub struct CompileOutcome {
     pub trusted_pins: Vec<String>,
 }
 
+/// What a compiler elsewhere posts as its run's outcome.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuestOutcome {
+    /// It compiled: what it made, and the SHA-256 of the composed component
+    /// it handed back.
+    Compiled {
+        /// What the compile made, but the composed component.
+        outcome: Box<CompileOutcome>,
+        /// The SHA-256 the host answered for the handed-back component.
+        workflow_wasm: String,
+    },
+    /// It did not.
+    Failed(CompileFailure),
+}
+
 /// A compile that failed: what [`apply_failure`] turns back into the error
 /// the compile would have returned in process.
 #[derive(Debug, Clone, Serialize, Deserialize)]

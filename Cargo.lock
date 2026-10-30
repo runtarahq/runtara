@@ -4664,7 +4664,6 @@ version = "9.0.1"
 dependencies = [
  "runtara-workflow-api",
  "runtara-workflows",
- "serde",
  "serde_json",
  "wasi 0.14.2+wasi-0.2.4",
 ]
