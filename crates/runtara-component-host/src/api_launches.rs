@@ -67,6 +67,9 @@ pub struct LaunchSlot {
     /// is served the connection, HTTP, SQL and trusted endpoints, and nothing
     /// that needs a run. `None` for a run's launch.
     standalone: Option<(StandaloneTrust, StandaloneControl)>,
+    /// A compile run on a compiler elsewhere (M7.15): the components it may
+    /// fetch and what it made. `None` for every other launch.
+    compile: Option<CompileWork>,
     /// Instance waits this launch registered whose last read was pending.
     /// A suspension it posts wakes on them too, as the old ABI's host
     /// attached them to the run's result.
@@ -78,6 +81,13 @@ pub struct LaunchSlot {
     lease_checked: Mutex<Option<std::time::Instant>>,
     /// What this launch may still append through `POST /v1/events`.
     events: Mutex<crate::event_budget::EventBudget>,
+}
+
+/// A compile launch's components, which it may fetch by SHA-256, and the
+/// composed component it made.
+struct CompileWork {
+    components: std::collections::BTreeMap<String, std::path::PathBuf>,
+    made: Mutex<Option<Vec<u8>>>,
 }
 
 /// How often a launch's lease is read again while it calls the workflow API.
@@ -202,6 +212,7 @@ impl ApiLaunches {
                 operations: Mutex::default(),
                 fault: Mutex::default(),
                 standalone: None,
+                compile: None,
                 pending_waits: Mutex::default(),
                 tasks: Mutex::default(),
                 lease_checked: Mutex::default(),
@@ -275,6 +286,7 @@ impl ApiLaunches {
                 operations: Mutex::default(),
                 fault: Mutex::default(),
                 standalone: Some((trust, control)),
+                compile: None,
                 pending_waits: Mutex::default(),
                 tasks: Mutex::default(),
                 lease_checked: Mutex::default(),
@@ -284,6 +296,49 @@ impl ApiLaunches {
             }),
         );
         Ok(())
+    }
+
+    /// Start serving `binding` as a compile on a compiler elsewhere (M7.15): a
+    /// standalone launch with no trusted execution or control, whose input
+    /// is the compile request and which may fetch `components` (each file by
+    /// its SHA-256) and hand back one composed component, which
+    /// [`Self::made`] takes.
+    pub fn begin_compile(
+        &self,
+        binding: Binding,
+        request: Vec<u8>,
+        components: std::collections::BTreeMap<String, std::path::PathBuf>,
+    ) -> Result<(), String> {
+        let launch_id = binding.launch_id.clone();
+        self.begin_standalone(binding, StandaloneTrust::Denied, StandaloneControl::Denied)?;
+        let mut slots = self.slots.lock().expect("workflow API launches poisoned");
+        let slot = slots
+            .get_mut(&launch_id)
+            .and_then(Arc::get_mut)
+            .ok_or_else(|| format!("launch {launch_id} is already in use"))?;
+        slot.input = request;
+        slot.info.launch_kind = "compile".into();
+        slot.compile = Some(CompileWork {
+            components,
+            made: Mutex::new(None),
+        });
+        Ok(())
+    }
+
+    /// Takes the composed component a compile launch handed back, if it did.
+    pub fn made(&self, launch_id: &str) -> Option<Vec<u8>> {
+        let slot = self
+            .slots
+            .lock()
+            .expect("workflow API launches poisoned")
+            .get(launch_id)
+            .cloned()?;
+        slot.compile
+            .as_ref()?
+            .made
+            .lock()
+            .expect("compile output poisoned")
+            .take()
     }
 
     /// Stop serving `launch_id` and hand back the outcome it posted, if any.
@@ -1004,6 +1059,42 @@ impl WorkflowApiBackend for Backend {
 
     async fn run_input(&self, binding: &Binding) -> Result<Vec<u8>, ApiError> {
         Ok(self.0.slot(binding).ok_or_else(not_serving)?.input.clone())
+    }
+
+    async fn get_artifact(&self, binding: &Binding, sha256: &str) -> Result<Vec<u8>, ApiError> {
+        let slot = self.0.slot(binding).ok_or_else(not_serving)?;
+        // Only a compile's own components, and nothing else on this host.
+        let path = slot
+            .compile
+            .as_ref()
+            .and_then(|work| work.components.get(sha256))
+            .ok_or_else(|| ApiError::new(ErrorCode::Denied, "not an artifact of this launch"))?;
+        tokio::fs::read(path)
+            .await
+            .map_err(|error| ApiError::new(ErrorCode::Unavailable, format!("artifact: {error}")))
+    }
+
+    async fn put_artifact(&self, binding: &Binding, bytes: Vec<u8>) -> Result<String, ApiError> {
+        use sha2::Digest;
+        let slot = self.0.slot(binding).ok_or_else(not_serving)?;
+        let work = slot
+            .compile
+            .as_ref()
+            .ok_or_else(|| ApiError::new(ErrorCode::Denied, "this launch makes no artifact"))?;
+        let sha256: String = sha2::Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let mut made = work.made.lock().expect("compile output poisoned");
+        // One component; the same again is a retry.
+        if made.as_ref().is_some_and(|made| made != &bytes) {
+            return Err(ApiError::new(
+                ErrorCode::ReplayConflict,
+                "this launch already handed back another artifact",
+            ));
+        }
+        *made = Some(bytes);
+        Ok(sha256)
     }
 
     async fn post_outcome(
@@ -1994,6 +2085,111 @@ mod tests {
             api_version: runtara_workflow_api::api_version(),
             capability_id: None,
         }
+    }
+
+    /// M7.15: a compile launch reads its request, fetches only the
+    /// components it was given, by SHA-256, and hands back one composed
+    /// component; another launch fetches nothing.
+    #[tokio::test]
+    async fn a_compile_launch_fetches_its_components_and_hands_back_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let component = dir.path().join("stdlib.wasm");
+        std::fs::write(&component, b"stdlib").unwrap();
+        let other = dir.path().join("secret");
+        std::fs::write(&other, b"not a component").unwrap();
+        let sha = |bytes: &[u8]| -> String {
+            use sha2::Digest;
+            sha2::Sha256::digest(bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        };
+        let launches = Arc::new(ApiLaunches::default());
+        launches
+            .begin_compile(
+                binding(1),
+                b"{\"compile\":1}".to_vec(),
+                [(sha(b"stdlib"), component)].into_iter().collect(),
+            )
+            .unwrap();
+        let app = launches.router();
+        let call = |method: &str, path: String, body: Vec<u8>, binding: Binding| {
+            let mut request = axum::http::Request::builder()
+                .method(method)
+                .uri(path.clone())
+                .header("idempotency-key", format!("{method}-{path}"))
+                .body(Body::from(body))
+                .unwrap();
+            request.extensions_mut().insert(binding);
+            app.clone().oneshot(request)
+        };
+        let input = call("GET", "/v1/run/input".into(), vec![], binding(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            to_bytes(input.into_body(), 1 << 20).await.unwrap(),
+            &b"{\"compile\":1}"[..]
+        );
+        let fetched = call(
+            "GET",
+            format!("/v1/artifacts/{}", sha(b"stdlib")),
+            vec![],
+            binding(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fetched.status(), 200);
+        assert_eq!(
+            to_bytes(fetched.into_body(), 1 << 20).await.unwrap(),
+            &b"stdlib"[..]
+        );
+        // A file of the host's it was not given, though it names its digest.
+        let refused = call(
+            "GET",
+            format!("/v1/artifacts/{}", sha(b"not a component")),
+            vec![],
+            binding(1),
+        )
+        .await
+        .unwrap();
+        assert!(refused.status().is_client_error(), "{}", refused.status());
+        let made = call(
+            "PUT",
+            "/v1/artifacts".into(),
+            b"composed".to_vec(),
+            binding(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(made.status(), 200);
+        let answer: serde_json::Value =
+            serde_json::from_slice(&to_bytes(made.into_body(), 1 << 20).await.unwrap()).unwrap();
+        assert_eq!(answer["sha256"], sha(b"composed"));
+        assert_eq!(launches.made("launch-1").as_deref(), Some(&b"composed"[..]));
+
+        // A launch that is not a compile neither fetches nor hands back.
+        let mut run = binding(1);
+        run.launch_id = "launch-2".into();
+        launches
+            .begin_standalone(
+                run.clone(),
+                StandaloneTrust::Denied,
+                StandaloneControl::Denied,
+            )
+            .unwrap();
+        let fetched = call(
+            "GET",
+            format!("/v1/artifacts/{}", sha(b"stdlib")),
+            vec![],
+            run.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(fetched.status().is_client_error(), "{}", fetched.status());
+        let made = call("PUT", "/v1/artifacts".into(), b"x".to_vec(), run)
+            .await
+            .unwrap();
+        assert!(made.status().is_client_error(), "{}", made.status());
     }
 
     #[tokio::test]

@@ -68,6 +68,20 @@ pub trait WorkflowApiBackend: Send + Sync + 'static {
     /// Shorten the launch deadline to `abort_after_ms` from now. Never extends.
     async fn set_deadline(&self, binding: &Binding, abort_after_ms: u64) -> Result<(), ApiError>;
 
+    /// The artifact whose SHA-256 is `sha256`, for a launch whose work names
+    /// it: a compile's components (M7.15). Others are refused.
+    async fn get_artifact(&self, binding: &Binding, sha256: &str) -> Result<Vec<u8>, ApiError> {
+        let _ = (binding, sha256);
+        Err(unsupported_service("artifacts"))
+    }
+
+    /// Takes `bytes` as what the launch made (a compile's composed component,
+    /// M7.15), answering its SHA-256.
+    async fn put_artifact(&self, binding: &Binding, bytes: Vec<u8>) -> Result<String, ApiError> {
+        let _ = (binding, bytes);
+        Err(unsupported_service("artifacts"))
+    }
+
     // Run services. Each answers `unsupported` until a backend serves it.
 
     /// The checkpoint `id`, if one was committed.
@@ -725,6 +739,8 @@ pub fn router(state: WorkflowApiState) -> Router {
         .route("/v1/run/outcome", post(post_run_outcome))
         .route("/v1/run/deadline", put(put_run_deadline))
         .route("/v1/run/alarm", post(post_run_alarm))
+        .route("/v1/artifacts", put(put_artifact))
+        .route("/v1/artifacts/{sha256}", get(get_artifact))
         .route(
             "/v1/checkpoints/{id}",
             get(runtime::get_checkpoint).put(runtime::put_checkpoint),
@@ -1201,6 +1217,36 @@ async fn post_run_outcome(
     let outcome = parse_outcome(&state.caps, parts.headers.get(headers::OUTCOME), body)?;
     state.backend.post_outcome(&binding, outcome).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn get_artifact(
+    State(state): State<WorkflowApiState>,
+    axum::extract::Path(sha256): axum::extract::Path<String>,
+    request: Request,
+) -> Result<Response, Failure> {
+    let binding = binding_of(&request)?;
+    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(ApiError::new(ErrorCode::Invalid, "not a SHA-256").into());
+    }
+    let bytes = state.backend.get_artifact(&binding, &sha256).await?;
+    let mut response = Bytes::from(bytes).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    Ok(response)
+}
+
+async fn put_artifact(
+    State(state): State<WorkflowApiState>,
+    request: Request,
+) -> Result<Response, Failure> {
+    let binding = binding_of(&request)?;
+    let body = to_bytes(request.into_body(), state.caps.request_body_bytes)
+        .await
+        .map_err(|_| ApiError::new(ErrorCode::TooLarge, "artifact is over the cap"))?;
+    let sha256 = state.backend.put_artifact(&binding, body.to_vec()).await?;
+    Ok(axum::Json(serde_json::json!({ "sha256": sha256 })).into_response())
 }
 
 #[derive(Deserialize)]
