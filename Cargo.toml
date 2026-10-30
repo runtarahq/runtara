@@ -41,6 +41,8 @@ members = [
     # Guest side of the workflow API, and a probe workflow built on it
     "crates/runtara-workflow-sdk",
     "crates/runtara-workflow-api-probe",
+    # The workflow compiler as a WASI command, for a VM with no filesystem
+    "crates/runtara-compile-guest",
     "crates/runtara-workflow-api-run",
     "crates/runtara-api-component",
     "crates/runtara-component-host",

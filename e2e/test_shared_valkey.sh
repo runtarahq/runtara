@@ -158,9 +158,14 @@ done
 start_server() {
     local name="$1" tenant="$2" port="$3" base="$4" served="${5:-}" db
     db=$(echo "${name}" | tr 'AB' 'ab')
+    # A platform object-model database only where the server serves one
+    # tenant: one serving several refuses it (M7.16).
+    local platform=""
+    [ -n "${served}" ] || platform="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DB_PREFIX}_${db}_server"
     print_step "Starting server ${name} (tenant ${tenant}) on :${port}..."
     RUNTARA_SERVER_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DB_PREFIX}_${db}_server" \
-    OBJECT_MODEL_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DB_PREFIX}_${db}_server" \
+    RUNTARA_DATABASE_CONNECTION_GUARD="${served:+off}" \
+    OBJECT_MODEL_DATABASE_URL="${platform}" \
     RUNTARA_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DB_PREFIX}_${db}_runtime" \
     TENANT_ID="${tenant}" \
     RUNTARA_SERVED_TENANTS="${served}" \

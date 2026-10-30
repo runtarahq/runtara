@@ -33,6 +33,48 @@ pub fn current() -> Option<String> {
     TENANT.try_with(Clone::clone).ok()
 }
 
+/// `work` in the current scope, wherever it is later run: for work spawned
+/// onto another task, which would otherwise leave the scope.
+pub fn inherit<F: Future>(work: F) -> impl Future<Output = F::Output> {
+    let tenant = current();
+    async move {
+        match tenant {
+            Some(tenant) => scoped(tenant, work).await,
+            None => work.await,
+        }
+    }
+}
+
+/// Whether `pool`'s role escapes row level security (a superuser or a
+/// BYPASSRLS role), so a tenant's scope would not confine it.
+pub async fn escapes_row_security(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user")
+        .fetch_one(pool)
+        .await
+}
+
+/// With `RUNTARA_REQUIRE_ROW_SECURITY` true, refuses a pool whose role
+/// escapes row level security: a process that serves several tenants from
+/// shared databases relies on it to keep each to its own rows. `database`
+/// names the pool in the error.
+pub async fn require_row_security(pool: &sqlx::PgPool, database: &str) -> Result<(), String> {
+    let required = std::env::var("RUNTARA_REQUIRE_ROW_SECURITY")
+        .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes"));
+    if !required {
+        return Ok(());
+    }
+    match escapes_row_security(pool).await {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(format!(
+            "RUNTARA_REQUIRE_ROW_SECURITY: the {database} database's role is a superuser or \
+             BYPASSRLS, so row level security would not bind it; connect as a plain role"
+        )),
+        Err(error) => Err(format!(
+            "RUNTARA_REQUIRE_ROW_SECURITY: could not read the {database} database's role: {error}"
+        )),
+    }
+}
+
 async fn name_tenant(connection: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT set_config('runtara.tenant_id', $1, false)")
         .bind(current().unwrap_or_default())
@@ -49,6 +91,28 @@ pub fn scoping(options: PgPoolOptions) -> PgPoolOptions {
         .before_acquire(|connection, _| {
             Box::pin(async move { name_tenant(connection).await.map(|_| true) })
         })
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn spawned_work_keeps_the_scope_only_when_it_inherits_it() {
+        let (kept, left) = scoped("acme", async {
+            let kept = tokio::spawn(inherit(async { current() }));
+            let left = tokio::spawn(async { current() });
+            (kept.await.unwrap(), left.await.unwrap())
+        })
+        .await;
+        assert_eq!(kept.as_deref(), Some("acme"));
+        assert_eq!(left, None);
+        // Outside any scope there is nothing to inherit.
+        assert_eq!(
+            tokio::spawn(inherit(async { current() })).await.unwrap(),
+            None
+        );
+    }
 }
 
 #[cfg(all(test, feature = "db-integration-tests"))]

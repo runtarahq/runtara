@@ -14,6 +14,17 @@ impl TriggerRepository {
         Self { pool }
     }
 
+    /// Gives every trigger that names no tenant to `tenant_id` (the primary
+    /// tenant, which they ran as), returning how many. Runs on the system
+    /// path: row-level security hides such rows from every tenant.
+    pub async fn claim_untenanted(&self, tenant_id: &str) -> Result<u64, sqlx::Error> {
+        sqlx::query("UPDATE public.invocation_trigger SET tenant_id = $1 WHERE tenant_id IS NULL")
+            .bind(tenant_id)
+            .execute(&self.pool)
+            .await
+            .map(|done| done.rows_affected())
+    }
+
     /// Create a new invocation trigger
     pub async fn create(
         &self,
@@ -66,7 +77,7 @@ impl TriggerRepository {
                 SELECT id, tenant_id, workflow_id, trigger_type, active, configuration,
                        created_at, last_run, updated_at, remote_tenant_id, single_instance
                 FROM public.invocation_trigger
-                WHERE tenant_id = $1 OR tenant_id IS NULL
+                WHERE tenant_id = $1
                 ORDER BY created_at DESC
                 "#,
             )
@@ -101,7 +112,7 @@ impl TriggerRepository {
                 SELECT id, tenant_id, workflow_id, trigger_type, active, configuration,
                        created_at, last_run, updated_at, remote_tenant_id, single_instance
                 FROM public.invocation_trigger
-                WHERE id = $1 AND (tenant_id = $2 OR tenant_id IS NULL)
+                WHERE id = $1 AND tenant_id = $2
                 "#,
             )
             .bind(id)
@@ -167,7 +178,7 @@ impl TriggerRepository {
                 END,
                 remote_tenant_id = $6,
                 single_instance = $7
-            WHERE id = $1 AND ($8::text IS NULL OR tenant_id = $8 OR tenant_id IS NULL)
+            WHERE id = $1 AND ($8::text IS NULL OR tenant_id = $8)
             RETURNING id, tenant_id, workflow_id, trigger_type, active, configuration,
                       created_at, last_run, updated_at, remote_tenant_id, single_instance
             "#,
@@ -190,7 +201,7 @@ impl TriggerRepository {
             sqlx::query(
                 r#"
                 DELETE FROM public.invocation_trigger
-                WHERE id = $1 AND (tenant_id = $2 OR tenant_id IS NULL)
+                WHERE id = $1 AND tenant_id = $2
                 "#,
             )
             .bind(id)
@@ -301,13 +312,13 @@ impl TriggerRepository {
             WHERE t.trigger_type = 'CHANNEL'
               AND t.active = true
               AND t.configuration->>'connection_id' = $1
-              AND (t.tenant_id = $2 OR t.tenant_id IS NULL)
+              AND t.tenant_id = $2
               AND ($3::text IS NULL OR t.id <> $3)
               AND EXISTS (
                   SELECT 1 FROM workflows w
                   WHERE w.workflow_id = t.workflow_id
                     AND w.deleted_at IS NULL
-                    AND (t.tenant_id IS NULL OR w.tenant_id = t.tenant_id)
+                    AND w.tenant_id = t.tenant_id
               )
             ORDER BY t.created_at DESC, t.id DESC
             LIMIT 1
@@ -320,17 +331,13 @@ impl TriggerRepository {
         .await
     }
 
-    /// Deactivate every active trigger visible to `tenant_id` whose workflow
-    /// is deleted or missing, returning the deactivated rows.
+    /// Deactivate every active trigger of `tenant_id` whose workflow is
+    /// deleted or missing, returning the deactivated rows.
     ///
     /// Triggers have no foreign key to `workflows`, so a trigger whose
     /// workflow was deleted without deactivating it would otherwise keep
     /// firing indefinitely. Workflow ids are only unique per tenant, so a
-    /// tenant's trigger needs a live workflow in that same tenant, while a
-    /// global (NULL-tenant) trigger is only orphaned once no tenant has a live
-    /// workflow with that id — it is never switched off from one tenant's
-    /// point of view. `WorkflowRepository::delete_workflow` applies the same
-    /// rule.
+    /// trigger needs a live workflow in its own tenant.
     pub async fn deactivate_orphaned(
         &self,
         tenant_id: &str,
@@ -340,12 +347,12 @@ impl TriggerRepository {
             UPDATE public.invocation_trigger t
             SET active = false, updated_at = NOW()
             WHERE t.active = true
-              AND (t.tenant_id = $1 OR t.tenant_id IS NULL)
+              AND t.tenant_id = $1
               AND NOT EXISTS (
                   SELECT 1 FROM workflows w
                   WHERE w.workflow_id = t.workflow_id
                     AND w.deleted_at IS NULL
-                    AND (t.tenant_id IS NULL OR w.tenant_id = t.tenant_id)
+                    AND w.tenant_id = t.tenant_id
               )
             RETURNING t.id, t.tenant_id, t.workflow_id, t.trigger_type, t.active, t.configuration,
                       t.created_at, t.last_run, t.updated_at, t.remote_tenant_id, t.single_instance

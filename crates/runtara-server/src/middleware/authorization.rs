@@ -1768,6 +1768,7 @@ mod tests {
     /// Install a capturing subscriber for the current thread (`#[tokio::test]` runs on a
     /// current-thread runtime, so the layer's `tracing::warn!` lands here).
     fn capture_logs() -> (LogCapture, tracing::subscriber::DefaultGuard) {
+        crate::test_env::install_permissive_global_subscriber();
         let capture = LogCapture::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(capture.clone())

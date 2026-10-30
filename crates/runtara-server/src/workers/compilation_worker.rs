@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use opentelemetry::KeyValue;
+use runtara_store_postgres::tenant_scope::scoped;
 use sqlx::PgPool;
 use tracing::{error, info, instrument, warn};
 
@@ -192,7 +193,9 @@ pub async fn run(
                 // the desired compiler mode) instead of an older source-only
                 // check here. The service short-circuits when a fresh image
                 // already exists, so the worker always hands the request off.
-                {
+                // The request is one tenant's: row level security keeps the
+                // compile's database work to that tenant's rows.
+                scoped(request.tenant_id.clone(), async {
                     let compile_start = Instant::now();
 
                     // Track active compilations. No labels: like the duration
@@ -365,7 +368,8 @@ pub async fn run(
                             }
                         }
                     }
-                }
+                })
+                .await;
 
                 // Mark as complete (removes from pending set)
                 if let Err(e) = queue.complete(&request).await {

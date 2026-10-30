@@ -4,6 +4,7 @@ use crate::runtime_types::ListEventsOptions;
 use axum::http::StatusCode;
 use dashmap::{DashMap, mapref::entry::Entry};
 use redis::aio::ConnectionManager;
+use runtara_store_postgres::tenant_scope::{inherit, scoped};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tokio::sync::mpsc;
@@ -373,9 +374,9 @@ impl ChannelRouter {
         if detach {
             let router = self.clone();
             let connection_id = connection_id.to_string();
-            tokio::spawn(async move {
+            tokio::spawn(inherit(async move {
                 router.dispatch_logged(&connection_id, route, msg).await;
-            });
+            }));
         } else {
             self.dispatch_logged(connection_id, route, msg).await;
         }
@@ -393,10 +394,11 @@ impl ChannelRouter {
             tick.tick().await;
             self.sweep_intake().await;
             for tenant in crate::config::served_tenants() {
-                match self
-                    .intake
-                    .purge(tenant, super::intake::RETENTION, 1000)
-                    .await
+                match scoped(
+                    tenant.clone(),
+                    self.intake.purge(tenant, super::intake::RETENTION, 1000),
+                )
+                .await
                 {
                     Ok(0) => {}
                     Ok(deleted) => debug!(%tenant, deleted, "Purged handled channel intake"),
@@ -410,7 +412,12 @@ impl ChannelRouter {
     /// and dispatch them.
     pub async fn recover_pending(self: &Arc<Self>) {
         for tenant in crate::config::served_tenants() {
-            match self.intake.release_orphans(tenant, self.started_at).await {
+            match scoped(
+                tenant.clone(),
+                self.intake.release_orphans(tenant, self.started_at),
+            )
+            .await
+            {
                 Ok(0) => {}
                 Ok(count) => info!(%tenant, count, "Recovering pending channel messages"),
                 Err(e) => warn!(%tenant, error = %e, "Unable to release pending channel intake"),
@@ -422,8 +429,10 @@ impl ChannelRouter {
     /// Dispatch every pending message whose next attempt is due. A message
     /// whose launch failed transiently is retried here, with backoff.
     pub async fn sweep_intake(self: &Arc<Self>) {
+        // Each tenant's messages in its own scope: row level security keeps
+        // the sweep's database work to that tenant's rows.
         for tenant in crate::config::served_tenants() {
-            self.sweep_tenant_intake(tenant).await;
+            scoped(tenant.clone(), self.sweep_tenant_intake(tenant)).await;
         }
     }
 
@@ -608,7 +617,8 @@ impl ChannelRouter {
         // channel, which carries only subsequent messages in the session.
         let router = self.clone();
         let conv_id = msg.conv_id.clone();
-        tokio::spawn(async move {
+        let tenant = route.tenant_id.clone();
+        tokio::spawn(scoped(tenant, async move {
             let mut rx = rx;
             info!(
                 conv_id = %conv_id,
@@ -644,14 +654,14 @@ impl ChannelRouter {
             while let Ok(pending) = rx.try_recv() {
                 router.redispatch(key.0.clone(), pending);
             }
-        });
+        }));
 
         Ok(())
     }
 
     fn redispatch(self: &Arc<Self>, connection_id: String, msg: InboundMessage) {
         let router = self.clone();
-        tokio::spawn(async move {
+        tokio::spawn(inherit(async move {
             match router.resolve_route(&connection_id).await {
                 Ok(route) => {
                     let dispatch: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
@@ -663,7 +673,7 @@ impl ChannelRouter {
                     warn!(connection_id = %connection_id, error = %e, "Unable to reroute channel message")
                 }
             }
-        });
+        }));
     }
 
     /// Build the reply adapter from connection credentials.

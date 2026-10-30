@@ -75,7 +75,8 @@ async fn soft_delete_behind_repository(pool: &PgPool, tenant: &str, workflow_id:
     .expect("soft-delete workflow");
 }
 
-/// Seed an active CRON trigger; `tenant = None` makes it a global trigger.
+/// Seed an active CRON trigger; `tenant = None` leaves it untenanted, as
+/// triggers from before every trigger named its tenant are.
 async fn seed_trigger(pool: &PgPool, tenant: Option<&str>, workflow_id: &str) -> String {
     let request = CreateInvocationTriggerRequest {
         workflow_id: workflow_id.to_string(),
@@ -168,7 +169,7 @@ async fn delete_workflow_deactivates_its_triggers_only() {
     let deleted_wf = seed_workflow(&repo, &tenant).await;
     let kept_wf = seed_workflow(&repo, &tenant).await;
     let tenant_trigger = seed_trigger(&pool, Some(&tenant), &deleted_wf).await;
-    let global_trigger = seed_trigger(&pool, None, &deleted_wf).await;
+    let second_trigger = seed_trigger(&pool, Some(&tenant), &deleted_wf).await;
     let kept_trigger = seed_trigger(&pool, Some(&tenant), &kept_wf).await;
 
     let outcome = repo
@@ -182,7 +183,7 @@ async fn delete_workflow_deactivates_its_triggers_only() {
         .map(|t| t.id.as_str())
         .collect();
     returned.sort_unstable();
-    let mut expected = vec![tenant_trigger.as_str(), global_trigger.as_str()];
+    let mut expected = vec![tenant_trigger.as_str(), second_trigger.as_str()];
     expected.sort_unstable();
     assert_eq!(returned, expected, "both of the workflow's triggers");
     assert!(
@@ -191,7 +192,7 @@ async fn delete_workflow_deactivates_its_triggers_only() {
     );
 
     assert!(!is_active(&pool, &tenant_trigger).await);
-    assert!(!is_active(&pool, &global_trigger).await);
+    assert!(!is_active(&pool, &second_trigger).await);
     assert!(
         is_active(&pool, &kept_trigger).await,
         "another workflow's trigger is untouched"
@@ -260,7 +261,7 @@ async fn deactivate_orphaned_switches_off_only_dead_workflow_triggers() {
 }
 
 #[tokio::test]
-async fn delete_workflow_keeps_global_trigger_while_another_tenant_has_the_workflow() {
+async fn delete_workflow_leaves_another_tenants_copy_and_its_triggers() {
     skip_if_no_db!();
     let pool = get_test_pool().await;
     let repo = WorkflowRepository::new(pool.clone());
@@ -273,7 +274,6 @@ async fn delete_workflow_keeps_global_trigger_while_another_tenant_has_the_workf
     seed_workflow_with_id(&repo, &tenant_b, &shared_wf).await;
     let a_trigger = seed_trigger(&pool, Some(&tenant_a), &shared_wf).await;
     let b_trigger = seed_trigger(&pool, Some(&tenant_b), &shared_wf).await;
-    let global_trigger = seed_trigger(&pool, None, &shared_wf).await;
 
     let outcome = repo
         .delete_workflow(&tenant_a, &shared_wf)
@@ -287,29 +287,20 @@ async fn delete_workflow_keeps_global_trigger_while_another_tenant_has_the_workf
     assert_eq!(ids, vec![a_trigger.as_str()], "only A's own trigger");
     assert!(!is_active(&pool, &a_trigger).await);
     assert!(
-        is_active(&pool, &global_trigger).await,
-        "B still has a live workflow with this id"
-    );
-    assert!(
         is_active(&pool, &b_trigger).await,
         "another tenant's trigger is untouched"
     );
 
-    // Once the last live copy goes, the global trigger goes with it.
     let outcome = repo
         .delete_workflow(&tenant_b, &shared_wf)
         .await
         .expect("delete tenant B's workflow");
-    let mut ids: Vec<&str> = outcome
+    let ids: Vec<&str> = outcome
         .deactivated_triggers
         .iter()
         .map(|t| t.id.as_str())
         .collect();
-    ids.sort_unstable();
-    let mut expected = vec![b_trigger.as_str(), global_trigger.as_str()];
-    expected.sort_unstable();
-    assert_eq!(ids, expected);
-    assert!(!is_active(&pool, &global_trigger).await);
+    assert_eq!(ids, vec![b_trigger.as_str()]);
 
     cleanup(&pool, &tenant_a, &[&shared_wf]).await;
     cleanup(&pool, &tenant_b, &[&shared_wf]).await;
@@ -330,7 +321,7 @@ async fn deactivate_orphaned_requires_a_live_workflow_in_the_triggers_own_tenant
     seed_workflow_with_id(&repo, &tenant_b, &shared_wf).await;
     soft_delete_behind_repository(&pool, &tenant_a, &shared_wf).await;
     let a_trigger = seed_trigger(&pool, Some(&tenant_a), &shared_wf).await;
-    let global_trigger = seed_trigger(&pool, None, &shared_wf).await;
+    let b_trigger = seed_trigger(&pool, Some(&tenant_b), &shared_wf).await;
 
     let deactivated = triggers
         .deactivate_orphaned(&tenant_a)
@@ -341,12 +332,9 @@ async fn deactivate_orphaned_requires_a_live_workflow_in_the_triggers_own_tenant
         ids.contains(&a_trigger.as_str()),
         "B's live copy must not keep A's orphan alive"
     );
-    assert!(
-        !ids.contains(&global_trigger.as_str()),
-        "a global trigger stays while any tenant has the workflow"
-    );
+    assert!(!ids.contains(&b_trigger.as_str()));
     assert!(!is_active(&pool, &a_trigger).await);
-    assert!(is_active(&pool, &global_trigger).await);
+    assert!(is_active(&pool, &b_trigger).await);
 
     cleanup(&pool, &tenant_a, &[&shared_wf]).await;
     cleanup(&pool, &tenant_b, &[&shared_wf]).await;
@@ -455,4 +443,34 @@ async fn newest_live_channel_trigger_breaks_a_created_at_tie_by_id() {
     );
 
     cleanup(&pool, &tenant, &[&workflow]).await;
+}
+
+#[tokio::test]
+async fn an_untenanted_trigger_becomes_the_primary_tenants() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let repo = WorkflowRepository::new(pool.clone());
+    let triggers = TriggerRepository::new(pool.clone());
+    let tenant = format!("t-{}", Uuid::new_v4());
+    let wf = seed_workflow(&repo, &tenant).await;
+    let untenanted = seed_trigger(&pool, None, &wf).await;
+
+    let claimed = triggers.claim_untenanted(&tenant).await.expect("claim");
+    assert!(claimed >= 1);
+    let owner: Option<String> =
+        sqlx::query_scalar("SELECT tenant_id FROM invocation_trigger WHERE id::text = $1")
+            .bind(&untenanted)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    // Another test may have claimed it first, for its own tenant.
+    assert!(owner.is_some(), "the trigger names a tenant");
+    let none_left: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM invocation_trigger WHERE tenant_id IS NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(none_left, 0);
+
+    cleanup(&pool, &tenant, &[&wf]).await;
 }

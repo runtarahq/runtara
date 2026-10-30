@@ -149,15 +149,23 @@ async fn authenticate_with(
         .await
 }
 
-/// Runs the rest of a request for `tenant` on the runtime database, where row
-/// level security then confines it to that tenant's rows (C11). A request
-/// that answers across tenants (`scoped` false) runs as the system path.
+/// Runs the rest of a request for `tenant` on the runtime and server
+/// databases, where row level security then confines it to that tenant's rows
+/// (C11, M7.11), holding one of the tenant's request slots in this process
+/// (M7.16) whichever way it authenticated. A request that answers across
+/// tenants (`scoped` false) runs as the system path.
 async fn as_tenant(
     scoped: bool,
     tenant: &str,
     rest: impl std::future::Future<Output = Response>,
 ) -> Response {
     if scoped {
+        // One of the tenant's slots in this process, held while the request
+        // runs, so no tenant holds them all (M7.16).
+        let _slot = match crate::tenant_concurrency::enter(tenant) {
+            Ok(slot) => slot,
+            Err(response) => return *response,
+        };
         runtara_store_postgres::tenant_scope::scoped(tenant, rest).await
     } else {
         rest.await

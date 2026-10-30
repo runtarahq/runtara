@@ -24,10 +24,17 @@ compiler = [
     "dep:wac-resolver",
     "dep:wac-graph",
     "dep:wasmparser",
+    # A compile request's and outcome's bytes, carried as JSON.
+    "dep:base64",
     # AgentCatalog::from_meta_dir for the runtara-compile CLI.
     "runtara-dsl/fs",
 ]
 direct-wasm-integration-tests = []
+
+[[test]]
+name = "compile_request"
+path = "tests/compile_request.rs"
+required-features = ["direct-wasm-integration-tests"]
 
 [[test]]
 name = "direct_wasm_execute"
@@ -55,6 +62,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { workspace = true }
 serde_ignored = "0.1"
 sha2 = "0.10"
+base64 = { workspace = true, optional = true }
 tracing = "0.1"
 minijinja = "2.5"
 wasm-encoder = { version = "0.247", optional = true, features = ["wasmparser"] }

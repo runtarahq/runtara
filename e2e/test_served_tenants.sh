@@ -20,18 +20,23 @@
 #      primary tenant still creates more, and each reads its own entitlements.
 #   6. OAUTH AND CONNECTION EVENTS — the second tenant's authorize URL
 #      redirects to its own callback path; that state is refused at the
-#      primary tenant's callback and is spent; its connection.created product
+#      primary tenant's callback and left alone; its connection.created product
 #      event carries the second tenant, and a failed callback's event is not
 #      filed under the tenant named in its URL.
 #   7. MCP SESSIONS — the second tenant's MCP session is kept under its own
 #      tenant; after a restart, restoring it with the primary tenant's
 #      credentials fails, while its owner restores it.
-#   8. RUNTIME ROW SECURITY (C11) — the server reaches the runtime database
-#      as a plain role that owns it, so row-level security binds everything
-#      above; that role, naming one tenant, sees none of the other's runs.
+#   8. ROW SECURITY (C11, M7.11) — the server reaches the runtime and server
+#      databases as a plain role that owns them, so row-level security binds
+#      everything above; that role, naming one tenant, sees none of the
+#      other's runs, workflows, triggers or API keys.
 #   9. PACED CALLS (SYN-917) — the second tenant may make 12 calls a minute
 #      that start external work: its run of 15 outbound HTTP calls waits for
 #      the last three and completes, while the primary's same run does not.
+#  10. CROSS-TENANT SWEEP (M7.16) — every GET route of the server's OpenAPI
+#      document, its path filled with the second tenant's workflow, run,
+#      trigger, connection and API key ids, asked as the primary tenant:
+#      none answers 2xx with the second tenant's object.
 #
 # With SERVED_TENANTS_KEY_ID_PER_TENANT, a host that seals each tenant's
 # credentials under its own keys (key id `{tenant}-k1`) is checked to.
@@ -159,20 +164,28 @@ for _ in {1..20}; do
 done
 
 print_step "Creating test databases..."
-psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_SERVER}" >/dev/null
-# Neither a superuser nor BYPASSRLS: row-level security binds the server.
+# Neither a superuser nor BYPASSRLS: row-level security binds the server, on
+# both databases it owns. The extensions its migrations ask for are made
+# beforehand, as an administrator makes them on a deployment.
 RUNTIME_PASSWORD=$(openssl rand -hex 16)
 psql_quiet -d postgres -c "CREATE ROLE ${RUNTIME_ROLE} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '${RUNTIME_PASSWORD}'" >/dev/null
+psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_SERVER} OWNER ${RUNTIME_ROLE}" >/dev/null
+for extension in uuid-ossp vector fuzzystrmatch pg_trgm; do
+    psql_quiet -d "${TEST_DB_SERVER}" -c "CREATE EXTENSION IF NOT EXISTS \"${extension}\"" >/dev/null
+done
 psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_RUNTIME} OWNER ${RUNTIME_ROLE}" >/dev/null
-SERVER_DB_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}"
+SERVER_DB_URL="postgresql://${RUNTIME_ROLE}:${RUNTIME_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}"
+# No platform object-model database: tenants sharing a process take none
+# (M7.16).
 
 start_server() {
     print_step "Starting runtara-server on :${TEST_PORT_PUBLIC}..."
     RUNTARA_SERVER_DATABASE_URL="${SERVER_DB_URL}" \
-    OBJECT_MODEL_DATABASE_URL="${SERVER_DB_URL}" \
+    RUNTARA_DATABASE_CONNECTION_GUARD=off \
     RUNTARA_DATABASE_URL="postgresql://${RUNTIME_ROLE}:${RUNTIME_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_RUNTIME}" \
     TENANT_ID="${TENANT}" \
     RUNTARA_SERVED_TENANTS="${SECOND_TENANT}" \
+    RUNTARA_REQUIRE_ROW_SECURITY=true \
     RUNTARA_TENANT_ENTITLEMENTS_JSON="{\"${SECOND_TENANT}\": {\"overrides\": {\"limits\": {\"maxWorkflows\": 1, \"workflowCallsPerMinute\": 12}}}}" \
     RUNTARA_PROXY_ALLOWED_HOSTS=127.0.0.1 \
     SERVER_HOST=127.0.0.1 \
@@ -253,16 +266,19 @@ WF_ID=$(create_and_compile "Answer" "${GRAPH}")
 RESP=$(api_post /triggers "{\"workflow_id\": \"${WF_ID}\", \"trigger_type\": \"HTTP\", \"active\": true}")
 TRIGGER=$(echo "${RESP}" | jq -r '.data.id // .id // empty' 2>/dev/null || true)
 [ -n "${TRIGGER}" ] || { print_error "trigger create failed: ${RESP}"; exit 1; }
-CODE=$(http_status -X POST -H 'Content-Type: application/json' -d '{"n": 1}' "${API}/events/http/${TRIGGER}/run")
+CODE=$(http_status -X POST -H 'Content-Type: application/json' -d '{"n": 1}' "${API}/${TENANT}/events/http/${TRIGGER}/run")
 case "${CODE}" in 2??) ;; *) print_error "the primary tenant's webhook answered ${CODE}"; exit 1 ;; esac
-RESP=$(curl -sS -X POST -H 'Content-Type: application/json' -d '{}' "${API}/events/http-sync/${WF_ID}")
+RESP=$(curl -sS -X POST -H 'Content-Type: application/json' -d '{}' "${API}/${TENANT}/events/http-sync/${WF_ID}")
 echo "${RESP}" | jq -e '.success == true and .outputs.answer == 42' >/dev/null \
     || { print_error "the sync webhook did not run the workflow: ${RESP}"; exit 1; }
 server_sql "CREATE TEMP TABLE t AS SELECT * FROM invocation_trigger WHERE id = '${TRIGGER}';
             UPDATE t SET id = 'outsider-trigger', tenant_id = 'outsider';
             INSERT INTO invocation_trigger SELECT * FROM t;" >/dev/null
-CODE=$(http_status -X POST -H 'Content-Type: application/json' -d '{}' "${API}/events/http/outsider-trigger/run")
+CODE=$(http_status -X POST -H 'Content-Type: application/json' -d '{}' "${API}/${TENANT}/events/http/outsider-trigger/run")
 [ "${CODE}" = "404" ] || { print_error "an unserved tenant's trigger answered ${CODE}, not 404"; exit 1; }
+# Tenants share this process: a webhook names its tenant (M7.16).
+CODE=$(http_status -X POST -H 'Content-Type: application/json' -d '{}' "${API}/events/http/${TRIGGER}/run")
+[ "${CODE}" = "404" ] || { print_error "a webhook naming no tenant answered ${CODE}, not 404"; exit 1; }
 echo "  the primary tenant's webhook and sync run; an unserved tenant's trigger is not found ✓"
 
 #-------------------------------------------------------------------------
@@ -305,7 +321,7 @@ B_TRIGGER=$(echo "${RESP}" | jq -r '.data.id // .id // empty' 2>/dev/null || tru
 RESP=$(api_post /triggers "{\"workflow_id\": \"${B_WF}\", \"trigger_type\": \"CRON\", \"active\": true, \"configuration\": {\"expression\": \"* * * * *\", \"timezone\": \"UTC\"}}")
 echo "${RESP}" | jq -e '.data.id // .id' >/dev/null 2>&1 || { print_error "the second tenant's cron create failed: ${RESP}"; exit 1; }
 AUTH=()
-CODE=$(http_status -X POST -H 'Content-Type: application/json' -d '{}' "${API}/events/http/${B_TRIGGER}/run")
+CODE=$(http_status -X POST -H 'Content-Type: application/json' -d '{}' "${API}/${SECOND_TENANT}/events/http/${B_TRIGGER}/run")
 case "${CODE}" in 2??) ;; *) print_error "the second tenant's webhook answered ${CODE}"; exit 1 ;; esac
 # Runs land under the second tenant: the webhook's, then the cron's.
 b_runs() {
@@ -376,8 +392,12 @@ STATE=$(python3 -c 'import sys,urllib.parse as u; print(u.parse_qs(u.urlparse(sy
 CALLBACK="http://127.0.0.1:${TEST_PORT_PUBLIC}/api/oauth"
 curl -sS "${CALLBACK}/${TENANT}/callback?state=${STATE}&code=c1" | grep -q "Invalid or expired authorization" \
     || { print_error "the primary tenant's callback accepted the second tenant's state"; exit 1; }
-curl -sS "${CALLBACK}/${SECOND_TENANT}/callback?state=${STATE}&code=c1" | grep -q "Invalid or expired authorization" \
-    || { print_error "a state refused at the wrong callback was not spent"; exit 1; }
+# Row-level security (M7.11) keeps the primary tenant's callback away from the
+# second tenant's state altogether: refused there, it is neither seen nor
+# spent, so another tenant cannot burn a flow it does not own.
+[ "$(server_sql "SELECT count(*) FROM oauth_state WHERE state = '${STATE}' AND tenant_id = '${SECOND_TENANT}'")" = "1" ] \
+    || { print_error "the primary tenant's callback reached the second tenant's state"; exit 1; }
+echo "  the primary tenant's callback refuses the second tenant's state and leaves it alone ✓"
 # A failed callback names no tenant it could prove: its event is not filed
 # under the tenant in its path.
 curl -sS -o /dev/null "${CALLBACK}/not-a-served-tenant/callback?error=access_denied"
@@ -405,7 +425,7 @@ for _ in {1..10}; do
 done
 [ "${FAILED_TENANT}" = "${TENANT}" ] \
     || { print_error "a failed callback's event was filed under '${FAILED_TENANT}', not the primary tenant"; exit 1; }
-echo "  the redirect names the second tenant; its state is refused at the primary's callback and spent; its connection event is its own; a failed callback's path tenant is not trusted ✓"
+echo "  the redirect names the second tenant; its state is refused at the primary's callback and left alone; its connection event is its own; a failed callback's path tenant is not trusted ✓"
 
 #-------------------------------------------------------------------------
 print_step "7. An MCP session is kept, and restored, under its own tenant..."
@@ -447,10 +467,10 @@ AUTH=()
 echo "  the session is kept under the second tenant; after a restart the primary is refused it and its owner restores it ✓"
 
 #-------------------------------------------------------------------------
-print_step "8. The runtime database binds the server to each request's tenant..."
+print_step "8. The runtime and server databases bind the server to each request's tenant..."
 as_runtime_role() {
     PGPASSWORD="${RUNTIME_PASSWORD}" psql -qtA -U "${RUNTIME_ROLE}" -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" \
-        -d "${TEST_DB_RUNTIME}" -c "$1"
+        -d "${2:-${TEST_DB_RUNTIME}}" -c "$1"
 }
 [ "$(as_runtime_role "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user")" = "f" ] \
     || { print_error "the runtime role escapes row-level security"; exit 1; }
@@ -459,6 +479,14 @@ SECOND_RUNS=$(runtime_sql "SELECT count(*) FROM instances WHERE tenant_id = '${S
 SEEN=$(as_runtime_role "SELECT set_config('runtara.tenant_id', '${TENANT}', false); SELECT count(*) FROM instances WHERE tenant_id = '${SECOND_TENANT}'" | tail -1)
 [ "${SEEN}" = "0" ] || { print_error "as ${TENANT} the runtime role saw ${SEEN} of the second tenant's runs"; exit 1; }
 echo "  every stage ran on a runtime role bound by row-level security; naming ${TENANT}, it sees none of the second tenant's ${SECOND_RUNS} runs ✓"
+for table in "workflows tenant_id" "invocation_trigger tenant_id" "api_keys org_id"; do
+    set -- ${table}
+    OWN=$(server_sql "SELECT count(*) FROM $1 WHERE $2 = '${SECOND_TENANT}'")
+    [ "${OWN}" -gt 0 ] || { print_error "the second tenant has no $1 rows to hide"; exit 1; }
+    SEEN=$(as_runtime_role "SELECT set_config('runtara.tenant_id', '${TENANT}', false); SELECT count(*) FROM $1 WHERE $2 = '${SECOND_TENANT}'" "${TEST_DB_SERVER}" | tail -1)
+    [ "${SEEN}" = "0" ] || { print_error "as ${TENANT} the server role saw ${SEEN} of the second tenant's $1"; exit 1; }
+done
+echo "  on the server database, naming ${TENANT}, it sees none of the second tenant's workflows, triggers or API keys ✓"
 
 #-------------------------------------------------------------------------
 print_step "9. A run's outbound calls wait for its tenant's limit..."
@@ -513,5 +541,64 @@ A_SECONDS=$(timed_run "${A_CALLS}")
 [ "${B_SECONDS}" -ge 15 ] && [ "${A_SECONDS}" -lt "${B_SECONDS}" ] \
     || { print_error "the second tenant's 15 calls took ${B_SECONDS} s against the primary's ${A_SECONDS} s: not paced"; exit 1; }
 echo "  15 outbound calls: the second tenant's run, at 12 a minute, completed in ${B_SECONDS} s (at least 15), the primary's in ${A_SECONDS} s ✓"
+
+#-------------------------------------------------------------------------
+print_step "10. Every GET route, asked as the primary for the second tenant's objects..."
+DUMP_BIN="$(dirname "${RUNTARA_SERVER_BIN}")/dump_openapi"
+[ -x "${DUMP_BIN}" ] || SQLX_OFFLINE="${SQLX_OFFLINE}" cargo build -q -p runtara-server --bin dump_openapi >&2
+"${DUMP_BIN}" > "${TEST_DATA_DIR}/openapi.json"
+B_RUN=$(runtime_sql "SELECT instance_id FROM instances WHERE tenant_id = '${SECOND_TENANT}' LIMIT 1")
+B_KEY_ID=$(server_sql "SELECT id FROM api_keys WHERE org_id = '${SECOND_TENANT}' LIMIT 1")
+python3 - "${TEST_DATA_DIR}/openapi.json" "http://127.0.0.1:${TEST_PORT_PUBLIC}" \
+    "${B_WF}" "${B_RUN}" "${B_TRIGGER}" "${B_CONN}" "${B_KEY_ID}" <<'PY' || exit 1
+import json, re, sys, urllib.request, urllib.error, uuid
+def normal(body, value):
+    body = body.replace(value, "<id>")
+    return re.sub(r"\d{4}-\d\d-\d\dT[0-9:.]+(Z|[+-]\d\d:?\d\d)?", "<time>", body)
+spec, base, workflow, run, trigger, connection, key = sys.argv[1:]
+ids = {"workflow": workflow, "instance": run, "execution": run, "run": run,
+       "trigger": trigger, "connection": connection, "key": key}
+def values(param):
+    name = param.lower()
+    for word, value in ids.items():
+        if word in name:
+            return [value]
+    return list(ids.values())
+asked = leaked = 0
+for path, item in json.load(open(spec))["paths"].items():
+    if "get" not in item or "{" not in path:
+        continue
+    params = re.findall(r"{([^}]+)}", path)
+    first = values(params[0])
+    for value in first:
+        url = path
+        for param in params:
+            url = url.replace("{" + param + "}", value if param == params[0] else values(param)[0])
+        asked += 1
+        try:
+            with urllib.request.urlopen(base + url, timeout=30) as response:
+                status, body = response.status, response.read().decode(errors="replace")
+        except urllib.error.HTTPError as error:
+            status, body = error.code, ""
+        except Exception:
+            continue
+        if 200 <= status < 300 and value in body:
+            # A route may echo the id it was asked for: it leaks only if it
+            # answers otherwise for an id that names nothing.
+            unknown = str(uuid.uuid4())
+            try:
+                with urllib.request.urlopen(base + url.replace(value, unknown), timeout=30) as response:
+                    other = response.read().decode(errors="replace")
+            except urllib.error.HTTPError as error:
+                other = f"HTTP {error.code}"
+            if normal(body, value) != normal(other, unknown):
+                leaked += 1
+                print(f"  GET {url} answered {status} with the second tenant's {value}", file=sys.stderr)
+if leaked:
+    sys.exit(f"{leaked} of {asked} cross-tenant reads answered with the second tenant's object")
+if asked < 20:
+    sys.exit(f"only {asked} routes were asked; the OpenAPI document lists too few")
+print(f"  {asked} GET routes asked as the primary for the second tenant's objects: none answered with one ✓")
+PY
 
 print_success "served tenants: webhooks, API keys, triggers, cron, OAuth callbacks and connection events reach exactly the tenants this server serves, each its own, under its own limits"

@@ -121,7 +121,7 @@ mod state_schema;
 // ============================================================================
 
 /// Result of workflow validation containing errors and warnings.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ValidationResult {
     /// Hard errors that prevent compilation.
     pub errors: Vec<ValidationError>,
@@ -135,7 +135,7 @@ pub struct ValidationResult {
 }
 
 /// `graph_path` from the moment `errors`/`warnings` had these lengths.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct GraphPathMark {
     errors: usize,
     warnings: usize,
@@ -248,7 +248,7 @@ impl ValidationResult {
 // ============================================================================
 
 /// Errors that can occur during validation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[allow(missing_docs)] // Fields are self-documenting from variant docs
 pub enum ValidationError {
     // === Graph Structure Errors ===
@@ -714,7 +714,7 @@ pub enum ValidationError {
 }
 
 /// Information about a missing required input field.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MissingInputField {
     /// Field name
     pub name: String,
@@ -1773,7 +1773,7 @@ impl std::error::Error for ValidationError {}
 // ============================================================================
 
 /// Warnings that indicate potential issues but don't prevent compilation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[allow(missing_docs)] // Fields are self-documenting from variant docs
 pub enum ValidationWarning {
     /// Unknown input field in agent step.
@@ -2514,7 +2514,7 @@ pub fn validate_workflow_with_children(
 ///
 /// Built by whoever resolves `EmbedWorkflow` references — the server loads
 /// children from the database, `runtara-compile` from `--child` files.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClosureChildGraph {
     /// The child's workflow id (as referenced by `childWorkflowId`).
     pub workflow_id: String,
@@ -2524,8 +2524,22 @@ pub struct ClosureChildGraph {
     pub execution_graph: ExecutionGraph,
 }
 
+/// A closure to validate elsewhere (a sandboxed validator), as
+/// [`validate_workflow_closure`] takes it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ClosureValidationRequest {
+    /// The root workflow's id.
+    pub root_workflow_id: String,
+    /// The root graph.
+    pub root: ExecutionGraph,
+    /// The agent catalog the closure is validated against.
+    pub catalog: runtara_dsl::agent_meta::AgentCatalog,
+    /// Every (grand)child graph the closure embeds.
+    pub children: Vec<ClosureChildGraph>,
+}
+
 /// Validation results for one child workflow in a closure.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChildValidationReport {
     /// The child's workflow id.
     pub workflow_id: String,
@@ -2539,7 +2553,7 @@ pub struct ChildValidationReport {
 /// Attributed validation results for a workflow and its full static
 /// child-workflow closure: the root graph plus every (grand)child, each
 /// fully validated, with errors attributed to the graph they occur in.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ClosureValidationReport {
     /// Results for the root graph (including root-level embed-input
     /// coverage, missing-child references, and cross-workflow cycles).

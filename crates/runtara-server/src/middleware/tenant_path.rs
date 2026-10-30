@@ -8,6 +8,7 @@
 //! before and an unknown tenant 404s.
 
 use axum::http::{Request, Uri};
+use axum::response::IntoResponse;
 
 /// The served tenant a request's path named.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +23,46 @@ pub fn strip_tenant_segment<B>(mut request: Request<B>) -> Request<B> {
         request.extensions_mut().insert(RequestedTenant(tenant));
     }
     request
+}
+
+/// Runs the rest of a request that named a served tenant in its path in that
+/// tenant's scope, so row level security confines its database work to the
+/// tenant's rows (M7.11). This covers what the auth middleware does not:
+/// webhooks, HTTP triggers, sync and channel callbacks, OAuth callbacks
+/// (`/api/oauth/{tenant}/…`, whose segment stays in the path), and an API
+/// key's lookup, which then finds only the named tenant's keys. A request
+/// whose path names no tenant runs as before; the auth middleware scopes it
+/// to its caller's tenant.
+pub async fn scope_requested_tenant(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let named = request
+        .extensions()
+        .get::<RequestedTenant>()
+        .map(|RequestedTenant(tenant)| tenant.clone())
+        .or_else(|| oauth_tenant(request.uri().path(), crate::config::is_served_tenant));
+    // A tenant-less event route resolves its tenant from what it names, and
+    // runs unscoped meanwhile: where tenants share a process, only the
+    // tenant's own form is served (M7.16), as the edge always sends.
+    if named.is_none()
+        && request.uri().path().starts_with("/api/runtime/events/")
+        && crate::config::try_get().is_some_and(|config| config.served_tenants.len() > 1)
+    {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
+    match named {
+        Some(tenant) => {
+            runtara_store_postgres::tenant_scope::scoped(tenant, next.run(request)).await
+        }
+        None => next.run(request).await,
+    }
+}
+
+/// The served tenant an OAuth redirect's path names.
+fn oauth_tenant(path: &str, is_served: impl Fn(&str) -> bool) -> Option<String> {
+    let (segment, _) = path.strip_prefix("/api/oauth/")?.split_once('/')?;
+    (!segment.is_empty() && is_served(segment)).then(|| segment.to_owned())
 }
 
 fn split_tenant(uri: &Uri, is_served: impl Fn(&str) -> bool) -> Option<(String, Uri)> {
@@ -54,6 +95,18 @@ mod tests {
     fn split(uri: &str) -> Option<(String, String)> {
         split_tenant(&uri.parse().unwrap(), |t| t == "acme" || t == "beta")
             .map(|(tenant, uri)| (tenant, uri.to_string()))
+    }
+
+    #[test]
+    fn an_oauth_redirect_names_a_served_tenant() {
+        let served = |t: &str| t == "acme";
+        assert_eq!(
+            oauth_tenant("/api/oauth/acme/callback", served),
+            Some("acme".into())
+        );
+        assert_eq!(oauth_tenant("/api/oauth/other/callback", served), None);
+        assert_eq!(oauth_tenant("/api/oauth/acme", served), None);
+        assert_eq!(oauth_tenant("/api/runtime/acme/x", served), None);
     }
 
     #[test]
