@@ -176,6 +176,21 @@ class NormalizeTest(unittest.TestCase):
         self.assertEqual(params[2]["description"], "Pagination")
         self.assertEqual(params[1]["schema"], {"type": "integer", "format": "int64"})
 
+    def test_required_scalar_or_object_parameter_requires_neither_form(self):
+        page = {"in": "query", "name": "page", "required": True, "style": "deepObject", "schema": {"oneOf": [
+            {"type": "integer"},
+            {"type": "object", "required": ["size"], "properties": {"size": {"type": "integer"}}},
+        ]}}
+        flt = {"in": "query", "name": "filter", "required": True, "style": "deepObject", "schema": {
+            "type": "object", "required": ["status"], "properties": {"status": {"type": "string"}}}}
+        sliced = cg.slice_spec(spec_with({"parameters": [page, flt]}, method="get"), ["op"])
+        required = {p["name"]: p.get("required", False) for p in operation(sliced, "op")["parameters"]}
+        # `{"page": 3}` alone is valid, so `page[size]` cannot be required...
+        self.assertEqual(required["page"], False)
+        self.assertEqual(required["page[size]"], False)
+        # ...while an object-only parameter keeps its required fields.
+        self.assertEqual(required["filter[status]"], True)
+
     def test_form_object_query_parameter_sends_its_fields_unprefixed(self):
         # No `style` means `form` with `explode: true`: status=…&owner=…, not filter[status]=….
         flt = {"in": "query", "name": "filter", "schema": {"type": "object", "properties": {
@@ -456,6 +471,25 @@ class EnvelopeRenderTest(unittest.TestCase):
     def test_several_integrations(self):
         self.assertIn('module_integration_ids = "sample_oauth,sample_token"', self.text)
         self.assertIn('integration_ids: vec!["sample_oauth".to_string(), "sample_token".to_string()]', self.text)
+
+
+@unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
+class ScalarOrObjectRenderTest(unittest.TestCase):
+    """A required parameter that is a scalar or an object: either form alone
+    deserializes, so `{"page": 3}` is a valid step input."""
+
+    def test_both_forms_are_optional_fields(self):
+        page = {"in": "query", "name": "page", "required": True, "style": "deepObject", "schema": {"oneOf": [
+            {"type": "integer"},
+            {"type": "object", "required": ["size"], "properties": {"size": {"type": "integer"}}},
+        ]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            write_crate(Path(tmp), spec_with({"parameters": [page]}, method="get"), ["op"])
+            text = cg.render(Path(tmp))
+        self.assertIn("pub page: Option<i64>,", text)
+        self.assertIn("pub page_size: Option<i64>,", text)
+        self.assertIn('.query_opt("page", &self.page)', text)
+        self.assertIn('.query_opt("page[size]", &self.page_size)', text)
 
 
 @unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")

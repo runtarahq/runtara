@@ -209,7 +209,10 @@ def expand_object_parameter(spec: dict, name: str, parameter: dict, schema: dict
     if not all(is_scalar(s) for s in scalars):
         sys.exit(f"{name}: query parameter `{param}` has non-scalar alternatives besides its object")
     fields = objects[0]["properties"]
-    required = objects[0].get("required") or []
+    # A required parameter makes the object's required fields required inputs,
+    # unless a scalar alternative alone also satisfies it: then every input is
+    # optional, and choosing one form is left to the vendor.
+    required = [] if scalars else objects[0].get("required") or []
     expanded = []
     if scalars:
         scalar = copy.deepcopy(scalars[0]) if len(scalars) == 1 else {"type": "string"}
