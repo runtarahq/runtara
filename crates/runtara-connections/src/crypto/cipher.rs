@@ -91,6 +91,14 @@ pub trait CredentialCipher: Send + Sync {
     /// Used for startup logging: operators should see a warning when running
     /// without encryption so it isn't silently disabled in production.
     fn is_encrypting(&self) -> bool;
+
+    /// Whether `tenant`'s credentials are sealed with real encryption: for a
+    /// cipher that keys each tenant apart, that tenant's own, whatever the
+    /// others' or the default's.
+    fn is_encrypting_for(&self, tenant: &str) -> bool {
+        let _ = tenant;
+        self.is_encrypting()
+    }
 }
 
 /// Returns `true` if `value` looks like one of our encrypted envelopes.
