@@ -30,6 +30,9 @@ pub struct CompileResult {
 
 /// The most a compile hands back, whatever its parts say.
 const MADE_LIMIT: usize = 64 * 1024 * 1024;
+/// The most one slice of a component carries: what a node's host origin
+/// answers at most.
+const MAX_SLICE: u64 = 8 * 1024 * 1024;
 /// The longest a worker's ask for the next compile waits.
 pub const MAX_WAIT: Duration = Duration::from_secs(30);
 
@@ -205,7 +208,9 @@ impl CompileQueues {
         let mut file = tokio::fs::File::open(path).await.map_err(unavailable)?;
         let size = file.metadata().await.map_err(unavailable)?.len();
         let start = offset.min(size);
-        let end = length.map_or(size, |length| start.saturating_add(length).min(size));
+        let end = start
+            .saturating_add(length.unwrap_or(MAX_SLICE).min(MAX_SLICE))
+            .min(size);
         file.seek(std::io::SeekFrom::Start(start))
             .await
             .map_err(unavailable)?;
