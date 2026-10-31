@@ -15,7 +15,7 @@
 //! 4. `POST /v1/run/outcome` (`completed`): a `GuestOutcome`
 //!    (`runtara_workflows::compile_request`).
 //!
-//! Given `{"worker": {"idle_ms", "until_unix_ms"}}` as its input instead, it
+//! Given `{"worker": {"idle_ms", "until_unix_ms", "deflate"}}` as its input instead, it
 //! is its tenant's warm compiler (SYN-930): it takes compiles one after
 //! another from `GET /v1/compiles/next`, the same calls under
 //! `/v1/compiles/{id}/`, fetching each component once for all of them.
@@ -59,7 +59,7 @@ fn run() -> Result<(), String> {
     }
     let request: CompileRequest =
         serde_json::from_value(input).map_err(|error| format!("the request: {error}"))?;
-    let outcome = compile(request, "/v1/artifacts", &Components::default())?;
+    let outcome = compile(request, "/v1/artifacts", &Components::default(), false)?;
     let body = serde_json::to_vec(&outcome).map_err(|error| error.to_string())?;
     http::call("POST", "/v1/run/outcome", Some(body)).map(|_| ())
 }
@@ -77,6 +77,7 @@ type Components = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<Stri
 fn work(settings: &serde_json::Value) -> Result<(), String> {
     let idle = std::time::Duration::from_millis(settings["idle_ms"].as_u64().unwrap_or(300_000));
     let until = settings["until_unix_ms"].as_u64().unwrap_or(u64::MAX);
+    let deflate = settings["deflate"].as_bool().unwrap_or(false);
     let now_ms = || {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -107,6 +108,7 @@ fn work(settings: &serde_json::Value) -> Result<(), String> {
             request,
             &format!("/v1/compiles/{id}/artifacts"),
             &components,
+            deflate,
         )?;
         let body = serde_json::to_vec(&outcome).map_err(|error| error.to_string())?;
         http::call("POST", &format!("/v1/compiles/{id}/outcome"), Some(body))?;
@@ -122,6 +124,7 @@ fn compile(
     request: CompileRequest,
     artifacts: &str,
     components: &Components,
+    deflate: bool,
 ) -> Result<GuestOutcome, String> {
     let started = std::time::Instant::now();
     let fetching = std::sync::Arc::new(std::sync::Mutex::new((
@@ -155,7 +158,7 @@ fn compile(
         Ok((outcome, wasm)) => {
             let compiled = started.elapsed();
             let handing_back = std::time::Instant::now();
-            let workflow_wasm = hand_back(artifacts, &wasm)?;
+            let workflow_wasm = hand_back(artifacts, &wasm, deflate)?;
             // On stderr, which a node keeps as the run's output: where a
             // compile's time went.
             let (files, bytes, fetch_time) = *fetching.lock().expect("fetch timings");
@@ -208,18 +211,16 @@ fn fetch(artifacts: &str, digest: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Hands `wasm` back to `artifacts` in parts, answering its SHA-256 once the
-/// host has it whole. A warm compiler's (under `/v1/compiles/`) goes
-/// deflated: a component deflates to about a third, and the link to its host
-/// may be slow (SYN-930).
+/// host has it whole, deflated when `deflate`: a component deflates to about
+/// a third, which pays where the link to the host is slow (SYN-930).
 #[cfg(target_os = "wasi")]
-fn hand_back(artifacts: &str, wasm: &[u8]) -> Result<String, String> {
+fn hand_back(artifacts: &str, wasm: &[u8], deflate: bool) -> Result<String, String> {
     use sha2::Digest;
     let digest: String = sha2::Sha256::digest(wasm)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    let deflated = artifacts.starts_with("/v1/compiles/");
-    let sent = if deflated {
+    let sent = if deflate {
         use std::io::Write;
         let mut encoder = flate2::write::DeflateEncoder::new(
             Vec::with_capacity(wasm.len() / 2),
@@ -230,7 +231,7 @@ fn hand_back(artifacts: &str, wasm: &[u8]) -> Result<String, String> {
     } else {
         wasm.to_vec()
     };
-    let encoding = if deflated { "&encoding=deflate" } else { "" };
+    let encoding = if deflate { "&encoding=deflate" } else { "" };
     let parts: Vec<&[u8]> = sent.chunks(HAND_BACK_PART).collect();
     let mut whole = false;
     for (index, part) in parts.iter().enumerate() {

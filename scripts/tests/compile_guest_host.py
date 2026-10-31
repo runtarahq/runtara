@@ -57,7 +57,7 @@ class Host(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/v1/run/input":
-            return self.reply(200, json.dumps({"worker": {"idle_ms": 500}}).encode() if WORKER else REQUEST)
+            return self.reply(200, json.dumps({"worker": {"idle_ms": 500, "deflate": True}}).encode() if WORKER else REQUEST)
         url = urllib.parse.urlparse(self.path)
         if url.path == "/v1/compiles/next":
             if not QUEUED:
