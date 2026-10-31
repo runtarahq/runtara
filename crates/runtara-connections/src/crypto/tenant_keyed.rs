@@ -65,6 +65,12 @@ impl CredentialCipher for TenantKeyedCipher {
     fn is_encrypting(&self) -> bool {
         self.default.is_encrypting() && self.tenants.values().all(|c| c.is_encrypting())
     }
+
+    /// A process serving several tenants may have no default key: a tenant
+    /// with its own is encrypted all the same.
+    fn is_encrypting_for(&self, tenant: &str) -> bool {
+        self.cipher_for(tenant).is_encrypting()
+    }
 }
 
 #[cfg(test)]
@@ -107,6 +113,20 @@ mod tests {
         assert_eq!(cipher.decrypt(&other, &ctx("beta", "c2")).unwrap(), secret);
         // Another tenant's keys cannot open it, whatever the connection.
         assert!(cipher.decrypt(&acme, &ctx("beta", "c1")).is_err());
+    }
+
+    /// A process serving several tenants with no default key encrypts each
+    /// tenant it has keys for, so one tenant's rows may be re-encrypted.
+    #[test]
+    fn a_tenant_with_its_own_keys_is_encrypted_without_a_default_key() {
+        let cipher = TenantKeyedCipher::new(Arc::new(crate::crypto::noop::NoOpCipher))
+            .with_tenant("acme", keyring((2, "acme-1"), &[]));
+        assert!(!cipher.is_encrypting(), "not every tenant is encrypted");
+        assert!(cipher.is_encrypting_for("acme"));
+        assert!(
+            !cipher.is_encrypting_for("beta"),
+            "beta has no keys of its own"
+        );
     }
 
     #[test]

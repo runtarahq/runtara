@@ -11416,3 +11416,63 @@ fn callable_embed_omits_runtime_only_for_a_complete_runtime_free_child() {
         }
     }
 }
+
+/// A compile with no filesystem (a WASI command in a VM that grants none) is
+/// handed its components in memory and leaves its build there: the composed
+/// component is the one a compile on disk makes, and nothing is written to
+/// disk.
+#[cfg(feature = "direct-wasm-integration-tests")]
+#[test]
+fn direct_compile_in_memory_composes_what_one_on_disk_does() {
+    let components_dir = shared_components_dir();
+    let input = |output_dir: PathBuf| DirectCompilationInput {
+        workflow_id: "simple".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: fixture("simple"),
+        child_workflows: vec![],
+        output_dir,
+        track_events: false,
+        agent_catalog: None,
+        agent_slug: None,
+    };
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut on_disk = compile_direct_workflow(input(temp.path().to_path_buf()))
+        .expect("simple fixture should compile");
+    let composed_on_disk =
+        fs::read(compose_direct_workflow(&mut on_disk, &components_dir).expect("compose on disk"))
+            .expect("composed on disk");
+
+    let memory = crate::compile_fs::MemoryFs::new();
+    for entry in fs::read_dir(&components_dir)
+        .expect("components dir")
+        .flatten()
+    {
+        let path = entry.path();
+        if path.is_file() {
+            memory.insert(
+                PathBuf::from("/components").join(entry.file_name()),
+                fs::read(&path).expect("component"),
+            );
+        }
+    }
+    let unwritten = tempfile::tempdir().expect("tempdir");
+    let build_root = unwritten.path().join("memory-build");
+    let composed_path = crate::compile_fs::in_memory(memory.clone(), || {
+        let mut in_memory =
+            compile_direct_workflow(input(build_root.clone())).expect("compile in memory");
+        compose_direct_workflow(&mut in_memory, Path::new("/components"))
+            .expect("compose in memory")
+    });
+    assert!(!build_root.exists(), "nothing was written to disk");
+    let composed_in_memory = memory.get(&composed_path).expect("composed in memory");
+    assert_eq!(composed_in_memory, composed_on_disk);
+    assert!(
+        memory
+            .under(&build_root)
+            .keys()
+            .any(|file| file.ends_with("manifest.json")),
+        "the build's other files are in memory too"
+    );
+}

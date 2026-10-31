@@ -1,0 +1,51 @@
+{
+  "additional_data": {
+    "next_cursor": "eyJmaWVsZCI6ImlkIiwiZmllbGRWYWx1ZSI6Nywic29ydERpcmVjdGlvbiI6ImFzYyIsImlkIjo3fQ"
+  },
+  "data": [
+    {
+      "acv": 120,
+      "add_time": "2021-01-01T00:00:00Z",
+      "archive_time": "2021-01-01T00:00:00Z",
+      "arr": 120,
+      "channel": 52,
+      "channel_id": "Jun23 Billboards",
+      "close_time": "2021-01-01T00:00:00Z",
+      "creator_user_id": 1,
+      "currency": "USD",
+      "custom_fields": {},
+      "expected_close_date": "2021-01-01",
+      "id": 1,
+      "is_archived": false,
+      "is_deleted": false,
+      "label_ids": [
+        1,
+        2,
+        3
+      ],
+      "local_close_date": "2021-01-01",
+      "local_lost_date": "2021-01-01",
+      "local_won_date": "2021-01-01",
+      "lost_reason": "Lost Reason",
+      "lost_time": "2021-01-01T00:00:00Z",
+      "mrr": 10,
+      "org_id": 1,
+      "origin": "ManuallyCreated",
+      "origin_id": null,
+      "owner_id": 1,
+      "person_id": 1,
+      "pipeline_id": 1,
+      "probability": 90,
+      "source_lead_id": "35b0d604-eb0d-42d0-be11-eac8832051f0",
+      "stage_change_time": "2021-01-01T00:00:00Z",
+      "stage_id": 1,
+      "status": "open",
+      "title": "Deal Title",
+      "update_time": "2021-01-01T00:00:00Z",
+      "value": 200,
+      "visible_to": 7,
+      "won_time": "2021-01-01T00:00:00Z"
+    }
+  ],
+  "success": true
+}

@@ -13,6 +13,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Zendesk agent, generated from Zendesk's Support API spec.** Nineteen
+  capabilities over tickets (list, show, create, update — which also adds
+  comments — delete), ticket comments and fields, search and search export,
+  users (show, search, create, update, create-or-update, current user),
+  organizations and groups. The new `zendesk_client_credentials` connection
+  type mints a Bearer token from a confidential OAuth client on the account's
+  own host (Zendesk retires API tokens on April 30, 2027, so there is no
+  API-token type), pins requests to `https://{subdomain}.zendesk.com`, refuses
+  a subdomain that would leave zendesk.com, and is limited by default to
+  3 requests/s with a burst of 10, under the 200 requests/minute of Zendesk's
+  Team plan.
+
+- **The connector generator handles more of a vendor spec.** A
+  `connector.yaml` can list `body_envelopes` (Zendesk's
+  `{"ticket": {...}}`), whose fields then become the step's inputs and are
+  wrapped back when sending; object query parameters become one input per
+  field (`page[size]`/`page[after]` for `deepObject`, unprefixed for `form`),
+  and a page-number alternative stays a `page` input; `integration_id` can name
+  several connection types. `fetch` also reads specs it used to fail on: a
+  bare `=` in YAML, examples given as `$ref`s, `oneOf` query parameters,
+  objects that declare fields and allow more, and schema names with runs of
+  capitals such as `EmailCCObject`. It sends its own User-Agent, which
+  Zendesk's CDN requires.
+
+- **Pipedrive agent, generated from Pipedrive's OpenAPI spec.** Five deal
+  capabilities (list, get, create, update, delete) bound to a new
+  `pipedrive_api_token` connection type: a personal API token sent as
+  `x-api-token` to `https://api.pipedrive.com`, limited by default to
+  5 requests/s with a burst of 10. Each field of a request body is its own step
+  input (an explicit `null` clears a nullable field), field labels are
+  humanized from the spec, and response fields and enum values the spec does
+  not declare are passed through.
+
+- **`scripts/connector_gen` generates an agent's capabilities from an
+  OpenAPI 3 spec** into one `src/generated.rs` per agent crate, using
+  openapi-generator (the pinned pip package bundles its own JDK) with
+  runtara's templates. A crate's `connector.yaml` pins the spec by sha256 and
+  lists the operations to generate; CI fails when `generated.rs` or the test
+  fixtures no longer match the trimmed spec, or `connector.yaml` changed
+  without re-fetching. Spec shapes the templates cannot send yet (form and
+  multipart bodies, object query parameters, required cookies) are refused
+  when fetching. `docs/adding-an-agent.md` covers the whole cycle.
+
+- **`#[field(skip)]` on `CapabilityOutput` fields** leaves a field out of the
+  output metadata, e.g. a flattened passthrough map. Capability inputs typed
+  `Option<Option<T>>` are described as optional `T`.
+
 - **Workflow images live in a content-addressed artifact store.** A new
   `runtara-artifact-store` crate defines `ArtifactStore` (put, get, exists,
   local path and delete by SHA-256 digest), with a filesystem store at
@@ -548,6 +595,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the eager-pass behavior described above.
 
 ### Changed
+
+- **The reason a token endpoint refused an OAuth client** (`invalid_scope`,
+  `invalid_client`, …) is now in the warning logged when a connection is
+  marked as requiring reconnection; it was only in a debug log.
 
 - **Breaking: workflows and agents reach the platform only through the
   workflow API, so every workflow must be recompiled.** A compiled workflow

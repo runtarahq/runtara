@@ -6,6 +6,7 @@ use axum::{
     routing::{delete, get, patch, post, put},
 };
 use rmcp::transport::streamable_http_server::session::SessionStore;
+use runtara_store_postgres::tenant_scope::scoped;
 use serde::Serialize;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::sync::Arc;
@@ -1197,6 +1198,27 @@ pub async fn start_with(
     )
     .await;
 
+    // Triggers from before every trigger named its tenant ran as the primary
+    // tenant; they become its own, so row-level security covers them too.
+    // Only where the process serves that tenant alone: in a shared store
+    // whose tenant an untenanted trigger was is unknown.
+    let claimed = if config::served_tenants().len() == 1 {
+        api::repositories::triggers::TriggerRepository::new(pool.clone())
+            .claim_untenanted(&tenant_id)
+            .await
+    } else {
+        Ok(0)
+    };
+    match claimed {
+        Ok(0) => {}
+        Ok(claimed) => {
+            tracing::info!(claimed, tenant_id = %tenant_id, "Gave untenanted triggers to the primary tenant")
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to give untenanted triggers to the primary tenant")
+        }
+    }
+
     // Cipher is built from RUNTARA_CONNECTIONS_ENCRYPTION_KEY env var — falls back to
     // NoOp (plaintext at rest) with a loud warning if missing, unless
     // RUNTARA_REQUIRE_CREDENTIAL_ENCRYPTION or RUNTARA_ENV=production is set, in which
@@ -1785,7 +1807,10 @@ pub async fn start_with(
             let pool_for_worker = trigger_pool.clone();
             let client_for_worker = trigger_runtime_client.clone();
             let cfg_for_worker = trigger_worker_config.clone();
-            shutdown_coordinator.spawn_intake(async move {
+            // A tenant's consumers act for it alone: row level security keeps
+            // their database work to its rows, as a request's is.
+            let scope = trigger_worker_tenant_id.clone();
+            shutdown_coordinator.spawn_intake(scoped(scope, async move {
                 let worker_config = workers::trigger_worker::TriggerWorkerConfig {
                     tenant_id: trigger_worker_tenant_id,
                     batch_size: trigger_batch_size,
@@ -1803,7 +1828,7 @@ pub async fn start_with(
                     permits_for_worker,
                 )
                 .await;
-            });
+            }));
         }
 
         // Start compilation worker (processes compilation queue)
@@ -1959,7 +1984,8 @@ pub async fn start_with(
             let client = client.clone();
             let shutdown = shutdown_signal.clone();
             let delivery_pool = pool.clone();
-            shutdown_coordinator.spawn_intake(async move {
+            let scope = delivery_tenant_id.clone();
+            shutdown_coordinator.spawn_intake(scoped(scope, async move {
                 workers::session_delivery_worker::run(
                     connection,
                     client,
@@ -1968,7 +1994,7 @@ pub async fn start_with(
                     shutdown,
                 )
                 .await;
-            });
+            }));
         }
     }
 
@@ -1980,17 +2006,15 @@ pub async fn start_with(
         let cron_pool = pool.clone();
         let cron_engine = Arc::clone(&execution_engine);
         let cron_shutdown = shutdown_signal.clone();
-        // Triggers no tenant owns run as the primary tenant, fired once.
-        let claims_untenanted = cron_tenant_id == tenant_id;
-        shutdown_coordinator.spawn_intake(async move {
+        let scope = cron_tenant_id.clone();
+        shutdown_coordinator.spawn_intake(scoped(scope, async move {
             let scheduler_config = workers::cron_scheduler::CronSchedulerConfig {
                 tenant_id: cron_tenant_id,
-                claims_untenanted,
                 check_interval_secs: 60,
             };
             workers::cron_scheduler::run(cron_pool, cron_engine, scheduler_config, cron_shutdown)
                 .await;
-        });
+        }));
     }
     println!("✓ Cron scheduler started (durable outbox)");
 
@@ -2919,7 +2943,11 @@ pub async fn start_with(
     // core stays up until the drain below finishes.
     let public_shutdown = shutdown_signal.clone();
     // A served tenant's path segment is stripped before routing (see
-    // `middleware::tenant_path`), so it wraps the finished router.
+    // `middleware::tenant_path`), so it wraps the finished router. The tenant
+    // it names scopes the request's database work, authenticated or not.
+    let public_app = public_app.layer(from_fn(
+        crate::middleware::tenant_path::scope_requested_tenant,
+    ));
     let public_app = tower::Layer::layer(
         &tower::util::MapRequestLayer::new(
             crate::middleware::tenant_path::strip_tenant_segment::<axum::body::Body>,

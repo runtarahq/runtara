@@ -573,3 +573,133 @@ fn test_extract_http_config_mcp_requires_url() {
     // Either fails at serde (missing field) or at the explicit url-required check.
     assert!(err.contains("url") || err.contains("Invalid mcp"), "{err}");
 }
+
+// ============================================================================
+// PipedriveExtractor Tests
+// ============================================================================
+
+#[test]
+fn test_pipedrive_extractor_sends_token_header_to_api_origin() {
+    let config = extract_http_config(
+        "pipedrive_api_token",
+        &json!({ "api_token": "token-value" }),
+        None,
+    )
+    .expect("Should extract config");
+
+    assert_eq!(
+        config.headers.get("x-api-token"),
+        Some(&"token-value".to_string())
+    );
+    assert_eq!(config.url_prefix, "https://api.pipedrive.com");
+}
+
+#[test]
+fn test_pipedrive_extractor_requires_token() {
+    let err = extract_http_config("pipedrive_api_token", &json!({}), None)
+        .expect_err("missing api_token should fail");
+    assert!(err.contains("pipedrive_api_token"), "{err}");
+}
+
+#[test]
+fn test_pipedrive_connection_type_is_registered() {
+    assert!(get_http_extractor_ids().contains(&"pipedrive_api_token"));
+    let meta = crate::registry::find_connection_type("pipedrive_api_token")
+        .expect("pipedrive_api_token is in the static registry");
+    assert_eq!(meta.display_name, "Pipedrive");
+    let token = meta.fields.iter().find(|f| f.name == "api_token").unwrap();
+    assert!(token.is_secret);
+}
+
+// ============================================================================
+// Zendesk Extractor Tests
+// ============================================================================
+
+#[test]
+fn test_zendesk_base_url_accepts_a_subdomain_or_the_account_url() {
+    use connection_types::zendesk_base_url;
+    for input in [
+        "acme",
+        " Acme ",
+        "acme.zendesk.com",
+        "https://acme.zendesk.com/",
+    ] {
+        assert_eq!(
+            zendesk_base_url(input).as_deref(),
+            Ok("https://acme.zendesk.com"),
+            "{input}"
+        );
+    }
+    assert_eq!(
+        zendesk_base_url("acme-support-2").as_deref(),
+        Ok("https://acme-support-2.zendesk.com")
+    );
+}
+
+#[test]
+fn test_zendesk_base_url_cannot_leave_zendesk() {
+    use connection_types::zendesk_base_url;
+    for input in [
+        "",
+        "evil.com#",
+        "evil.com/",
+        "acme.evil.com",
+        "acme.zendesk.com.evil.com",
+        "user@evil.com",
+        "acme:8080",
+        "-acme",
+        "http://acme.zendesk.com",
+    ] {
+        assert!(zendesk_base_url(input).is_err(), "{input:?} was accepted");
+    }
+}
+
+#[test]
+fn test_zendesk_client_credentials_extractor_pins_the_account() {
+    let config = extract_http_config(
+        "zendesk_client_credentials",
+        &json!({ "subdomain": "acme", "client_id": "runtara", "client_secret": "secret" }),
+        None,
+    )
+    .expect("Should extract config");
+    // The Bearer token is minted at request time, not by the extractor.
+    assert!(config.headers.is_empty());
+    assert_eq!(config.url_prefix, "https://acme.zendesk.com");
+}
+
+#[test]
+fn test_zendesk_extractor_rejects_a_foreign_host() {
+    let err = extract_http_config(
+        "zendesk_client_credentials",
+        &json!({ "subdomain": "evil.com#", "client_id": "c", "client_secret": "s" }),
+        None,
+    )
+    .expect_err("a foreign host must be rejected");
+    assert!(err.contains("Invalid Zendesk subdomain"), "{err}");
+}
+
+#[test]
+fn test_zendesk_connection_type_is_registered() {
+    assert!(get_http_extractor_ids().contains(&"zendesk_client_credentials"));
+    let meta = crate::registry::find_connection_type("zendesk_client_credentials")
+        .expect("zendesk_client_credentials is in the static registry");
+    let secret = meta
+        .fields
+        .iter()
+        .find(|f| f.name == "client_secret")
+        .unwrap();
+    assert!(secret.is_secret);
+    let scope = meta.fields.iter().find(|f| f.name == "scope").unwrap();
+    assert!(scope.is_optional);
+    // The form default is a literal in the attribute; it must match the
+    // default the extractor and the token request fall back to.
+    assert_eq!(
+        scope.default_value,
+        Some(connection_types::ZENDESK_DEFAULT_SCOPE)
+    );
+    let params: connection_types::ZendeskClientCredentialsParams = serde_json::from_value(
+        json!({ "subdomain": "acme", "client_id": "c", "client_secret": "s" }),
+    )
+    .unwrap();
+    assert_eq!(params.scope, connection_types::ZENDESK_DEFAULT_SCOPE);
+}

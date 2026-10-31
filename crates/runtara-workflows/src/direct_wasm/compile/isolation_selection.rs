@@ -317,7 +317,7 @@ impl AgentLoweringSelection {
                     dep.metadata.wasm.as_ref().unwrap().sha256.clone(),
                 );
                 unsupported |= artifact_metadata::component_imports_prefix(
-                    &fs::read(&dep.wasm_path)?,
+                    &crate::compile_fs::read(&dep.wasm_path)?,
                     "wasi:http/",
                 )?;
             }
@@ -328,7 +328,7 @@ impl AgentLoweringSelection {
                         && a.reason != AgentIsolationReason::Isolated
                 }) {
                     unsupported |= artifact_metadata::component_imports_prefix(
-                        &fs::read(&dep.wasm_path)?,
+                        &crate::compile_fs::read(&dep.wasm_path)?,
                         "wasi:http/",
                     )?;
                 }

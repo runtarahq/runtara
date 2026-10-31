@@ -1258,6 +1258,165 @@ impl HttpConnectionExtractor for StripeExtractor {
 }
 
 // ============================================================================
+// Pipedrive Connection Type
+// ============================================================================
+
+/// Parameters for Pipedrive API token authentication
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "pipedrive_api_token",
+    display_name = "Pipedrive",
+    description = "Connect to the Pipedrive CRM API with a personal API token",
+    category = "crm",
+    auth_type = "api_key"
+)]
+pub struct PipedriveApiTokenParams {
+    /// Pipedrive personal API token
+    #[field(
+        display_name = "API Token",
+        description = "Personal API token from Pipedrive: Settings → Personal preferences → API",
+        secret
+    )]
+    pub api_token: String,
+}
+
+/// HTTP extractor for Pipedrive connections. The base URL is the bare origin:
+/// callers include the API version in the path (`/api/v2/...`).
+pub struct PipedriveExtractor;
+
+impl HttpConnectionExtractor for PipedriveExtractor {
+    fn integration_id(&self) -> &'static str {
+        "pipedrive_api_token"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        let p: PipedriveApiTokenParams = serde_json::from_value(params.clone())
+            .map_err(|e| format!("Invalid pipedrive_api_token connection parameters: {}", e))?;
+
+        let mut headers = HashMap::new();
+        headers.insert("x-api-token".to_string(), p.api_token);
+
+        Ok(HttpConnectionConfig {
+            headers,
+            query_parameters: HashMap::new(),
+            url_prefix: "https://api.pipedrive.com".to_string(),
+            rate_limit_config: None,
+        })
+    }
+}
+
+// ============================================================================
+// Zendesk Connection Types
+// ============================================================================
+
+/// The `https://{subdomain}.zendesk.com` origin of a Zendesk account.
+///
+/// Accepts the bare subdomain (`acme`) or the account URL people copy from the
+/// browser (`https://acme.zendesk.com/`). Whatever is left must be a single DNS
+/// label, so credentialed requests can only ever go to a host under
+/// zendesk.com.
+pub fn zendesk_base_url(subdomain: &str) -> Result<String, String> {
+    let raw = subdomain.trim().to_ascii_lowercase();
+    let label = raw.strip_prefix("https://").unwrap_or(&raw);
+    let label = label.trim_end_matches('/');
+    let label = label.strip_suffix(".zendesk.com").unwrap_or(label);
+    let valid = !label.is_empty()
+        && label.len() <= 63
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    if !valid {
+        return Err(format!(
+            "Invalid Zendesk subdomain `{}`: use the part before .zendesk.com, e.g. `acme` for acme.zendesk.com",
+            subdomain.trim()
+        ));
+    }
+    Ok(format!("https://{label}.zendesk.com"))
+}
+
+/// The scopes a Zendesk token is requested with when the connection sets none.
+/// The `scope` field's form default repeats it as a literal (the attribute takes
+/// no constant); a test keeps the two equal.
+pub const ZENDESK_DEFAULT_SCOPE: &str = "read write";
+
+/// Parameters for Zendesk OAuth2 client-credentials authentication
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "zendesk_client_credentials",
+    display_name = "Zendesk (OAuth Client Credentials)",
+    description = "Connect to the Zendesk Support API with a confidential OAuth client",
+    category = "crm",
+    auth_type = "oauth2_client_credentials"
+)]
+pub struct ZendeskClientCredentialsParams {
+    /// Zendesk account subdomain
+    #[field(
+        display_name = "Subdomain",
+        description = "Your Zendesk subdomain: 'acme' for acme.zendesk.com",
+        placeholder = "acme"
+    )]
+    pub subdomain: String,
+
+    /// OAuth client identifier
+    #[field(
+        display_name = "Client ID",
+        description = "The Unique identifier of an OAuth client whose Client kind is Confidential: Admin Center → Apps and integrations → APIs → OAuth clients"
+    )]
+    pub client_id: String,
+
+    /// OAuth client secret
+    #[field(
+        display_name = "Client Secret",
+        description = "The Secret of the same OAuth client",
+        secret
+    )]
+    pub client_secret: String,
+
+    /// Space-separated scopes requested for the token
+    #[serde(default = "default_zendesk_scope")]
+    #[field(
+        display_name = "Scope",
+        description = "Space-separated scopes, within the OAuth client's allowed scopes if it restricts them. Groups, ticket fields and search need the broad 'read' (and 'write' to change data)",
+        default = "read write"
+    )]
+    pub scope: String,
+}
+
+fn default_zendesk_scope() -> String {
+    ZENDESK_DEFAULT_SCOPE.to_string()
+}
+
+/// HTTP extractor for Zendesk client-credentials connections. The Bearer
+/// token is minted and injected at request time by the connection subsystem
+/// (`describe_connection_auth`); this extractor only pins the account's host.
+pub struct ZendeskClientCredentialsExtractor;
+
+impl HttpConnectionExtractor for ZendeskClientCredentialsExtractor {
+    fn integration_id(&self) -> &'static str {
+        "zendesk_client_credentials"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        let p: ZendeskClientCredentialsParams =
+            serde_json::from_value(params.clone()).map_err(|e| {
+                format!(
+                    "Invalid zendesk_client_credentials connection parameters: {}",
+                    e
+                )
+            })?;
+
+        Ok(HttpConnectionConfig {
+            headers: HashMap::new(),
+            query_parameters: HashMap::new(),
+            url_prefix: zendesk_base_url(&p.subdomain)?,
+            rate_limit_config: None,
+        })
+    }
+}
+
+// ============================================================================
 // MCP (Model Context Protocol) Connection Type
 // ============================================================================
 

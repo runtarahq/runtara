@@ -1,4 +1,5 @@
-//! Test-only helpers for serialized process-environment mutation.
+//! Test-only helpers for serialized process-environment mutation, and for
+//! capturing tracing output in lib tests.
 //!
 //! `std::env::set_var`/`remove_var` are process-global and unsafe under the
 //! multi-threaded test harness. Every lib test that mutates env vars must
@@ -60,4 +61,46 @@ impl Drop for EnvGuard {
             }
         }
     }
+}
+
+/// A process-wide subscriber that never vetoes a callsite, so tests can capture
+/// events with a thread-local subscriber (`set_default`) without losing them.
+///
+/// tracing caches each callsite's interest at its first hit. While at most one
+/// subscriber is live, that interest comes from the hitting thread's default;
+/// on a test thread with none it is the no-op subscriber's `never`, cached for
+/// good, so a capturing test hitting the same callsite afterwards records
+/// nothing. With this installed globally every callsite stays `sometimes`, and
+/// each event asks the subscriber current on its own thread.
+pub fn install_permissive_global_subscriber() {
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::subscriber::Interest;
+    use tracing::{Event, Metadata};
+
+    struct Permissive;
+
+    impl tracing::Subscriber for Permissive {
+        fn register_callsite(&self, _: &'static Metadata<'static>) -> Interest {
+            Interest::sometimes()
+        }
+        fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+            None
+        }
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            false
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, _: &Event<'_>) {}
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let _ = tracing::subscriber::set_global_default(Permissive);
+    });
 }

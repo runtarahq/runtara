@@ -39,6 +39,7 @@ fn agents() -> Vec<(&'static str, AgentInfo)> {
         ("mcp", runtara_agent_mcp::agent_info()),
         ("object-model", runtara_agent_object_model::agent_info()),
         ("openai", runtara_agent_openai::agent_info()),
+        ("pipedrive", runtara_agent_pipedrive::agent_info()),
         ("s3-storage", runtara_agent_s3_storage::agent_info()),
         ("sqs", runtara_agent_sqs::agent_info()),
         ("sharepoint", runtara_agent_sharepoint::agent_info()),
@@ -51,6 +52,7 @@ fn agents() -> Vec<(&'static str, AgentInfo)> {
         ("utils", runtara_agent_utils::agent_info()),
         ("xlsx", runtara_agent_xlsx::agent_info()),
         ("xml", runtara_agent_xml::agent_info()),
+        ("zendesk", runtara_agent_zendesk::agent_info()),
         // Subsequent agents are added here as they migrate to the macro-derived
         // metadata path.
     ]

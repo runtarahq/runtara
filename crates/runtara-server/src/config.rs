@@ -185,6 +185,22 @@ impl Config {
             .ok()
             .map(|url| url.trim().to_owned())
             .filter(|url| !url.is_empty());
+        // A platform object-model database has no tenant column or row-level
+        // security, and raw SQL runs on it as its role: a process serving
+        // several tenants, or one required to be bound by row-level security,
+        // would let each read and write the others' (M7.16). They use their
+        // own connections instead.
+        if platform_database_refused(
+            object_model_database_url.is_some(),
+            served_tenants.len(),
+            parse_bool_or("RUNTARA_REQUIRE_ROW_SECURITY", false)?,
+        ) {
+            return Err(ConfigError::Invalid(
+                "OBJECT_MODEL_DATABASE_URL",
+                "is shared by every tenant with no row-level security; a process serving several \
+                 tenants or requiring row-level security takes none",
+            ));
+        }
         let database_connection_guard = match std::env::var("RUNTARA_DATABASE_CONNECTION_GUARD")
             .ok()
             .map(|mode| mode.trim().to_ascii_lowercase())
@@ -725,6 +741,13 @@ pub fn is_served_tenant(tenant: &str) -> bool {
     try_get().is_some_and(|config| config.served_tenants.iter().any(|served| served == tenant))
 }
 
+/// Whether a platform object-model database is refused: it has no tenant
+/// column or row-level security, so not where tenants share a process or
+/// row-level security is required.
+fn platform_database_refused(configured: bool, served: usize, row_security: bool) -> bool {
+    configured && (served > 1 || row_security)
+}
+
 fn served_tenants_from_raw(primary: &str, extra: Option<String>) -> Vec<String> {
     let mut tenants = vec![primary.to_owned()];
     for tenant in extra.iter().flat_map(|raw| raw.split(',')) {
@@ -1067,6 +1090,23 @@ pub fn valkey_admission_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_platform_object_model_database_is_refused_where_tenants_share_a_process() {
+        assert!(
+            !platform_database_refused(true, 1, false),
+            "one tenant, as before"
+        );
+        assert!(platform_database_refused(true, 2, false), "several tenants");
+        assert!(
+            platform_database_refused(true, 1, true),
+            "row-level security required"
+        );
+        assert!(
+            !platform_database_refused(false, 3, true),
+            "none configured"
+        );
+    }
 
     #[test]
     fn production_lowering_identity_uses_standard_composition() {

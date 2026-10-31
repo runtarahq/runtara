@@ -1,0 +1,1958 @@
+{
+  "components": {
+    "securitySchemes": {
+      "api_key": {
+        "in": "header",
+        "name": "x-api-token",
+        "type": "apiKey"
+      },
+      "basic_authentication": {
+        "description": "Base 64 encoded string containing the `client_id` and `client_secret` values. The header value should be `Basic <base64(client_id:client_secret)>`.",
+        "scheme": "basic",
+        "type": "http"
+      },
+      "oauth2": {
+        "description": "For more information, see https://pipedrive.readme.io/docs/marketplace-oauth-authorization",
+        "flows": {
+          "authorizationCode": {
+            "authorizationUrl": "https://oauth.pipedrive.com/oauth/authorize",
+            "refreshUrl": "https://oauth.pipedrive.com/oauth/token",
+            "scopes": {
+              "activities:full": "Create, read, update and delete activities and all files and filters. Also includes read access to activity fields and types",
+              "activities:read": "Read activities, its fields and types; all files and filters",
+              "admin": "Allows to do many things that an administrator can do in a Pipedrive company account - create, read, update and delete pipelines and its stages; deal, person and organization fields; activity types; users and permissions, etc. It also allows the app to create webhooks and fetch and delete webhooks that are created by the app",
+              "base": "Read settings of the authorized user and currencies in an account",
+              "contact-fields:full": "Create, read, update and delete person and organization fields",
+              "contacts:full": "Create, read, update and delete persons and organizations and their followers; all notes, files, filters. Also grants read access to contacts-related fields",
+              "contacts:read": "Read the data about persons and organizations, their related fields and followers; also all notes, files, filters",
+              "deal-fields:full": "Create, read, update and delete deal fields",
+              "deals:full": "Create, read, update and delete deals, its participants and followers; all files, notes, and filters. It also includes read access to deal fields, pipelines, stages, and statistics. Does not include access to activities (except the last and next activity related to a deal)",
+              "deals:read": "Read most of the data about deals and related entities - deal fields, products, followers, participants; all notes, files, filters, pipelines, stages, and statistics. Does not include access to activities (except the last and next activity related to a deal)",
+              "goals:full": "Create, read, update and delete goals",
+              "goals:read": "Read data on all goals",
+              "leads:full": "Create, read, update and delete leads and lead labels",
+              "leads:read": "Read data about leads and lead labels",
+              "mail:full": "Read, update and delete mail threads. Also grants read access to mail messages",
+              "mail:read": "Read mail threads and messages",
+              "messengers-integration": "Allows application to register as a messengers integration provider and allows them to deliver incoming messages and their statuses",
+              "phone-integration": "Enables advanced call integration features like logging call duration and other metadata, and play call recordings inside Pipedrive",
+              "product-fields:full": "Create, read, update and delete product fields",
+              "products:full": "Create, read, update and delete products and its fields; add products to deals",
+              "products:read": "Read products, its fields, files, followers and products connected to a deal",
+              "project-fields:full": "Create, read, update and delete project fields",
+              "projects:full": "Create, read, update and delete projects and its fields; add projects templates and project related tasks",
+              "projects:read": "Read projects and its fields, tasks and project templates",
+              "recents:read": "Read all recent changes occurred in an account. Includes data about activities, activity types, deals, files, filters, notes, persons, organizations, pipelines, stages, products and users",
+              "search:read": "Search across the account for deals, persons, organizations, files and products, and see details about the returned results",
+              "users:read": "Read data about users (people with access to a Pipedrive account), their permissions, roles and followers",
+              "video-calls": "Allows application to register as a video call integration provider and create conference links"
+            },
+            "tokenUrl": "https://oauth.pipedrive.com/oauth/token"
+          }
+        },
+        "type": "oauth2"
+      }
+    }
+  },
+  "info": {
+    "title": "Pipedrive API v2",
+    "version": "2.0.0"
+  },
+  "openapi": "3.0.1",
+  "paths": {
+    "/deals": {
+      "get": {
+        "description": "Returns data about all not archived deals.",
+        "operationId": "getDeals",
+        "parameters": [
+          {
+            "description": "If supplied, only deals matching the specified filter are returned",
+            "in": "query",
+            "name": "filter_id",
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "x-runtara-label": "Filter ID"
+          },
+          {
+            "description": "Optional comma separated array of up to 100 entity ids to fetch. If filter_id is provided, this is ignored. If any of the requested entities do not exist or are not visible, they are not included in the response.",
+            "explode": false,
+            "in": "query",
+            "name": "ids",
+            "schema": {
+              "items": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "maxItems": 100,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "style": "form",
+            "x-runtara-label": "IDs"
+          },
+          {
+            "description": "If supplied, only deals owned by the specified user are returned. If filter_id is provided, this is ignored.",
+            "in": "query",
+            "name": "owner_id",
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "x-runtara-label": "Owner ID"
+          },
+          {
+            "description": "If supplied, only deals linked to the specified person are returned. If filter_id is provided, this is ignored.",
+            "in": "query",
+            "name": "person_id",
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "x-runtara-label": "Person ID"
+          },
+          {
+            "description": "If supplied, only deals linked to the specified organization are returned. If filter_id is provided, this is ignored.",
+            "in": "query",
+            "name": "org_id",
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "x-runtara-label": "Organization"
+          },
+          {
+            "description": "If supplied, only deals in the specified pipeline are returned. If filter_id is provided, this is ignored.",
+            "in": "query",
+            "name": "pipeline_id",
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "x-runtara-label": "Pipeline ID"
+          },
+          {
+            "description": "If supplied, only deals in the specified stage are returned. If filter_id is provided, this is ignored.",
+            "in": "query",
+            "name": "stage_id",
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "x-runtara-label": "Stage ID"
+          },
+          {
+            "description": "Only fetch deals with a specific status. If omitted, all not deleted deals are returned. If set to deleted, deals that have been deleted up to 30 days ago will be included. Multiple statuses can be included as a comma separated array. If filter_id is provided, this is ignored.",
+            "explode": false,
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "items": {
+                "enum": [
+                  "open",
+                  "won",
+                  "lost",
+                  "deleted"
+                ],
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "style": "form",
+            "x-runtara-label": "Status"
+          },
+          {
+            "description": "If set, only deals with an `update_time` later than or equal to this time are returned. In RFC3339 format, e.g. 2025-01-01T10:20:00Z.",
+            "in": "query",
+            "name": "updated_since",
+            "schema": {
+              "type": "string"
+            },
+            "x-runtara-label": "Updated Since"
+          },
+          {
+            "description": "If set, only deals with an `update_time` earlier than this time are returned. In RFC3339 format, e.g. 2025-01-01T10:20:00Z.",
+            "in": "query",
+            "name": "updated_until",
+            "schema": {
+              "type": "string"
+            },
+            "x-runtara-label": "Updated Until"
+          },
+          {
+            "description": "The field to sort by. Supported fields: `id`, `update_time`, `add_time`.",
+            "in": "query",
+            "name": "sort_by",
+            "schema": {
+              "default": "id",
+              "enum": [
+                "id",
+                "update_time",
+                "add_time"
+              ],
+              "type": "string"
+            },
+            "x-runtara-default": "\"id\"",
+            "x-runtara-label": "Sort By"
+          },
+          {
+            "description": "The sorting direction. Supported values: `asc`, `desc`.",
+            "in": "query",
+            "name": "sort_direction",
+            "schema": {
+              "default": "asc",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "type": "string"
+            },
+            "x-runtara-default": "\"asc\"",
+            "x-runtara-label": "Sort Direction"
+          },
+          {
+            "description": "Optional comma separated string array of additional fields to include",
+            "explode": false,
+            "in": "query",
+            "name": "include_fields",
+            "schema": {
+              "items": {
+                "enum": [
+                  "next_activity_id",
+                  "last_activity_id",
+                  "first_won_time",
+                  "products_count",
+                  "files_count",
+                  "notes_count",
+                  "followers_count",
+                  "email_messages_count",
+                  "activities_count",
+                  "done_activities_count",
+                  "undone_activities_count",
+                  "participants_count",
+                  "last_incoming_mail_time",
+                  "last_outgoing_mail_time",
+                  "smart_bcc_email",
+                  "source_lead_id"
+                ],
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "style": "form",
+            "x-runtara-label": "Include Fields"
+          },
+          {
+            "description": "Optional comma separated string array of custom fields keys to include. If you are only interested in a particular set of custom fields, please use this parameter for faster results and smaller response.<br/>A maximum of 15 keys is allowed.",
+            "explode": false,
+            "in": "query",
+            "name": "custom_fields",
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 15,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "style": "form",
+            "x-runtara-label": "Custom Fields"
+          },
+          {
+            "description": "When provided with a 'true' value, single option and multiple option custom fields values contain objects in the form of '{ id: number, label: string }' instead of plain id",
+            "in": "query",
+            "name": "include_option_labels",
+            "schema": {
+              "type": "boolean"
+            },
+            "x-runtara-label": "Include Option Labels"
+          },
+          {
+            "description": "When provided with 'true' value, response will include an array of label objects in the form of '{ id: number, label: string }'",
+            "in": "query",
+            "name": "include_labels",
+            "schema": {
+              "type": "boolean"
+            },
+            "x-runtara-label": "Include Labels"
+          },
+          {
+            "description": "For pagination, the limit of entries to be returned. If not provided, 100 items will be returned. Please note that a maximum value of 500 is allowed.",
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "example": 100,
+              "format": "int64",
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "x-runtara-example": "100",
+            "x-runtara-label": "Limit"
+          },
+          {
+            "description": "For pagination, the marker (an opaque string value) representing the first item on the next page",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "x-runtara-label": "Cursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "additional_data": {
+                    "next_cursor": "eyJmaWVsZCI6ImlkIiwiZmllbGRWYWx1ZSI6Nywic29ydERpcmVjdGlvbiI6ImFzYyIsImlkIjo3fQ"
+                  },
+                  "data": [
+                    {
+                      "acv": 120,
+                      "add_time": "2021-01-01T00:00:00Z",
+                      "archive_time": "2021-01-01T00:00:00Z",
+                      "arr": 120,
+                      "channel": 52,
+                      "channel_id": "Jun23 Billboards",
+                      "close_time": "2021-01-01T00:00:00Z",
+                      "creator_user_id": 1,
+                      "currency": "USD",
+                      "custom_fields": {},
+                      "expected_close_date": "2021-01-01",
+                      "id": 1,
+                      "is_archived": false,
+                      "is_deleted": false,
+                      "label_ids": [
+                        1,
+                        2,
+                        3
+                      ],
+                      "local_close_date": "2021-01-01",
+                      "local_lost_date": "2021-01-01",
+                      "local_won_date": "2021-01-01",
+                      "lost_reason": "Lost Reason",
+                      "lost_time": "2021-01-01T00:00:00Z",
+                      "mrr": 10,
+                      "org_id": 1,
+                      "origin": "ManuallyCreated",
+                      "origin_id": null,
+                      "owner_id": 1,
+                      "person_id": 1,
+                      "pipeline_id": 1,
+                      "probability": 90,
+                      "source_lead_id": "35b0d604-eb0d-42d0-be11-eac8832051f0",
+                      "stage_change_time": "2021-01-01T00:00:00Z",
+                      "stage_id": 1,
+                      "status": "open",
+                      "title": "Deal Title",
+                      "update_time": "2021-01-01T00:00:00Z",
+                      "value": 200,
+                      "visible_to": 7,
+                      "won_time": "2021-01-01T00:00:00Z"
+                    }
+                  ],
+                  "success": true
+                },
+                "schema": {
+                  "allOf": [
+                    {
+                      "properties": {
+                        "success": {
+                          "description": "If the response is successful or not",
+                          "type": "boolean",
+                          "x-runtara-label": "Success"
+                        }
+                      },
+                      "title": "baseResponse",
+                      "type": "object"
+                    },
+                    {
+                      "properties": {
+                        "additional_data": {
+                          "description": "The additional data of the list",
+                          "properties": {
+                            "next_cursor": {
+                              "description": "The first item on the next page. The value of the `next_cursor` field will be `null` if you have reached the end of the dataset and there’s no more pages to be returned.",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Next Cursor"
+                            }
+                          },
+                          "type": "object",
+                          "x-runtara-label": "Additional Data"
+                        },
+                        "data": {
+                          "description": "Deals array",
+                          "items": {
+                            "properties": {
+                              "acv": {
+                                "description": "Only available in Growth and above plans\n\nThe Annual Contract Value of the deal\n\nNull if there are no products attached to the deal\n",
+                                "nullable": true,
+                                "type": "number",
+                                "x-runtara-label": "Acv"
+                              },
+                              "add_time": {
+                                "description": "The creation date and time of the deal",
+                                "type": "string",
+                                "x-runtara-label": "Add Time"
+                              },
+                              "arr": {
+                                "description": "Only available in Growth and above plans\n\nThe Annual Recurring Revenue of the deal\n\nNull if there are no products attached to the deal\n",
+                                "nullable": true,
+                                "type": "number",
+                                "x-runtara-label": "Arr"
+                              },
+                              "channel": {
+                                "description": "The ID of your Marketing channel this Deal was created from. Recognized Marketing channels can be configured in your <a href=\"https://app.pipedrive.com/settings/fields\" target=\"_blank\" rel=\"noopener noreferrer\">Company settings</a>.",
+                                "format": "int64",
+                                "nullable": true,
+                                "type": "integer",
+                                "x-runtara-label": "Channel"
+                              },
+                              "channel_id": {
+                                "description": "The optional ID to further distinguish the Marketing channel.",
+                                "nullable": true,
+                                "type": "string",
+                                "x-runtara-label": "Channel ID"
+                              },
+                              "close_time": {
+                                "description": "The date and time of closing the deal",
+                                "nullable": true,
+                                "type": "string",
+                                "x-runtara-label": "Close Time"
+                              },
+                              "currency": {
+                                "description": "The currency associated with the deal",
+                                "type": "string",
+                                "x-runtara-label": "Currency"
+                              },
+                              "custom_fields": {
+                                "additionalProperties": true,
+                                "description": "An object where each key represents a custom field. All custom fields are referenced as randomly generated 40-character hashes. To clear a custom field value, set it to `null`. For multi-option fields (field type `set`), use `null` to clear the selection — sending an empty array `[]` is not supported and will result in a validation error.",
+                                "type": "object",
+                                "x-runtara-label": "Custom Fields"
+                              },
+                              "expected_close_date": {
+                                "description": "The expected close date of the deal",
+                                "format": "date",
+                                "nullable": true,
+                                "type": "string",
+                                "x-runtara-label": "Expected Close Date"
+                              },
+                              "id": {
+                                "description": "The ID of the deal",
+                                "format": "int64",
+                                "type": "integer",
+                                "x-runtara-label": "ID"
+                              },
+                              "is_archived": {
+                                "description": "Whether the deal is archived or not",
+                                "type": "boolean",
+                                "x-runtara-label": "Is Archived"
+                              },
+                              "is_deleted": {
+                                "description": "Whether the deal is deleted or not",
+                                "type": "boolean",
+                                "x-runtara-label": "Is Deleted"
+                              },
+                              "label_ids": {
+                                "description": "The IDs of labels assigned to the deal",
+                                "items": {
+                                  "format": "int64",
+                                  "type": "integer"
+                                },
+                                "type": "array",
+                                "x-runtara-label": "Label IDs"
+                              },
+                              "lost_reason": {
+                                "description": "The reason for losing the deal",
+                                "nullable": true,
+                                "type": "string",
+                                "x-runtara-label": "Lost Reason"
+                              },
+                              "lost_time": {
+                                "description": "The date and time of changing the deal status as lost",
+                                "nullable": true,
+                                "type": "string",
+                                "x-runtara-label": "Lost Time"
+                              },
+                              "mrr": {
+                                "description": "Only available in Growth and above plans\n\nThe Monthly Recurring Revenue of the deal\n\nNull if there are no products attached to the deal\n",
+                                "nullable": true,
+                                "type": "number",
+                                "x-runtara-label": "Mrr"
+                              },
+                              "org_id": {
+                                "description": "The ID of the organization linked to the deal",
+                                "format": "int64",
+                                "nullable": true,
+                                "type": "integer",
+                                "x-runtara-label": "Organization"
+                              },
+                              "origin": {
+                                "description": "The way this Deal was created. `origin` field is set by Pipedrive when Deal is created and cannot be changed.",
+                                "type": "string",
+                                "x-runtara-label": "Origin"
+                              },
+                              "origin_id": {
+                                "description": "The optional ID to further distinguish the origin of the deal - e.g. Which API integration created this Deal.",
+                                "nullable": true,
+                                "type": "string",
+                                "x-runtara-label": "Origin ID"
+                              },
+                              "owner_id": {
+                                "description": "The ID of the user who owns the deal",
+                                "format": "int64",
+                                "type": "integer",
+                                "x-runtara-label": "Owner ID"
+                              },
+                              "person_id": {
+                                "description": "The ID of the person linked to the deal",
+                                "format": "int64",
+                                "nullable": true,
+                                "type": "integer",
+                                "x-runtara-label": "Person ID"
+                              },
+                              "pipeline_id": {
+                                "description": "The ID of the pipeline associated with the deal",
+                                "format": "int64",
+                                "type": "integer",
+                                "x-runtara-label": "Pipeline ID"
+                              },
+                              "probability": {
+                                "description": "The success probability percentage of the deal",
+                                "nullable": true,
+                                "type": "number",
+                                "x-runtara-label": "Probability"
+                              },
+                              "source_lead_id": {
+                                "description": "The ID of the lead if the deal was converted from a lead. Only included when requested via include_fields parameter.",
+                                "format": "uuid",
+                                "nullable": true,
+                                "type": "string",
+                                "x-runtara-label": "Source Lead ID"
+                              },
+                              "stage_change_time": {
+                                "description": "The last updated date and time of the deal stage",
+                                "nullable": true,
+                                "type": "string",
+                                "x-runtara-label": "Stage Change Time"
+                              },
+                              "stage_id": {
+                                "description": "The ID of the deal stage",
+                                "format": "int64",
+                                "type": "integer",
+                                "x-runtara-label": "Stage ID"
+                              },
+                              "status": {
+                                "description": "The status of the deal",
+                                "type": "string",
+                                "x-runtara-label": "Status"
+                              },
+                              "title": {
+                                "description": "The title of the deal",
+                                "type": "string",
+                                "x-runtara-label": "Title"
+                              },
+                              "update_time": {
+                                "description": "The last updated date and time of the deal",
+                                "nullable": true,
+                                "type": "string",
+                                "x-runtara-label": "Update Time"
+                              },
+                              "value": {
+                                "description": "The value of the deal",
+                                "type": "number",
+                                "x-runtara-label": "Value"
+                              },
+                              "visible_to": {
+                                "description": "The visibility of the deal",
+                                "format": "int64",
+                                "type": "integer",
+                                "x-runtara-label": "Visible To"
+                              },
+                              "won_time": {
+                                "description": "The date and time of changing the deal status as won",
+                                "nullable": true,
+                                "type": "string",
+                                "x-runtara-label": "Won Time"
+                              }
+                            },
+                            "type": "object"
+                          },
+                          "type": "array",
+                          "x-runtara-label": "Data"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ],
+                  "title": "GetDealsResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Get all not archived deals"
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          },
+          {
+            "oauth2": [
+              "deals:read",
+              "deals:full"
+            ]
+          }
+        ],
+        "summary": "Get all deals",
+        "tags": [
+          "Deals"
+        ],
+        "x-runtara-first": true,
+        "x-runtara-summary": "Get all deals",
+        "x-token-cost": 10,
+        "x-tool-description": "Retrieves paginated active deals with filtering by owner, person, organization, pipeline, stage, status, and time ranges. Essential for analytics, reporting, dashboard views, and bulk operations. Filters combine for precise selection; filter_id overrides individual filters."
+      },
+      "post": {
+        "description": "Adds a new deal.",
+        "operationId": "addDeal",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "archive_time": {
+                    "description": "The optional date and time of archiving the deal in UTC. Format: YYYY-MM-DD HH:MM:SS. If omitted and `is_archived` is true, it will be set to the current date and time.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Archive Time"
+                  },
+                  "close_time": {
+                    "description": "The date and time of closing the deal. Can only be set if deal status is won or lost.",
+                    "type": "string",
+                    "x-runtara-label": "Close Time"
+                  },
+                  "currency": {
+                    "description": "The currency associated with the deal",
+                    "type": "string",
+                    "x-runtara-label": "Currency"
+                  },
+                  "custom_fields": {
+                    "additionalProperties": true,
+                    "description": "An object where each key represents a custom field. All custom fields are referenced as randomly generated 40-character hashes. To clear a custom field value, set it to `null`. For multi-option fields (field type `set`), use `null` to clear the selection — sending an empty array `[]` is not supported and will result in a validation error.",
+                    "type": "object",
+                    "x-runtara-label": "Custom Fields"
+                  },
+                  "expected_close_date": {
+                    "description": "The expected close date of the deal",
+                    "format": "date",
+                    "type": "string",
+                    "x-runtara-label": "Expected Close Date"
+                  },
+                  "is_archived": {
+                    "description": "Whether the deal is archived or not",
+                    "type": "boolean",
+                    "x-runtara-label": "Is Archived"
+                  },
+                  "is_deleted": {
+                    "description": "Whether the deal is deleted or not",
+                    "type": "boolean",
+                    "x-runtara-label": "Is Deleted"
+                  },
+                  "label_ids": {
+                    "description": "The IDs of labels assigned to the deal",
+                    "items": {
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "type": "array",
+                    "x-runtara-label": "Label IDs"
+                  },
+                  "lost_reason": {
+                    "description": "The reason for losing the deal. Can only be set if deal status is lost.",
+                    "type": "string",
+                    "x-runtara-label": "Lost Reason"
+                  },
+                  "lost_time": {
+                    "description": "The date and time of changing the deal status as lost. Can only be set if deal status is lost.",
+                    "type": "string",
+                    "x-runtara-label": "Lost Time"
+                  },
+                  "org_id": {
+                    "description": "The ID of the organization linked to the deal",
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer",
+                    "x-runtara-label": "Organization"
+                  },
+                  "owner_id": {
+                    "description": "The ID of the user who owns the deal",
+                    "format": "int64",
+                    "type": "integer",
+                    "x-runtara-label": "Owner ID"
+                  },
+                  "person_id": {
+                    "description": "The ID of the person linked to the deal",
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer",
+                    "x-runtara-label": "Person ID"
+                  },
+                  "pipeline_id": {
+                    "description": "The ID of the pipeline associated with the deal",
+                    "format": "int64",
+                    "type": "integer",
+                    "x-runtara-label": "Pipeline ID"
+                  },
+                  "probability": {
+                    "description": "The success probability percentage of the deal",
+                    "type": "number",
+                    "x-runtara-label": "Probability"
+                  },
+                  "stage_id": {
+                    "description": "The ID of the deal stage",
+                    "format": "int64",
+                    "type": "integer",
+                    "x-runtara-label": "Stage ID"
+                  },
+                  "status": {
+                    "description": "The status of the deal",
+                    "type": "string",
+                    "x-runtara-label": "Status"
+                  },
+                  "title": {
+                    "description": "The title of the deal",
+                    "type": "string",
+                    "x-runtara-label": "Title"
+                  },
+                  "value": {
+                    "description": "The value of the deal",
+                    "type": "number",
+                    "x-runtara-label": "Value"
+                  },
+                  "visible_to": {
+                    "description": "The visibility of the deal",
+                    "format": "int64",
+                    "type": "integer",
+                    "x-runtara-label": "Visible To"
+                  },
+                  "won_time": {
+                    "description": "The date and time of changing the deal status as won. Can only be set if deal status is won.",
+                    "type": "string",
+                    "x-runtara-label": "Won Time"
+                  }
+                },
+                "required": [
+                  "title"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "data": {
+                    "acv": 120,
+                    "add_time": "2021-01-01T00:00:00Z",
+                    "archive_time": "2021-01-01T00:00:00Z",
+                    "arr": 120,
+                    "channel": 52,
+                    "channel_id": "Jun23 Billboards",
+                    "close_time": "2021-01-01T00:00:00Z",
+                    "creator_user_id": 1,
+                    "currency": "USD",
+                    "custom_fields": {},
+                    "expected_close_date": "2021-01-01",
+                    "id": 1,
+                    "is_archived": false,
+                    "is_deleted": false,
+                    "label_ids": [
+                      1,
+                      2,
+                      3
+                    ],
+                    "local_close_date": "2021-01-01",
+                    "local_lost_date": "2021-01-01",
+                    "local_won_date": "2021-01-01",
+                    "lost_reason": "Lost Reason",
+                    "lost_time": "2021-01-01T00:00:00Z",
+                    "mrr": 10,
+                    "org_id": 1,
+                    "origin": "ManuallyCreated",
+                    "origin_id": null,
+                    "owner_id": 1,
+                    "person_id": 1,
+                    "pipeline_id": 1,
+                    "probability": 90,
+                    "source_lead_id": "35b0d604-eb0d-42d0-be11-eac8832051f0",
+                    "stage_change_time": "2021-01-01T00:00:00Z",
+                    "stage_id": 1,
+                    "status": "open",
+                    "title": "Deal Title",
+                    "update_time": "2021-01-01T00:00:00Z",
+                    "value": 200,
+                    "visible_to": 7,
+                    "won_time": "2021-01-01T00:00:00Z"
+                  },
+                  "success": true
+                },
+                "schema": {
+                  "allOf": [
+                    {
+                      "properties": {
+                        "success": {
+                          "description": "If the response is successful or not",
+                          "type": "boolean",
+                          "x-runtara-label": "Success"
+                        }
+                      },
+                      "title": "baseResponse",
+                      "type": "object"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "properties": {
+                            "acv": {
+                              "description": "Only available in Growth and above plans\n\nThe Annual Contract Value of the deal\n\nNull if there are no products attached to the deal\n",
+                              "nullable": true,
+                              "type": "number",
+                              "x-runtara-label": "Acv"
+                            },
+                            "add_time": {
+                              "description": "The creation date and time of the deal",
+                              "type": "string",
+                              "x-runtara-label": "Add Time"
+                            },
+                            "arr": {
+                              "description": "Only available in Growth and above plans\n\nThe Annual Recurring Revenue of the deal\n\nNull if there are no products attached to the deal\n",
+                              "nullable": true,
+                              "type": "number",
+                              "x-runtara-label": "Arr"
+                            },
+                            "channel": {
+                              "description": "The ID of your Marketing channel this Deal was created from. Recognized Marketing channels can be configured in your <a href=\"https://app.pipedrive.com/settings/fields\" target=\"_blank\" rel=\"noopener noreferrer\">Company settings</a>.",
+                              "format": "int64",
+                              "nullable": true,
+                              "type": "integer",
+                              "x-runtara-label": "Channel"
+                            },
+                            "channel_id": {
+                              "description": "The optional ID to further distinguish the Marketing channel.",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Channel ID"
+                            },
+                            "close_time": {
+                              "description": "The date and time of closing the deal",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Close Time"
+                            },
+                            "currency": {
+                              "description": "The currency associated with the deal",
+                              "type": "string",
+                              "x-runtara-label": "Currency"
+                            },
+                            "custom_fields": {
+                              "additionalProperties": true,
+                              "description": "An object where each key represents a custom field. All custom fields are referenced as randomly generated 40-character hashes. To clear a custom field value, set it to `null`. For multi-option fields (field type `set`), use `null` to clear the selection — sending an empty array `[]` is not supported and will result in a validation error.",
+                              "type": "object",
+                              "x-runtara-label": "Custom Fields"
+                            },
+                            "expected_close_date": {
+                              "description": "The expected close date of the deal",
+                              "format": "date",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Expected Close Date"
+                            },
+                            "id": {
+                              "description": "The ID of the deal",
+                              "format": "int64",
+                              "type": "integer",
+                              "x-runtara-label": "ID"
+                            },
+                            "is_archived": {
+                              "description": "Whether the deal is archived or not",
+                              "type": "boolean",
+                              "x-runtara-label": "Is Archived"
+                            },
+                            "is_deleted": {
+                              "description": "Whether the deal is deleted or not",
+                              "type": "boolean",
+                              "x-runtara-label": "Is Deleted"
+                            },
+                            "label_ids": {
+                              "description": "The IDs of labels assigned to the deal",
+                              "items": {
+                                "format": "int64",
+                                "type": "integer"
+                              },
+                              "type": "array",
+                              "x-runtara-label": "Label IDs"
+                            },
+                            "lost_reason": {
+                              "description": "The reason for losing the deal",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Lost Reason"
+                            },
+                            "lost_time": {
+                              "description": "The date and time of changing the deal status as lost",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Lost Time"
+                            },
+                            "mrr": {
+                              "description": "Only available in Growth and above plans\n\nThe Monthly Recurring Revenue of the deal\n\nNull if there are no products attached to the deal\n",
+                              "nullable": true,
+                              "type": "number",
+                              "x-runtara-label": "Mrr"
+                            },
+                            "org_id": {
+                              "description": "The ID of the organization linked to the deal",
+                              "format": "int64",
+                              "nullable": true,
+                              "type": "integer",
+                              "x-runtara-label": "Organization"
+                            },
+                            "origin": {
+                              "description": "The way this Deal was created. `origin` field is set by Pipedrive when Deal is created and cannot be changed.",
+                              "type": "string",
+                              "x-runtara-label": "Origin"
+                            },
+                            "origin_id": {
+                              "description": "The optional ID to further distinguish the origin of the deal - e.g. Which API integration created this Deal.",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Origin ID"
+                            },
+                            "owner_id": {
+                              "description": "The ID of the user who owns the deal",
+                              "format": "int64",
+                              "type": "integer",
+                              "x-runtara-label": "Owner ID"
+                            },
+                            "person_id": {
+                              "description": "The ID of the person linked to the deal",
+                              "format": "int64",
+                              "nullable": true,
+                              "type": "integer",
+                              "x-runtara-label": "Person ID"
+                            },
+                            "pipeline_id": {
+                              "description": "The ID of the pipeline associated with the deal",
+                              "format": "int64",
+                              "type": "integer",
+                              "x-runtara-label": "Pipeline ID"
+                            },
+                            "probability": {
+                              "description": "The success probability percentage of the deal",
+                              "nullable": true,
+                              "type": "number",
+                              "x-runtara-label": "Probability"
+                            },
+                            "source_lead_id": {
+                              "description": "The ID of the lead if the deal was converted from a lead. Only included when requested via include_fields parameter.",
+                              "format": "uuid",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Source Lead ID"
+                            },
+                            "stage_change_time": {
+                              "description": "The last updated date and time of the deal stage",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Stage Change Time"
+                            },
+                            "stage_id": {
+                              "description": "The ID of the deal stage",
+                              "format": "int64",
+                              "type": "integer",
+                              "x-runtara-label": "Stage ID"
+                            },
+                            "status": {
+                              "description": "The status of the deal",
+                              "type": "string",
+                              "x-runtara-label": "Status"
+                            },
+                            "title": {
+                              "description": "The title of the deal",
+                              "type": "string",
+                              "x-runtara-label": "Title"
+                            },
+                            "update_time": {
+                              "description": "The last updated date and time of the deal",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Update Time"
+                            },
+                            "value": {
+                              "description": "The value of the deal",
+                              "type": "number",
+                              "x-runtara-label": "Value"
+                            },
+                            "visible_to": {
+                              "description": "The visibility of the deal",
+                              "format": "int64",
+                              "type": "integer",
+                              "x-runtara-label": "Visible To"
+                            },
+                            "won_time": {
+                              "description": "The date and time of changing the deal status as won",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Won Time"
+                            }
+                          },
+                          "type": "object",
+                          "x-runtara-label": "Data"
+                        }
+                      },
+                      "title": "UpsertDealResponseData",
+                      "type": "object"
+                    }
+                  ],
+                  "title": "UpsertDealResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Add deal"
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          },
+          {
+            "oauth2": [
+              "deals:full"
+            ]
+          }
+        ],
+        "summary": "Add a new deal",
+        "tags": [
+          "Deals"
+        ],
+        "x-runtara-side-effects": true,
+        "x-runtara-summary": "Add a new deal",
+        "x-token-cost": 5,
+        "x-tool-description": "Creates new sales deals with customizable properties: title (required), value, person, organization, pipeline stage, and custom fields. Essential for lead conversion, sales processes, and integrations. Automatically assigns timestamps and ownership."
+      }
+    },
+    "/deals/{id}": {
+      "delete": {
+        "description": "Marks a deal as deleted. After 30 days, the deal will be permanently deleted.",
+        "operationId": "deleteDeal",
+        "parameters": [
+          {
+            "description": "The ID of the deal",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "x-runtara-label": "ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "data": {
+                    "id": 1
+                  },
+                  "success": true
+                },
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "properties": {
+                        "id": {
+                          "description": "Deleted deal ID",
+                          "format": "int64",
+                          "type": "integer",
+                          "x-runtara-label": "ID"
+                        }
+                      },
+                      "type": "object",
+                      "x-runtara-label": "Data"
+                    },
+                    "success": {
+                      "description": "If the response is successful or not",
+                      "type": "boolean",
+                      "x-runtara-label": "Success"
+                    }
+                  },
+                  "title": "DeleteDealResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Delete deal"
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          },
+          {
+            "oauth2": [
+              "deals:full"
+            ]
+          }
+        ],
+        "summary": "Delete a deal",
+        "tags": [
+          "Deals"
+        ],
+        "x-runtara-side-effects": true,
+        "x-runtara-summary": "Delete a deal",
+        "x-token-cost": 3,
+        "x-tool-description": "Soft-deletes deals with 30-day recovery period before permanent removal. Essential for deal cleanup, error correction, and removing unwanted opportunities. Becomes inaccessible via standard APIs but recoverable during grace period."
+      },
+      "get": {
+        "description": "Returns the details of a specific deal.",
+        "operationId": "getDeal",
+        "parameters": [
+          {
+            "description": "The ID of the deal",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "x-runtara-label": "ID"
+          },
+          {
+            "description": "Optional comma separated string array of additional fields to include",
+            "explode": false,
+            "in": "query",
+            "name": "include_fields",
+            "schema": {
+              "items": {
+                "enum": [
+                  "next_activity_id",
+                  "last_activity_id",
+                  "first_won_time",
+                  "products_count",
+                  "files_count",
+                  "notes_count",
+                  "followers_count",
+                  "email_messages_count",
+                  "activities_count",
+                  "done_activities_count",
+                  "undone_activities_count",
+                  "participants_count",
+                  "last_incoming_mail_time",
+                  "last_outgoing_mail_time",
+                  "smart_bcc_email",
+                  "source_lead_id"
+                ],
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "style": "form",
+            "x-runtara-label": "Include Fields"
+          },
+          {
+            "description": "Optional comma separated string array of custom fields keys to include. If you are only interested in a particular set of custom fields, please use this parameter for faster results and smaller response.<br/>A maximum of 15 keys is allowed.",
+            "explode": false,
+            "in": "query",
+            "name": "custom_fields",
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 15,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "style": "form",
+            "x-runtara-label": "Custom Fields"
+          },
+          {
+            "description": "When provided with a 'true' value, single option and multiple option custom fields values contain objects in the form of '{ id: number, label: string }' instead of plain id",
+            "in": "query",
+            "name": "include_option_labels",
+            "schema": {
+              "type": "boolean"
+            },
+            "x-runtara-label": "Include Option Labels"
+          },
+          {
+            "description": "When provided with 'true' value, response will include an array of label objects in the form of '{ id: number, label: string }'",
+            "in": "query",
+            "name": "include_labels",
+            "schema": {
+              "type": "boolean"
+            },
+            "x-runtara-label": "Include Labels"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "data": {
+                    "acv": 120,
+                    "add_time": "2021-01-01T00:00:00Z",
+                    "archive_time": "2021-01-01T00:00:00Z",
+                    "arr": 120,
+                    "channel": 52,
+                    "channel_id": "Jun23 Billboards",
+                    "close_time": "2021-01-01T00:00:00Z",
+                    "creator_user_id": 1,
+                    "currency": "USD",
+                    "custom_fields": {},
+                    "expected_close_date": "2021-01-01",
+                    "id": 1,
+                    "is_archived": false,
+                    "is_deleted": false,
+                    "label_ids": [
+                      1,
+                      2,
+                      3
+                    ],
+                    "local_close_date": "2021-01-01",
+                    "local_lost_date": "2021-01-01",
+                    "local_won_date": "2021-01-01",
+                    "lost_reason": "Lost Reason",
+                    "lost_time": "2021-01-01T00:00:00Z",
+                    "mrr": 10,
+                    "org_id": 1,
+                    "origin": "ManuallyCreated",
+                    "origin_id": null,
+                    "owner_id": 1,
+                    "person_id": 1,
+                    "pipeline_id": 1,
+                    "probability": 90,
+                    "source_lead_id": "35b0d604-eb0d-42d0-be11-eac8832051f0",
+                    "stage_change_time": "2021-01-01T00:00:00Z",
+                    "stage_id": 1,
+                    "status": "open",
+                    "title": "Deal Title",
+                    "update_time": "2021-01-01T00:00:00Z",
+                    "value": 200,
+                    "visible_to": 7,
+                    "won_time": "2021-01-01T00:00:00Z"
+                  },
+                  "success": true
+                },
+                "schema": {
+                  "allOf": [
+                    {
+                      "properties": {
+                        "success": {
+                          "description": "If the response is successful or not",
+                          "type": "boolean",
+                          "x-runtara-label": "Success"
+                        }
+                      },
+                      "title": "baseResponse",
+                      "type": "object"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "properties": {
+                            "acv": {
+                              "description": "Only available in Growth and above plans\n\nThe Annual Contract Value of the deal\n\nNull if there are no products attached to the deal\n",
+                              "nullable": true,
+                              "type": "number",
+                              "x-runtara-label": "Acv"
+                            },
+                            "add_time": {
+                              "description": "The creation date and time of the deal",
+                              "type": "string",
+                              "x-runtara-label": "Add Time"
+                            },
+                            "arr": {
+                              "description": "Only available in Growth and above plans\n\nThe Annual Recurring Revenue of the deal\n\nNull if there are no products attached to the deal\n",
+                              "nullable": true,
+                              "type": "number",
+                              "x-runtara-label": "Arr"
+                            },
+                            "channel": {
+                              "description": "The ID of your Marketing channel this Deal was created from. Recognized Marketing channels can be configured in your <a href=\"https://app.pipedrive.com/settings/fields\" target=\"_blank\" rel=\"noopener noreferrer\">Company settings</a>.",
+                              "format": "int64",
+                              "nullable": true,
+                              "type": "integer",
+                              "x-runtara-label": "Channel"
+                            },
+                            "channel_id": {
+                              "description": "The optional ID to further distinguish the Marketing channel.",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Channel ID"
+                            },
+                            "close_time": {
+                              "description": "The date and time of closing the deal",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Close Time"
+                            },
+                            "currency": {
+                              "description": "The currency associated with the deal",
+                              "type": "string",
+                              "x-runtara-label": "Currency"
+                            },
+                            "custom_fields": {
+                              "additionalProperties": true,
+                              "description": "An object where each key represents a custom field. All custom fields are referenced as randomly generated 40-character hashes. To clear a custom field value, set it to `null`. For multi-option fields (field type `set`), use `null` to clear the selection — sending an empty array `[]` is not supported and will result in a validation error.",
+                              "type": "object",
+                              "x-runtara-label": "Custom Fields"
+                            },
+                            "expected_close_date": {
+                              "description": "The expected close date of the deal",
+                              "format": "date",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Expected Close Date"
+                            },
+                            "id": {
+                              "description": "The ID of the deal",
+                              "format": "int64",
+                              "type": "integer",
+                              "x-runtara-label": "ID"
+                            },
+                            "is_archived": {
+                              "description": "Whether the deal is archived or not",
+                              "type": "boolean",
+                              "x-runtara-label": "Is Archived"
+                            },
+                            "is_deleted": {
+                              "description": "Whether the deal is deleted or not",
+                              "type": "boolean",
+                              "x-runtara-label": "Is Deleted"
+                            },
+                            "label_ids": {
+                              "description": "The IDs of labels assigned to the deal",
+                              "items": {
+                                "format": "int64",
+                                "type": "integer"
+                              },
+                              "type": "array",
+                              "x-runtara-label": "Label IDs"
+                            },
+                            "lost_reason": {
+                              "description": "The reason for losing the deal",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Lost Reason"
+                            },
+                            "lost_time": {
+                              "description": "The date and time of changing the deal status as lost",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Lost Time"
+                            },
+                            "mrr": {
+                              "description": "Only available in Growth and above plans\n\nThe Monthly Recurring Revenue of the deal\n\nNull if there are no products attached to the deal\n",
+                              "nullable": true,
+                              "type": "number",
+                              "x-runtara-label": "Mrr"
+                            },
+                            "org_id": {
+                              "description": "The ID of the organization linked to the deal",
+                              "format": "int64",
+                              "nullable": true,
+                              "type": "integer",
+                              "x-runtara-label": "Organization"
+                            },
+                            "origin": {
+                              "description": "The way this Deal was created. `origin` field is set by Pipedrive when Deal is created and cannot be changed.",
+                              "type": "string",
+                              "x-runtara-label": "Origin"
+                            },
+                            "origin_id": {
+                              "description": "The optional ID to further distinguish the origin of the deal - e.g. Which API integration created this Deal.",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Origin ID"
+                            },
+                            "owner_id": {
+                              "description": "The ID of the user who owns the deal",
+                              "format": "int64",
+                              "type": "integer",
+                              "x-runtara-label": "Owner ID"
+                            },
+                            "person_id": {
+                              "description": "The ID of the person linked to the deal",
+                              "format": "int64",
+                              "nullable": true,
+                              "type": "integer",
+                              "x-runtara-label": "Person ID"
+                            },
+                            "pipeline_id": {
+                              "description": "The ID of the pipeline associated with the deal",
+                              "format": "int64",
+                              "type": "integer",
+                              "x-runtara-label": "Pipeline ID"
+                            },
+                            "probability": {
+                              "description": "The success probability percentage of the deal",
+                              "nullable": true,
+                              "type": "number",
+                              "x-runtara-label": "Probability"
+                            },
+                            "source_lead_id": {
+                              "description": "The ID of the lead if the deal was converted from a lead. Only included when requested via include_fields parameter.",
+                              "format": "uuid",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Source Lead ID"
+                            },
+                            "stage_change_time": {
+                              "description": "The last updated date and time of the deal stage",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Stage Change Time"
+                            },
+                            "stage_id": {
+                              "description": "The ID of the deal stage",
+                              "format": "int64",
+                              "type": "integer",
+                              "x-runtara-label": "Stage ID"
+                            },
+                            "status": {
+                              "description": "The status of the deal",
+                              "type": "string",
+                              "x-runtara-label": "Status"
+                            },
+                            "title": {
+                              "description": "The title of the deal",
+                              "type": "string",
+                              "x-runtara-label": "Title"
+                            },
+                            "update_time": {
+                              "description": "The last updated date and time of the deal",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Update Time"
+                            },
+                            "value": {
+                              "description": "The value of the deal",
+                              "type": "number",
+                              "x-runtara-label": "Value"
+                            },
+                            "visible_to": {
+                              "description": "The visibility of the deal",
+                              "format": "int64",
+                              "type": "integer",
+                              "x-runtara-label": "Visible To"
+                            },
+                            "won_time": {
+                              "description": "The date and time of changing the deal status as won",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Won Time"
+                            }
+                          },
+                          "type": "object",
+                          "x-runtara-label": "Data"
+                        }
+                      },
+                      "title": "UpsertDealResponseData",
+                      "type": "object"
+                    }
+                  ],
+                  "title": "UpsertDealResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Get deal"
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          },
+          {
+            "oauth2": [
+              "deals:read",
+              "deals:full"
+            ]
+          }
+        ],
+        "summary": "Get details of a deal",
+        "tags": [
+          "Deals"
+        ],
+        "x-runtara-summary": "Get details of a deal",
+        "x-token-cost": 1,
+        "x-tool-description": "Fetches comprehensive details of a specific deal by ID, including all properties, custom fields, associated contacts, and metadata. Use this endpoint for deal detail pages, updating deal information, or when you need complete deal context. Supports optional field inclusion for optimized data retrieval and custom field expansion for enhanced deal analysis."
+      },
+      "patch": {
+        "description": "Updates the properties of a deal.",
+        "operationId": "updateDeal",
+        "parameters": [
+          {
+            "description": "The ID of the deal",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "x-runtara-label": "ID"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "archive_time": {
+                    "description": "The optional date and time of archiving the deal in UTC. Format: YYYY-MM-DD HH:MM:SS. If omitted and `is_archived` is true, it will be set to the current date and time.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Archive Time"
+                  },
+                  "close_time": {
+                    "description": "The date and time of closing the deal. Can only be set if deal status is won or lost.",
+                    "type": "string",
+                    "x-runtara-label": "Close Time"
+                  },
+                  "currency": {
+                    "description": "The currency associated with the deal",
+                    "type": "string",
+                    "x-runtara-label": "Currency"
+                  },
+                  "custom_fields": {
+                    "additionalProperties": true,
+                    "description": "An object where each key represents a custom field. All custom fields are referenced as randomly generated 40-character hashes. To clear a custom field value, set it to `null`. For multi-option fields (field type `set`), use `null` to clear the selection — sending an empty array `[]` is not supported and will result in a validation error.",
+                    "type": "object",
+                    "x-runtara-label": "Custom Fields"
+                  },
+                  "expected_close_date": {
+                    "description": "The expected close date of the deal",
+                    "format": "date",
+                    "type": "string",
+                    "x-runtara-label": "Expected Close Date"
+                  },
+                  "is_archived": {
+                    "description": "Whether the deal is archived or not",
+                    "type": "boolean",
+                    "x-runtara-label": "Is Archived"
+                  },
+                  "is_deleted": {
+                    "description": "Whether the deal is deleted or not",
+                    "type": "boolean",
+                    "x-runtara-label": "Is Deleted"
+                  },
+                  "label_ids": {
+                    "description": "The IDs of labels assigned to the deal",
+                    "items": {
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "type": "array",
+                    "x-runtara-label": "Label IDs"
+                  },
+                  "lost_reason": {
+                    "description": "The reason for losing the deal. Can only be set if deal status is lost.",
+                    "type": "string",
+                    "x-runtara-label": "Lost Reason"
+                  },
+                  "lost_time": {
+                    "description": "The date and time of changing the deal status as lost. Can only be set if deal status is lost.",
+                    "type": "string",
+                    "x-runtara-label": "Lost Time"
+                  },
+                  "org_id": {
+                    "description": "The ID of the organization linked to the deal",
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer",
+                    "x-runtara-label": "Organization"
+                  },
+                  "owner_id": {
+                    "description": "The ID of the user who owns the deal",
+                    "format": "int64",
+                    "type": "integer",
+                    "x-runtara-label": "Owner ID"
+                  },
+                  "person_id": {
+                    "description": "The ID of the person linked to the deal",
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer",
+                    "x-runtara-label": "Person ID"
+                  },
+                  "pipeline_id": {
+                    "description": "The ID of the pipeline associated with the deal",
+                    "format": "int64",
+                    "type": "integer",
+                    "x-runtara-label": "Pipeline ID"
+                  },
+                  "probability": {
+                    "description": "The success probability percentage of the deal",
+                    "type": "number",
+                    "x-runtara-label": "Probability"
+                  },
+                  "stage_id": {
+                    "description": "The ID of the deal stage",
+                    "format": "int64",
+                    "type": "integer",
+                    "x-runtara-label": "Stage ID"
+                  },
+                  "status": {
+                    "description": "The status of the deal",
+                    "type": "string",
+                    "x-runtara-label": "Status"
+                  },
+                  "title": {
+                    "description": "The title of the deal",
+                    "type": "string",
+                    "x-runtara-label": "Title"
+                  },
+                  "value": {
+                    "description": "The value of the deal",
+                    "type": "number",
+                    "x-runtara-label": "Value"
+                  },
+                  "visible_to": {
+                    "description": "The visibility of the deal",
+                    "format": "int64",
+                    "type": "integer",
+                    "x-runtara-label": "Visible To"
+                  },
+                  "won_time": {
+                    "description": "The date and time of changing the deal status as won. Can only be set if deal status is won.",
+                    "type": "string",
+                    "x-runtara-label": "Won Time"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "data": {
+                    "acv": 120,
+                    "add_time": "2021-01-01T00:00:00Z",
+                    "archive_time": "2021-01-01T00:00:00Z",
+                    "arr": 120,
+                    "channel": 52,
+                    "channel_id": "Jun23 Billboards",
+                    "close_time": "2021-01-01T00:00:00Z",
+                    "creator_user_id": 1,
+                    "currency": "USD",
+                    "custom_fields": {},
+                    "expected_close_date": "2021-01-01",
+                    "id": 1,
+                    "is_archived": false,
+                    "is_deleted": false,
+                    "label_ids": [
+                      1,
+                      2,
+                      3
+                    ],
+                    "local_close_date": "2021-01-01",
+                    "local_lost_date": "2021-01-01",
+                    "local_won_date": "2021-01-01",
+                    "lost_reason": "Lost Reason",
+                    "lost_time": "2021-01-01T00:00:00Z",
+                    "mrr": 10,
+                    "org_id": 1,
+                    "origin": "ManuallyCreated",
+                    "origin_id": null,
+                    "owner_id": 1,
+                    "person_id": 1,
+                    "pipeline_id": 1,
+                    "probability": 90,
+                    "source_lead_id": "35b0d604-eb0d-42d0-be11-eac8832051f0",
+                    "stage_change_time": "2021-01-01T00:00:00Z",
+                    "stage_id": 1,
+                    "status": "open",
+                    "title": "Deal Title",
+                    "update_time": "2021-01-01T00:00:00Z",
+                    "value": 200,
+                    "visible_to": 7,
+                    "won_time": "2021-01-01T00:00:00Z"
+                  },
+                  "success": true
+                },
+                "schema": {
+                  "allOf": [
+                    {
+                      "properties": {
+                        "success": {
+                          "description": "If the response is successful or not",
+                          "type": "boolean",
+                          "x-runtara-label": "Success"
+                        }
+                      },
+                      "title": "baseResponse",
+                      "type": "object"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "properties": {
+                            "acv": {
+                              "description": "Only available in Growth and above plans\n\nThe Annual Contract Value of the deal\n\nNull if there are no products attached to the deal\n",
+                              "nullable": true,
+                              "type": "number",
+                              "x-runtara-label": "Acv"
+                            },
+                            "add_time": {
+                              "description": "The creation date and time of the deal",
+                              "type": "string",
+                              "x-runtara-label": "Add Time"
+                            },
+                            "arr": {
+                              "description": "Only available in Growth and above plans\n\nThe Annual Recurring Revenue of the deal\n\nNull if there are no products attached to the deal\n",
+                              "nullable": true,
+                              "type": "number",
+                              "x-runtara-label": "Arr"
+                            },
+                            "channel": {
+                              "description": "The ID of your Marketing channel this Deal was created from. Recognized Marketing channels can be configured in your <a href=\"https://app.pipedrive.com/settings/fields\" target=\"_blank\" rel=\"noopener noreferrer\">Company settings</a>.",
+                              "format": "int64",
+                              "nullable": true,
+                              "type": "integer",
+                              "x-runtara-label": "Channel"
+                            },
+                            "channel_id": {
+                              "description": "The optional ID to further distinguish the Marketing channel.",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Channel ID"
+                            },
+                            "close_time": {
+                              "description": "The date and time of closing the deal",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Close Time"
+                            },
+                            "currency": {
+                              "description": "The currency associated with the deal",
+                              "type": "string",
+                              "x-runtara-label": "Currency"
+                            },
+                            "custom_fields": {
+                              "additionalProperties": true,
+                              "description": "An object where each key represents a custom field. All custom fields are referenced as randomly generated 40-character hashes. To clear a custom field value, set it to `null`. For multi-option fields (field type `set`), use `null` to clear the selection — sending an empty array `[]` is not supported and will result in a validation error.",
+                              "type": "object",
+                              "x-runtara-label": "Custom Fields"
+                            },
+                            "expected_close_date": {
+                              "description": "The expected close date of the deal",
+                              "format": "date",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Expected Close Date"
+                            },
+                            "id": {
+                              "description": "The ID of the deal",
+                              "format": "int64",
+                              "type": "integer",
+                              "x-runtara-label": "ID"
+                            },
+                            "is_archived": {
+                              "description": "Whether the deal is archived or not",
+                              "type": "boolean",
+                              "x-runtara-label": "Is Archived"
+                            },
+                            "is_deleted": {
+                              "description": "Whether the deal is deleted or not",
+                              "type": "boolean",
+                              "x-runtara-label": "Is Deleted"
+                            },
+                            "label_ids": {
+                              "description": "The IDs of labels assigned to the deal",
+                              "items": {
+                                "format": "int64",
+                                "type": "integer"
+                              },
+                              "type": "array",
+                              "x-runtara-label": "Label IDs"
+                            },
+                            "lost_reason": {
+                              "description": "The reason for losing the deal",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Lost Reason"
+                            },
+                            "lost_time": {
+                              "description": "The date and time of changing the deal status as lost",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Lost Time"
+                            },
+                            "mrr": {
+                              "description": "Only available in Growth and above plans\n\nThe Monthly Recurring Revenue of the deal\n\nNull if there are no products attached to the deal\n",
+                              "nullable": true,
+                              "type": "number",
+                              "x-runtara-label": "Mrr"
+                            },
+                            "org_id": {
+                              "description": "The ID of the organization linked to the deal",
+                              "format": "int64",
+                              "nullable": true,
+                              "type": "integer",
+                              "x-runtara-label": "Organization"
+                            },
+                            "origin": {
+                              "description": "The way this Deal was created. `origin` field is set by Pipedrive when Deal is created and cannot be changed.",
+                              "type": "string",
+                              "x-runtara-label": "Origin"
+                            },
+                            "origin_id": {
+                              "description": "The optional ID to further distinguish the origin of the deal - e.g. Which API integration created this Deal.",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Origin ID"
+                            },
+                            "owner_id": {
+                              "description": "The ID of the user who owns the deal",
+                              "format": "int64",
+                              "type": "integer",
+                              "x-runtara-label": "Owner ID"
+                            },
+                            "person_id": {
+                              "description": "The ID of the person linked to the deal",
+                              "format": "int64",
+                              "nullable": true,
+                              "type": "integer",
+                              "x-runtara-label": "Person ID"
+                            },
+                            "pipeline_id": {
+                              "description": "The ID of the pipeline associated with the deal",
+                              "format": "int64",
+                              "type": "integer",
+                              "x-runtara-label": "Pipeline ID"
+                            },
+                            "probability": {
+                              "description": "The success probability percentage of the deal",
+                              "nullable": true,
+                              "type": "number",
+                              "x-runtara-label": "Probability"
+                            },
+                            "source_lead_id": {
+                              "description": "The ID of the lead if the deal was converted from a lead. Only included when requested via include_fields parameter.",
+                              "format": "uuid",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Source Lead ID"
+                            },
+                            "stage_change_time": {
+                              "description": "The last updated date and time of the deal stage",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Stage Change Time"
+                            },
+                            "stage_id": {
+                              "description": "The ID of the deal stage",
+                              "format": "int64",
+                              "type": "integer",
+                              "x-runtara-label": "Stage ID"
+                            },
+                            "status": {
+                              "description": "The status of the deal",
+                              "type": "string",
+                              "x-runtara-label": "Status"
+                            },
+                            "title": {
+                              "description": "The title of the deal",
+                              "type": "string",
+                              "x-runtara-label": "Title"
+                            },
+                            "update_time": {
+                              "description": "The last updated date and time of the deal",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Update Time"
+                            },
+                            "value": {
+                              "description": "The value of the deal",
+                              "type": "number",
+                              "x-runtara-label": "Value"
+                            },
+                            "visible_to": {
+                              "description": "The visibility of the deal",
+                              "format": "int64",
+                              "type": "integer",
+                              "x-runtara-label": "Visible To"
+                            },
+                            "won_time": {
+                              "description": "The date and time of changing the deal status as won",
+                              "nullable": true,
+                              "type": "string",
+                              "x-runtara-label": "Won Time"
+                            }
+                          },
+                          "type": "object",
+                          "x-runtara-label": "Data"
+                        }
+                      },
+                      "title": "UpsertDealResponseData",
+                      "type": "object"
+                    }
+                  ],
+                  "title": "UpsertDealResponse",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Edit deal"
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          },
+          {
+            "oauth2": [
+              "deals:full"
+            ]
+          }
+        ],
+        "summary": "Update a deal",
+        "tags": [
+          "Deals"
+        ],
+        "x-runtara-side-effects": true,
+        "x-runtara-summary": "Update a deal",
+        "x-token-cost": 5,
+        "x-tool-description": "Modifies deal properties using PATCH semantics for partial updates without affecting unchanged fields. Essential for deal progression, value updates, stage changes, and workflow automation. Preserves data integrity by updating only provided fields."
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "https://api.pipedrive.com/api/v2"
+    }
+  ]
+}

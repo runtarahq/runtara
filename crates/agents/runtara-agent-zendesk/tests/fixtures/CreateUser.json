@@ -1,0 +1,15 @@
+{
+  "user": {
+    "custom_role_id": 123456,
+    "email": "roge@example.org",
+    "id": 9873843,
+    "name": "Roger Wilco",
+    "organization_id": 57542,
+    "role": "agent",
+    "role_type": 0,
+    "separation": {
+      "brand_id": 123,
+      "scope": "brand"
+    }
+  }
+}

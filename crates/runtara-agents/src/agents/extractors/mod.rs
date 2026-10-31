@@ -61,6 +61,8 @@ static HTTP_EXTRACTORS: &[&dyn HttpConnectionExtractor] = &[
     &connection_types::HubSpotAccessTokenExtractor,
     &connection_types::QuickBooksOnlineExtractor,
     &connection_types::StripeExtractor,
+    &connection_types::PipedriveExtractor,
+    &connection_types::ZendeskClientCredentialsExtractor,
     &connection_types::McpExtractor,
 ];
 

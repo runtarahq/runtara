@@ -1,0 +1,63 @@
+{
+  "user": {
+    "active": true,
+    "alias": "Mr. Johnny",
+    "authenticity_token": "<CORS TOKEN>",
+    "created_at": "2009-07-20T22:55:29Z",
+    "custom_role_id": 9373643,
+    "details": "",
+    "email": "johnny@example.com",
+    "external_id": "sai989sur98w9",
+    "id": 35436,
+    "last_login_at": "2011-05-05T10:38:52Z",
+    "locale": "en-US",
+    "locale_id": 1,
+    "moderator": true,
+    "name": "Johnny Agent",
+    "notes": "Johnny is a nice guy!",
+    "only_private_comments": false,
+    "organization_id": 57542,
+    "phone": "+15551234567",
+    "photo": {
+      "content_type": "image/png",
+      "content_url": "https://company.zendesk.com/photos/my_funny_profile_pic.png",
+      "id": 928374,
+      "name": "my_funny_profile_pic.png",
+      "size": 166144,
+      "thumbnails": [
+        {
+          "content_type": "image/png",
+          "content_url": "https://company.zendesk.com/photos/my_funny_profile_pic_thumb.png",
+          "id": 928375,
+          "name": "my_funny_profile_pic_thumb.png",
+          "size": 58298
+        }
+      ]
+    },
+    "restricted_agent": true,
+    "role": "agent",
+    "role_type": 0,
+    "separation": {
+      "brand_id": 123,
+      "scope": "brand"
+    },
+    "shared": false,
+    "shared_agent": false,
+    "signature": "Have a nice day, Johnny",
+    "suspended": true,
+    "tags": [
+      "enterprise",
+      "other_tag"
+    ],
+    "ticket_restriction": "assigned",
+    "time_zone": "Copenhagen",
+    "updated_at": "2011-05-05T10:38:52Z",
+    "url": "https://company.zendesk.com/api/v2/users/35436",
+    "user_fields": {
+      "user_date": "2012-07-23T00:00:00Z",
+      "user_decimal": 5.1,
+      "user_dropdown": "option_1"
+    },
+    "verified": true
+  }
+}

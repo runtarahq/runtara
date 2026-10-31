@@ -78,6 +78,12 @@
     "fnv1a64": "5fce813c446be821"
   },
   {
+    "integrationId": "pipedrive_api_token",
+    "fieldCount": 1,
+    "serializedBytes": 470,
+    "fnv1a64": "6f1075e3aca1b94f"
+  },
+  {
     "integrationId": "postgres",
     "fieldCount": 1,
     "serializedBytes": 538,
@@ -130,5 +136,11 @@
     "fieldCount": 1,
     "serializedBytes": 499,
     "fnv1a64": "608b4e5db01474c4"
+  },
+  {
+    "integrationId": "zendesk_client_credentials",
+    "fieldCount": 4,
+    "serializedBytes": 1513,
+    "fnv1a64": "049b4f57d8daf732"
   }
 ]

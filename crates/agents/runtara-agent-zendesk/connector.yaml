@@ -1,0 +1,35 @@
+# Input to scripts/connector_gen/connector_gen.py; see its README.md.
+agent:
+  id: zendesk
+  name: Zendesk
+  description: Zendesk Support — tickets, comments, users, organizations, groups and search.
+  integration_id: zendesk_client_credentials
+  error_prefix: ZENDESK
+spec:
+  url: https://developer.zendesk.com/zendesk/oas.yaml
+  sha256: 809a093dd15caa57536520db2c7dd8a829e8e6c2a25c01b3f7af3f4e9b8d22e6
+# Zendesk wraps request bodies: {"ticket": {...}}. Their fields become inputs.
+body_envelopes:
+  - ticket
+  - organization
+  - user
+operations:
+  - ListTickets
+  - ShowTicket
+  - CreateTicket
+  - UpdateTicket
+  - DeleteTicket
+  - ListTicketComments
+  - ListSearchResults
+  - ExportSearchResults
+  - ShowUser
+  - SearchUsers
+  - CreateUser
+  - UpdateUser
+  - CreateOrUpdateUser
+  - ShowCurrentUser
+  - ShowOrganization
+  - CreateOrganization
+  - UpdateOrganization
+  - ListGroups
+  - ListTicketFields

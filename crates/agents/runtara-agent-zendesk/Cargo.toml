@@ -1,0 +1,26 @@
+[package]
+name = "runtara-agent-zendesk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Zendesk Support integration agent, generated from the Zendesk OpenAPI spec — WebAssembly Component"
+keywords = ["wasm", "component", "agent", "zendesk", "support"]
+categories = ["wasm", "web-programming::http-client"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+runtara-agent-macro = { workspace = true }
+runtara-dsl = { workspace = true }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+runtara-http = { workspace = true, features = ["native"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+runtara-http = { workspace = true, features = ["wasi"] }

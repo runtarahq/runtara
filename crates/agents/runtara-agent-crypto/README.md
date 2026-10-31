@@ -29,8 +29,6 @@ Output: `target/wasm32-wasip1/release/runtara_agent_crypto.wasm` (~150 KB).
 - [`src/lib.rs`](src/lib.rs) — Rust-side typed inputs (`HashInput`, `HmacInput`), `Guest` impl, JSON Schema strings published via `list-capabilities()`.
 - [`Cargo.toml`](Cargo.toml) — `crate-type = ["cdylib", "rlib"]`. Bindings are generated at compile time by `agent_component!` from `runtara_wit::agent_package`; there is no WIT or bindings file in the crate.
 
-## Template for new agents
+## Adding a new agent
 
-Copy this crate, rename, replace the `Guest::invoke` match table, update `list_capabilities()`, point `[package.metadata.component]` at the new crate name. Add the crate path to the workspace `Cargo.toml` and to `scripts/build-agent-components.sh` will pick it up automatically (the script scans `crates/runtara-agent-*` excluding `wit`/`macro`/`common`).
-
-Once built, drop the `.wasm` into the directory pointed at by `RUNTARA_AGENT_COMPONENTS_DIR` and restart the server.
+See [docs/adding-an-agent.md](../../../docs/adding-an-agent.md).

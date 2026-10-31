@@ -1,0 +1,10 @@
+{
+  "user": {
+    "id": 35436,
+    "name": "Johnny Agent",
+    "separation": {
+      "brand_id": 123,
+      "scope": "brand"
+    }
+  }
+}

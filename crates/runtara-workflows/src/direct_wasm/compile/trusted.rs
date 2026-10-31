@@ -20,7 +20,7 @@ pub(super) fn pin_trusted_dependencies(
         let Some(meta) = &dep.metadata.meta else {
             continue;
         };
-        let bytes = std::fs::read(dep.wasm_path.with_extension("meta.json"))?;
+        let bytes = crate::compile_fs::read(dep.wasm_path.with_extension("meta.json"))?;
         // Recheck the sidecar identity captured during resolution. Metadata
         // changed mid-build must never be paired with an older artifact hash.
         if super::sha256_hex(&bytes) != meta.file.sha256 {
@@ -31,7 +31,7 @@ pub(super) fn pin_trusted_dependencies(
         // Scoped workflow-agent children are packaged separately, so WAC
         // cannot lift their transitive imports into the root. Preserve those
         // version requirements explicitly before appending the child package.
-        let component_bytes = std::fs::read(&dep.wasm_path)?;
+        let component_bytes = crate::compile_fs::read(&dep.wasm_path)?;
         // A staged workflow-agent carries the pins it was composed with. Each
         // must name the version in the bundle; a control pin (from a
         // workflow-agent published before control became an ordinary agent)
@@ -122,7 +122,7 @@ pub fn staged_dependency_is_stale(
     components_dir: &std::path::Path,
     wasm_path: &std::path::Path,
 ) -> bool {
-    let Ok(bytes) = std::fs::read(wasm_path) else {
+    let Ok(bytes) = crate::compile_fs::read(wasm_path) else {
         return false;
     };
     let Ok(pins) = artifact_pins(&bytes) else {
@@ -155,8 +155,10 @@ fn pinned_and_bundled<'a>(
 /// This is the pin a workflow compiled against that bundle records.
 pub fn bundled_trusted_pin(components_dir: &std::path::Path, agent: &str) -> Option<String> {
     let component = crate::direct_wasm::component::agent_component(agent);
-    let wasm = std::fs::read(components_dir.join(&component.bundle_wasm_filename)).ok()?;
-    let meta = std::fs::read(components_dir.join(&component.bundle_meta_filename)).ok()?;
+    let wasm =
+        crate::compile_fs::read(components_dir.join(&component.bundle_wasm_filename)).ok()?;
+    let meta =
+        crate::compile_fs::read(components_dir.join(&component.bundle_meta_filename)).ok()?;
     Some(runtara_dsl::agent_meta::trusted_artifact_import(
         agent,
         &super::sha256_hex(&wasm),

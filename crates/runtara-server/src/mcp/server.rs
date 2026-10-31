@@ -1096,6 +1096,8 @@ impl ServerHandler for SmoMcpServer {
     /// the request extensions. We recover the `AuthContext` from there and bind it via
     /// [`with_caller_auth`] so every in-process API call this tool makes runs as the
     /// real caller — applying role and ownership authorization instead of bypassing it.
+    /// The call also runs in the caller's tenant scope, so row-level security confines
+    /// the tool's own database work to that tenant.
     async fn call_tool(
         &self,
         request: rmcp::model::CallToolRequestParams,
@@ -1109,11 +1111,28 @@ impl ServerHandler for SmoMcpServer {
 
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         match caller {
+            // rmcp runs the call on a task of its own, outside the request's
+            // tenant scope, so it is scoped again here: the tool's own
+            // database reads see only the caller's tenant.
             Some(auth) => {
-                tools::internal_api::with_caller_auth(auth, self.tool_router.call(tcc)).await
+                let tenant = auth.org_id.clone();
+                runtara_store_postgres::tenant_scope::scoped(
+                    tenant,
+                    tools::internal_api::with_caller_auth(auth, self.tool_router.call(tcc)),
+                )
+                .await
             }
             // No HTTP-derived identity (non-HTTP transport / tests): dispatch without
             // binding; in-process calls fall back to their role-less synthetic context.
+            // Where tenants share a process, no call goes unscoped (M7.16).
+            None if crate::config::try_get()
+                .is_some_and(|config| config.served_tenants.len() > 1) =>
+            {
+                Err(rmcp::ErrorData::invalid_request(
+                    "a tool call names no tenant",
+                    None,
+                ))
+            }
             None => self.tool_router.call(tcc).await,
         }
     }

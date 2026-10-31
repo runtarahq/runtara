@@ -106,6 +106,27 @@ pub fn get_default_rate_limit_config(integration_id: &str) -> Option<RateLimitCo
             max_retries: 3,
             max_wait_ms: 60000,
         }),
+        // Pipedrive: API-token requests are limited per token over a 2-second
+        // window, from 20 per window on the Essential plan up to 120 on Enterprise.
+        // 5 req/s with burst 10 can never exceed 20 in any 2-second window.
+        "pipedrive_api_token" => Some(RateLimitConfigDto {
+            requests_per_second: 5,
+            burst_size: 10,
+            retry_on_limit: true,
+            max_retries: 3,
+            max_wait_ms: 60000,
+        }),
+        // Zendesk Support API: limited per account per minute, from 200 requests
+        // on the Team plan up to 2500 on Enterprise Plus (legacy Essential
+        // accounts get 10 and need a lower limit on the connection). 3 req/s with
+        // burst 10 allows at most 190 in any minute.
+        "zendesk_client_credentials" => Some(RateLimitConfigDto {
+            requests_per_second: 3,
+            burst_size: 10,
+            retry_on_limit: true,
+            max_retries: 3,
+            max_wait_ms: 60000,
+        }),
         // Mailgun: per-plan sending/API limits vary; 5 req/s with burst 10 is a
         // conservative floor that suits transactional sending without 429s.
         "mailgun" => Some(RateLimitConfigDto {
@@ -152,6 +173,20 @@ mod tests {
         let config = get_default_rate_limit_config("stripe_api_key").unwrap();
         assert_eq!(config.requests_per_second, 20);
         assert_eq!(config.burst_size, 40);
+    }
+
+    #[test]
+    fn test_pipedrive_defaults() {
+        let config = get_default_rate_limit_config("pipedrive_api_token").unwrap();
+        assert_eq!(config.requests_per_second, 5);
+        assert_eq!(config.burst_size, 10);
+    }
+
+    #[test]
+    fn test_zendesk_defaults_stay_under_the_team_plan() {
+        let config = get_default_rate_limit_config("zendesk_client_credentials").unwrap();
+        // At most burst + rate × 60 requests in any minute; Team allows 200.
+        assert!(config.burst_size + config.requests_per_second * 60 <= 200);
     }
 
     #[test]

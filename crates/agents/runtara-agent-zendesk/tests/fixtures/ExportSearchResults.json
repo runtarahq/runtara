@@ -1,0 +1,13 @@
+{
+  "facets": null,
+  "links": {
+    "next": "https://example.zendesk.com/api/v2/search/export?filter%5Btype%5D=ticket&page%5Bafter%5D=eyJmaWVsZCI6ImNyZWF0ZWRfYXQiLCJkZXNjIjp0cnVlLCJ0aWVCcmVha0ZpZWxkIjoiaWQiLCJ0aWVCcmVha0Rlc2MiOmZhbHNlLCJzb3J0VmFsdWVzIjpudWxsLCJleHBvcnRlZFRodXNGYXIiOjAsInNlc3Npb25TdGFydCI6MTYwNzAzOTI1Mzk4NSwiY3JlYXRlZEF0IjoxNjA3MDM5MjUzOTg1LCJzYWx0ZWRSZXF1ZXN0SGFzaCI6LTQ5ODM0ODc3LCJzYWx0ZWRDdXJzb3JIYXNoIjotMjQwMzQ4MjgwfQ%3D%3D&page%5Bsize%5D=100&query=hello%26page%5Bsize%5D%3D100%26filter%5Btype%5D%3Dticket",
+    "prev": null
+  },
+  "meta": {
+    "after_cursor": "eyJmaWVsZCI6ImNyZWF0ZWRfYXQiLCJkZXNjIjp0cnVlLCJ0aWVCcmVha0ZpZWxkIjoiaWQiLCJ0aWVCcmVha0Rlc2MiOmZhbHNlLCJzb3J0VmFsdWVzIjpudWxsLCJleHBvcnRlZFRodXNGYXIiOjAsInNlc3Npb25TdGFydCI6MTYwNzAzOTI1Mzk4NSwiY3JlYXRlZEF0IjoxNjA3MDM5MjUzOTg1LCJzYWx0ZWRSZXF1ZXN0SGFzaCI6LTQ5ODM0ODc3LCJzYWx0ZWRDdXJzb3JIYXNoIjotMjQwMzQ4MjgwfQ==",
+    "before_cursor": null,
+    "has_more": true
+  },
+  "results": []
+}

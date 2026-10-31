@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures::stream::StreamExt;
+use runtara_store_postgres::tenant_scope::scoped;
 use serde_json::Value;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use thiserror::Error;
@@ -738,8 +739,9 @@ impl ExecutionOutbox {
         );
 
         give_back!(
-            sqlx::query("INSERT INTO execution_outbox (request_id) VALUES ($1)")
+            sqlx::query("INSERT INTO execution_outbox (request_id, tenant_id) VALUES ($1, $2)")
                 .bind(request_id)
+                .bind(tenant_id)
                 .execute(&mut *tx)
                 .await
         );
@@ -1518,6 +1520,11 @@ impl ExecutionOutbox {
                     (o.state = 'pending' AND o.available_at <= NOW())
                     OR (o.state = 'leased' AND o.lease_expires_at <= NOW())
                   )
+                  -- Where processes serving other tenants share the store
+                  -- (RUNTARA_CLAIM_ONLY_SERVED_TENANTS), only the served
+                  -- tenants' requests: another's stream is not this
+                  -- process's to publish to.
+                  AND ($4::text[] IS NULL OR o.tenant_id = ANY($4))
                 ORDER BY o.available_at, o.created_at
                 FOR UPDATE OF o SKIP LOCKED
                 LIMIT $2
@@ -1537,6 +1544,7 @@ impl ExecutionOutbox {
         .bind(worker_id)
         .bind(batch_size)
         .bind(lease_ms)
+        .bind(runtara_environment::claim_scope::claim_tenants())
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
@@ -2269,8 +2277,10 @@ impl ExecutionOutboxRelay {
         // database and the runners mostly idle. Rows address different
         // requests and the stream is unordered across them, so overlapping
         // them changes no ordering the consumer relies on.
+        // Each row is one tenant's: row level security keeps its delivery's
+        // database work to that tenant's rows.
         let results = futures::stream::iter(claimed)
-            .map(|claim| self.deliver_one(claim))
+            .map(|claim| scoped(claim.tenant_id.clone(), self.deliver_one(claim)))
             .buffer_unordered(relay_delivery_concurrency())
             .collect::<Vec<_>>()
             .await;
