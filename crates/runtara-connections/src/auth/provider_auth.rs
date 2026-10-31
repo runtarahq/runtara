@@ -127,7 +127,7 @@ fn describe_connection_auth(
                 headers.insert("Authorization".into(), format!("Bearer {}", key));
             }
             ConnectionAuthDescriptor {
-                base_url: Some("https://api.openai.com".into()),
+                base_url: Some(openai_proxy_base_url(params)),
                 aws_signing: None,
                 azure_signing: None,
                 deferred_auth: None,
@@ -1059,6 +1059,21 @@ fn collect_shopify_scopes(params: &Value) -> String {
         .join(",")
 }
 
+/// Proxy pin base for an `openai_api_key` connection.
+///
+/// The stored `base_url` follows the OpenAI SDK convention and ends in `/v1`
+/// (`https://api.openai.com/v1`), while every OpenAI caller sends paths that
+/// already start with `/v1/` (`/v1/chat/completions`). One trailing `/v1`
+/// segment is dropped so the two compose without doubling it. Connections
+/// saved without a base URL keep the official API.
+pub fn openai_proxy_base_url(params: &Value) -> String {
+    let Some(base_url) = first_string_param(params, &["base_url"]) else {
+        return "https://api.openai.com".to_string();
+    };
+    let base_url = base_url.trim_end_matches('/');
+    base_url.strip_suffix("/v1").unwrap_or(base_url).to_string()
+}
+
 fn first_string_param(params: &Value, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| {
         params[*key]
@@ -1142,6 +1157,46 @@ mod tests {
             revocation_endpoint: "",
             pkce_required: false,
             params_driven: false,
+        }
+    }
+
+    #[test]
+    fn openai_pins_the_saved_base_url_without_its_v1_segment() {
+        for (params, expected) in [
+            (json!({ "api_key": "sk-x" }), "https://api.openai.com"),
+            (
+                json!({ "api_key": "sk-x", "base_url": "  " }),
+                "https://api.openai.com",
+            ),
+            (
+                json!({ "api_key": "sk-x", "base_url": "https://api.openai.com/v1" }),
+                "https://api.openai.com",
+            ),
+            (
+                json!({ "api_key": "sk-x", "base_url": "https://llm.example/v1/" }),
+                "https://llm.example",
+            ),
+            (
+                json!({ "api_key": "sk-x", "base_url": "https://llm.example/openai/v1" }),
+                "https://llm.example/openai",
+            ),
+            (
+                json!({ "api_key": "sk-x", "base_url": "https://llm.example/v10" }),
+                "https://llm.example/v10",
+            ),
+            (
+                json!({ "api_key": "sk-x", "base_url": "https://llm.example" }),
+                "https://llm.example",
+            ),
+        ] {
+            let mut headers = HashMap::new();
+            let descriptor =
+                describe_connection_auth("conn", "openai_api_key", &params, &mut headers);
+            assert_eq!(descriptor.base_url.as_deref(), Some(expected), "{params}");
+            assert_eq!(
+                headers.get("Authorization").map(String::as_str),
+                Some("Bearer sk-x")
+            );
         }
     }
 

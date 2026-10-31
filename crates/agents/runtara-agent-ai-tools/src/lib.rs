@@ -5,7 +5,7 @@
 //! Bedrock). Each capability routes from an explicit `provider` input; the
 //! outbound host service validates that provider against the selected connection,
 //! then handles credential injection and base-URL rewriting per provider (OpenAI:
-//! `https://api.openai.com`; Bedrock: `https://bedrock-runtime.{region}.amazonaws.com`).
+//! the connection's base URL; Bedrock: `https://bedrock-runtime.{region}.amazonaws.com`).
 //!
 //! Capability metadata travels through `#[capability_input]` / `#[capability]` /
 //! `#[capability_output]` annotations on the same Rust types and functions that
@@ -195,20 +195,20 @@ pub struct LlmUsage {
 // OpenAI HTTP helper
 // ============================================================================
 
-/// POST `body` to `https://api.openai.com{path}` via the outbound host service.
+/// POST `body` to `{path}` under the connection's base URL via the outbound host
+/// service, so any OpenAI-compatible endpoint the connection names is honored.
 async fn openai_post(
     connection: &RawConnection,
     path: &str,
     body: Value,
     timeout_ms: u64,
 ) -> Result<Value, AgentError> {
-    let url = format!("https://api.openai.com{path}");
     let body_bytes = serde_json::to_vec(&body)
         .map_err(|e| AgentError::permanent("SERIALIZATION_ERROR", e.to_string()))?;
 
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(timeout_ms));
     let response = client
-        .request("POST", &url)
+        .request("POST", path)
         .header("Content-Type", "application/json")
         .connection_id(&connection.connection_id)
         .ai_provider(PROVIDER_OPENAI)

@@ -124,7 +124,7 @@ async fn cancellation(
                 } else {
                     assert!(request["url"].as_str().unwrap().starts_with(
                         if provider == "openai" {
-                            "https://api.openai.com/"
+                            "/v1/"
                         } else if agent == "ai-tools" {
                             "/model/"
                         } else {
@@ -152,7 +152,7 @@ async fn cancellation(
                 assert_eq!(request["connection_id"], "fixture-connection");
                 match agent.as_str() {
                     "openai" => {
-                        assert_eq!(request["url"], "https://api.openai.com/v1/moderations");
+                        assert_eq!(request["url"], "/v1/moderations");
                         assert_eq!(request_body(&request)?["input"], "after");
                     }
                     "bedrock" => {
@@ -163,7 +163,7 @@ async fn cancellation(
                         );
                     }
                     "ai-tools" => {
-                        assert_eq!(request["url"], "https://api.openai.com/v1/chat/completions");
+                        assert_eq!(request["url"], "/v1/chat/completions");
                         assert_eq!(request_body(&request)?["messages"][0]["content"], "after");
                     }
                     _ => unreachable!(),

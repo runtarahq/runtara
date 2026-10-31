@@ -1198,6 +1198,28 @@ mod tests {
     }
 
     #[test]
+    fn openai_requests_follow_the_connection_base_url() {
+        let base = runtara_connections::auth::provider_auth::openai_proxy_base_url(
+            &json!({"api_key": "sk-x", "base_url": "https://llm.example/v1"}),
+        );
+        // Native AiAgent (relative) and agent components (absolute) both land
+        // on the saved host, never on api.openai.com.
+        for agent_url in [
+            "/v1/chat/completions",
+            "https://api.openai.com/v1/chat/completions",
+        ] {
+            let url = proxy_url::pin_url_to_base(
+                agent_url,
+                Some(&base),
+                true,
+                &proxy_url::PinOptions::strict(),
+            )
+            .unwrap();
+            assert_eq!(url, "https://llm.example/v1/chat/completions");
+        }
+    }
+
+    #[test]
     fn attachment_endpoints_pin_host_and_mailgun_domain() {
         let params = json!({"domain": "inbound.example"});
         for (integration, endpoint, expected) in [
