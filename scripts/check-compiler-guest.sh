@@ -85,3 +85,23 @@ print(f"  over the workflow API with no filesystem: a {len(wasm)}-byte component
 PY
 wasm-tools validate --features all "${WORK}/api/workflow.wasm" \
     || { echo "the guest's component does not validate" >&2; exit 1; }
+
+# As its tenant's warm compiler (SYN-930): two compiles, one after the other,
+# the second fetching nothing the first fetched, then it ends once idle.
+kill "${HOST_PID}" 2>/dev/null; wait "${HOST_PID}" 2>/dev/null || true
+mkdir -p "${WORK}/worker"
+python3 "${ROOT}/scripts/tests/compile_guest_host.py" "${PORT}" "${WORK}/chain100.json" "${COMPONENTS_DIR}" "${WORK}/worker" worker &
+HOST_PID=$!
+for _ in $(seq 1 50); do (echo > "/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null && break; sleep 0.1; done
+wasmtime run -W max-wasm-stack=67108864 -S http --env "RUNTARA_COMPILE_API=http://127.0.0.1:${PORT}" "${API_GUEST}"
+python3 - "${WORK}/worker" "${WORK}/api/workflow.wasm" <<'PY'
+import hashlib, json, os, sys
+worker, single = sys.argv[1:]
+expected = hashlib.sha256(open(single, "rb").read()).hexdigest()
+for compile_id in ("j0", "j1"):
+    outcome = json.load(open(os.path.join(worker, f"outcome-{compile_id}.json")))
+    assert outcome["compiled"]["workflow_wasm"] == expected, (compile_id, outcome)
+first = len(set(open(os.path.join(worker, "fetched-j0")).read().split()))
+assert first > 0 and not os.path.exists(os.path.join(worker, "fetched-j1")), "the second compile fetched again"
+print(f"  as a warm compiler: two compiles to the same component, the first fetching {first} files and the second none ✓")
+PY
