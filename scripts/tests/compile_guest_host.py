@@ -18,8 +18,9 @@ import zlib
 port, workflow, components_dir, out_dir = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
 WORKER = len(sys.argv) > 5
 QUEUED = ["j0", "j1"] if WORKER else []
-# The compiles it issues: only their ids name a file.
-ISSUED = frozenset(QUEUED)
+# The compiles it issues, each to its own id as written here: a file is named
+# only after one of these, never after a path a request names.
+ISSUED = {compile_id: compile_id for compile_id in QUEUED}
 files = {}
 names = {}
 for name in sorted(os.listdir(components_dir)):
@@ -54,7 +55,7 @@ class Host(http.server.BaseHTTPRequestHandler):
         """The compile and component a path names: (id or None, digest)."""
         if path.startswith("/v1/compiles/"):
             compile_id, _, digest = path.removeprefix("/v1/compiles/").partition("/artifacts/")
-            return (compile_id if compile_id in ISSUED else "unknown"), digest
+            return ISSUED.get(compile_id, "unknown"), digest
         return None, path.removeprefix("/v1/artifacts/")
 
     def do_GET(self):
@@ -103,8 +104,8 @@ class Host(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         name = "outcome.json"
         if self.path.startswith("/v1/compiles/"):
-            compile_id = self.path.split("/")[3]
-            if compile_id not in ISSUED:
+            compile_id = ISSUED.get(self.path.split("/")[3])
+            if compile_id is None:
                 return self.reply(404, b"{}")
             name = f"outcome-{compile_id}.json"
         with open(os.path.join(out_dir, name), "wb") as out:
