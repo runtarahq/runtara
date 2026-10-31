@@ -168,7 +168,9 @@ fn compile(
         Ok((outcome, wasm)) => {
             let compiled = started.elapsed();
             let handing_back = std::time::Instant::now();
-            let workflow_wasm = hand_back(artifacts, &wasm, deflate)?;
+            // Its SHA-256 as the compile computed it: hashing 6 MB again in
+            // WASM took much of the hand-back.
+            let workflow_wasm = hand_back(artifacts, &wasm, &outcome.binary_checksum, deflate)?;
             // On stderr, which a node keeps as the run's output: where a
             // compile's time went.
             let (files, bytes, fetch_time) = *fetching.lock().expect("fetch timings");
@@ -220,16 +222,13 @@ fn fetch(artifacts: &str, digest: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-/// Hands `wasm` back to `artifacts` in parts, answering its SHA-256 once the
-/// host has it whole, deflated when `deflate`: a component deflates to about
-/// a third, which pays where the link to the host is slow (SYN-930).
+/// Hands `wasm`, whose SHA-256 is `digest`, back to `artifacts` in parts,
+/// answering its SHA-256 once the host has it whole (checking it is what the
+/// parts make), deflated when `deflate`: a component deflates to about a
+/// third, which pays where the link to the host is slow (SYN-930).
 #[cfg(target_os = "wasi")]
-fn hand_back(artifacts: &str, wasm: &[u8], deflate: bool) -> Result<String, String> {
-    use sha2::Digest;
-    let digest: String = sha2::Sha256::digest(wasm)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+fn hand_back(artifacts: &str, wasm: &[u8], digest: &str, deflate: bool) -> Result<String, String> {
+    let digest = digest.to_owned();
     let sent = if deflate {
         use std::io::Write;
         let mut encoder = flate2::write::DeflateEncoder::new(
