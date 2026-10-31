@@ -214,7 +214,8 @@ impl CompileQueues {
         file.seek(std::io::SeekFrom::Start(start))
             .await
             .map_err(unavailable)?;
-        let mut bytes = Vec::with_capacity((end - start) as usize);
+        // Grown as read: `take` bounds it.
+        let mut bytes = Vec::new();
         file.take(end - start)
             .read_to_end(&mut bytes)
             .await
