@@ -180,8 +180,10 @@ fn compile(
 /// response a Fenders node's host origin allows.
 #[cfg(target_os = "wasi")]
 const FETCH_SLICE: usize = 4 * 1024 * 1024;
+/// A hand-back part: as large as a request may be, less room for its
+/// headers, as each part is a round trip.
 #[cfg(target_os = "wasi")]
-const HAND_BACK_PART: usize = 2 * 1024 * 1024;
+const HAND_BACK_PART: usize = 3 * 1024 * 1024 + 768 * 1024;
 
 /// The artifact `digest` at `artifacts`, in slices: a slice shorter than
 /// asked for is its last.

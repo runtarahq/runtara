@@ -203,11 +203,54 @@ fn listed(
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        let digest = sha256_hex(&std::fs::read(entry.path())?);
+        let digest = digest_of(&entry.path())?;
         paths.insert(digest.clone(), entry.path());
         files.insert(name, digest);
     }
     Ok(files)
+}
+
+/// The SHA-256 of the file at `path`, read again only when the file is
+/// another or changed (SYN-930): a compile names every component, and
+/// hashing them all each time cost a remote compile much of its budget. A
+/// file replaced or rewritten has another inode, size, modification or
+/// change time.
+fn digest_of(path: &Path) -> io::Result<String> {
+    #[cfg(unix)]
+    let identity = {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path)?;
+        (
+            meta.dev(),
+            meta.ino(),
+            meta.len(),
+            meta.mtime(),
+            meta.mtime_nsec(),
+            meta.ctime(),
+            meta.ctime_nsec(),
+        )
+    };
+    #[cfg(not(unix))]
+    return Ok(sha256_hex(&std::fs::read(path)?));
+    #[cfg(unix)]
+    {
+        use std::collections::HashMap;
+        use std::sync::{Mutex, OnceLock};
+        type Identity = (u64, u64, u64, i64, i64, i64, i64);
+        static KNOWN: OnceLock<Mutex<HashMap<PathBuf, (Identity, String)>>> = OnceLock::new();
+        let known = KNOWN.get_or_init(Mutex::default);
+        if let Some((seen, digest)) = known.lock().expect("digests").get(path)
+            && *seen == identity
+        {
+            return Ok(digest.clone());
+        }
+        let digest = sha256_hex(&std::fs::read(path)?);
+        known
+            .lock()
+            .expect("digests")
+            .insert(path.to_path_buf(), (identity, digest.clone()));
+        Ok(digest)
+    }
 }
 
 /// The request for compiling `input` with `options`, and where each file it
@@ -674,4 +717,27 @@ fn write_build(
     let binary_path = build_dir.join(WORKFLOW_WASM);
     std::fs::write(&binary_path, workflow_wasm)?;
     Ok((build_dir, binary_path))
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use super::*;
+
+    /// A component's digest is read again once the file is rewritten, even
+    /// to the same size, and not otherwise.
+    #[test]
+    fn a_rewritten_component_is_hashed_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.wasm");
+        std::fs::write(&path, b"first").unwrap();
+        assert_eq!(digest_of(&path).unwrap(), sha256_hex(b"first"));
+        assert_eq!(digest_of(&path).unwrap(), sha256_hex(b"first"));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(&path, b"other").unwrap();
+        assert_eq!(digest_of(&path).unwrap(), sha256_hex(b"other"));
+        let replacement = dir.path().join("agent.new");
+        std::fs::write(&replacement, b"third").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert_eq!(digest_of(&path).unwrap(), sha256_hex(b"third"));
+    }
 }
