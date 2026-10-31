@@ -11,9 +11,10 @@ export function useOrgId() {
 
   useEffect(() => {
     // Non-OIDC modes: the server already knows its tenant. Take it from the
-    // injected runtime config so the request interceptor can prefix URLs.
+    // injected runtime config so the request interceptor can prefix URLs, or,
+    // on a static host, from the path the SPA was loaded at.
     if (!isOidcAuth) {
-      setOrgId(config.tenantId ?? '');
+      setOrgId(config.tenantId ?? tenantIdFromUrl ?? '');
       return;
     }
 

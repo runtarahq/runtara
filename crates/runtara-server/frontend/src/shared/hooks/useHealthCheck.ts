@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { checkServerVersion } from '@/shared/config/serverCompat';
 import { ManagementAPIClient } from '@/shared/queries';
 import { useMaintenanceStore } from '@/shared/stores/maintenanceStore';
 
@@ -8,8 +9,9 @@ export function useHealthCheck() {
   useEffect(() => {
     const checkHealth = async () => {
       try {
-        await ManagementAPIClient.instance.get('/health');
+        const response = await ManagementAPIClient.instance.get('/health');
         setMaintenanceMode(false);
+        checkServerVersion(response?.data?.version);
       } catch (error: any) {
         if (error?.response?.status === 503) {
           setMaintenanceMode(true);

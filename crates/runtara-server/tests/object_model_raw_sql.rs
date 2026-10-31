@@ -101,6 +101,7 @@ impl Fixture {
                 db_pool: pool.clone(),
                 redis_manager: None,
                 public_base_url: "http://localhost".to_string(),
+                oauth_complete_url: None,
                 http_client: reqwest::Client::new(),
                 cipher: Arc::new(NoOpCipher),
                 compatibility: Arc::new(IntegrationCompatibility::new(Default::default())),

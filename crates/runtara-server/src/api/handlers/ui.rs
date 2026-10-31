@@ -78,6 +78,65 @@ pub fn resolve_source() -> Option<AssetSource> {
     }
 }
 
+/// Whether this process serves the UI: what [`resolve_source`] decides,
+/// without its warnings.
+pub fn serves_ui() -> bool {
+    std::env::var("RUNTARA_UI_DIST_DIR").is_ok_and(|raw| !raw.trim().is_empty())
+        || cfg!(feature = "embed-ui")
+}
+
+/// The UI's `<base href>` (`RUNTARA_UI_BASE_PATH`, default `/ui/`), with its
+/// trailing slash: where the browser loads the UI's files from.
+pub fn base_href() -> String {
+    let raw = std::env::var("RUNTARA_UI_BASE_PATH").unwrap_or_default();
+    let base = raw.trim_end_matches('/');
+    if base.is_empty() {
+        "/ui/".to_string()
+    } else {
+        format!("{base}/")
+    }
+}
+
+/// The console's OAuth landing page (`oauth-complete.html`), where the OAuth
+/// callback sends the consent popup.
+///
+/// `RUNTARA_UI_PUBLIC_URL` names where the console's files are served when
+/// that is not this server (a static host, a dev server): e.g.
+/// `https://app.example.com/`. Without it, the UI this server serves, under
+/// `public_base_url`; `None` when it serves none.
+pub fn oauth_complete_url(public_base_url: &str) -> Result<Option<url::Url>, String> {
+    oauth_complete_url_from(
+        std::env::var("RUNTARA_UI_PUBLIC_URL").ok().as_deref(),
+        public_base_url,
+        serves_ui().then(base_href).as_deref(),
+    )
+}
+
+fn oauth_complete_url_from(
+    ui_public_url: Option<&str>,
+    public_base_url: &str,
+    served_base_href: Option<&str>,
+) -> Result<Option<url::Url>, String> {
+    let console = match ui_public_url.map(str::trim).filter(|raw| !raw.is_empty()) {
+        Some(raw) => raw.to_string(),
+        None => match served_base_href {
+            Some(base_href) => format!("{}{base_href}", public_base_url.trim_end_matches('/')),
+            None => return Ok(None),
+        },
+    };
+    let console = url::Url::parse(&format!("{}/", console.trim_end_matches('/')))
+        .map_err(|e| format!("the console URL '{console}' is not a URL: {e}"))?;
+    if !matches!(console.scheme(), "http" | "https") || console.query().is_some() {
+        return Err(format!(
+            "the console URL '{console}' must be an http(s) URL without a query"
+        ));
+    }
+    console
+        .join("oauth-complete.html")
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
 impl AssetSource {
     /// Whether the bytes behind this source can change while the process runs.
     /// Only an immutable source may have its rewritten index.html cached, and
@@ -858,6 +917,44 @@ fn asset_response(path: &str, asset: Asset, state: &UiState) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_landing_page_is_under_the_configured_console() {
+        let url = oauth_complete_url_from(
+            Some("https://app.example.com"),
+            "https://api.example.com",
+            Some("/ui/"),
+        );
+        assert_eq!(
+            url.unwrap().unwrap().as_str(),
+            "https://app.example.com/oauth-complete.html"
+        );
+        let url = oauth_complete_url_from(Some("https://app.example.com/console/"), "", None);
+        assert_eq!(
+            url.unwrap().unwrap().as_str(),
+            "https://app.example.com/console/oauth-complete.html"
+        );
+    }
+
+    #[test]
+    fn oauth_landing_page_defaults_to_the_served_ui() {
+        let url = oauth_complete_url_from(None, "http://localhost:7001/", Some("/ui/"));
+        assert_eq!(
+            url.unwrap().unwrap().as_str(),
+            "http://localhost:7001/ui/oauth-complete.html"
+        );
+        assert_eq!(
+            oauth_complete_url_from(None, "http://localhost:7001", None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn oauth_landing_page_refuses_a_console_url_it_cannot_redirect_to() {
+        assert!(oauth_complete_url_from(Some("app.example.com"), "", None).is_err());
+        assert!(oauth_complete_url_from(Some("javascript:alert(1)"), "", None).is_err());
+        assert!(oauth_complete_url_from(Some("https://app.example.com/?x=1"), "", None).is_err());
+    }
 
     #[test]
     fn csp_allows_wasm_validation_without_general_eval() {

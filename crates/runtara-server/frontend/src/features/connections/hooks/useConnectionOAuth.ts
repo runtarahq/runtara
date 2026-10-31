@@ -3,7 +3,7 @@ import { useAuth } from 'react-oidc-context';
 import { toast } from 'sonner';
 import { isOidcAuth } from '@/shared/config/runtimeConfig';
 import { queryKeys } from '@/shared/queries/query-keys';
-import { queryClient } from '@/main.tsx';
+import { queryClient } from '@/bootstrap.tsx';
 import { getOAuthAuthorizeUrl } from '@/features/connections/queries';
 import { useOAuthPopup } from './useOAuthPopup';
 
@@ -30,7 +30,7 @@ export function useConnectionOAuth() {
       setRunningId(connectionId);
       try {
         const authUrl = await getOAuthAuthorizeUrl(token, connectionId);
-        await openOAuthPopup(authUrl);
+        await openOAuthPopup(authUrl, connectionId);
         queryClient.invalidateQueries({ queryKey: queryKeys.connections.all });
         queryClient.invalidateQueries({
           queryKey: queryKeys.connections.byId(connectionId),

@@ -27,6 +27,7 @@ export const createAuthHeaders = (token?: string | null) => {
 export function getRuntimeBaseUrl(): string {
   const base = config.apiBaseUrl.replace(/\/$/, '');
   const orgId = useAuthStore.getState().orgId;
-  const orgSegment = orgId && !config.stripOrgId ? `/${orgId}` : '';
+  const orgSegment =
+    orgId && !config.stripOrgId ? `/${encodeURIComponent(orgId)}` : '';
   return `${base}/api/runtime${orgSegment}`;
 }

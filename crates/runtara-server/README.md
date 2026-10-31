@@ -86,6 +86,13 @@ deployed behind a gateway that routes `/ui/<tenant-id>/…` externally, set
 prefix stays at `/ui` (override via `RUNTARA_UI_MOUNT` only if the gateway
 does not strip the tenant segment before forwarding).
 
+When the console is served from somewhere else (a static host, `vite dev`),
+set `RUNTARA_UI_PUBLIC_URL` to where its files are, e.g.
+`https://app.example.com/`. The OAuth callback sends the consent popup to that
+console's `oauth-complete.html`; without the setting it uses the UI this
+server serves, and with no UI it answers in plain text. A console on another
+origin also needs that origin in `CORS_ALLOWED_ORIGINS`.
+
 `RUNTARA_UI_DIST_DIR=<path to frontend/dist>` serves the UI from that directory
 at request time instead of from the embedded snapshot. It works with or without
 `embed-ui` and in any profile, and takes precedence when both are available.

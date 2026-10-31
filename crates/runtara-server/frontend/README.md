@@ -86,6 +86,38 @@ Config resolution lives in [`src/shared/config/runtimeConfig.ts`](src/shared/con
 Vite dev server and tests use the build-time fallbacks; the embedded
 server overrides them.
 
+### Static hosting
+
+`dist/` also runs from a plain static host (a CDN). With no injected config,
+the SPA reads `config.json` from the site root
+([`staticConfig.ts`](src/shared/config/staticConfig.ts)): the same keys as
+`window.__RUNTARA_CONFIG__` (`authMode`, `oidcAuthority`, `oidcClientId`,
+`oidcAudience`, `oidcOrganizations`, `apiBaseUrl`, `eventsBaseUrl`,
+`plausibleDomain`, `plausibleHost`), plus `mountPath` (default `/ui/`). The
+tenant is the first path segment under the mount (`/ui/acme/…`), and
+entitlements come from `GET /api/runtime/entitlements`. The version shown is
+the bundle's own `VITE_RUNTARA_VERSION`, so set it when building; a server
+more than one minor version away from it gets a warning (with no version
+set, nothing is checked).
+
+The host has to:
+
+- serve `dist/` at the site root (`<base href="/">` is what `./assets/*`
+  resolve against);
+- answer every unknown path with `index.html` (SPA fallback);
+- serve `index.html` and `config.json` with `Cache-Control: no-cache`, and
+  `assets/*` as immutable;
+- set the CSP itself. `index.html` has two inline scripts, the empty config
+  placeholder and the theme script; both are fixed, so their hashes are too.
+  The OAuth landing page (`oauth-complete.html`) needs `script-src 'self'` and,
+  for its `<style>` block, `style-src 'unsafe-inline'`.
+
+Serve `/api/*` and `/health` from the same origin (a proxy to runtara-server)
+and leave `apiBaseUrl` unset. On another origin the server needs
+`CORS_ALLOWED_ORIGINS` set to the console's origin and `RUNTARA_UI_PUBLIC_URL`
+to where the console is served, so the OAuth callback sends the consent popup
+to the console's `oauth-complete.html`.
+
 ## Scripts
 
 - `npm run dev` — Vite dev server on `:8081`

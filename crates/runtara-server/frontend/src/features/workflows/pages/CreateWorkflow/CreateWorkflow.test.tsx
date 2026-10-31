@@ -10,7 +10,7 @@ const spies = vi.hoisted(() => ({
 }));
 
 // `main.tsx` mounts the app at import time; the page only needs its queryClient.
-vi.mock('@/main.tsx', () => ({
+vi.mock('@/bootstrap.tsx', () => ({
   queryClient: { invalidateQueries: vi.fn() },
 }));
 

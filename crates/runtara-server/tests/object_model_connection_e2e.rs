@@ -163,6 +163,7 @@ fn facade(pool: PgPool) -> ConnectionsFacade {
         db_pool: pool,
         redis_manager: None,
         public_base_url: "http://localhost".to_string(),
+        oauth_complete_url: None,
         http_client: reqwest::Client::new(),
         cipher: Arc::new(NoOpCipher),
         compatibility: test_compatibility(),

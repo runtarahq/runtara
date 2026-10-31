@@ -15,7 +15,7 @@ import {
   validateSchemaFieldsWithRust,
 } from '@/features/workflows/utils/rust-workflow-validation';
 import '@xyflow/react/dist/base.css';
-import { queryClient } from '@/main.tsx';
+import { queryClient } from '@/bootstrap.tsx';
 import { slugify } from '@/shared/utils/string-utils';
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import * as form from '@/features/workflows/components/WorkflowEditor/NodeForm/NodeFormItem';

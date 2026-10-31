@@ -5,7 +5,7 @@ import { normalizeFolderParam } from '@/features/workflows/folder-nav';
 import { useCustomMutation } from '@/shared/hooks/api';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { queryKeys } from '@/shared/queries/query-keys';
-import { queryClient } from '@/main.tsx';
+import { queryClient } from '@/bootstrap.tsx';
 
 import { createWorkflow } from '@/features/workflows/queries';
 

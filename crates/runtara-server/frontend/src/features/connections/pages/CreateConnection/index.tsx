@@ -20,7 +20,7 @@ import {
 import { useAuth } from 'react-oidc-context';
 import { isOidcAuth } from '@/shared/config/runtimeConfig';
 import { useNavigationBlockerStore } from '@/shared/stores/navigationBlockerStore';
-import { queryClient } from '@/main.tsx';
+import { queryClient } from '@/bootstrap.tsx';
 
 export function CreateConnection() {
   const { id } = useParams();
@@ -52,7 +52,7 @@ export function CreateConnection() {
       }
       try {
         const authUrl = await getOAuthAuthorizeUrl(token, connectionId);
-        await openOAuthPopup(authUrl);
+        await openOAuthPopup(authUrl, connectionId);
         // Authorized: nothing left to do here, the list confirms completion.
         queryClient.invalidateQueries({ queryKey: queryKeys.connections.all });
         navigate('/connections');

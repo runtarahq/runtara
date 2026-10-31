@@ -23,7 +23,7 @@ import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { useConnectionRateLimitStatus } from '@/features/connections/hooks/useRateLimits';
 import { useConnectionOAuth } from '@/features/connections/hooks/useConnectionOAuth';
 import { useNavigationBlockerStore } from '@/shared/stores/navigationBlockerStore';
-import { queryClient } from '@/main.tsx';
+import { queryClient } from '@/bootstrap.tsx';
 import type { FormDefinition } from '@/shared/forms';
 import {
   patchStripsAuthorization,

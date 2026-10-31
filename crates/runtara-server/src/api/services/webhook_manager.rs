@@ -842,6 +842,7 @@ mod tests {
                 db_pool: pool,
                 redis_manager: None,
                 public_base_url: "http://localhost".into(),
+                oauth_complete_url: None,
                 http_client: runtara_connections::net::build_hardened_client(),
                 cipher: Arc::new(NoOpCipher),
                 compatibility: Arc::new(IntegrationCompatibility::new(Default::default())),

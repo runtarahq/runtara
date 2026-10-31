@@ -17,7 +17,7 @@ import {
   isEntitlementDenial,
 } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys.ts';
-import { queryClient } from '@/main.tsx';
+import { queryClient } from '@/bootstrap.tsx';
 import { folderCountLabel } from './folder-count-label';
 import { matchFolders } from './folder-search';
 import {
