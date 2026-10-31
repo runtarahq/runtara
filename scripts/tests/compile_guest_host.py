@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import urllib.parse
+import zlib
 
 port, workflow, components_dir, out_dir = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
 WORKER = len(sys.argv) > 5
@@ -89,6 +90,8 @@ class Host(http.server.BaseHTTPRequestHandler):
         whole = len(made) == parts
         if whole:
             wasm = b"".join(made[i] for i in range(parts))
+            if query.get("encoding") == ["deflate"]:
+                wasm = zlib.decompress(wasm, -15)
             assert hashlib.sha256(wasm).hexdigest() == digest
             name = f"workflow-{compile_id}.wasm" if compile_id else "workflow.wasm"
             with open(os.path.join(out_dir, name), "wb") as out:

@@ -639,6 +639,7 @@ fn compile_worker_routes(launches: Arc<ApiLaunches>) -> axum::Router {
     struct Part {
         part: u32,
         parts: u32,
+        encoding: Option<String>,
     }
     async fn next(
         State(launches): State<Arc<ApiLaunches>>,
@@ -709,10 +710,16 @@ fn compile_worker_routes(launches: Arc<ApiLaunches>) -> axum::Router {
             Ok(bytes) => bytes.to_vec(),
             Err(_) => return refused(Refusal::BadPart("the part is too large")),
         };
-        match launches
-            .compiles
-            .hand_back(&id, &tenant, &worker, &sha256, part.part, part.parts, bytes)
-        {
+        match launches.compiles.hand_back(
+            &id,
+            &tenant,
+            &worker,
+            &sha256,
+            part.part,
+            part.parts,
+            part.encoding.as_deref() == Some("deflate"),
+            bytes,
+        ) {
             Ok(whole) => axum::Json(serde_json::json!({"whole": whole})).into_response(),
             Err(refusal) => refused(refusal),
         }

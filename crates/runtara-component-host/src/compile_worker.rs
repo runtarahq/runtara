@@ -218,7 +218,8 @@ impl CompileQueues {
     }
 
     /// Takes `bytes` as part `part` of `parts` of what the compile `id` made,
-    /// whose SHA-256 is `sha256`: answers whether it is now whole.
+    /// whose SHA-256 is `sha256`, deflated when `deflated`: answers whether it
+    /// is now whole.
     #[allow(clippy::too_many_arguments)]
     pub fn hand_back(
         &self,
@@ -228,6 +229,7 @@ impl CompileQueues {
         sha256: &str,
         part: u32,
         parts: u32,
+        deflated: bool,
         bytes: Vec<u8>,
     ) -> Result<bool, Refusal> {
         if parts == 0 || part >= parts {
@@ -251,10 +253,22 @@ impl CompileQueues {
         if made.parts.len() < parts as usize {
             return Ok(false);
         }
-        let whole: Vec<u8> = std::mem::take(&mut made.parts)
+        let mut whole: Vec<u8> = std::mem::take(&mut made.parts)
             .into_values()
             .flatten()
             .collect();
+        if deflated {
+            use std::io::Read;
+            let mut inflated = Vec::with_capacity(whole.len() * 3);
+            let read = flate2::read::DeflateDecoder::new(whole.as_slice())
+                .take(MADE_LIMIT as u64 + 1)
+                .read_to_end(&mut inflated);
+            if read.is_err() || inflated.len() > MADE_LIMIT {
+                made.expected = None;
+                return Err(Refusal::BadPart("the parts do not inflate to an artifact"));
+            }
+            whole = inflated;
+        }
         let digest: String = sha2::Sha256::digest(&whole)
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -360,12 +374,30 @@ mod tests {
         let made_sha = digest(made);
         assert!(
             !queues
-                .hand_back(&first, "acme", "w1", &made_sha, 1, 2, made[9..].to_vec())
+                .hand_back(
+                    &first,
+                    "acme",
+                    "w1",
+                    &made_sha,
+                    1,
+                    2,
+                    false,
+                    made[9..].to_vec()
+                )
                 .unwrap()
         );
         assert!(
             queues
-                .hand_back(&first, "acme", "w1", &made_sha, 0, 2, made[..9].to_vec())
+                .hand_back(
+                    &first,
+                    "acme",
+                    "w1",
+                    &made_sha,
+                    0,
+                    2,
+                    false,
+                    made[..9].to_vec()
+                )
                 .unwrap()
         );
         queues
@@ -401,13 +433,27 @@ mod tests {
         let wrong = digest(b"something else");
         assert!(
             queues
-                .hand_back(&id, "acme", "w1", &wrong, 0, 1, b"made".to_vec())
+                .hand_back(&id, "acme", "w1", &wrong, 0, 1, false, b"made".to_vec())
                 .is_err()
         );
         assert!(
             queues
-                .hand_back(&id, "acme", "w1", &wrong, 3, 1, b"made".to_vec())
+                .hand_back(&id, "acme", "w1", &wrong, 3, 1, false, b"made".to_vec())
                 .is_err()
+        );
+        // Deflated parts are taken once they inflate to the component named.
+        let made = vec![7u8; 100_000];
+        let deflated = {
+            use std::io::Write;
+            let mut encoder =
+                flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(&made).unwrap();
+            encoder.finish().unwrap()
+        };
+        assert!(
+            queues
+                .hand_back(&id, "acme", "w1", &digest(&made), 0, 1, true, deflated)
+                .unwrap()
         );
         queues.cancel(&id);
         assert!(done.await.is_err(), "a cancelled compile's result ends");

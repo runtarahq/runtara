@@ -208,7 +208,9 @@ fn fetch(artifacts: &str, digest: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Hands `wasm` back to `artifacts` in parts, answering its SHA-256 once the
-/// host has it whole.
+/// host has it whole. A warm compiler's (under `/v1/compiles/`) goes
+/// deflated: a component deflates to about a third, and the link to its host
+/// may be slow (SYN-930).
 #[cfg(target_os = "wasi")]
 fn hand_back(artifacts: &str, wasm: &[u8]) -> Result<String, String> {
     use sha2::Digest;
@@ -216,12 +218,28 @@ fn hand_back(artifacts: &str, wasm: &[u8]) -> Result<String, String> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    let parts: Vec<&[u8]> = wasm.chunks(HAND_BACK_PART).collect();
+    let deflated = artifacts.starts_with("/v1/compiles/");
+    let sent = if deflated {
+        use std::io::Write;
+        let mut encoder = flate2::write::DeflateEncoder::new(
+            Vec::with_capacity(wasm.len() / 2),
+            flate2::Compression::fast(),
+        );
+        encoder.write_all(wasm).map_err(|error| error.to_string())?;
+        encoder.finish().map_err(|error| error.to_string())?
+    } else {
+        wasm.to_vec()
+    };
+    let encoding = if deflated { "&encoding=deflate" } else { "" };
+    let parts: Vec<&[u8]> = sent.chunks(HAND_BACK_PART).collect();
     let mut whole = false;
     for (index, part) in parts.iter().enumerate() {
         let answer = http::call(
             "PUT",
-            &format!("{artifacts}/{digest}?part={index}&parts={}", parts.len()),
+            &format!(
+                "{artifacts}/{digest}?part={index}&parts={}{encoding}",
+                parts.len()
+            ),
             Some(part.to_vec()),
         )?;
         let answer: serde_json::Value = serde_json::from_slice(&answer)
