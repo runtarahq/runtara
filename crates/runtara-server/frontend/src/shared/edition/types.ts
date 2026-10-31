@@ -14,6 +14,12 @@ export type EditionRoute = {
  * console with the `@edition` alias pointed at its own module
  * (`RUNTARA_EDITION_DIR`) to add its pages, menu entries and controls without
  * carrying them in this repository.
+ *
+ * The console reads `open` while it works out its own root
+ * (`@/shared/config/appBase`), so an edition module must not import
+ * `@/shared/config/appBase` or `@/shared/config/oidcConfig` at top level:
+ * the cycle would read them before they are set. Import them where they are
+ * used (in a component or hook), not when the module loads.
  */
 export type Edition = {
   /** Pages, after the built-in ones. */

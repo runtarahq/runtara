@@ -12,6 +12,7 @@ import { NotFound } from '@/shared/pages/NotFound';
 import { ErrorBoundary } from '@/shared/components/error-boundary.tsx';
 import { Spinner } from '@/shared/components/ui/spinner';
 import { edition } from '@edition';
+import { appBaseUrl } from '@/shared/config/appBase';
 
 const Operations = lazy(() =>
   import('@/features/operations/pages').then((m) => ({ default: m.Operations }))
@@ -126,9 +127,10 @@ const PageLoader = () => (
   </div>
 );
 
-// Basename comes from the <base href> the server injects at startup so the
-// SPA works under any mount path (/ui, /ui/tenant-abc, etc.) without rebuilding.
-const basename = new URL(document.baseURI).pathname.replace(/\/$/, '');
+// Basename is the SPA root (the <base href> the server injects, or the path a
+// static host was loaded at) so the SPA works under any mount path (/ui,
+// /ui/tenant-abc, etc.) without rebuilding.
+const basename = new URL(appBaseUrl).pathname.replace(/\/$/, '');
 
 export const router = createBrowserRouter(
   [

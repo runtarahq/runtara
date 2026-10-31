@@ -32,7 +32,7 @@ vi.mock('react-oidc-context', () => ({
   useAuth: () => ({ user: { access_token: 'test-token' } }),
 }));
 
-vi.mock('@/main.tsx', () => ({
+vi.mock('@/bootstrap.tsx', () => ({
   queryClient: { invalidateQueries: vi.fn() },
 }));
 

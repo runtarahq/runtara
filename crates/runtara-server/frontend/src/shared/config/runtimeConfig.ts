@@ -3,14 +3,24 @@
 // Values are injected by the Rust server into index.html as
 // `window.__RUNTARA_CONFIG__` at startup, so the same compiled bundle can be
 // deployed across tenants with different OIDC/API/analytics settings without
-// rebuilding. When a key is missing (e.g. running via `vite dev` or in tests),
-// we fall back to the build-time `VITE_*` values.
+// rebuilding. A static host has no server to inject them: there they come from
+// a `config.json` next to index.html (staticConfig.ts). When a key is missing
+// (e.g. running via `vite dev` or in tests), we fall back to the build-time
+// `VITE_*` values.
 
 import type { EntitlementsSnapshot } from '@/shared/entitlements';
+import { normalizeMountPath } from '@/shared/config/staticConfig';
 
 export type AuthMode = 'oidc' | 'local' | 'trust_proxy';
 
-type RuntimeConfig = {
+/**
+ * Who serves the page: runtara-server, which injects the config; a static
+ * host, whose `config.json` supplied it; or neither (vite dev, tests), where
+ * only the build-time values apply.
+ */
+export type Hosting = 'server' | 'static' | 'build';
+
+export type RuntimeConfig = {
   oidcAuthority?: string;
   oidcClientId?: string;
   oidcAudience?: string;
@@ -39,6 +49,12 @@ type RuntimeConfig = {
    *  embedded Rust UI handler; absent when running under `vite dev` or in
    *  tests, in which case consumers fall back to `GET /api/runtime/entitlements`. */
   entitlements?: EntitlementsSnapshot;
+  /** Set by staticConfig.ts when the config came from a static host's
+   *  `config.json`; never injected by the server. */
+  hosting?: 'static';
+  /** Static hosting only: the path the console is served under, its tenants
+   *  at `{mountPath}{tenant}/`. Defaults to `/ui/`, the server's mount. */
+  mountPath?: string;
 };
 
 declare global {
@@ -71,7 +87,14 @@ const resolveAuthMode = (value: string | undefined): AuthMode => {
   }
 };
 
+const resolveHosting = (value: RuntimeConfig): Hosting => {
+  if (value.hosting === 'static') return 'static';
+  return value.authMode ? 'server' : 'build';
+};
+
 export const config = {
+  hosting: resolveHosting(runtime),
+  mountPath: normalizeMountPath(runtime.mountPath),
   authMode: resolveAuthMode(
     pick(runtime.authMode, import.meta.env.VITE_RUNTARA_AUTH_MODE)
   ),

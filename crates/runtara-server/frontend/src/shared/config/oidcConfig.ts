@@ -1,34 +1,22 @@
 import type { User } from 'oidc-client-ts';
 import { WebStorageStateStore } from 'oidc-client-ts';
 import { config, isOidcAuth } from '@/shared/config/runtimeConfig';
-
-// Full absolute URL of the SPA root (protocol + host + mount path), e.g.
-// `http://localhost:7001/ui/org_abc/`. `document.baseURI` reflects the
-// `<base href>` the server injects at startup, so per-tenant deploys see
-// the tenant-scoped path here.
-const appBaseUrl = document.baseURI;
+import {
+  appBaseUrl,
+  mountReturnPath,
+  tenantIdFromUrl,
+} from '@/shared/config/appBase';
 
 // Auth0's "Allowed Callback URLs" / "Allowed Logout URLs" lists are per
-// *application*, not per *tenant* — so a per-tenant `<base href>` (e.g.
-// `/ui/org_abc/`) can never be whitelisted directly. Strip down to the
-// parent mount (`/ui/`); one whitelist entry then covers every tenant.
+// *application*, not per *tenant* — so a per-tenant SPA root (e.g.
+// `/ui/org_abc/`) can never be whitelisted directly. Return to the parent
+// mount (`/ui/`) instead; one whitelist entry then covers every tenant.
 // After Auth0 callback lands at `/ui/`, `onSigninCallback` redirects to
 // the per-tenant mount based on the JWT's `org_id` claim. localStorage is
 // keyed by origin (not path), so the per-tenant SPA inherits the OIDC state.
-const baseUrlParts = new URL(appBaseUrl);
-const baseUrlSegments = baseUrlParts.pathname.split('/').filter(Boolean);
-const mountSegment = baseUrlSegments[0] ?? 'ui';
-const mountReturnUrl = `${baseUrlParts.origin}/${mountSegment}/`;
+const mountReturnUrl = new URL(mountReturnPath, appBaseUrl).href;
 
-/** The path Auth0 callbacks always return to (e.g. `/ui/`). */
-export const mountReturnPath = new URL(mountReturnUrl).pathname;
-
-/**
- * Tenant id parsed from the SPA's mount path, e.g. `/ui/org_abc/` → `org_abc`.
- * `undefined` when loaded at the parent mount (`/ui/`) or bare origin — i.e.
- * during the OIDC callback hop, before we know which tenant to land in.
- */
-export const tenantIdFromUrl: string | undefined = baseUrlSegments[1];
+export { mountReturnPath, tenantIdFromUrl };
 
 const onSigninCallback = (user?: User) => {
   const orgId = user?.profile?.org_id as string | undefined;

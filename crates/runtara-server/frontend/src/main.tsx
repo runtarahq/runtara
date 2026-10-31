@@ -1,45 +1,8 @@
-import { StrictMode } from 'react';
-import { createRoot } from 'react-dom/client';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { AuthProvider } from 'react-oidc-context';
-import { ReactFlowProvider } from '@xyflow/react';
-import { Toaster } from '@/shared/components/ui/sonner';
-import { oidcConfig } from '@/shared/config/oidcConfig';
-import { initAnalytics } from '@/shared/analytics/plausible';
-import { ensureRustValidationInitialized } from '@/shared/lib/rust-validation-wasm';
-import App from '@/App';
+import { loadStaticConfig } from '@/shared/config/staticConfig';
 
-// Self-hosted Inter (variable font) — the primary face declared in
-// tailwind.config.js fontFamily.sans; without this import the app silently
-// fell back to Roboto/system-ui.
-import '@fontsource-variable/inter';
-import './index.css';
-
-initAnalytics();
-ensureRustValidationInitialized().catch((err) => {
-  console.warn('[validation] WASM preload failed', err);
+// Boot in two stages: a static host's config.json has to be in place before
+// any module reads the runtime config, and most of the app reads it when it is
+// first imported. So the app is imported only once the config is settled.
+void loadStaticConfig().then((boot) => {
+  if (boot) void import('./bootstrap');
 });
-
-export const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 1000 * 60 * 5, // 5 minutes - data stays fresh for 5 minutes
-      gcTime: 1000 * 60 * 10, // 10 minutes - cache garbage collection time
-      retry: 1, // Only retry once on failure instead of 3 times
-      refetchOnWindowFocus: false, // Already set in useCustomQuery but good as default
-    },
-  },
-});
-
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <AuthProvider {...oidcConfig}>
-      <QueryClientProvider client={queryClient}>
-        <ReactFlowProvider>
-          <App />
-        </ReactFlowProvider>
-        <Toaster />
-      </QueryClientProvider>
-    </AuthProvider>
-  </StrictMode>
-);

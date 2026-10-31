@@ -3,7 +3,7 @@ import { Link } from 'react-router';
 import { toast } from 'sonner';
 import { RefreshCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { queryClient } from '@/main';
+import { queryClient } from '@/bootstrap';
 import { useCustomMutation, useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { Button } from '@/shared/components/ui/button';
