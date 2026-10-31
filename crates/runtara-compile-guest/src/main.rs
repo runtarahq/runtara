@@ -46,6 +46,9 @@ const PREGROW: usize = 192 * 1024 * 1024;
 
 #[cfg(target_os = "wasi")]
 fn run() -> Result<(), String> {
+    // Its host trusts nothing it makes for being valid, and whatever runs a
+    // component validates it: validating here only cost the compile.
+    runtara_workflows::direct_wasm::set_composition_validated(false);
     // Grow the linear memory once, now: a Fenders guest has no room reserved
     // for growth, so each growth moves the whole memory, and a compile that
     // grew step by step to its peak spent most of its time so. Freed, the
@@ -104,6 +107,7 @@ fn work(settings: &serde_json::Value) -> Result<(), String> {
             .to_owned();
         let request: CompileRequest = serde_json::from_value(next["request"].clone())
             .map_err(|error| format!("the request: {error}"))?;
+        let (_, waited) = http::take_timings();
         let outcome = compile(
             request,
             &format!("/v1/compiles/{id}/artifacts"),
@@ -112,6 +116,12 @@ fn work(settings: &serde_json::Value) -> Result<(), String> {
         )?;
         let body = serde_json::to_vec(&outcome).map_err(|error| error.to_string())?;
         http::call("POST", &format!("/v1/compiles/{id}/outcome"), Some(body))?;
+        let (calls, took) = http::take_timings();
+        eprintln!(
+            "runtara-compile-guest: compile {id}: waited {} ms for it, {calls} calls in {} ms",
+            waited.as_millis(),
+            took.as_millis()
+        );
         last = std::time::Instant::now();
     }
 }

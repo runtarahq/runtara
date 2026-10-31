@@ -652,6 +652,19 @@ pub fn compose_direct_workflow_with_isolated_agents(
     )
 }
 
+/// Whether a composed component is validated as it is encoded: unless a
+/// process says otherwise ([`set_composition_validated`]).
+static COMPOSITION_VALIDATED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// Whether this process validates the components it composes. A compiler
+/// whose output its host trusts no more than its input (one in a sandbox,
+/// SYN-930) need not: validating a composed component took most of its
+/// composing, and whatever runs it validates it again.
+pub fn set_composition_validated(validated: bool) {
+    COMPOSITION_VALIDATED.store(validated, std::sync::atomic::Ordering::Relaxed);
+}
+
 type IsolationSelection<'a> = (
     &'a std::collections::BTreeMap<String, String>,
     runtara_invocation_contract::PackageLimits,
@@ -1029,10 +1042,11 @@ fn compose_workflow_component_in_process(
     );
 
     let encode_start = Instant::now();
+    let validate = COMPOSITION_VALIDATED.load(std::sync::atomic::Ordering::Relaxed);
     let encoded = resolution
         .encode(EncodeOptions {
             define_components: true,
-            validate: true,
+            validate,
             ..Default::default()
         })
         .map_err(|err| {
@@ -1043,7 +1057,7 @@ fn compose_workflow_component_in_process(
     tracing::debug!(
         target: "runtara::direct_compile::profile",
         elapsed_ms = encode_start.elapsed().as_secs_f64() * 1000.0,
-        validate = true,
+        validate,
         "compose: encoded + validated composed component",
     );
     encoded

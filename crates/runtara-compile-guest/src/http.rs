@@ -10,7 +10,25 @@ static NEXT_KEY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::ne
 
 /// `method` `path` on the workflow API, with `body`: answers the response's
 /// body, or why the call failed (a status other than 2xx among them).
+/// The calls made since [`take_timings`] was last asked, and the time they took.
+static TIMINGS: std::sync::Mutex<(u32, std::time::Duration)> =
+    std::sync::Mutex::new((0, std::time::Duration::ZERO));
+
+/// The calls made since last asked, and the time they took.
+pub(crate) fn take_timings() -> (u32, std::time::Duration) {
+    std::mem::take(&mut *TIMINGS.lock().expect("timings"))
+}
+
 pub(crate) fn call(method: &str, path: &str, body: Option<Vec<u8>>) -> Result<Vec<u8>, String> {
+    let started = std::time::Instant::now();
+    let answer = call_once(method, path, body);
+    let mut timings = TIMINGS.lock().expect("timings");
+    timings.0 += 1;
+    timings.1 += started.elapsed();
+    answer
+}
+
+fn call_once(method: &str, path: &str, body: Option<Vec<u8>>) -> Result<Vec<u8>, String> {
     let (scheme, authority) = match std::env::var("RUNTARA_COMPILE_API") {
         Ok(base) => {
             let (scheme, authority) = base
