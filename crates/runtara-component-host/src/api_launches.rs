@@ -140,6 +140,8 @@ pub struct ApiLaunches {
     pub(crate) trusted: std::sync::OnceLock<Arc<TrustedExecutor>>,
     /// Paces each tenant's calls that start external work, once given one.
     limiter: std::sync::OnceLock<Arc<dyn runtara_workflow_api::server::CallLimiter>>,
+    /// Compiles queued for each tenant's warm compiler (SYN-930).
+    compiles: crate::compile_worker::CompileQueues,
 }
 
 impl Default for ApiLaunches {
@@ -155,6 +157,7 @@ impl Default for ApiLaunches {
             connection_resolver: std::sync::OnceLock::new(),
             control: std::sync::OnceLock::new(),
             trusted: std::sync::OnceLock::new(),
+            compiles: Default::default(),
         }
     }
 }
@@ -335,6 +338,53 @@ impl ApiLaunches {
         Ok(())
     }
 
+    /// Start serving `binding` as its tenant's warm compiler (SYN-930): a
+    /// compile launch whose input is `settings` and which takes its tenant's
+    /// compiles from [`Self::submit_compile`], one after another, over
+    /// `/v1/compiles/*`, and is served nothing else of the API.
+    pub fn begin_compile_worker(&self, binding: Binding, settings: Vec<u8>) -> Result<(), String> {
+        let launch_id = binding.launch_id.clone();
+        self.begin_compile(binding, settings, Default::default())?;
+        let mut slots = self.slots.lock().expect("workflow API launches poisoned");
+        let slot = slots
+            .get_mut(&launch_id)
+            .and_then(Arc::get_mut)
+            .ok_or_else(|| format!("launch {launch_id} is already in use"))?;
+        slot.info.launch_kind = COMPILE_WORKER.into();
+        Ok(())
+    }
+
+    /// Queues `tenant`'s compile of `request` for its warm compiler, which may
+    /// fetch `components` (each file by its SHA-256): its id, and its result.
+    pub fn submit_compile(
+        &self,
+        tenant: &str,
+        request: Vec<u8>,
+        components: std::collections::BTreeMap<String, std::path::PathBuf>,
+    ) -> (
+        String,
+        tokio::sync::oneshot::Receiver<crate::compile_worker::CompileResult>,
+    ) {
+        self.compiles.submit(tenant, request, components)
+    }
+
+    /// Forgets a queued compile: its result ends with an error.
+    pub fn cancel_compile(&self, id: &str) {
+        self.compiles.cancel(id);
+    }
+
+    /// The warm compiler `binding` serves, if it is one: its tenant and launch.
+    fn compile_worker(&self, binding: &Binding) -> Option<(String, String)> {
+        self.slot(binding)
+            .filter(|slot| slot.info.launch_kind == COMPILE_WORKER)
+            .map(|slot| {
+                (
+                    slot.binding.tenant_id.clone(),
+                    slot.binding.launch_id.clone(),
+                )
+            })
+    }
+
     /// Takes the composed component a compile launch handed back, if it did.
     pub fn made(&self, launch_id: &str) -> Option<Vec<u8>> {
         let slot = self
@@ -503,6 +553,7 @@ impl ApiLaunches {
             limiter: Some(Arc::new(Paced(Arc::clone(self)))),
             caps: Caps::default(),
         })
+        .merge(compile_worker_routes(Arc::clone(self)))
         // A compile launch is served its run, its input, its outcome and its
         // artifacts, and nothing else: a compiler a tenant's workflow
         // compromised reaches none of the tenant's connections, databases or
@@ -529,10 +580,168 @@ impl ApiLaunches {
     }
 }
 
-/// What a compile launch is served.
+/// What a compile launch is served: a warm compiler's compiles among it.
 fn compile_path(path: &str) -> bool {
     matches!(path, "/v1/run" | "/v1/run/input" | "/v1/run/outcome")
         || path.starts_with("/v1/artifacts/")
+        || path.starts_with("/v1/compiles/")
+}
+
+/// A warm compiler's launch kind.
+const COMPILE_WORKER: &str = "compile-worker";
+
+/// A warm compiler's calls (SYN-930), each of its own tenant's compiles, and
+/// only the one it took.
+fn compile_worker_routes(launches: Arc<ApiLaunches>) -> axum::Router {
+    use crate::compile_worker::Refusal;
+    use axum::extract::{Path, Query, Request, State};
+    use axum::http::{HeaderValue, StatusCode, header};
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::{get, post};
+
+    fn refused(refusal: Refusal) -> Response {
+        let (code, message) = match refusal {
+            Refusal::NotYours => (
+                ErrorCode::Denied,
+                "not a compile this worker took".to_owned(),
+            ),
+            Refusal::NotAComponent => (
+                ErrorCode::Denied,
+                "not a component of this compile".to_owned(),
+            ),
+            Refusal::BadPart(why) => (ErrorCode::Invalid, why.to_owned()),
+            Refusal::Unavailable(why) => (ErrorCode::Unavailable, format!("artifact: {why}")),
+        };
+        runtara_workflow_api::server::error_response(&ApiError::new(code, message))
+    }
+    fn worker_of(launches: &ApiLaunches, request: &Request) -> Option<(String, String)> {
+        request
+            .extensions()
+            .get::<Binding>()
+            .and_then(|binding| launches.compile_worker(binding))
+    }
+    fn not_a_worker() -> Response {
+        runtara_workflow_api::server::error_response(&ApiError::new(
+            ErrorCode::Denied,
+            "only a warm compiler takes compiles",
+        ))
+    }
+    #[derive(serde::Deserialize)]
+    struct Wait {
+        wait_ms: Option<u64>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Slice {
+        offset: Option<u64>,
+        length: Option<u64>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Part {
+        part: u32,
+        parts: u32,
+    }
+    async fn next(
+        State(launches): State<Arc<ApiLaunches>>,
+        Query(wait): Query<Wait>,
+        request: Request,
+    ) -> Response {
+        let Some((tenant, worker)) = worker_of(&launches, &request) else {
+            return not_a_worker();
+        };
+        let wait = std::time::Duration::from_millis(wait.wait_ms.unwrap_or(0));
+        match launches.compiles.next(&tenant, &worker, wait).await {
+            Some((id, request)) => {
+                let request: serde_json::Value = match serde_json::from_slice(&request) {
+                    Ok(request) => request,
+                    Err(_) => serde_json::Value::Null,
+                };
+                axum::Json(serde_json::json!({"id": id, "request": request})).into_response()
+            }
+            None => StatusCode::NO_CONTENT.into_response(),
+        }
+    }
+    async fn fetch(
+        State(launches): State<Arc<ApiLaunches>>,
+        Path((id, sha256)): Path<(String, String)>,
+        Query(slice): Query<Slice>,
+        request: Request,
+    ) -> Response {
+        let Some((tenant, worker)) = worker_of(&launches, &request) else {
+            return not_a_worker();
+        };
+        match launches
+            .compiles
+            .artifact(
+                &id,
+                &tenant,
+                &worker,
+                &sha256,
+                slice.offset.unwrap_or(0),
+                slice.length,
+            )
+            .await
+        {
+            Ok((bytes, size)) => {
+                let mut response = Bytes::from(bytes).into_response();
+                response.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/octet-stream"),
+                );
+                response.headers_mut().insert(
+                    runtara_workflow_api::server::ARTIFACT_SIZE,
+                    HeaderValue::from(size),
+                );
+                response
+            }
+            Err(refusal) => refused(refusal),
+        }
+    }
+    async fn hand_back(
+        State(launches): State<Arc<ApiLaunches>>,
+        Path((id, sha256)): Path<(String, String)>,
+        Query(part): Query<Part>,
+        request: Request,
+    ) -> Response {
+        let Some((tenant, worker)) = worker_of(&launches, &request) else {
+            return not_a_worker();
+        };
+        let bytes = match to_bytes(request.into_body(), 4 * 1024 * 1024).await {
+            Ok(bytes) => bytes.to_vec(),
+            Err(_) => return refused(Refusal::BadPart("the part is too large")),
+        };
+        match launches
+            .compiles
+            .hand_back(&id, &tenant, &worker, &sha256, part.part, part.parts, bytes)
+        {
+            Ok(whole) => axum::Json(serde_json::json!({"whole": whole})).into_response(),
+            Err(refusal) => refused(refusal),
+        }
+    }
+    async fn outcome(
+        State(launches): State<Arc<ApiLaunches>>,
+        Path(id): Path<String>,
+        request: Request,
+    ) -> Response {
+        let Some((tenant, worker)) = worker_of(&launches, &request) else {
+            return not_a_worker();
+        };
+        let body = match to_bytes(request.into_body(), 4 * 1024 * 1024).await {
+            Ok(body) => body.to_vec(),
+            Err(_) => return refused(Refusal::BadPart("the outcome is too large")),
+        };
+        match launches.compiles.finish(&id, &tenant, &worker, body) {
+            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+            Err(refusal) => refused(refusal),
+        }
+    }
+    axum::Router::new()
+        .route("/v1/compiles/next", get(next))
+        .route(
+            "/v1/compiles/{id}/artifacts/{sha256}",
+            get(fetch).put(hand_back),
+        )
+        .route("/v1/compiles/{id}/outcome", post(outcome))
+        .with_state(launches)
 }
 
 struct Backend(Arc<ApiLaunches>);
@@ -2187,6 +2396,130 @@ mod tests {
     /// components it was given, by SHA-256 (whole or in slices), and hands
     /// back one composed component (in parts, checked once whole); another
     /// launch fetches nothing.
+    /// SYN-930: a warm compiler takes its tenant's compiles one after
+    /// another over `/v1/compiles/*`, is served nothing else, and no other
+    /// launch takes them.
+    #[tokio::test]
+    async fn a_warm_compiler_takes_its_tenants_compiles_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let component = dir.path().join("stdlib.wasm");
+        std::fs::write(&component, b"stdlib").unwrap();
+        let sha = |bytes: &[u8]| -> String {
+            use sha2::Digest;
+            sha2::Sha256::digest(bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        };
+        let launches = Arc::new(ApiLaunches::default());
+        let worker = binding(1);
+        launches
+            .begin_compile_worker(worker.clone(), b"{\"worker\":{}}".to_vec())
+            .unwrap();
+        let mut other = binding(1);
+        other.launch_id = "another".into();
+        launches
+            .begin_compile(other.clone(), b"{}".to_vec(), Default::default())
+            .unwrap();
+        let app = launches.router();
+        let call = |method: &str, path: String, body: Vec<u8>, binding: Binding| {
+            let mut request = axum::http::Request::builder()
+                .method(method)
+                .uri(path.clone())
+                .header("idempotency-key", format!("{method}-{path}"))
+                .body(Body::from(body))
+                .unwrap();
+            request.extensions_mut().insert(binding);
+            app.clone().oneshot(request)
+        };
+        let body = |response: axum::response::Response| async move {
+            to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap()
+                .to_vec()
+        };
+        let input = call("GET", "/v1/run/input".into(), vec![], worker.clone())
+            .await
+            .unwrap();
+        assert_eq!(body(input).await, b"{\"worker\":{}}");
+        // Nothing queued: the ask ends empty.
+        let none = call(
+            "GET",
+            "/v1/compiles/next?wait_ms=10".into(),
+            vec![],
+            worker.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(none.status(), 204);
+
+        let tenant = worker.tenant_id.clone();
+        let (id, done) = launches.submit_compile(
+            &tenant,
+            b"{\"compile\":1}".to_vec(),
+            [(sha(b"stdlib"), component)].into_iter().collect(),
+        );
+        // Only a warm compiler takes compiles.
+        let refused = call("GET", "/v1/compiles/next".into(), vec![], other.clone())
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), 403);
+        let next = call(
+            "GET",
+            "/v1/compiles/next?wait_ms=1000".into(),
+            vec![],
+            worker.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next.status(), 200);
+        let next: serde_json::Value = serde_json::from_slice(&body(next).await).unwrap();
+        assert_eq!(next["id"], id.as_str());
+        assert_eq!(next["request"], serde_json::json!({"compile": 1}));
+        let stdlib = format!("/v1/compiles/{id}/artifacts/{}", sha(b"stdlib"));
+        let fetched = call(
+            "GET",
+            format!("{stdlib}?offset=2&length=3"),
+            vec![],
+            worker.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fetched.headers()["runtara-artifact-size"], "6");
+        assert_eq!(body(fetched).await, b"dli");
+        let refused = call("GET", stdlib.clone(), vec![], other.clone())
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), 403, "another launch is not served it");
+        let made = b"composed";
+        let put = call(
+            "PUT",
+            format!("/v1/compiles/{id}/artifacts/{}?part=0&parts=1", sha(made)),
+            made.to_vec(),
+            worker.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(body(put).await, br#"{"whole":true}"#);
+        let posted = call(
+            "POST",
+            format!("/v1/compiles/{id}/outcome"),
+            b"{\"compiled\":true}".to_vec(),
+            worker.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(posted.status(), 204);
+        let result = done.await.unwrap();
+        assert_eq!(result.outcome, b"{\"compiled\":true}");
+        assert_eq!(result.made.as_deref(), Some(made.as_slice()));
+        // A warm compiler reaches nothing but its compiles.
+        let denied = call("GET", "/v1/connections".into(), vec![], worker.clone())
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), 403);
+    }
+
     #[tokio::test]
     async fn a_compile_launch_fetches_its_components_and_hands_back_one() {
         let dir = tempfile::tempdir().unwrap();

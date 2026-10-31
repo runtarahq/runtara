@@ -13,6 +13,7 @@ mod outbound_test_fixture;
 pub mod api_launches;
 pub mod bindings;
 mod cleanup_alarm;
+pub mod compile_worker;
 pub mod connection_resolver_host;
 pub mod control_host;
 pub mod database_host;
