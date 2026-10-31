@@ -21,6 +21,6 @@ base64 = { workspace = true }
 # with default features; this agent only uses the in-memory reader
 # (`open_workbook_auto_from_rs`), so no filesystem access is required and no
 # native host handler is involved.
-calamine = "0.26"
+calamine = "0.37"
 runtara-agent-macro = { workspace = true }
 runtara-dsl = { workspace = true }

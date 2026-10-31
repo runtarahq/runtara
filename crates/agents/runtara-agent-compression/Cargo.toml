@@ -23,7 +23,7 @@ base64 = { workspace = true }
 # constructs `CompressionMethod::Stored` and `::Deflated` and nothing else.
 # What remains (flate2 -> miniz_oxide) compiles to wasm32-wasip2, which is why
 # this agent no longer forwards to a native host handler.
-zip = { version = "2.4", default-features = false, features = ["deflate"] }
+zip = { version = "9.1", default-features = false, features = ["deflate"] }
 runtara-agent-macro = { workspace = true }
 runtara-dsl = { workspace = true }
 strum = { version = "0.26", features = ["derive"] }
