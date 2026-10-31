@@ -72,7 +72,12 @@ pub async fn run(
         Some(cipher) => cipher,
         None => cipher_from_env()?,
     };
-    if !cipher.is_encrypting() {
+    // One tenant's rows need only that tenant's keys.
+    let encrypting = match args.tenant_id.as_deref() {
+        Some(tenant) => cipher.is_encrypting_for(tenant),
+        None => cipher.is_encrypting(),
+    };
+    if !encrypting {
         return Err(format!(
             "Encryption is not enabled. Set {ENCRYPTION_KEY_ENV} before running {COMMAND}."
         ));
