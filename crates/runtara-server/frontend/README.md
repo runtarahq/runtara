@@ -109,11 +109,14 @@ The host has to:
   `assets/*` as immutable;
 - set the CSP itself. `index.html` has two inline scripts, the empty config
   placeholder and the theme script; both are fixed, so their hashes are too.
+  The OAuth landing page (`oauth-complete.html`) needs `script-src 'self'` and,
+  for its `<style>` block, `style-src 'unsafe-inline'`.
 
 Serve `/api/*` and `/health` from the same origin (a proxy to runtara-server)
 and leave `apiBaseUrl` unset. On another origin the server needs
-`CORS_ALLOWED_ORIGINS`, and connecting OAuth connections doesn't work yet: the
-callback page posts its result to its own origin.
+`CORS_ALLOWED_ORIGINS` set to the console's origin and `RUNTARA_UI_PUBLIC_URL`
+to where the console is served, so the OAuth callback sends the consent popup
+to the console's `oauth-complete.html`.
 
 ## Scripts
 

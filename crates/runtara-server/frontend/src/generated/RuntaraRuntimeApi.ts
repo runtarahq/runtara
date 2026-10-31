@@ -5890,7 +5890,7 @@ export class Api<
 > extends HttpClient<SecurityDataType> {
   api = {
     /**
-     * @description This is a PUBLIC endpoint (no JWT required) — called by the OAuth provider redirecting the user's browser after consent.
+     * @description This is a PUBLIC endpoint (no JWT required) — called by the OAuth provider redirecting the user's browser after consent. The consent popup is then sent on to the console's landing page, which tells the console from the console's own origin.
      *
      * @tags oauth-callback
      * @name CallbackHandler
@@ -5911,7 +5911,7 @@ export class Api<
       },
       params: RequestParams = {},
     ) =>
-      this.request<void, any>({
+      this.request<void, void>({
         path: `/api/oauth/${tenantId}/callback`,
         method: "GET",
         query: query,

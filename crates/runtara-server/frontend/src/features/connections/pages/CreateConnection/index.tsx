@@ -52,7 +52,7 @@ export function CreateConnection() {
       }
       try {
         const authUrl = await getOAuthAuthorizeUrl(token, connectionId);
-        await openOAuthPopup(authUrl);
+        await openOAuthPopup(authUrl, connectionId);
         // Authorized: nothing left to do here, the list confirms completion.
         queryClient.invalidateQueries({ queryKey: queryKeys.connections.all });
         navigate('/connections');

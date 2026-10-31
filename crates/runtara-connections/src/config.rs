@@ -25,6 +25,12 @@ pub struct ConnectionsConfig {
     /// Example: `"https://api.example.com"`
     pub public_base_url: String,
 
+    /// The console's OAuth landing page (`oauth-complete.html`), where the
+    /// OAuth callback sends the consent popup once it is done. The console may
+    /// be on another host than this API. `None` when there is no console: the
+    /// callback then answers with a plain-text outcome.
+    pub oauth_complete_url: Option<url::Url>,
+
     /// Shared HTTP client for outbound requests (OAuth token exchange, etc.).
     pub http_client: reqwest::Client,
 
@@ -61,6 +67,7 @@ pub struct ConnectionsState {
     pub db_pool: PgPool,
     pub redis_manager: Option<redis::aio::ConnectionManager>,
     pub public_base_url: String,
+    pub oauth_complete_url: Option<url::Url>,
     pub http_client: reqwest::Client,
     pub cipher: Arc<dyn CredentialCipher>,
     pub compatibility: Arc<IntegrationCompatibility>,
@@ -74,6 +81,7 @@ impl ConnectionsState {
             db_pool: config.db_pool,
             redis_manager: config.redis_manager,
             public_base_url: config.public_base_url,
+            oauth_complete_url: config.oauth_complete_url,
             http_client: config.http_client,
             cipher: config.cipher,
             compatibility: config.compatibility,

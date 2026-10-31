@@ -390,7 +390,10 @@ case "${AUTHORIZE}" in
 esac
 STATE=$(python3 -c 'import sys,urllib.parse as u; print(u.parse_qs(u.urlparse(sys.argv[1]).query)["state"][0])' "${AUTHORIZE}")
 CALLBACK="http://127.0.0.1:${TEST_PORT_PUBLIC}/api/oauth"
-curl -sS "${CALLBACK}/${TENANT}/callback?state=${STATE}&code=c1" | grep -q "Invalid or expired authorization" \
+# With a console to go to, the callback redirects there with the error code;
+# without one, it answers in plain text.
+curl -sS -D - "${CALLBACK}/${TENANT}/callback?state=${STATE}&code=c1" \
+    | grep -qiE "Invalid or expired authorization|^location: .*[?&]error=invalid_state" \
     || { print_error "the primary tenant's callback accepted the second tenant's state"; exit 1; }
 # Row-level security (M7.11) keeps the primary tenant's callback away from the
 # second tenant's state altogether: refused there, it is neither seen nor
