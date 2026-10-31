@@ -1,9 +1,11 @@
 """A stand-in for the workflow API a compile guest's host serves (M7.15), for
 scripts/check-compiler-guest.sh: it serves one compile request and the
 components it names, takes the composed component and the outcome, and writes
-them to OUT_DIR.
+them to OUT_DIR. With WORKER, it serves a warm compiler (SYN-930) the same
+compile twice, over /v1/compiles/*, each one's outcome to outcome-{id}.json and
+the components each fetched to fetched-{id}.
 
-Usage: compile_guest_host.py PORT WORKFLOW_JSON COMPONENTS_DIR OUT_DIR
+Usage: compile_guest_host.py PORT WORKFLOW_JSON COMPONENTS_DIR OUT_DIR [WORKER]
 """
 import hashlib
 import http.server
@@ -13,6 +15,8 @@ import sys
 import urllib.parse
 
 port, workflow, components_dir, out_dir = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+WORKER = len(sys.argv) > 5
+QUEUED = ["j0", "j1"] if WORKER else []
 files = {}
 names = {}
 for name in sorted(os.listdir(components_dir)):
@@ -42,14 +46,27 @@ class Host(http.server.BaseHTTPRequestHandler):
     def body(self):
         return self.rfile.read(int(self.headers.get("Content-Length", 0)))
 
+    @staticmethod
+    def artifact(path):
+        """The compile and component a path names: (id or None, digest)."""
+        if path.startswith("/v1/compiles/"):
+            compile_id, _, digest = path.removeprefix("/v1/compiles/").partition("/artifacts/")
+            return compile_id, digest
+        return None, path.removeprefix("/v1/artifacts/")
+
     def do_GET(self):
         if self.path == "/v1/run/input":
-            return self.reply(200, REQUEST)
+            return self.reply(200, json.dumps({"worker": {"idle_ms": 500}}).encode() if WORKER else REQUEST)
         url = urllib.parse.urlparse(self.path)
-        digest = url.path.removeprefix("/v1/artifacts/")
+        if url.path == "/v1/compiles/next":
+            if not QUEUED:
+                return self.reply(204, b"")
+            return self.reply(200, json.dumps({"id": QUEUED.pop(0), "request": json.loads(REQUEST)}).encode())
+        compile_id, digest = Host.artifact(url.path)
         query = urllib.parse.parse_qs(url.query)
         if digest in files:
-            with open(os.path.join(out_dir, "fetched"), "a") as fetched:
+            log = f"fetched-{compile_id}" if compile_id else "fetched"
+            with open(os.path.join(out_dir, log), "a") as fetched:
                 fetched.write(digest + "\n")
             with open(files[digest], "rb") as component:
                 data = component.read()
@@ -64,20 +81,25 @@ class Host(http.server.BaseHTTPRequestHandler):
 
     def do_PUT(self):
         url = urllib.parse.urlparse(self.path)
-        digest = url.path.removeprefix("/v1/artifacts/")
+        compile_id, digest = Host.artifact(url.path)
         query = urllib.parse.parse_qs(url.query)
         part, parts = int(query["part"][0]), int(query["parts"][0])
-        Host.PARTS[part] = self.body()
-        whole = len(Host.PARTS) == parts
+        made = Host.PARTS.setdefault(compile_id, {})
+        made[part] = self.body()
+        whole = len(made) == parts
         if whole:
-            wasm = b"".join(Host.PARTS[i] for i in range(parts))
+            wasm = b"".join(made[i] for i in range(parts))
             assert hashlib.sha256(wasm).hexdigest() == digest
-            with open(os.path.join(out_dir, "workflow.wasm"), "wb") as out:
+            name = f"workflow-{compile_id}.wasm" if compile_id else "workflow.wasm"
+            with open(os.path.join(out_dir, name), "wb") as out:
                 out.write(wasm)
         self.reply(200, json.dumps({"sha256": digest, "whole": whole}).encode())
 
     def do_POST(self):
-        with open(os.path.join(out_dir, "outcome.json"), "wb") as out:
+        name = "outcome.json"
+        if self.path.startswith("/v1/compiles/"):
+            name = f"outcome-{self.path.split('/')[3]}.json"
+        with open(os.path.join(out_dir, name), "wb") as out:
             out.write(self.body())
         self.reply(200, b"{}")
 
