@@ -33,7 +33,7 @@ RuntimeREST.instance.interceptors.request.use((requestConfig) => {
   if (orgId && requestConfig.url && !config.stripOrgId) {
     requestConfig.url = requestConfig.url.replace(
       /\/api\/runtime\//,
-      `/api/runtime/${orgId}/`
+      () => `/api/runtime/${encodeURIComponent(orgId)}/`
     );
   }
   return requestConfig;

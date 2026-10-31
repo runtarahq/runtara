@@ -6,6 +6,11 @@ import { edition } from '@edition';
 /** Where the SPA is rooted: the mount, or one of its tenants under it. */
 export type AppBase = { path: string; tenant?: string };
 
+// A tenant id as the path may carry it. The console builds API paths from the
+// tenant, so anything else (`..`, an escape) could aim a signed-in user's
+// requests elsewhere: such a segment names no tenant.
+const TENANT_SEGMENT = /^[A-Za-z0-9_-]{1,128}$/;
+
 /**
  * The SPA's root under a static host, from the page's path. Below the mount,
  * the first segment names the tenant (`/ui/acme/workflows` → `/ui/acme/`),
@@ -25,17 +30,8 @@ export function resolveStaticBase(
   }
 
   const segment = rest.split('/')[0];
-  if (!segment) return { path: mountPath };
-  return { path: `${mountPath}${segment}/`, tenant: decodeSegment(segment) };
-}
-
-/** Runs before React mounts, so a malformed escape must not throw. */
-function decodeSegment(segment: string): string {
-  try {
-    return decodeURIComponent(segment);
-  } catch {
-    return segment;
-  }
+  if (!TENANT_SEGMENT.test(segment)) return { path: mountPath };
+  return { path: `${mountPath}${segment}/`, tenant: segment };
 }
 
 const staticBase =

@@ -37,15 +37,15 @@ describe('resolveStaticBase', () => {
     expect(resolveStaticBase('/', '/', open)).toEqual({ path: '/' });
   });
 
-  it('decodes the tenant id', () => {
-    expect(resolveStaticBase('/ui/org%20a/', '/ui/', open).tenant).toBe(
-      'org a'
-    );
-  });
-
-  it('keeps a malformed escape as it is', () => {
-    expect(resolveStaticBase('/ui/org%E0%A4%A/', '/ui/', open).tenant).toBe(
-      'org%E0%A4%A'
-    );
+  it('takes only a plain id as the tenant', () => {
+    for (const path of [
+      '/ui/..%2F..%2Fadmin/workflows',
+      '/ui/org%20a/',
+      '/ui/org%E0%A4%A/',
+      '/ui/.../workflows',
+      '/ui/a.b/',
+    ]) {
+      expect(resolveStaticBase(path, '/ui/', open)).toEqual({ path: '/ui/' });
+    }
   });
 });
