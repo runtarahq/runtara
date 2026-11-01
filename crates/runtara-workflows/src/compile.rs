@@ -124,6 +124,10 @@ pub struct DirectWorkflowCompileOptions {
     pub extra_component_dirs: Vec<PathBuf>,
     /// Optional checksum of the original workflow DSL source.
     pub source_checksum: Option<String>,
+    /// How the workflow reaches the stdlib: the mode its runner runs
+    /// artifacts in. `None` compiles in the process's
+    /// ([`crate::direct_wasm::DirectStdlibMode::current`]).
+    pub stdlib: Option<crate::direct_wasm::DirectStdlibMode>,
 }
 
 impl std::fmt::Debug for CompilationInput {
@@ -199,6 +203,16 @@ pub struct NativeCompilationResult {
 /// graphs return [`io::ErrorKind::Unsupported`] before any direct build output
 /// is written.
 pub fn compile_workflow_direct(
+    input: CompilationInput,
+    options: DirectWorkflowCompileOptions,
+) -> io::Result<NativeCompilationResult> {
+    let stdlib = options
+        .stdlib
+        .unwrap_or_else(crate::direct_wasm::DirectStdlibMode::current);
+    stdlib.scope(|| compile_workflow_direct_in_mode(input, options))
+}
+
+fn compile_workflow_direct_in_mode(
     input: CompilationInput,
     options: DirectWorkflowCompileOptions,
 ) -> io::Result<NativeCompilationResult> {
@@ -420,6 +434,7 @@ mod tests {
                 components_dir: temp.path().join("missing-components"),
                 extra_component_dirs: Vec::new(),
                 source_checksum: Some("source-sha256".to_string()),
+                stdlib: None,
             },
         )
         .expect_err("parallel fan-out is not supported in direct mode");

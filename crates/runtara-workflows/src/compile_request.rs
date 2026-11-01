@@ -98,8 +98,8 @@ pub struct CompileRequest {
     /// The extra component directories, in order (a tenant's staged
     /// workflow-agents), each by file name: each file's SHA-256.
     pub extra_components: Vec<BTreeMap<String, String>>,
-    /// How the workflow reaches the stdlib: the host's mode, as its runtime
-    /// runs the artifact. A request without one compiles in the compiler's.
+    /// How the workflow reaches the stdlib: the mode its runner runs the
+    /// artifact in. A request without one compiles in the compiler's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdlib: Option<DirectStdlibMode>,
 }
@@ -294,20 +294,22 @@ pub fn request(
             source_checksum: options.source_checksum.clone(),
             components,
             extra_components,
-            stdlib: Some(DirectStdlibMode::current()),
+            stdlib: Some(options.stdlib.unwrap_or_else(DirectStdlibMode::current)),
         },
         paths,
     ))
 }
 
 /// The request for publishing `input`, `tenant`'s workflow, as an agent
-/// with the components in `components_dir` and `extra_component_dirs`, and
-/// where each file it names is, by SHA-256.
+/// with the components in `components_dir` and `extra_component_dirs`,
+/// reaching the stdlib as `stdlib` says, and where each file it names is,
+/// by SHA-256.
 pub fn request_published_agent(
     tenant: &str,
     input: &crate::direct_wasm::DirectCompilationInput,
     components_dir: &Path,
     extra_component_dirs: &[PathBuf],
+    stdlib: DirectStdlibMode,
 ) -> io::Result<(CompileRequest, BTreeMap<String, PathBuf>)> {
     let mut paths = BTreeMap::new();
     let components = listed(components_dir, &mut paths)?;
@@ -339,7 +341,7 @@ pub fn request_published_agent(
             source_checksum: input.source_checksum.clone(),
             components,
             extra_components,
-            stdlib: Some(DirectStdlibMode::current()),
+            stdlib: Some(stdlib),
         },
         paths,
     ))
@@ -353,20 +355,14 @@ pub fn compile(
     request: CompileRequest,
     fetch: impl Fn(&str) -> io::Result<Vec<u8>> + Send + Sync + 'static,
 ) -> Result<(CompileOutcome, Vec<u8>), CompileFailure> {
-    if let Some(mode) = request.stdlib {
-        let in_force = DirectStdlibMode::install(mode);
-        if in_force != mode {
-            return Err(CompileFailure {
-                kind: format!("{:?}", io::ErrorKind::Unsupported),
-                message: format!(
-                    "this compiler compiles the stdlib {}, and the request asks for it {}",
-                    in_force.tag(),
-                    mode.tag()
-                ),
-                stale: None,
-            });
-        }
-    }
+    let stdlib = request.stdlib.unwrap_or_else(DirectStdlibMode::current);
+    stdlib.scope(|| compile_in_mode(request, fetch))
+}
+
+fn compile_in_mode(
+    request: CompileRequest,
+    fetch: impl Fn(&str) -> io::Result<Vec<u8>> + Send + Sync + 'static,
+) -> Result<(CompileOutcome, Vec<u8>), CompileFailure> {
     let mut by_path = BTreeMap::new();
     for (name, digest) in &request.components {
         by_path.insert(Path::new(COMPONENTS).join(name), digest.clone());
@@ -425,6 +421,7 @@ pub fn compile(
         components_dir: PathBuf::from(COMPONENTS),
         extra_component_dirs: extra_dirs,
         source_checksum: request.source_checksum,
+        stdlib: request.stdlib,
     };
     let result =
         in_memory(memory.clone(), || compile_workflow_direct(input, options)).map_err(failure)?;

@@ -46,6 +46,7 @@ fn options(output_dir: PathBuf, extra: PathBuf) -> DirectWorkflowCompileOptions 
         components_dir: components_dir(),
         extra_component_dirs: vec![extra],
         source_checksum: Some("source".into()),
+        stdlib: None,
     }
 }
 
@@ -170,6 +171,7 @@ fn a_publish_elsewhere_makes_what_one_in_process_does() {
         &direct(temp.path().join("unused")),
         &components_dir(),
         &[staged],
+        runtara_workflows::direct_wasm::DirectStdlibMode::current(),
     )
     .expect("request");
     let req = serde_json::from_slice(&serde_json::to_vec(&req).unwrap()).unwrap();
@@ -185,35 +187,46 @@ fn a_publish_elsewhere_makes_what_one_in_process_does() {
     assert_eq!(remote.artifact_metadata, local.artifact_metadata);
 }
 
-/// The request carries the host's stdlib mode, as its runtime runs the
-/// artifact, and a compiler fixed to the other mode refuses it rather than
-/// make an artifact the host cannot run. A request without one (an older
-/// host's) compiles in the compiler's mode.
+/// A compile is in the stdlib mode it is asked for, the mode its runner runs
+/// artifacts in, here or elsewhere, whatever the process's default: a
+/// request carries it. A request without one (an older host's) compiles in
+/// the compiler's mode.
 #[test]
-fn a_compile_elsewhere_is_in_the_hosts_stdlib_mode() {
+fn a_compile_is_in_the_stdlib_mode_its_runner_runs() {
     use runtara_workflows::compile_request::CompileRequest;
     use runtara_workflows::direct_wasm::DirectStdlibMode;
+    fn imports_linked_stdlib(wasm: &[u8]) -> bool {
+        let name = DirectStdlibMode::Linked.json_interface().as_bytes();
+        wasm.windows(name.len()).any(|window| window == name)
+    }
     let temp = tempfile::tempdir().unwrap();
     let opts = options(temp.path().join("remote"), temp.path().join("staged"));
     let (req, paths) = request(&input(agent_graph()), &opts).unwrap();
-    let mode = DirectStdlibMode::current();
-    assert_eq!(req.stdlib, Some(mode));
+    assert_eq!(req.stdlib, Some(DirectStdlibMode::current()));
 
     let mut wire = serde_json::to_value(&req).unwrap();
     wire.as_object_mut().unwrap().remove("stdlib");
     let older: CompileRequest = serde_json::from_value(wire).unwrap();
     assert_eq!(older.stdlib, None);
 
-    let mut other = req;
-    other.stdlib = Some(match mode {
-        DirectStdlibMode::Fused => DirectStdlibMode::Linked,
-        DirectStdlibMode::Linked => DirectStdlibMode::Fused,
-    });
-    let failure = compile(other, move |digest| std::fs::read(&paths[digest])).unwrap_err();
-    assert_eq!(failure.kind, "Unsupported");
-    assert!(
-        failure.message.contains("the request asks for it"),
-        "{}",
-        failure.message
-    );
+    // One process compiles in either mode, as each compile asks, here and
+    // elsewhere.
+    let paths = Arc::new(paths);
+    for mode in [DirectStdlibMode::Fused, DirectStdlibMode::Linked] {
+        let linked = mode == DirectStdlibMode::Linked;
+        let mut opts = options(
+            temp.path().join(format!("local-{mode:?}")),
+            temp.path().join("staged"),
+        );
+        opts.stdlib = Some(mode);
+        let (req, _) = request(&input(agent_graph()), &opts).unwrap();
+        assert_eq!(req.stdlib, Some(mode));
+        let paths = paths.clone();
+        let (_, wasm) = compile(req, move |digest| std::fs::read(&paths[digest])).unwrap();
+        assert_eq!(imports_linked_stdlib(&wasm), linked, "elsewhere, {mode:?}");
+
+        let local = compile_workflow_direct(input(agent_graph()), opts).unwrap();
+        let wasm = std::fs::read(local.build_dir.join("workflow.wasm")).unwrap();
+        assert_eq!(imports_linked_stdlib(&wasm), linked, "here, {mode:?}");
+    }
 }

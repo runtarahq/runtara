@@ -1983,6 +1983,10 @@ impl Runner for EmbeddedWasmRunner {
         "wasm-embedded"
     }
 
+    fn links_workflow_stdlib(&self) -> bool {
+        true
+    }
+
     fn occupancy(&self) -> Option<RunnerOccupancy> {
         Some(compute_occupancy(
             self.run_limit,
