@@ -25,9 +25,7 @@ pub mod workflows;
 pub mod workflows_sync;
 
 // Always compiled: without `embed-ui` it can still serve a dist directory from
-// disk via `RUNTARA_UI_DIST_DIR`, which is what lets a dev build skip the
-// feature (and with it the `rerun-if-changed=frontend/dist` that makes a running
-// `npm run build:watch` invalidate every cargo build).
+// disk via `RUNTARA_UI_DIST_DIR` (a runtara-frontend checkout's build, say).
 pub mod ui;
 
 pub mod operations;

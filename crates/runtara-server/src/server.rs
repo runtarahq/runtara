@@ -2827,7 +2827,7 @@ pub async fn start_with(
         .nest("/mcp", mcp_router);
 
     // UI. Served when the binary was built with `embed-ui`, or when
-    // RUNTARA_UI_DIST_DIR points at a built frontend/dist (which wins, and works
+    // RUNTARA_UI_DIST_DIR points at a runtara-frontend dist/ (which wins, and works
     // in any profile — see `handlers::ui::AssetSource`).
     // - RUNTARA_UI_BASE_PATH: `<base href>` injected into index.html (default `/ui`).
     //   Tenant deployments set this to `/ui/<tenant-id>` so the browser resolves

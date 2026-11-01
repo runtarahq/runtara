@@ -30,62 +30,8 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   SQLX_OFFLINE: true
-  WASM_PACK_VERSION: "0.13.1"
 
 jobs:
-  # Built once and shared, exactly as ci.yml's frontend-embed job does. Was
-  # inside every bundle job (~128s x 3 platforms), even though the output is
-  # identical across them.
-  #
-  # Carries dist/ AND src/wasm/validation/ on purpose: runtara-server's build.rs
-  # re-derives the validation-WASM fingerprint and, if it disagrees, shells out to
-  # wasm-pack and re-runs `npm run build` itself. Shipping the fingerprint keeps
-  # the consumers on the up-to-date path, so they need neither Node nor wasm-pack.
-  frontend:
-    name: Build Frontend
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: false
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-frontend
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: crates/runtara-server/frontend/.node-version
-          cache: npm
-          cache-dependency-path: crates/runtara-server/frontend/package-lock.json
-
-      - name: Install wasm-pack (prebuilt)
-        uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-pack@${{ env.WASM_PACK_VERSION }}
-
-      - name: Build frontend
-        working-directory: crates/runtara-server/frontend
-        run: |
-          npm ci --no-audit --no-fund
-          npm run build
-
-      - name: Upload frontend
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-frontend
-          path: |
-            crates/runtara-server/frontend/dist/
-            crates/runtara-server/frontend/src/wasm/validation/
-          if-no-files-found: error
-          retention-days: 1
-
   # The validation WASM package and openapi.json that runtarahq/runtara-frontend
   # builds against, attached to the release below.
   frontend-inputs:
@@ -144,7 +90,7 @@ jobs:
   bundle:
     name: Build Bundle (${{ matrix.os }}-${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    needs: [frontend, components]
+    needs: [components]
     strategy:
       fail-fast: false
       matrix:
@@ -198,14 +144,6 @@ jobs:
         with:
           shared-key: release-bundle-${{ matrix.os }}-${{ matrix.arch }}
 
-      # Node and wasm-pack are gone from this job: the frontend arrives prebuilt,
-      # fingerprint included, so build.rs stays on its up-to-date path.
-      - name: Download frontend
-        uses: actions/download-artifact@v4
-        with:
-          name: release-frontend
-          path: crates/runtara-server/frontend
-
       - name: Download WASM components
         uses: actions/download-artifact@v4
         with:
@@ -215,7 +153,7 @@ jobs:
       - name: Build bundle
         run: |
           ./scripts/build-bundle.sh \
-            --skip-frontend --skip-components \
+            --skip-components \
             --output-dir target/bundle \
             --version "${{ steps.get_version.outputs.version }}"
 
@@ -268,19 +206,33 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # The smoke suite is runtara-frontend's, at the release the bundle embeds.
+      - name: Read the embedded frontend release
+        id: frontend
+        run: |
+          version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*//p' crates/runtara-server/frontend.lock | tr -d '[:space:]')"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout runtara-frontend
+        uses: actions/checkout@v4
+        with:
+          repository: runtarahq/runtara-frontend
+          ref: v${{ steps.frontend.outputs.version }}
+          path: frontend
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version-file: crates/runtara-server/frontend/.node-version
+          node-version-file: frontend/.node-version
           cache: npm
-          cache-dependency-path: crates/runtara-server/frontend/package-lock.json
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend dependencies
-        working-directory: crates/runtara-server/frontend
+        working-directory: frontend
         run: npm ci --no-audit --no-fund
 
       - name: Install Playwright browsers
-        working-directory: crates/runtara-server/frontend
+        working-directory: frontend
         run: npx playwright install chromium --with-deps
 
       - name: Download linux bundle
@@ -350,7 +302,7 @@ jobs:
           exit 1
 
       - name: Run smoke tests
-        working-directory: crates/runtara-server/frontend
+        working-directory: frontend
         run: npm run test:e2e:smoke -- --max-failures=5
         env:
           CI: "true"
@@ -379,8 +331,8 @@ jobs:
         with:
           name: smoke-test-results
           path: |
-            crates/runtara-server/frontend/e2e-results/
-            crates/runtara-server/frontend/e2e-report/
+            frontend/e2e-results/
+            frontend/e2e-report/
             .data/smoke/runtara-server.log
           retention-days: 7
 

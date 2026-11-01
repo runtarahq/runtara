@@ -30,8 +30,12 @@ scoped README files, examples.
 - `crates/runtara-connections` owns credential storage, OAuth, connection
   schemas, and rate limiting.
 - `crates/runtara-object-store` owns schema-driven tenant object storage.
-- `crates/runtara-server/frontend` is the React/Vite application. Feature code
-  lives under `src/features`; shared code lives under `src/shared`.
+- The console (React/Vite) lives in
+  [runtarahq/runtara-frontend](https://github.com/runtarahq/runtara-frontend).
+  `embed-ui` embeds the release pinned in `crates/runtara-server/frontend.lock`,
+  which `build.rs` fetches with `scripts/fetch-frontend.sh`. Console changes go
+  to that repository; moving the embedded console to a new release means
+  updating the lock's version and sha256.
 - `prototypes` and `spikes` are experimental and are not production code unless
   a task explicitly targets them.
 
@@ -41,8 +45,6 @@ scoped README files, examples.
 - Agent and workflow components target `wasm32-wasip2` and build with plain
   Cargo through `scripts/build-agent-components.sh`. Do not introduce
   `cargo-component` or committed generated `bindings.rs` files.
-- The frontend Node version is pinned in
-  `crates/runtara-server/frontend/.node-version`.
 
 ## Working Rules
 
@@ -63,11 +65,11 @@ scoped README files, examples.
 
 ## Generated Files
 
-- `crates/runtara-server/frontend/src/generated/*.ts` is generated from
-  OpenAPI. Regenerate the runtime client with the frontend package's
-  `generate-api-runtime-offline` script when the runtime API changes.
-- `crates/runtara-server/frontend/src/wasm/validation` is generated and
-  ignored. Build it with `npm run build:wasm-validation` from the frontend.
+- Each release attaches `openapi.json` (from `dump_openapi`) and the browser
+  validation WASM package (`runtara-validation-wasm-<version>.tgz`, from
+  `crates/runtara-validation-wasm`) for runtara-frontend, which builds against
+  them (`.github/workflows/frontend-inputs.yml`).
+- `crates/runtara-server/frontend-dist` is the fetched console release; ignored.
 - Agent `.wasm` and `.meta.json` files are produced under
   `target/wasm32-wasip2/release` by
   `scripts/build-agent-components.sh`.
@@ -95,8 +97,8 @@ whole workspace.
   without their required feature.
 - Component changes: run `scripts/build-agent-components.sh`, then the relevant
   `runtara-component-host` and `runtara-workflows` integration tests from CI.
-- Frontend changes: from `crates/runtara-server/frontend`, run the relevant
-  combination of `npm test`, `npm run lint`, and `npm run build`.
+- Validation WASM changes (`runtara-validation-wasm` and the crates it uses):
+  build it with `wasm-pack build crates/runtara-validation-wasm --target web`.
 - Database changes: run the owning crate's feature-gated integration tests
   against isolated test databases.
 - Use top-level `e2e/test_*.sh` scripts only when their external boundary is

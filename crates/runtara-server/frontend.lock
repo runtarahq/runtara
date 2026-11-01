@@ -1,0 +1,6 @@
+# The runtara-frontend release runtara-server embeds (--features embed-ui).
+# scripts/fetch-frontend.sh downloads it from runtara-frontend's GitHub release
+# and checks it against sha256. Console X.Y works with server X.Y and the
+# minor on either side.
+version = 10.0.0
+sha256 = c0f8b5cec3fba16f7bf954db196e96c693853507404328f8d6ec9a5e0b6bc376

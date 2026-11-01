@@ -75,31 +75,22 @@ jobs:
           curl -sS --fail-with-body -X POST -H 'Content-Type: application/json' \
             --data "$payload" "$SLACK_WEBHOOK_URL"
 
-  # The `embed-ui` feature (in GATE_FEATURES) makes rust_embed pull
-  # frontend/dist into the server binary, so `lint` and `build` both need a
-  # built frontend. They used to build it themselves — two full `npm ci &&
-  # npm run build` runs, each installing wasm-pack and compiling the
-  # validation WASM. Build it once here and share it instead.
-  #
-  # The artifact carries BOTH outputs on purpose. build.rs re-derives the
-  # validation-WASM fingerprint and, if it disagrees with the one in
-  # src/wasm/validation/, shells out to wasm-pack itself and then re-runs
-  # `npm run build`. Shipping the fingerprint file alongside dist/ keeps it on
-  # the up-to-date path, which is why the consumers below need neither
-  # wasm-pack nor Node. (Verified: build.rs logs "Browser validation WASM is
-  # up-to-date" and never trips its REBUILDING FRONTEND DIST branch.)
-  frontend-embed:
-    name: frontend (embedded UI)
+  # The browser validation WASM that runtara-frontend depends on is built by
+  # wasm-pack and published only with a release (frontend-inputs.yml). Build it
+  # here too, so a change that breaks that build fails on its PR instead of at
+  # release time. (`embed-ui` itself needs no frontend build: build.rs fetches
+  # the runtara-frontend release pinned in crates/runtara-server/frontend.lock.)
+  validation-wasm:
+    name: validation wasm
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
 
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          target: wasm32-unknown-unknown
           cache: false
 
       - uses: Swatinem/rust-cache@v2
@@ -108,40 +99,23 @@ jobs:
           # 10 GB per-repo budget — the churn that was evicting these caches
           # into partial matches ("full match: false") on nearly every run.
           save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: crates/runtara-server/frontend/.node-version
-          cache: npm
-          cache-dependency-path: crates/runtara-server/frontend/package-lock.json
 
       - name: Install wasm-pack (prebuilt)
         uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack@${{ env.WASM_PACK_VERSION }}
 
-      - name: Build frontend (embedded UI)
-        working-directory: crates/runtara-server/frontend
+      - name: Build the validation WASM package
+        env:
+          CARGO_TARGET_DIR: target/validation-wasm-pack
         run: |
-          npm ci --no-audit --no-fund
-          npm run build
-
-      # Two paths, so the artifact root is their common ancestor
-      # (crates/runtara-server/frontend) and both trees restore in place.
-      - name: Upload frontend (embedded UI)
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-embed
-          path: |
-            crates/runtara-server/frontend/dist/
-            crates/runtara-server/frontend/src/wasm/validation/
-          if-no-files-found: error
-          retention-days: 1
+          wasm-pack build crates/runtara-validation-wasm \
+              --target web --release \
+              --out-dir "${GITHUB_WORKSPACE}/target/validation-wasm-pkg" \
+              --out-name runtara_validation
 
   lint:
     runs-on: ubuntu-latest
-    needs: frontend-embed
 
     steps:
       - uses: actions/checkout@v4
@@ -159,12 +133,6 @@ jobs:
           # 10 GB per-repo budget — the churn that was evicting these caches
           # into partial matches ("full match: false") on nearly every run.
           save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Download frontend (embedded UI)
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-embed
-          path: crates/runtara-server/frontend
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -197,7 +165,6 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
-    needs: frontend-embed
 
     steps:
       - uses: actions/checkout@v4
@@ -215,12 +182,6 @@ jobs:
           # 10 GB per-repo budget — the churn that was evicting these caches
           # into partial matches ("full match: false") on nearly every run.
           save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Download frontend (embedded UI)
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-embed
-          path: crates/runtara-server/frontend
 
       - name: Build
         run: |
@@ -784,7 +745,7 @@ jobs:
     # Skipped on cancellation (avoids spurious "failure" pings when a run is
     # superseded by a new push).
     needs:
-      - frontend-embed
+      - validation-wasm
       - lint
       - build
       - test-workflows
@@ -813,8 +774,8 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
-          # "skipped" counts as bad, not neutral. Jobs here now form a chain
-          # (frontend-embed -> lint/build -> test-*), so an early failure leaves
+          # "skipped" counts as bad, not neutral. Jobs here can form a chain
+          # (lint/build -> test-*), so an early failure leaves
           # everything downstream "skipped" rather than "failure" — matching only
           # on "failure" would report a green CI for a run that never compiled.
           # cancelled() runs are already filtered out by the `if:` above, so a
