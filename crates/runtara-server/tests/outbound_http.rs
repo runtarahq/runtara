@@ -95,6 +95,7 @@ fn facade_with_redis(
         db_pool: pool,
         redis_manager,
         public_base_url: "http://localhost".to_string(),
+        oauth_complete_url: None,
         http_client: runtara_connections::net::build_hardened_client(),
         cipher: Arc::new(NoOpCipher),
         compatibility,

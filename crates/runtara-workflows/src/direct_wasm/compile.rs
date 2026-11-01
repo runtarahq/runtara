@@ -63,6 +63,7 @@ mod split;
 mod split_parallel;
 mod split_retry;
 mod state;
+mod stdlib_context;
 mod step_context;
 mod step_error;
 mod switch_route;
@@ -652,6 +653,19 @@ pub fn compose_direct_workflow_with_isolated_agents(
     )
 }
 
+/// Whether a composed component is validated as it is encoded: unless a
+/// process says otherwise ([`set_composition_validated`]).
+static COMPOSITION_VALIDATED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// Whether this process validates the components it composes. A compiler
+/// whose output its host trusts no more than its input (one in a sandbox,
+/// SYN-930) need not: validating a composed component took most of its
+/// composing, and whatever runs it validates it again.
+pub fn set_composition_validated(validated: bool) {
+    COMPOSITION_VALIDATED.store(validated, std::sync::atomic::Ordering::Relaxed);
+}
+
 type IsolationSelection<'a> = (
     &'a std::collections::BTreeMap<String, String>,
     runtara_invocation_contract::PackageLimits,
@@ -785,7 +799,14 @@ fn compose_direct_workflow_selected(
         "runtara:workflow-logic".to_string(),
         result.workflow_logic_wasm_path.clone(),
     );
-    for component in &shared_components {
+    let linked =
+        super::component::DirectStdlibMode::current() == super::component::DirectStdlibMode::Linked;
+    // Linked, the stdlib is not composed; its digest is still recorded below,
+    // for the host to link the version the artifact was built against.
+    for component in shared_components
+        .iter()
+        .filter(|component| !(linked && component.package == STDLIB_COMPONENT_PACKAGE))
+    {
         overrides.insert(component.package.clone(), component.wasm_path.clone());
     }
     for component in &agent_components {
@@ -843,8 +864,27 @@ fn compose_direct_workflow_selected(
         "compose: in-process wac-graph composition complete",
     );
     trusted::pin_trusted_dependencies(&mut composed_wasm, &agent_components, components_dir)?;
+    if linked {
+        let stdlib = shared_components
+            .iter()
+            .find(|component| component.package == STDLIB_COMPONENT_PACKAGE)
+            .and_then(|component| component.metadata.wasm.as_ref())
+            .ok_or_else(|| component_error("linked compile: no workflow stdlib digest"))?;
+        trusted::pin_linked_stdlib(&mut composed_wasm, &stdlib.sha256, &agent_components)?;
+    }
     // Before isolated children are appended: they run in Stores of their own.
-    let memory_floor_bytes = initial_memory_bytes(&composed_wasm)?;
+    let mut memory_floor_bytes = initial_memory_bytes(&composed_wasm)?;
+    if linked {
+        // The run's Store also holds the linked stdlib instance.
+        for component in &shared_components {
+            if component.package == STDLIB_COMPONENT_PACKAGE {
+                let stdlib = std::fs::read(&component.wasm_path).map_err(|error| {
+                    component_error(format!("read {}: {error}", component.wasm_path.display()))
+                })?;
+                memory_floor_bytes += initial_memory_bytes(&stdlib)?;
+            }
+        }
+    }
     let isolation = if bindings.is_empty() {
         None
     } else {
@@ -935,6 +975,9 @@ fn compose_direct_workflow_selected(
 /// `wac-parser`/`wac-resolver`/`wac-graph` — the same crates the `wac` CLI
 /// uses — so the output is identical to the former subprocess, with no
 /// external `wac` binary required.
+/// The stdlib's wac package name.
+const STDLIB_COMPONENT_PACKAGE: &str = "runtara:workflow-stdlib";
+
 fn compose_workflow_component_in_process(
     wac_source: &str,
     deps_dir: &Path,
@@ -1029,10 +1072,11 @@ fn compose_workflow_component_in_process(
     );
 
     let encode_start = Instant::now();
+    let validate = COMPOSITION_VALIDATED.load(std::sync::atomic::Ordering::Relaxed);
     let encoded = resolution
         .encode(EncodeOptions {
             define_components: true,
-            validate: true,
+            validate,
             ..Default::default()
         })
         .map_err(|err| {
@@ -1043,7 +1087,7 @@ fn compose_workflow_component_in_process(
     tracing::debug!(
         target: "runtara::direct_compile::profile",
         elapsed_ms = encode_start.elapsed().as_secs_f64() * 1000.0,
-        validate = true,
+        validate,
         "compose: encoded + validated composed component",
     );
     encoded
@@ -1138,9 +1182,10 @@ pub fn direct_lowering_tag() -> String {
     // their run permits until the execution timeout, and recompiling reported
     // success without rebuilding anything.
     format!(
-        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v24,agent-composition=standard-v1,parent-cancel=callback-v2,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,trusted-artifacts=v1,on-signal-remap=v1,wide-result-errors=v1,control-api=direct-v1,omit_runtime={}",
+        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v24,agent-composition=standard-v1,parent-cancel=callback-v2,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,trusted-artifacts=v1,stdlib-context=v1,stdlib={},on-signal-remap=v1,wide-result-errors=v1,control-api=direct-v1,omit_runtime={}",
         workflow_abi_tag(super::component::WorkflowRole::Root),
         DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
+        super::component::DirectStdlibMode::current().tag(),
         omit_runtime_from_env()
     )
 }
@@ -1791,7 +1836,7 @@ fn build_direct_component_resolve_with_waits(
          \n\
          world workflow {{\n\
              import {};\n",
-        runtara_wit::stdlib::JSON
+        super::component::DirectStdlibMode::current().json_interface()
     );
     // Everything the logic reaches is `runtara:api`'s: the runtime (unless
     // the workflow is runtime-free), connections, timers, operations, waits

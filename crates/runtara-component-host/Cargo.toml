@@ -10,8 +10,12 @@ keywords = ["wasm", "component-model", "wasmtime", "agent"]
 categories = ["wasm"]
 
 [features]
-component-integration-tests = []
+component-integration-tests = ["test-incremental-cache"]
 db-integration-tests = []
+# Tests only: share Cranelift output per function across compiles, so suites
+# that compose many workflows around the same stdlib/agent code compile it
+# once per process (`EngineConfig::incremental_cache`).
+test-incremental-cache = ["wasmtime/incremental-cache"]
 # Test-only experiment: guest-owned orchestration across disposable Stores.
 
 [[test]]
@@ -70,6 +74,7 @@ path = "tests/outbound_http.rs"
 required-features = ["component-integration-tests"]
 
 [dependencies]
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 runtara-database-contract = { path = "../runtara-database-contract" }
 runtara-artifact-store = { path = "../runtara-artifact-store" }
 runtara-agent-trusted = { path = "../runtara-agent-trusted" }

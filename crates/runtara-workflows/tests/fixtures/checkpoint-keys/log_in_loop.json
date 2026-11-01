@@ -1,0 +1,5 @@
+[
+  "runtara:v2:[\"agent\",\"smoke-log_in_loop\",[],[],[\"transform\",\"map-fields\",\"init\"]]",
+  "runtara:v2:[\"agent\",\"smoke-log_in_loop\",[],[],[\"transform\",\"map-fields\",\"init\"]]::attempt::1",
+  "runtara:v2:[\"while\",\"smoke-log_in_loop\",[],[],[\"loop\"]]"
+]

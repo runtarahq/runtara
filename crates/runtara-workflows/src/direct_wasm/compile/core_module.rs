@@ -672,7 +672,8 @@ pub(super) fn emit_direct_core_module(
     module.section(&exports);
     module.section(&code);
     module.section(&data);
-    Ok(module.finish())
+    // Every stdlib call carries the caller's context; see `stdlib_context`.
+    super::stdlib_context::thread_stdlib_context(&module.finish())
 }
 
 #[allow(clippy::too_many_arguments)]

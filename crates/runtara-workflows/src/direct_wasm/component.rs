@@ -13,7 +13,47 @@
 //! from the files actually staged on disk. Contracts over coupling: the module
 //! names imports it never defines, and `wac` resolves them.
 
-use runtara_wit::stdlib::{JSON as STDLIB_JSON_INTERFACE, PACKAGE as STDLIB_PACKAGE};
+use runtara_wit::stdlib::PACKAGE as STDLIB_PACKAGE;
+
+/// How workflow logic reaches the stdlib.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectStdlibMode {
+    /// Composed into every workflow artifact.
+    Fused,
+    /// Left out of the artifact: the logic imports `runtara:workflow-stdlib-link`
+    /// and the host links one stdlib instance into each run.
+    Linked,
+}
+
+impl DirectStdlibMode {
+    /// The process's mode: `RUNTARA_DIRECT_STDLIB=linked` or `fused`, else
+    /// linked. This crate's own unit tests default to fused: they pin the
+    /// composed layout's import names, and the integration suites run both.
+    pub fn current() -> Self {
+        static MODE: std::sync::OnceLock<DirectStdlibMode> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| match std::env::var("RUNTARA_DIRECT_STDLIB").as_deref() {
+            Ok("fused") => Self::Fused,
+            Ok("linked") => Self::Linked,
+            _ if cfg!(test) => Self::Fused,
+            _ => Self::Linked,
+        })
+    }
+
+    /// The stdlib interface workflow logic imports.
+    pub fn json_interface(self) -> &'static str {
+        match self {
+            Self::Fused => runtara_wit::stdlib::JSON,
+            Self::Linked => runtara_wit::stdlib_link::JSON,
+        }
+    }
+
+    pub(crate) fn tag(self) -> &'static str {
+        match self {
+            Self::Fused => "fused",
+            Self::Linked => "linked",
+        }
+    }
+}
 
 /// Package of the world direct-emitted workflow logic is encoded against, and
 /// of the logic component in the composition.
@@ -126,33 +166,38 @@ pub(crate) fn http_guest_wac(
     // start their child through `runtara:api/tasks`. A plain agent imports
     // none of it, and a spread that satisfies nothing is a wac error.
     const STDLIB: &str = "let workflow-stdlib = new runtara:workflow-stdlib { ... };\n";
+    const API: &str = "let workflow-api = new runtara:api-component { ... };\n";
     let wac = if with_api {
-        if wac.matches(STDLIB).count() != 1 {
-            return Err("the workflow composition has no single stdlib instance".into());
-        }
-        wac.replacen(
-            STDLIB,
-            &format!("{STDLIB}let workflow-api = new runtara:api-component {{ ... }};\n"),
-            1,
-        )
-        .lines()
-        .map(|line| {
-            let adapter = line.starts_with("let agent-")
-                && line.ends_with(" { ... };")
-                && isolated.iter().any(|package| {
-                    line.ends_with(&format!(" = new {} {{ ... }};", wac_name(package)))
-                });
-            if adapter {
-                format!(
-                    "{} {{ ...workflow-api, ... }};",
-                    &line[..line.len() - " { ... };".len()]
-                )
-            } else {
-                line.to_string()
+        let composed = match wac.matches(STDLIB).count() {
+            1 => wac.replacen(STDLIB, &format!("{STDLIB}{API}"), 1),
+            // Linked: no stdlib instance, so the api component goes first.
+            0 if DirectStdlibMode::current() == DirectStdlibMode::Linked => {
+                let first = wac
+                    .find("\nlet ")
+                    .ok_or("the workflow composition instantiates nothing")?;
+                format!("{}\n{API}{}", &wac[..first], &wac[first + 1..])
             }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+            _ => return Err("the workflow composition has no single stdlib instance".into()),
+        };
+        composed
+            .lines()
+            .map(|line| {
+                let adapter = line.starts_with("let agent-")
+                    && line.ends_with(" { ... };")
+                    && isolated.iter().any(|package| {
+                        line.ends_with(&format!(" = new {} {{ ... }};", wac_name(package)))
+                    });
+                if adapter {
+                    format!(
+                        "{} {{ ...workflow-api, ... }};",
+                        &line[..line.len() - " { ... };".len()]
+                    )
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
             + "\n"
     } else {
         wac.to_string()
@@ -212,7 +257,10 @@ impl DirectComponentArtifacts {
     /// needs it.
     pub(super) fn with_wait_instances(mut self, wait_instances: bool) -> Self {
         if wait_instances && !self.wait_instances {
-            let stdlib = format!("    import {STDLIB_JSON_INTERFACE};\n");
+            let stdlib = format!(
+                "    import {};\n",
+                DirectStdlibMode::current().json_interface()
+            );
             let import = format!("{stdlib}    import {};\n", runtara_wit::api::WAITS);
             self.world_wit = self.world_wit.replacen(&stdlib, &import, 1);
         }
@@ -225,7 +273,10 @@ impl DirectComponentArtifacts {
     /// reads the child through tasks and parks on it through waits.
     pub(super) fn with_child_runs(mut self, child_runs: bool) -> Self {
         if child_runs {
-            let stdlib = format!("    import {STDLIB_JSON_INTERFACE};\n");
+            let stdlib = format!(
+                "    import {};\n",
+                DirectStdlibMode::current().json_interface()
+            );
             let mut imports = stdlib.clone();
             for interface in [runtara_wit::api::TASKS, runtara_wit::api::WAITS] {
                 let import = format!("    import {interface};\n");
@@ -242,7 +293,10 @@ impl DirectComponentArtifacts {
     /// step publishes state.
     pub(super) fn with_run_state(mut self, run_state: bool) -> Self {
         if run_state && !self.run_state {
-            let stdlib = format!("    import {STDLIB_JSON_INTERFACE};\n");
+            let stdlib = format!(
+                "    import {};\n",
+                DirectStdlibMode::current().json_interface()
+            );
             let import = format!("{stdlib}    import {};\n", runtara_wit::api::STATE);
             self.world_wit = self.world_wit.replacen(&stdlib, &import, 1);
         }
@@ -421,7 +475,8 @@ fn emit_world_wit(
          package {DIRECT_WORKFLOW_LOGIC_PACKAGE};\n\
          \n\
          world workflow {{\n\
-         \x20   import {STDLIB_JSON_INTERFACE};\n",
+         \x20   import {};\n",
+        DirectStdlibMode::current().json_interface(),
     );
     if !omit_runtime {
         // The run services: `runtara:api`'s runtime interfaces.
@@ -512,9 +567,13 @@ fn emit_wac(
     let mut out = format!(
         "// Generated by runtara-workflows direct component scaffold.\n\
          package runtara:workflow-instance@{DIRECT_AGENT_WIT_VERSION};\n\
-         \n\
-         let workflow-stdlib = new runtara:workflow-stdlib {{ ... }};\n",
+         \n",
     );
+    // Linked: the logic's stdlib import bubbles up for the host to serve.
+    let fused = DirectStdlibMode::current() == DirectStdlibMode::Fused;
+    if fused {
+        out.push_str("let workflow-stdlib = new runtara:workflow-stdlib { ... };\n");
+    }
 
     // Named once for both the instantiations and the arguments below.
     let instances: Vec<WacAgentInstance> = agents
@@ -548,7 +607,9 @@ fn emit_wac(
     }
 
     out.push_str("\nlet wf = new runtara:workflow-logic {");
-    out.push_str(" ...workflow-stdlib,");
+    if fused {
+        out.push_str(" ...workflow-stdlib,");
+    }
     for instance in &instances {
         let agent = instance.agent;
         let interface = if scoped_agents.contains(agent) {

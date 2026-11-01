@@ -46,6 +46,7 @@ mod tests {
         let engine = crate::build_engine(&crate::EngineConfig {
             cache_dir: None,
             enable_epoch_interruption: false,
+            incremental_cache: false,
         })
         .unwrap();
         let importing = |name: &str| {

@@ -114,6 +114,32 @@ struct StoreEntry {
     nested: Vec<u64>,
 }
 
+/// One context's interning arena and handle nonce, held while another context
+/// is current. See [`swap_value_store`].
+pub struct ValueStoreSlot {
+    store: ValueStore,
+    nonce: u64,
+}
+
+impl Default for ValueStoreSlot {
+    fn default() -> Self {
+        Self {
+            store: ValueStore::default(),
+            nonce: fresh_nonce(),
+        }
+    }
+}
+
+/// Exchange the current arena and nonce with `slot`. A stdlib instance serves
+/// several logic instances, each with its own context: the component swaps a
+/// context in for a call and back out after it, so values stay with their
+/// context and a handle from one never resolves in another (each has its own
+/// nonce).
+pub fn swap_value_store(slot: &mut ValueStoreSlot) {
+    VALUE_STORE.with(|store| std::mem::swap(&mut *store.borrow_mut(), &mut slot.store));
+    WFREF_NONCE.with(|nonce| slot.nonce = nonce.replace(slot.nonce));
+}
+
 /// Clear the interning arena. Called at run start (`init-manifest`) so a reused
 /// component instance never sees a previous run's handles. Also rotates the
 /// handle nonce, so any handle minted before the reset stops matching the
@@ -331,7 +357,7 @@ fn stored_value(id: u64) -> Value {
 /// Fully resolve handles at external boundaries. A same-run dangling handle is
 /// an internal invariant failure, never a successful null output. Foreign-run
 /// or user-shaped handles remain ordinary data because wfref_id rejects them.
-fn materialize(value: Value) -> Value {
+pub(crate) fn materialize(value: Value) -> Value {
     if let Some(id) = wfref_id(&value) {
         return materialize(stored_value(id));
     }

@@ -356,6 +356,7 @@ async fn run_composed(
     }
     let engine = runtara_component_host::build_engine(&EngineConfig {
         cache_dir: None,
+        incremental_cache: true,
         ..Default::default()
     })
     .unwrap();

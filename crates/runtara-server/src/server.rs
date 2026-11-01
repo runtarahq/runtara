@@ -1239,19 +1239,31 @@ pub async fn start_with(
     // router just for this one field.
     let encryption_enabled = cipher.is_encrypting();
 
+    // Used to build the OAuth callback redirect_uri. Production sets this
+    // explicitly; for local dev, default it to the port THIS server actually
+    // binds (SERVER_PORT, default 7001) so the callback lands here instead of
+    // a stale hardcoded port. `localhost` (not SERVER_HOST, which may be
+    // 0.0.0.0) — it's a browser-facing URL.
+    let public_base_url = std::env::var("PUBLIC_BASE_URL").unwrap_or_else(|_| {
+        let port = std::env::var("SERVER_PORT").unwrap_or_else(|_| "7001".to_string());
+        format!("http://localhost:{port}")
+    });
+    // Where the OAuth callback sends the consent popup: the console's landing
+    // page, on whichever host serves the console.
+    let oauth_complete_url = match crate::api::handlers::ui::oauth_complete_url(&public_base_url) {
+        Ok(url) => url,
+        Err(msg) => {
+            eprintln!("❌ Configuration error: RUNTARA_UI_PUBLIC_URL: {msg}");
+            std::process::exit(1);
+        }
+    };
+
     // Construct connections crate config and facade.
     let connections_config = runtara_connections::ConnectionsConfig {
         db_pool: pool.clone(),
         redis_manager: redis_manager.clone(),
-        // Used to build the OAuth callback redirect_uri. Production sets this
-        // explicitly; for local dev, default it to the port THIS server actually
-        // binds (SERVER_PORT, default 7001) so the callback lands here instead of
-        // a stale hardcoded port. `localhost` (not SERVER_HOST, which may be
-        // 0.0.0.0) — it's a browser-facing URL.
-        public_base_url: std::env::var("PUBLIC_BASE_URL").unwrap_or_else(|_| {
-            let port = std::env::var("SERVER_PORT").unwrap_or_else(|_| "7001".to_string());
-            format!("http://localhost:{port}")
-        }),
+        public_base_url,
+        oauth_complete_url,
         // Hardened: no-redirect + DNS-guarded — this client performs the OAuth
         // refresh POSTs (token_cache) and other credentialed connection egress.
         http_client: runtara_connections::net::build_hardened_client(),
@@ -2815,7 +2827,7 @@ pub async fn start_with(
         .nest("/mcp", mcp_router);
 
     // UI. Served when the binary was built with `embed-ui`, or when
-    // RUNTARA_UI_DIST_DIR points at a built frontend/dist (which wins, and works
+    // RUNTARA_UI_DIST_DIR points at a runtara-frontend dist/ (which wins, and works
     // in any profile — see `handlers::ui::AssetSource`).
     // - RUNTARA_UI_BASE_PATH: `<base href>` injected into index.html (default `/ui`).
     //   Tenant deployments set this to `/ui/<tenant-id>` so the browser resolves

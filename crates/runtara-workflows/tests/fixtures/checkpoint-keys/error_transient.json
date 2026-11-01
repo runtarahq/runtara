@@ -1,0 +1,4 @@
+[
+  "runtara:v2:[\"agent\",\"smoke-error_transient\",[],[],[\"utils\",\"return-input\",\"simulate_failure\"]]",
+  "runtara:v2:[\"agent\",\"smoke-error_transient\",[],[],[\"utils\",\"return-input\",\"simulate_failure\"]]::attempt::1"
+]

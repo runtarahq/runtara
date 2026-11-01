@@ -353,6 +353,18 @@ pub fn get_step_types_json() -> String {
     }))
 }
 
+/// Return the runtime variables a workflow may read, as
+/// `{"variables": [{"name", "description"}]}`: the DSL's
+/// `PUBLIC_RUNTIME_VARIABLES`, which the editor's built-in variables must cover.
+#[wasm_bindgen(js_name = getPublicRuntimeVariablesJson)]
+pub fn get_public_runtime_variables_json() -> String {
+    let variables: Vec<Value> = runtara_dsl::PUBLIC_RUNTIME_VARIABLES
+        .iter()
+        .map(|(name, description)| json!({ "name": name, "description": description }))
+        .collect();
+    to_json_string(&json!({ "variables": variables }))
+}
+
 /// Return the JSON Schema metadata for a statically compiled workflow step type.
 #[wasm_bindgen(js_name = getStepTypeSchemaJson)]
 pub fn get_step_type_schema_json(step_type: &str) -> String {
@@ -627,6 +639,23 @@ mod tests {
     // Tests replace the process-global catalog. Serialize those mutations so
     // parallel test execution cannot make validation depend on test order.
     static CATALOG_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn public_runtime_variables_are_the_dsls() {
+        let value: Value = serde_json::from_str(&get_public_runtime_variables_json()).unwrap();
+        let names: Vec<&str> = value["variables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|variable| variable["name"].as_str().unwrap())
+            .collect();
+        let dsl: Vec<&str> = runtara_dsl::PUBLIC_RUNTIME_VARIABLES
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(names, dsl);
+        assert!(value["variables"][0]["description"].is_string());
+    }
 
     const FORM_DEFINITION_JSON: &str = r#"{
         "schemaVersion": 1,

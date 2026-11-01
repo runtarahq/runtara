@@ -143,6 +143,7 @@ async fn built_object_model_crud_bulk_aggregate_and_memory_use_native_postgres()
     let engine = runtara_component_host::build_engine(&runtara_component_host::EngineConfig {
         cache_dir: None,
         enable_epoch_interruption: false,
+        incremental_cache: false,
     })?;
     let component =
         Component::from_file(&engine, directory.join("runtara_agent_object_model.wasm"))?;

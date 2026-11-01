@@ -192,6 +192,7 @@ async fn execute_cancelled_http(parallel: bool, recover: bool, root_stop: bool) 
     .unwrap();
     let engine = runtara_component_host::build_engine(&EngineConfig {
         cache_dir: None,
+        incremental_cache: true,
         ..Default::default()
     })
     .unwrap();

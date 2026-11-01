@@ -71,7 +71,7 @@ edition = "2024"
 # reports a clear "requires rustc X" instead of a random type error on an older
 # compiler.
 rust-version = "1.97"
-version = "9.0.1"
+version = "10.0.0"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/runtarahq/runtara"
 homepage = "https://runtara.com"
@@ -79,7 +79,7 @@ keywords = ["durable", "workflow", "checkpoint", "execution"]
 categories = ["asynchronous", "development-tools"]
 
 [workspace.dependencies]
-runtara-http = { path = "crates/runtara-http", version = "9.0", default-features = false }
+runtara-http = { path = "crates/runtara-http", version = "10.0", default-features = false }
 # Shared by every agent component under crates/agents. Agents pick runtara-http's
 # `native` feature (ureq) on the host and `wasi` (typed outbound host calls) in
 # WASM; connection IDs and routing controls are explicit request fields, and
@@ -92,8 +92,8 @@ runtara-http = { path = "crates/runtara-http", version = "9.0", default-features
 # hand-edited. runtara-dsl's default features are off to keep them out of the
 # `.wasm`.
 wit-bindgen = "0.58"
-runtara-agent-macro = { path = "crates/runtara-agent-macro", version = "9.0" }
-runtara-dsl = { path = "crates/runtara-dsl", version = "9.0", default-features = false }
+runtara-agent-macro = { path = "crates/runtara-agent-macro", version = "10.0" }
+runtara-dsl = { path = "crates/runtara-dsl", version = "10.0", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 # `float_roundtrip` makes float parsing correctly rounded. Without it serde_json's
 # fast path can move a value by one ULP on parse, and workflow values are

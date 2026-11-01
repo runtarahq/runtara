@@ -155,6 +155,7 @@ async fn repeated_cancellation_soak() -> anyhow::Result<()> {
     let engine = runtara_component_host::build_engine(&runtara_component_host::EngineConfig {
         cache_dir: None,
         enable_epoch_interruption: false,
+        incremental_cache: false,
     })?;
     // Prepared once. A per-cycle Component would measure compilation, not what
     // repeated cancellation leaves behind.

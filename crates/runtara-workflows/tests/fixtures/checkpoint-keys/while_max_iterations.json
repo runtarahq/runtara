@@ -1,0 +1,11 @@
+[
+  "runtara:v2:[\"agent\",\"smoke-while_max_iterations\",[],[[\"While\",\"loop\",0]],[\"transform\",\"map-fields\",\"process\"]]",
+  "runtara:v2:[\"agent\",\"smoke-while_max_iterations\",[],[[\"While\",\"loop\",0]],[\"transform\",\"map-fields\",\"process\"]]::attempt::1",
+  "runtara:v2:[\"agent\",\"smoke-while_max_iterations\",[],[[\"While\",\"loop\",1]],[\"transform\",\"map-fields\",\"process\"]]",
+  "runtara:v2:[\"agent\",\"smoke-while_max_iterations\",[],[[\"While\",\"loop\",1]],[\"transform\",\"map-fields\",\"process\"]]::attempt::1",
+  "runtara:v2:[\"agent\",\"smoke-while_max_iterations\",[],[[\"While\",\"loop\",2]],[\"transform\",\"map-fields\",\"process\"]]",
+  "runtara:v2:[\"agent\",\"smoke-while_max_iterations\",[],[[\"While\",\"loop\",2]],[\"transform\",\"map-fields\",\"process\"]]::attempt::1",
+  "runtara:v2:[\"agent\",\"smoke-while_max_iterations\",[],[],[\"transform\",\"map-fields\",\"init\"]]",
+  "runtara:v2:[\"agent\",\"smoke-while_max_iterations\",[],[],[\"transform\",\"map-fields\",\"init\"]]::attempt::1",
+  "runtara:v2:[\"while\",\"smoke-while_max_iterations\",[],[],[\"loop\"]]"
+]

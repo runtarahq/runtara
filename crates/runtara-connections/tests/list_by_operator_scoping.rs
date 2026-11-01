@@ -293,6 +293,7 @@ async fn native_descriptions_and_resources_enforce_tenant_and_safe_metadata() {
         db_pool: fixture.pool.clone(),
         redis_manager: None,
         public_base_url: String::new(),
+        oauth_complete_url: None,
         http_client: reqwest::Client::new(),
         cipher: Arc::new(NoOpCipher),
         compatibility: Arc::new(IntegrationCompatibility::from_catalog(&catalog)),

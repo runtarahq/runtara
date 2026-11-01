@@ -2285,31 +2285,6 @@ mod tests {
         assert!(runtime_variables.contains_key("variables._index"));
     }
 
-    /// The editor's built-in variable types cover exactly the public runtime
-    /// variables the DSL documents.
-    #[test]
-    fn editor_builtin_variables_match_the_dsl() {
-        let source = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/frontend/src/features/workflows/components/WorkflowEditor/NodeForm/reference-type.ts"
-        ))
-        .unwrap();
-        let start = source.find("BUILTIN_VARIABLE_TYPES").unwrap();
-        let body = &source[start..start + source[start..].find("};").unwrap()];
-        let mut editor: Vec<&str> = body
-            .lines()
-            .filter_map(|line| line.trim().split_once(':').map(|(name, _)| name))
-            .filter(|name| name.starts_with('_'))
-            .collect();
-        editor.sort_unstable();
-        let mut dsl: Vec<&str> = runtara_dsl::PUBLIC_RUNTIME_VARIABLES
-            .iter()
-            .map(|(name, _)| *name)
-            .collect();
-        dsl.sort_unstable();
-        assert_eq!(editor, dsl);
-    }
-
     #[test]
     fn authoring_schema_describes_error_step_without_input_mapping() {
         let schema = workflow_authoring_schema("object_model", "bulk-update-instances");

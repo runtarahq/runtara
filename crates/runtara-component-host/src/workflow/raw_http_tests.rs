@@ -73,6 +73,7 @@ async fn an_agent_cannot_reach_a_loopback_listener_over_raw_wasi_http() -> anyho
     let engine = crate::build_engine(&crate::EngineConfig {
         cache_dir: None,
         enable_epoch_interruption: false,
+        incremental_cache: false,
     })?;
     let component = Component::new(&engine, raw_http_component(&authority))?;
     let state = crate::HostState::new(Arc::new(crate::CallContext::for_test("tenant-a")));

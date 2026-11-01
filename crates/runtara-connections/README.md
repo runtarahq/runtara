@@ -14,7 +14,7 @@ Not a standalone crate — `publish = false`, and it assumes the host supplies a
 
 ```rust
 let config = runtara_connections::ConnectionsConfig {
-    db_pool, redis_manager, public_base_url, http_client,
+    db_pool, redis_manager, public_base_url, oauth_complete_url, http_client,
     cipher: runtara_connections::cipher_from_env(),
 };
 let facade = Arc::new(runtara_connections::ConnectionsFacade::new(

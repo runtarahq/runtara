@@ -185,7 +185,7 @@ existing connection type (`http_bearer`, `http_api_key`,
    (headers, base URL, registration, a rejected host), the match arm in
    `provider_auth.rs`, and the default in `rate_limit_defaults.rs`.
 7. Optional: an icon in
-   `crates/runtara-server/frontend/src/shared/components/service-icon.tsx`,
+   runtara-frontend's `src/shared/components/service-icon.tsx`,
    keyed by the connection type's `integration_id` (it falls back to the
    category icon).
 8. Refresh the connection form snapshot:

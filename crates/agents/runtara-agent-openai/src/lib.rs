@@ -163,7 +163,8 @@ fn require_connection(connection: Option<&RawConnection>) -> Result<&RawConnecti
     })
 }
 
-/// POST `body` to `https://api.openai.com{path}` via the outbound host service. The
+/// POST `body` to `{path}` under the connection's base URL via the outbound host
+/// service, so any OpenAI-compatible endpoint the connection names is honored. The
 /// proxy attaches `Authorization: Bearer <api_key>` based on the connection
 /// id header so the component never sees the secret.
 async fn openai_post_json(
@@ -172,7 +173,6 @@ async fn openai_post_json(
     body: Value,
     timeout_ms: u64,
 ) -> Result<Value, AgentError> {
-    let url = format!("https://api.openai.com{path}");
     let body_bytes = serde_json::to_vec(&body).map_err(|e| {
         AgentError::permanent("SERIALIZATION_ERROR", e.to_string())
             .with_attr("integration", "OPENAI")
@@ -180,7 +180,7 @@ async fn openai_post_json(
 
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(timeout_ms));
     let response = client
-        .request("POST", &url)
+        .request("POST", path)
         .header("Content-Type", "application/json")
         .connection_id(&connection.connection_id)
         .body_bytes(&body_bytes)

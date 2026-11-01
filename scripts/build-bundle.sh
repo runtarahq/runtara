@@ -16,7 +16,6 @@
 # Usage:
 #   ./scripts/build-bundle.sh                   # build for the current host
 #   ./scripts/build-bundle.sh --skip-build      # assemble from existing target/release
-#   ./scripts/build-bundle.sh --skip-frontend   # frontend/dist already built elsewhere
 #   ./scripts/build-bundle.sh --skip-components # wasm32-wasip2 components built elsewhere
 #   ./scripts/build-bundle.sh --output-dir /tmp # write bundle to custom dir
 #
@@ -35,11 +34,10 @@ cd "$ROOT_DIR"
 # ─── Defaults ────────────────────────────────────────────────────────────────
 
 SKIP_BUILD=0
-# Granular skips, so CI can build the frontend and the (architecture-independent)
-# WASM components in jobs that run alongside the server build instead of after it.
-# Each still runs the same existence check --skip-build does, so a missing input
-# fails loudly here rather than producing a bundle with a hole in it.
-SKIP_FRONTEND=0
+# Granular skip, so CI can build the (architecture-independent) WASM components
+# in a job that runs alongside the server build instead of after it. It still
+# runs the same existence check --skip-build does, so a missing input fails
+# loudly here rather than producing a bundle with a hole in it.
 SKIP_COMPONENTS=0
 OUTPUT_DIR="${ROOT_DIR}/target/bundle"
 DOWNLOAD_CACHE="${HOME}/.cache/runtara-bundle-build"
@@ -49,7 +47,6 @@ DOWNLOAD_CACHE="${HOME}/.cache/runtara-bundle-build"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --skip-build)      SKIP_BUILD=1; shift ;;
-        --skip-frontend)   SKIP_FRONTEND=1; shift ;;
         --skip-components) SKIP_COMPONENTS=1; shift ;;
         --output-dir)      OUTPUT_DIR="$2"; shift 2 ;;
         --output-dir=*)    OUTPUT_DIR="${1#*=}"; shift ;;
@@ -120,29 +117,17 @@ resolve_versions() {
     info "Target dir:      ${TARGET_DIR}"
 }
 
-# ─── Build frontend ──────────────────────────────────────────────────────────
+# ─── Fetch frontend ──────────────────────────────────────────────────────────
 
-build_frontend() {
-    local frontend_dir="${ROOT_DIR}/crates/runtara-server/frontend"
-    local dist_index="${frontend_dir}/dist/index.html"
-
-    if [ "$SKIP_BUILD" = "1" ] || [ "$SKIP_FRONTEND" = "1" ]; then
-        if [ ! -f "$dist_index" ]; then
-            echo "Error: --skip-build but ${dist_index} not found" >&2
-            echo "Run (cd ${frontend_dir} && npm ci && npm run build) first." >&2
-            exit 1
-        fi
-        info "Skipping frontend build, using existing ${dist_index}"
+# The embedded UI is the runtara-frontend release pinned in
+# crates/runtara-server/frontend.lock. build.rs fetches it too; doing it here
+# first surfaces a download or checksum failure as its own step.
+fetch_frontend() {
+    if [ "$SKIP_BUILD" = "1" ]; then
         return
     fi
-
-    if ! command -v npm >/dev/null 2>&1; then
-        echo "Error: npm not found. Install Node.js to build the embedded UI." >&2
-        exit 1
-    fi
-
-    step "Building frontend (embedded UI)"
-    (cd "$frontend_dir" && npm ci --no-audit --no-fund && npm run build)
+    step "Fetching the embedded frontend release"
+    "${SCRIPT_DIR}/fetch-frontend.sh"
 }
 
 # ─── Build runtara-server ────────────────────────────────────────────────────
@@ -279,7 +264,7 @@ main() {
 
     detect_platform
     resolve_versions
-    build_frontend
+    fetch_frontend
     build_server
     build_agent_components
     assemble_bundle

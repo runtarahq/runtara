@@ -1,7 +1,7 @@
 # Workflow canvas UX/UI audit
 
 Audit date: 2026-10-11. Scope: the workflow editor's Canvas view
-(`crates/runtara-server/frontend/src/features/workflows/components/WorkflowEditor`),
+(runtara-frontend's `src/features/workflows/components/WorkflowEditor`),
 checked against live workflows on a local server: a linear chain (Landing Demo),
 an AI Agent with tools and memory (AI Assistant Showcase), a 20-step branching
 workflow (tenant-provision) and nested fan-out with a While container.
