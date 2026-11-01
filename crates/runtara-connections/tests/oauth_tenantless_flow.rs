@@ -23,7 +23,7 @@ use runtara_connections::config::EveryTenant;
 use runtara_connections::oauth_callback_router;
 use runtara_connections::repository::oauth::OAuthRepository;
 use runtara_connections::service::oauth::{OAuthError, StartBinding};
-use runtara_connections::service::oauth_flow::{self, sha256_hex};
+use runtara_connections::service::oauth_flow;
 use serde_json::json;
 use tower::ServiceExt;
 use wiremock::MockServer;
@@ -58,9 +58,16 @@ async fn a_flows_record_is_under_its_tenant_and_redeems_once() {
         .expect("a browser flow has a nonce");
 
     // The index holds the tenant alone, keyed by the state's hash, and the
-    // record lives under the tenant's prefix; both expire with the flow.
-    let hash = sha256_hex(&flow.state);
+    // record lives under the tenant's prefix; both expire with the flow. The
+    // flow is this Valkey's only one, so its record names the hash (the unit
+    // tests in oauth_flow pin that hash to the state's).
     let mut valkey = fixture.valkey.clone();
+    let records: Vec<String> = valkey.keys("acme:oauth_state:*").await.unwrap();
+    let [record_key] = records.as_slice() else {
+        panic!("one flow record under acme: {records:?}");
+    };
+    let hash = record_key.trim_start_matches("acme:oauth_state:");
+    assert_eq!(hash.len(), 64, "a SHA-256, hex");
     let index: String = valkey
         .get(format!("runtara:oauth_state:{hash}"))
         .await

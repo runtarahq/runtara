@@ -9,7 +9,6 @@ use std::sync::Arc;
 use redis::AsyncCommands;
 use runtara_connections::crypto::noop::NoOpCipher;
 use runtara_connections::service::oauth::{OAuthService, StartBinding};
-use runtara_connections::service::oauth_flow::sha256_hex;
 use sqlx::PgPool;
 use testcontainers::ContainerAsync;
 use testcontainers::runners::AsyncRunner;
@@ -119,11 +118,16 @@ async fn quickbooks_authorize_url_is_descriptor_driven() {
 
     // The flow was stored, under the tenant, with a PKCE verifier for the
     // callback to send.
+    // The flow is this Valkey's only one.
     let mut valkey = valkey.manager.clone();
-    let record: String = valkey
-        .get(format!("tenant_qb:oauth_state:{}", sha256_hex(&flow.state)))
+    let records: Vec<String> = valkey
+        .keys("tenant_qb:oauth_state:*")
         .await
-        .expect("read flow record");
+        .expect("list flow records");
+    let [record_key] = records.as_slice() else {
+        panic!("one flow record under tenant_qb: {records:?}");
+    };
+    let record: String = valkey.get(record_key).await.expect("read flow record");
     let record: serde_json::Value = serde_json::from_str(&record).expect("flow record");
     assert_eq!(record["connection_id"], "conn_qb");
     assert!(
