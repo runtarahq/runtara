@@ -799,7 +799,14 @@ fn compose_direct_workflow_selected(
         "runtara:workflow-logic".to_string(),
         result.workflow_logic_wasm_path.clone(),
     );
-    for component in &shared_components {
+    let linked =
+        super::component::DirectStdlibMode::current() == super::component::DirectStdlibMode::Linked;
+    // Linked, the stdlib is not composed; its digest is still recorded below,
+    // for the host to link the version the artifact was built against.
+    for component in shared_components
+        .iter()
+        .filter(|component| !(linked && component.package == STDLIB_COMPONENT_PACKAGE))
+    {
         overrides.insert(component.package.clone(), component.wasm_path.clone());
     }
     for component in &agent_components {
@@ -858,7 +865,18 @@ fn compose_direct_workflow_selected(
     );
     trusted::pin_trusted_dependencies(&mut composed_wasm, &agent_components, components_dir)?;
     // Before isolated children are appended: they run in Stores of their own.
-    let memory_floor_bytes = initial_memory_bytes(&composed_wasm)?;
+    let mut memory_floor_bytes = initial_memory_bytes(&composed_wasm)?;
+    if linked {
+        // The run's Store also holds the linked stdlib instance.
+        for component in &shared_components {
+            if component.package == STDLIB_COMPONENT_PACKAGE {
+                let stdlib = std::fs::read(&component.wasm_path).map_err(|error| {
+                    component_error(format!("read {}: {error}", component.wasm_path.display()))
+                })?;
+                memory_floor_bytes += initial_memory_bytes(&stdlib)?;
+            }
+        }
+    }
     let isolation = if bindings.is_empty() {
         None
     } else {
@@ -949,6 +967,9 @@ fn compose_direct_workflow_selected(
 /// `wac-parser`/`wac-resolver`/`wac-graph` — the same crates the `wac` CLI
 /// uses — so the output is identical to the former subprocess, with no
 /// external `wac` binary required.
+/// The stdlib's wac package name.
+const STDLIB_COMPONENT_PACKAGE: &str = "runtara:workflow-stdlib";
+
 fn compose_workflow_component_in_process(
     wac_source: &str,
     deps_dir: &Path,
@@ -1153,9 +1174,10 @@ pub fn direct_lowering_tag() -> String {
     // their run permits until the execution timeout, and recompiling reported
     // success without rebuilding anything.
     format!(
-        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v24,agent-composition=standard-v1,parent-cancel=callback-v2,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,trusted-artifacts=v1,stdlib-context=v1,on-signal-remap=v1,wide-result-errors=v1,control-api=direct-v1,omit_runtime={}",
+        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v24,agent-composition=standard-v1,parent-cancel=callback-v2,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,trusted-artifacts=v1,stdlib-context=v1,stdlib={},on-signal-remap=v1,wide-result-errors=v1,control-api=direct-v1,omit_runtime={}",
         workflow_abi_tag(super::component::WorkflowRole::Root),
         DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
+        super::component::DirectStdlibMode::current().tag(),
         omit_runtime_from_env()
     )
 }
@@ -1806,7 +1828,7 @@ fn build_direct_component_resolve_with_waits(
          \n\
          world workflow {{\n\
              import {};\n",
-        runtara_wit::stdlib::JSON
+        super::component::DirectStdlibMode::current().json_interface()
     );
     // Everything the logic reaches is `runtara:api`'s: the runtime (unless
     // the workflow is runtime-free), connections, timers, operations, waits

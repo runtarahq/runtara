@@ -225,6 +225,33 @@ Exit: all suites green, and the step-0 key test passes unchanged.
 Exit: all suites green in both modes; gate numbers recorded in
 `docs/stdlib-runtime-linking.md`.
 
+**As built:**
+- **Forwarders:** generated from a 138-line table in
+  `CH/stdlib_link.rs`, checked against the WIT by a test. Linking checks each
+  function's types.
+- **Mode:** `DirectStdlibMode`, read once from `RUNTARA_DIRECT_STDLIB`.
+- **Without a configured stdlib**, the executor compiles
+  `runtara_workflow_stdlib.wasm` from the components directory. Production
+  configures a source in Phase 3.
+- **CI:** the linked battery runs in its own job, `test-linked-stdlib`, so it
+  doesn't lengthen `components-build`.
+
+**Gate**, local (16-core arm64, Phase 0 cache on, host crate at opt-level 3
+for linked):
+
+| | Fused | Linked |
+|---|---|---|
+| `direct_wasm_execute`, wall / CPU | 150 s / 1,613 CPU-s | 56 s / 596 CPU-s |
+| `split_large_scope_does_not_exhaust_guest_heap` | 1.18 s | 0.90 s |
+| `split_large_scope_with_events_does_not_flood_debug` | 0.52 s | 0.26 s |
+| `split_parallel_workflow` | 0.48 s | 0.24 s |
+| `while_growing_accumulator_stays_bounded` | 1.99 s | 1.06 s |
+
+Single-test times include compile and load. The slower execution under load
+seen in the spike came from its mix of dynamic and typed forwarders. It hasn't
+been measured separately with every forwarder typed; the whole linked suite
+runs 2.7x faster.
+
 ## Phase 3: production wiring and rollout
 
 1. **Pinning the stdlib version.** Each artifact must run against the stdlib

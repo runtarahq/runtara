@@ -741,6 +741,47 @@ jobs:
         # feature-gated lib target rather than an integration test.
         run: cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib agent_deadline_tests
 
+  # The direct WASM smoke battery with the stdlib linked by the host instead of
+  # composed into each artifact (RUNTARA_DIRECT_STDLIB). Its own job, so the
+  # second mode runs alongside components-build rather than after it.
+  test-linked-stdlib:
+    runs-on: ubuntu-latest
+    needs: wit-package
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-wasip2
+          cache: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: components-build
+          save-if: false
+
+      - name: Build all agent components + emit sidecar meta.json
+        env:
+          RUNTARA_NO_INSTALL_TOOLS: "1"
+        run: scripts/build-agent-components.sh
+
+      - name: Run direct WASM workflow execution smoke tests with the stdlib linked
+        env:
+          RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/agent-components
+          RUNTARA_DIRECT_STDLIB: linked
+        # The host serves the stdlib through typed forwarders whose copies are
+        # generic code compiled in runtara-component-host; at opt-level 0
+        # they copy byte by byte, so that one crate is optimized here.
+        run: |
+          cargo test -p runtara-workflows \
+            --features direct-wasm-integration-tests \
+            --config 'profile.dev.package.runtara-component-host.opt-level=3' \
+            --test direct_wasm_execute
+
   notify-result:
     # Posts success or failure once all build/test jobs finish.
     # Skipped on cancellation (avoids spurious "failure" pings when a run is
@@ -758,6 +799,7 @@ jobs:
       - wit-package
       - components-build
       - test-composed-deadlines
+      - test-linked-stdlib
     if: |
       !cancelled() && github.actor != 'dependabot[bot]' && (
         (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)

@@ -1147,7 +1147,10 @@ fn is_stdlib_import(
     function.name == function_name
         && interface
             .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name.starts_with("runtara:workflow-stdlib/json"))
+            .is_some_and(|name| {
+                name.starts_with("runtara:workflow-stdlib/json")
+                    || name.starts_with("runtara:workflow-stdlib-link/json")
+            })
 }
 
 pub(super) fn is_connection_resolver_import(

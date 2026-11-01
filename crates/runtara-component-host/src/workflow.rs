@@ -341,6 +341,8 @@ pub struct WorkflowState {
     termination: Option<Termination>,
     pub(crate) cleanup_alarm: crate::cleanup_alarm::CleanupAlarmState,
     execution: Option<Arc<ExecutionContext>>,
+    /// The run's linked stdlib instance, when its workflow imports one.
+    pub(crate) stdlib: Option<crate::stdlib_link::LinkedStdlib>,
 }
 
 impl WorkflowState {
@@ -461,9 +463,58 @@ pub struct WorkflowExecutor {
     engine: Arc<Engine>,
     linker: Linker<WorkflowState>,
     cache: tokio::sync::Mutex<HashMap<PathBuf, CachedComponent>>,
+    /// The stdlib linked workflows are served, compiled once.
+    stdlib: tokio::sync::OnceCell<crate::stdlib_link::StdlibPre>,
 }
 
 impl WorkflowExecutor {
+    /// Serve linked workflows `component`, the compiled workflow stdlib. Set
+    /// before the first linked run; otherwise the first one compiles
+    /// `runtara_workflow_stdlib.wasm` from the components directory
+    /// (`RUNTARA_DIRECT_WASM_COMPONENTS_DIR`, else
+    /// `RUNTARA_AGENT_COMPONENTS_DIR`).
+    pub fn set_workflow_stdlib(&self, component: Component) -> Result<()> {
+        let pre = Arc::new(self.linker.instantiate_pre(&component)?);
+        self.stdlib
+            .set(pre)
+            .map_err(|_| anyhow::anyhow!("workflow stdlib already configured"))
+    }
+
+    async fn workflow_stdlib(&self) -> Result<&crate::stdlib_link::StdlibPre> {
+        self.stdlib
+            .get_or_try_init(|| async {
+                let dir = std::env::var_os("RUNTARA_DIRECT_WASM_COMPONENTS_DIR")
+                    .or_else(|| std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR"))
+                    .map(PathBuf::from)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "a linked workflow needs the workflow stdlib, and none is configured"
+                        )
+                    })?;
+                let engine = Arc::clone(&self.engine);
+                let component =
+                    tokio::task::spawn_blocking(move || crate::stdlib_link::load(&engine, &dir))
+                        .await
+                        .context("workflow stdlib compile task panicked")??;
+                Ok(Arc::new(self.linker.instantiate_pre(&component)?))
+            })
+            .await
+    }
+
+    /// Instantiate the run's stdlib when `pre`'s workflow imports it.
+    async fn link_stdlib(
+        &self,
+        pre: &wasmtime::component::InstancePre<WorkflowState>,
+        store: &mut Store<WorkflowState>,
+    ) -> Result<()> {
+        if crate::stdlib_link::imports_linked_stdlib(pre.component()) {
+            let stdlib = self.workflow_stdlib().await?;
+            let linked = crate::stdlib_link::instantiate(stdlib, store).await?;
+            store.data_mut().stdlib = Some(linked);
+        }
+        Ok(())
+    }
+
     pub fn set_outbound_http(&self, service: Arc<dyn crate::OutboundHttpHost>) -> Result<()> {
         self.outbound_http
             .set(service)
@@ -605,6 +656,9 @@ impl WorkflowExecutor {
         // send hook routes only the workflow API origin (workflow_api.rs).
         wasmtime_wasi::p3::add_to_linker(&mut linker)?;
         wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+        // Every link site starts from this linker, so linked workflows (and
+        // published workflow-agents among isolated children) reach the stdlib.
+        crate::stdlib_link::add_forwarders(&mut linker)?;
         Ok(Self {
             trusted: std::sync::OnceLock::new(),
             control_host: std::sync::OnceLock::new(),
@@ -618,6 +672,7 @@ impl WorkflowExecutor {
             engine,
             linker,
             cache: tokio::sync::Mutex::new(HashMap::new()),
+            stdlib: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -1192,6 +1247,7 @@ impl WorkflowExecutor {
             cleanup_alarm: Default::default(),
             api_deadline: crate::workflow_api::ApiDeadline::new(),
             execution: control.execution,
+            stdlib: None,
         };
 
         let mut store = Store::new(&self.engine, state);
@@ -1277,6 +1333,7 @@ impl WorkflowExecutor {
                         store.data_mut().termination = Some(Termination::Timeout);
                         anyhow::bail!("execution deadline elapsed before instantiation");
                     }
+                    self.link_stdlib(pre, &mut store).await?;
                     let instance = pre.instantiate_async(&mut store).await?;
                     // Every run is served the workflow API: its agents reach
                     // connections over it on either ABI. Released when this
@@ -1520,6 +1577,7 @@ impl WorkflowExecutor {
             cleanup_alarm: Default::default(),
             api_deadline: crate::workflow_api::ApiDeadline::new(),
             execution: None,
+            stdlib: None,
         };
         let mut store = Store::new(&self.engine, state);
         store.limiter(|s| &mut s.limiter);
@@ -1527,6 +1585,7 @@ impl WorkflowExecutor {
         // u64::MAX, which overflows the engine's `current + delta`) lets a pure
         // (sub-millisecond) capability run to completion.
         store.set_epoch_deadline(1 << 40);
+        self.link_stdlib(pre, &mut store).await?;
         let instance = pre.instantiate_async(&mut store).await?;
         let iface_idx = instance
             .get_export_index(&mut store, None, iface_name)

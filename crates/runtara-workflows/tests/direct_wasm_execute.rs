@@ -1850,11 +1850,20 @@ fn direct_compose_leaves_only_wasi_for_the_host() {
 
     let bytes = fs::read(&result.wasm_path).expect("read artifact");
     let imports = top_level_component_imports(&bytes);
+    // Linked, the host also serves the stdlib.
+    let linked = runtara_workflows::direct_wasm::DirectStdlibMode::current()
+        == runtara_workflows::direct_wasm::DirectStdlibMode::Linked;
+    let stdlib = runtara_wit::stdlib_link::JSON;
     assert!(
-        imports
-            .iter()
-            .all(|name| name.starts_with("wasi:") || name == "runtara:agent/types@1.0.0"),
+        imports.iter().all(|name| name.starts_with("wasi:")
+            || name == "runtara:agent/types@1.0.0"
+            || (linked && name == stdlib)),
         "only WASI (and the type-only agent types) reach the host; imports: {imports:?}"
+    );
+    assert_eq!(
+        imports.iter().any(|name| name == stdlib),
+        linked,
+        "the stdlib is imported exactly when it is linked; imports: {imports:?}"
     );
     assert!(
         imports

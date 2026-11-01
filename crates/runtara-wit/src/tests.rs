@@ -37,6 +37,7 @@ fn every_name_constant_names_a_real_interface() {
         crate::agent::TYPES,
         crate::agent::CAPABILITIES,
         crate::stdlib::JSON,
+        crate::stdlib_link::JSON,
         crate::trusted::EXECUTION,
     ] {
         assert!(names.contains(name), "{name} is not a runtara interface");
@@ -49,14 +50,47 @@ fn every_name_constant_names_a_real_interface() {
         .map(|(_, package)| package.name.to_string())
         .filter(|name| name.starts_with("runtara:"))
         .collect();
-    assert_eq!(packages.len(), PACKAGES.len());
+    // PACKAGES plus the derived stdlib-link package.
+    assert_eq!(packages.len(), PACKAGES.len() + 1);
     assert!(names.contains(crate::wasi::MONOTONIC_CLOCK));
     for name in [
         crate::agent::PACKAGE,
         crate::stdlib::PACKAGE,
+        crate::stdlib_link::PACKAGE,
         crate::trusted::PACKAGE,
     ] {
         assert!(packages.iter().any(|package| package == name), "{name}");
+    }
+}
+
+/// The linked stdlib is the stdlib, function for function, every one async.
+#[test]
+fn stdlib_link_mirrors_the_stdlib() {
+    let resolve = resolve();
+    let interface = |name: &str| {
+        resolve
+            .interfaces
+            .iter()
+            .find(|(id, _)| resolve.id_of(*id).as_deref() == Some(name))
+            .map(|(_, interface)| interface)
+            .unwrap_or_else(|| panic!("{name}"))
+    };
+    let stdlib = interface(crate::stdlib::JSON);
+    let link = interface(crate::stdlib_link::JSON);
+    assert_eq!(
+        stdlib.functions.keys().collect::<Vec<_>>(),
+        link.functions.keys().collect::<Vec<_>>()
+    );
+    for (name, function) in &link.functions {
+        let original = &stdlib.functions[name];
+        assert!(function.kind.is_async(), "{name} is async");
+        assert!(!original.kind.is_async(), "{name} is sync in the stdlib");
+        assert_eq!(function.params.len(), original.params.len(), "{name}");
+        assert_eq!(
+            function.result.is_some(),
+            original.result.is_some(),
+            "{name}"
+        );
     }
 }
 

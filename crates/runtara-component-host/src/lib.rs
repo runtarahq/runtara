@@ -36,6 +36,7 @@ pub mod precompile;
 pub mod registry;
 mod removed_abi;
 pub mod runtime_host;
+pub mod stdlib_link;
 pub mod trusted;
 pub mod workflow;
 pub mod workflow_api;
