@@ -6307,9 +6307,11 @@ fn embedded_executor() -> &'static runtara_component_host::WorkflowExecutor {
     static EXECUTOR: std::sync::OnceLock<runtara_component_host::WorkflowExecutor> =
         std::sync::OnceLock::new();
     EXECUTOR.get_or_init(|| {
-        let engine =
-            runtara_component_host::build_engine(&runtara_component_host::EngineConfig::default())
-                .expect("build embedded engine");
+        let engine = runtara_component_host::build_engine(&runtara_component_host::EngineConfig {
+            incremental_cache: true,
+            ..Default::default()
+        })
+        .expect("build embedded engine");
         runtara_component_host::spawn_epoch_ticker(Arc::clone(&engine));
         let executor =
             runtara_component_host::WorkflowExecutor::new(engine).expect("build workflow executor");

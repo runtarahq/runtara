@@ -253,6 +253,7 @@ pub(super) async fn cancel_and_reuse_with_state(
     let engine = runtara_component_host::build_engine(&runtara_component_host::EngineConfig {
         cache_dir: None,
         enable_epoch_interruption: false,
+        incremental_cache: false,
     })?;
     let component = Component::new(&engine, bytes)?;
     let mut linker = runtara_component_host::build_linker(&engine)?;
@@ -326,6 +327,7 @@ pub(super) async fn invoke_named_agent_with_state(
     let engine = runtara_component_host::build_engine(&runtara_component_host::EngineConfig {
         cache_dir: None,
         enable_epoch_interruption: false,
+        incremental_cache: false,
     })?;
     let component = Component::from_file(&engine, agent_path(agent_id)?)?;
     let linker = runtara_component_host::build_linker(&engine)?;

@@ -427,7 +427,11 @@ impl RuntimeHost for Host {
 fn executor() -> &'static WorkflowExecutor {
     static EXECUTOR: std::sync::OnceLock<WorkflowExecutor> = std::sync::OnceLock::new();
     EXECUTOR.get_or_init(|| {
-        let engine = runtara_component_host::build_engine(&Default::default()).unwrap();
+        let engine = runtara_component_host::build_engine(&runtara_component_host::EngineConfig {
+            incremental_cache: true,
+            ..Default::default()
+        })
+        .unwrap();
         runtara_component_host::spawn_epoch_ticker(engine.clone());
         let executor = WorkflowExecutor::new(engine).unwrap();
         executor

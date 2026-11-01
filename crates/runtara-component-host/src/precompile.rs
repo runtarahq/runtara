@@ -970,6 +970,7 @@ mod tests {
         let engine = build_engine(&EngineConfig {
             cache_dir: None,
             enable_epoch_interruption: false,
+            incremental_cache: false,
         })
         .unwrap();
         let compiled = precompile_artifact_with_engine(&request, &engine).unwrap();
@@ -984,6 +985,7 @@ mod tests {
         let other = build_engine(&EngineConfig {
             cache_dir: None,
             enable_epoch_interruption: true,
+            incremental_cache: false,
         })
         .unwrap();
         // SAFETY: same trusted response; incompatible engine must be rejected.

@@ -36,6 +36,7 @@ async fn run(cleanup: Cleanup) -> Result<()> {
     let engine = crate::engine::build_engine(&crate::engine::EngineConfig {
         cache_dir: None,
         enable_epoch_interruption: true,
+        incremental_cache: false,
     })?;
     let _ticker = test_support::Ticker::new(engine.clone());
     let mut executor = WorkflowExecutor::new(engine.clone())?;
@@ -215,6 +216,7 @@ async fn production_alarm_also_bounds_workflow_entry_execution() -> Result<()> {
     let engine = crate::engine::build_engine(&crate::engine::EngineConfig {
         cache_dir: None,
         enable_epoch_interruption: true,
+        incremental_cache: false,
     })?;
     let _ticker = test_support::Ticker::new(engine.clone());
     let mut executor = WorkflowExecutor::new(engine.clone())?;
@@ -244,6 +246,7 @@ async fn production_alarm_also_bounds_dispatcher_execution() -> Result<()> {
     let engine = crate::engine::build_engine(&crate::engine::EngineConfig {
         cache_dir: None,
         enable_epoch_interruption: true,
+        incremental_cache: false,
     })?;
     let _ticker = test_support::Ticker::new(engine.clone());
     let mut linker = crate::build_linker(&engine)?;
