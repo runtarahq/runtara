@@ -850,6 +850,7 @@ mod tests {
                     Vec::new(),
                 )),
                 connection_events: None,
+                oauth: Default::default(),
             },
         )))
     }

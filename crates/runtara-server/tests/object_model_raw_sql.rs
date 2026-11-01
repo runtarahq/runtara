@@ -109,6 +109,7 @@ impl Fixture {
                     Vec::new(),
                 )),
                 connection_events: None,
+                oauth: Default::default(),
             },
         )));
         let state = Arc::new(ObjectModelState {

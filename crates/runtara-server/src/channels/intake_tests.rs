@@ -282,6 +282,7 @@ impl Harness {
                     Vec::new(),
                 )),
                 connection_events: None,
+                oauth: Default::default(),
             },
         )));
         let valkey = crate::valkey::ValkeyConfig::from_env().expect("isolated Valkey required");

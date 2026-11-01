@@ -4744,6 +4744,7 @@ dependencies = [
  "testcontainers-modules",
  "thiserror 2.0.18",
  "tokio",
+ "tower",
  "tracing",
  "url",
  "urlencoding",

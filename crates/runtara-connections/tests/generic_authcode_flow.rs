@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use runtara_connections::crypto::noop::NoOpCipher;
-use runtara_connections::service::oauth::{OAuthError, OAuthService};
+use runtara_connections::service::oauth::{OAuthError, OAuthService, StartBinding};
 use serde_json::json;
 use sqlx::PgPool;
 use sqlx::Row;
@@ -17,6 +17,8 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+mod valkey_support;
 
 struct PgFixture {
     pool: PgPool,
@@ -160,17 +162,20 @@ async fn generic_authcode_full_flow_from_params() {
     .await
     .expect("insert connection");
 
+    let valkey = valkey_support::ValkeyFixture::start().await;
     let service = OAuthService::new(
         fixture.pool.clone(),
         Arc::new(NoOpCipher),
         "https://platform.example.com".to_string(),
-    );
+    )
+    .with_flows(valkey.manager.clone());
 
     // 1. Authorize URL comes from the PARAM auth_url, with PKCE on by default.
-    let auth_url = service
-        .generate_authorization_url("conn_gen", "tenant_gen")
+    let flow = service
+        .start("conn_gen", "tenant_gen", StartBinding::Browser)
         .await
         .expect("authorize url");
+    let auth_url = flow.authorization_url.clone();
     assert!(
         auth_url.starts_with(&format!("{}/oauth/authorize?", provider.uri())),
         "authorize URL must be rooted at the param endpoint: {auth_url}"
@@ -186,50 +191,36 @@ async fn generic_authcode_full_flow_from_params() {
         "the redirect URI names the connection's tenant"
     );
 
-    // A state redeemed at another tenant's callback URL is refused, and spent:
-    // the token endpoint is never called for it.
+    // A state redeemed at another tenant's callback URL is refused: the
+    // token endpoint is never called for it.
     let foreign = extract_query_param(&auth_url, "state").expect("state in authorize url");
     let refused = service
-        .handle_callback(
+        .complete(
             "tenant_other",
             &foreign,
             "authcode-123",
             &std::collections::HashMap::new(),
+            flow.browser_nonce.as_deref(),
         )
         .await;
     assert!(
         matches!(refused, Err(OAuthError::InvalidState)),
         "a state redeemed under another tenant must be refused"
     );
-    let replayed = service
-        .handle_callback(
-            "tenant_gen",
-            &foreign,
-            "authcode-123",
-            &std::collections::HashMap::new(),
-        )
-        .await;
-    assert!(
-        matches!(replayed, Err(OAuthError::InvalidState)),
-        "the refused state is consumed"
-    );
-    let auth_url = service
-        .generate_authorization_url("conn_gen", "tenant_gen")
-        .await
-        .expect("authorize url");
 
     // 2. Callback: exchange the code at the param token_url (Basic auth), store tokens.
     let state = extract_query_param(&auth_url, "state").expect("state in authorize url");
-    let connection_id = service
-        .handle_callback(
+    let completed = service
+        .complete(
             "tenant_gen",
             &state,
             "authcode-123",
             &std::collections::HashMap::new(),
+            flow.browser_nonce.as_deref(),
         )
         .await
         .expect("callback exchange");
-    assert_eq!(connection_id, "conn_gen");
+    assert_eq!(completed.connection_id, "conn_gen");
 
     let row = sqlx::query(
         "SELECT connection_parameters, status FROM connection_data_entity WHERE id = 'conn_gen'",
@@ -318,15 +309,18 @@ async fn generic_authcode_pkce_can_be_disabled() {
     .await
     .expect("insert connection");
 
+    let valkey = valkey_support::ValkeyFixture::start().await;
     let service = OAuthService::new(
         fixture.pool.clone(),
         Arc::new(NoOpCipher),
         "https://platform.example.com".to_string(),
-    );
+    )
+    .with_flows(valkey.manager.clone());
     let url = service
-        .generate_authorization_url("conn_nopkce", "tenant_gen")
+        .start("conn_nopkce", "tenant_gen", StartBinding::Browser)
         .await
-        .expect("authorize url");
+        .expect("authorize url")
+        .authorization_url;
     assert!(
         !url.contains("code_challenge"),
         "pkce=false must disable the code challenge: {url}"

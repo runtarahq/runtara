@@ -8,6 +8,7 @@ use std::sync::Arc;
 use crate::crypto::CredentialCipher;
 use crate::repository::connections::ConnectionRepository;
 use crate::repository::oauth::OAuthRepository;
+use crate::service::oauth_flow::{self, FlowBinding, FlowRecord, FlowStore};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::RngCore;
@@ -16,6 +17,13 @@ use runtara_dsl::agent_meta::OAuthConfig;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+
+/// The connection parameter naming the redirect URI a connection uses, so it
+/// stays the one registered with the provider: `tenantless` for
+/// `/api/oauth/callback`, anything else (or none, as on connections made
+/// before the tenant-less callback) for `/api/oauth/{tenant}/callback`.
+pub const OAUTH_CALLBACK_PARAM: &str = "oauth_callback";
+pub const OAUTH_CALLBACK_TENANTLESS: &str = "tenantless";
 
 #[derive(Debug)]
 pub enum OAuthError {
@@ -27,6 +35,8 @@ pub enum OAuthError {
     MissingParameter(String),
     /// State token not found or expired
     InvalidState,
+    /// A flow started in a browser came back without that browser's cookie.
+    BrowserMismatch,
     /// Token exchange failed
     TokenExchangeFailed(String),
     /// Internal error
@@ -42,16 +52,60 @@ impl std::fmt::Display for OAuthError {
             }
             OAuthError::MissingParameter(p) => write!(f, "Missing connection parameter: {}", p),
             OAuthError::InvalidState => write!(f, "Invalid or expired OAuth state"),
+            OAuthError::BrowserMismatch => write!(
+                f,
+                "The authorization was not finished in the browser that started it"
+            ),
             OAuthError::TokenExchangeFailed(msg) => write!(f, "Token exchange failed: {}", msg),
             OAuthError::Internal(msg) => write!(f, "Internal error: {}", msg),
         }
     }
 }
 
+/// How a flow being started is to be bound to whoever starts it.
+#[derive(Debug, Clone)]
+pub enum StartBinding {
+    /// In the console: a cookie the browser must bring back.
+    Browser,
+}
+
+/// A flow just started.
+#[derive(Debug)]
+pub struct StartedFlow {
+    /// Where to send the user.
+    pub authorization_url: String,
+    /// The flow's state, as in the authorization URL.
+    pub state: String,
+    /// The redirect URI the provider will send the user to.
+    pub redirect_uri: String,
+    /// For a browser flow, the nonce its cookie must carry.
+    pub browser_nonce: Option<String>,
+}
+
+/// A flow completed.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CompletedFlow {
+    pub connection_id: String,
+}
+
+/// A redeemed flow: from Valkey, or from the `oauth_state` table for a flow
+/// started before flows moved to Valkey (no binding then).
+struct RedeemedFlow {
+    connection_id: String,
+    integration_id: String,
+    redirect_uri: String,
+    code_verifier: Option<String>,
+    binding: Option<FlowBinding>,
+}
+
 pub struct OAuthService {
+    /// Flows started before flows moved to Valkey, read once at the callback
+    /// during the release that moves them.
     oauth_repo: OAuthRepository,
     connection_repo: ConnectionRepository,
     public_base_url: String,
+    flows: Option<FlowStore>,
+    tenantless_callback: bool,
 }
 
 impl OAuthService {
@@ -60,18 +114,69 @@ impl OAuthService {
             oauth_repo: OAuthRepository::new(pool.clone()),
             connection_repo: ConnectionRepository::new(pool, cipher),
             public_base_url,
+            flows: None,
+            tenantless_callback: true,
         }
     }
 
-    /// Generate an OAuth2 authorization URL for a connection.
-    ///
-    /// Creates a state token, stores it in the DB, and returns the full
-    /// authorization URL the user should be redirected to.
-    pub async fn generate_authorization_url(
+    /// The service as a request's state configures it.
+    pub fn from_state(state: &crate::config::ConnectionsState) -> Self {
+        let service = Self::new(
+            state.db_pool.clone(),
+            state.cipher.clone(),
+            state.public_base_url.clone(),
+        )
+        .with_tenantless_callback(state.oauth.tenantless_callback);
+        match &state.redis_manager {
+            Some(valkey) => service.with_flows(valkey.clone()),
+            None => service,
+        }
+    }
+
+    /// Keep flows in progress in `valkey`. Without it no flow can start.
+    pub fn with_flows(mut self, valkey: redis::aio::ConnectionManager) -> Self {
+        self.flows = Some(FlowStore::new(valkey));
+        self
+    }
+
+    /// Whether connections marked `tenantless` get the callback that names no
+    /// tenant. Off, every connection uses its tenant's callback.
+    pub fn with_tenantless_callback(mut self, enabled: bool) -> Self {
+        self.tenantless_callback = enabled;
+        self
+    }
+
+    fn flows(&self) -> Result<&FlowStore, OAuthError> {
+        self.flows.as_ref().ok_or_else(|| {
+            OAuthError::Internal("OAuth flows need Valkey, and none is configured".to_string())
+        })
+    }
+
+    /// Whether the public base URL is https, so cookies can be `Secure`.
+    pub fn secure_cookies(&self) -> bool {
+        self.public_base_url.starts_with("https://")
+    }
+
+    /// The redirect URI a connection with `params` uses in `tenant`.
+    pub fn redirect_uri(&self, tenant_id: &str, params: &Value) -> String {
+        let base = self.public_base_url.trim_end_matches('/');
+        let tenantless = params[OAUTH_CALLBACK_PARAM].as_str() == Some(OAUTH_CALLBACK_TENANTLESS);
+        if tenantless && self.tenantless_callback {
+            format!("{base}/api/oauth/callback")
+        } else {
+            format!("{base}/api/oauth/{tenant_id}/callback")
+        }
+    }
+
+    /// Start an authorization-code flow for a connection: the authorization
+    /// URL, with the flow's record stored in Valkey.
+    pub async fn start(
         &self,
         connection_id: &str,
         tenant_id: &str,
-    ) -> Result<String, OAuthError> {
+        binding: StartBinding,
+    ) -> Result<StartedFlow, OAuthError> {
+        let flows = self.flows()?;
         // Load the connection with parameters
         let conn = self
             .connection_repo
@@ -113,16 +218,10 @@ impl OAuthService {
 
         // Generate a cryptographically random state token
         let state = generate_state();
-
-        // Build redirect URI
-        let redirect_uri = format!(
-            "{}/api/oauth/{}/callback",
-            self.public_base_url.trim_end_matches('/'),
-            tenant_id
-        );
+        let redirect_uri = self.redirect_uri(tenant_id, &params);
 
         // PKCE (RFC 7636) when the provider descriptor requires it: attach an S256
-        // code_challenge to the authorize URL and stash the verifier on the state row.
+        // code_challenge to the authorize URL and keep the verifier in the flow.
         let (code_verifier, pkce_query) = if effective.pkce_required {
             let (verifier, challenge) = generate_pkce();
             let q = format!(
@@ -134,15 +233,28 @@ impl OAuthService {
             (None, String::new())
         };
 
-        // Store state in DB
-        self.oauth_repo
-            .create_state(
+        let (binding, browser_nonce) = match binding {
+            StartBinding::Browser => {
+                let nonce = oauth_flow::new_nonce();
+                (
+                    FlowBinding::Browser {
+                        nonce_hash: oauth_flow::sha256_hex(&nonce),
+                    },
+                    Some(nonce),
+                )
+            }
+        };
+        flows
+            .put(
                 &state,
-                tenant_id,
-                connection_id,
-                integration_id,
-                &redirect_uri,
-                code_verifier.as_deref(),
+                &FlowRecord {
+                    tenant_id: tenant_id.to_string(),
+                    connection_id: connection_id.to_string(),
+                    integration_id: integration_id.to_string(),
+                    redirect_uri: redirect_uri.clone(),
+                    code_verifier,
+                    binding,
+                },
             )
             .await
             .map_err(|e| OAuthError::Internal(e.to_string()))?;
@@ -150,7 +262,7 @@ impl OAuthService {
         // Build authorization URL. `response_type=code` is mandatory for the
         // authorization-code grant (RFC 6749 §4.1.1); strict providers (Intuit)
         // reject the request outright without it.
-        let auth_url = format!(
+        let authorization_url = format!(
             "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}{}",
             effective.auth_url,
             urlencoding::encode(client_id),
@@ -160,45 +272,98 @@ impl OAuthService {
             pkce_query,
         );
 
-        Ok(auth_url)
+        Ok(StartedFlow {
+            authorization_url,
+            state,
+            redirect_uri,
+            browser_nonce,
+        })
     }
 
-    /// Handle the OAuth2 callback: validate state, exchange code for tokens,
-    /// capture any provider-specific callback params, and store everything on the
-    /// connection. `callback_params` is the full parsed callback query string, from
-    /// which the descriptor's declared `extra_callback_params` (e.g. Intuit `realmId`)
-    /// are captured.
-    pub async fn handle_callback(
-        &self,
-        tenant_id: &str,
-        state: &str,
-        code: &str,
-        callback_params: &std::collections::HashMap<String, String>,
-    ) -> Result<String, OAuthError> {
-        // Atomically consume the state token
-        let state_row = self
+    /// The tenant of the flow `state` names, if it is in progress. This only
+    /// finds the tenant; the flow is verified when it is redeemed there.
+    pub async fn tenant_of(&self, state: &str) -> Result<Option<String>, OAuthError> {
+        self.flows()?
+            .tenant_of(state)
+            .await
+            .map_err(|e| OAuthError::Internal(e.to_string()))
+    }
+
+    /// Redeem the flow `state` names in `tenant`, once.
+    async fn redeem(&self, tenant_id: &str, state: &str) -> Result<RedeemedFlow, OAuthError> {
+        if let Some(record) = self
+            .flows()?
+            .take(tenant_id, state)
+            .await
+            .map_err(|e| OAuthError::Internal(e.to_string()))?
+        {
+            return Ok(RedeemedFlow {
+                connection_id: record.connection_id,
+                integration_id: record.integration_id,
+                redirect_uri: record.redirect_uri,
+                code_verifier: record.code_verifier,
+                binding: Some(record.binding),
+            });
+        }
+        // A flow started before flows moved to Valkey, by a process from
+        // before the change (a handover runs both). Consumed either way, and
+        // redeemed only for the tenant it was issued for.
+        let row = self
             .oauth_repo
             .get_and_delete_state(state)
             .await
             .map_err(|e| OAuthError::Internal(e.to_string()))?
             .ok_or(OAuthError::InvalidState)?;
-        // A state is redeemed only at the callback URL of the tenant it was
-        // issued for; it is consumed either way.
-        if state_row.tenant_id != tenant_id {
+        if row.tenant_id != tenant_id {
             return Err(OAuthError::InvalidState);
+        }
+        Ok(RedeemedFlow {
+            connection_id: row.connection_id,
+            integration_id: row.integration_id,
+            redirect_uri: row.redirect_uri,
+            code_verifier: row.code_verifier,
+            binding: None,
+        })
+    }
+
+    /// Complete the flow `state` names in `tenant`: check its binding,
+    /// exchange the code for tokens, capture any provider-specific callback
+    /// params, and store everything on the connection. `callback_params` is
+    /// the full parsed callback query string, from which the descriptor's
+    /// declared `extra_callback_params` (e.g. Intuit `realmId`) are captured.
+    /// `browser_nonce` is the flow's cookie, if the request carried it.
+    pub async fn complete(
+        &self,
+        tenant_id: &str,
+        state: &str,
+        code: &str,
+        callback_params: &std::collections::HashMap<String, String>,
+        browser_nonce: Option<&str>,
+    ) -> Result<CompletedFlow, OAuthError> {
+        let flow = self.redeem(tenant_id, state).await?;
+        match &flow.binding {
+            Some(FlowBinding::Browser { nonce_hash }) => {
+                if !oauth_flow::nonce_matches(nonce_hash, browser_nonce) {
+                    return Err(OAuthError::BrowserMismatch);
+                }
+            }
+            // Not issued until flows started without a browser exist.
+            Some(FlowBinding::Confirm { .. }) => return Err(OAuthError::InvalidState),
+            // Started before flows were bound; accepted for this release only.
+            None => {}
         }
 
         // Look up OAuthConfig
-        let meta = find_connection_type(&state_row.integration_id)
-            .ok_or_else(|| OAuthError::NotOAuthIntegration(state_row.integration_id.clone()))?;
+        let meta = find_connection_type(&flow.integration_id)
+            .ok_or_else(|| OAuthError::NotOAuthIntegration(flow.integration_id.clone()))?;
         let oauth_config = meta
             .oauth_config
-            .ok_or_else(|| OAuthError::NotOAuthIntegration(state_row.integration_id.clone()))?;
+            .ok_or_else(|| OAuthError::NotOAuthIntegration(flow.integration_id.clone()))?;
 
         // Load connection to get client_id + client_secret
         let conn = self
             .connection_repo
-            .get_with_parameters(&state_row.connection_id, &state_row.tenant_id)
+            .get_with_parameters(&flow.connection_id, tenant_id)
             .await
             .map_err(|e| OAuthError::Internal(e.to_string()))?
             .ok_or(OAuthError::ConnectionNotFound)?;
@@ -219,50 +384,59 @@ impl OAuthService {
             code,
             client_id,
             client_secret,
-            &state_row.redirect_uri,
-            state_row.code_verifier.as_deref(),
+            &flow.redirect_uri,
+            flow.code_verifier.as_deref(),
         )
         .await?;
 
-        // Merge tokens into connection_parameters
+        let granted = granted_fields(&token_response, oauth_config, callback_params)?;
         let mut updated_params = params.clone();
         if let Some(obj) = updated_params.as_object_mut() {
-            if let Some(at) = token_response.get("access_token") {
-                obj.insert("access_token".to_string(), at.clone());
-            }
-            if let Some(rt) = token_response.get("refresh_token") {
-                obj.insert("refresh_token".to_string(), rt.clone());
-            }
-            if let Some(expires_in) = token_response["expires_in"].as_u64() {
-                let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64);
-                obj.insert(
-                    "token_expires_at".to_string(),
-                    Value::String(expires_at.to_rfc3339()),
-                );
-            }
-            // Stamp the successful authorization time for the grant-health card.
-            obj.insert(
-                "authorized_at".to_string(),
-                Value::String(chrono::Utc::now().to_rfc3339()),
-            );
-            // Capture provider-specific callback params declared by the descriptor
-            // (e.g. Intuit returns `realmId`, needed for every QuickBooks API path).
-            merge_extra_callback_params(obj, oauth_config, callback_params)?;
+            obj.extend(granted);
         }
 
         // Update connection: set parameters + status = ACTIVE
         self.connection_repo
-            .update_parameters_and_status(
-                &state_row.connection_id,
-                &state_row.tenant_id,
-                &updated_params,
-                "ACTIVE",
-            )
+            .update_parameters_and_status(&flow.connection_id, tenant_id, &updated_params, "ACTIVE")
             .await
             .map_err(|e| OAuthError::Internal(e.to_string()))?;
 
-        Ok(state_row.connection_id)
+        Ok(CompletedFlow {
+            connection_id: flow.connection_id,
+        })
     }
+}
+
+/// What a completed flow adds to a connection: the tokens, their expiry, the
+/// time of authorization, and the descriptor's extra callback params.
+fn granted_fields(
+    token_response: &Value,
+    oauth_config: &OAuthConfig,
+    callback_params: &std::collections::HashMap<String, String>,
+) -> Result<serde_json::Map<String, Value>, OAuthError> {
+    let mut obj = serde_json::Map::new();
+    if let Some(at) = token_response.get("access_token") {
+        obj.insert("access_token".to_string(), at.clone());
+    }
+    if let Some(rt) = token_response.get("refresh_token") {
+        obj.insert("refresh_token".to_string(), rt.clone());
+    }
+    if let Some(expires_in) = token_response["expires_in"].as_u64() {
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64);
+        obj.insert(
+            "token_expires_at".to_string(),
+            Value::String(expires_at.to_rfc3339()),
+        );
+    }
+    // Stamp the successful authorization time for the grant-health card.
+    obj.insert(
+        "authorized_at".to_string(),
+        Value::String(chrono::Utc::now().to_rfc3339()),
+    );
+    // Capture provider-specific callback params declared by the descriptor
+    // (e.g. Intuit returns `realmId`, needed for every QuickBooks API path).
+    merge_extra_callback_params(&mut obj, oauth_config, callback_params)?;
+    Ok(obj)
 }
 
 /// Merge the descriptor's declared extra callback params (e.g. Intuit `realmId`) from

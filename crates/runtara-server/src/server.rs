@@ -147,6 +147,7 @@ use runtime_client::RuntimeClient;
         runtara_connections::handler::connections::list_connection_auth_types_handler,
         runtara_connections::handler::oauth::authorize_handler,
         runtara_connections::handler::oauth::callback_handler,
+        runtara_connections::handler::oauth::tenantless_callback_handler,
         // Metrics endpoints
         api::metrics::get_workflow_metrics,
         api::metrics::get_workflow_stats,
@@ -1275,6 +1276,11 @@ pub async fn start_with(
         connection_events: Some(Arc::new(product_events::ConnectionEventBridge::new(
             product_event_sink.clone(),
         ))),
+        oauth: runtara_connections::OAuthOptions {
+            tenantless_callback: config::get().oauth_tenantless_callback,
+            browser_binding: config::get().oauth_browser_binding,
+            tenants: Arc::new(crate::middleware::tenant_path::ServedTenants),
+        },
     };
     let connections_state =
         runtara_connections::ConnectionsState::from_config(connections_config.clone());

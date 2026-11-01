@@ -1,18 +1,25 @@
 //! OAuth2 Authorization Code flow handlers
 //!
-//! Two endpoints:
-//! - `GET /api/runtime/connections/{id}/oauth/authorize` (JWT-protected) — generates auth URL
-//! - `GET /api/oauth/{tenant_id}/callback` (public) — handles provider redirect
+//! Endpoints:
+//! - `GET /api/runtime/connections/{id}/oauth/authorize` (JWT-protected) — starts a
+//!   flow bound to the browser by a cookie, and answers with the authorization URL
+//! - `GET /api/oauth/callback` (public) — the provider's redirect, for connections
+//!   whose redirect URI names no tenant: the tenant comes from the flow
+//! - `GET /api/oauth/{tenant_id}/callback` (public) — the same, for connections
+//!   registered with their tenant's own redirect URI
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, LOCATION, REFERRER_POLICY};
+use axum::http::header::{
+    CACHE_CONTROL, CONTENT_TYPE, COOKIE, LOCATION, REFERRER_POLICY, SET_COOKIE,
+};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ConnectionsState;
-use crate::service::oauth::{OAuthError, OAuthService};
+use crate::service::oauth::{OAuthError, OAuthService, StartBinding};
+use crate::service::oauth_flow;
 
 // ============================================================================
 // Authorize endpoint (JWT-protected)
@@ -24,6 +31,9 @@ use crate::service::oauth::{OAuthError, OAuthService};
 pub struct OAuthAuthorizeResponse {
     pub success: bool,
     pub authorization_url: String,
+    /// The redirect URI the provider will send the user to: the one to
+    /// register with the provider for this connection.
+    pub redirect_uri: String,
 }
 
 #[derive(Serialize)]
@@ -35,8 +45,9 @@ pub struct ErrorResponse {
 
 /// Generate an OAuth2 authorization URL for a connection.
 ///
-/// The frontend should open this URL in a popup window.
-/// After user consent, the provider redirects to /api/oauth/{tenant_id}/callback.
+/// The frontend should open this URL in a popup window, in the same browser:
+/// the response sets a cookie, for this flow alone, that the callback needs.
+/// After user consent, the provider redirects to the connection's redirect URI.
 #[cfg_attr(feature = "utoipa", utoipa::path(
     get,
     path = "/api/runtime/connections/{id}/oauth/authorize",
@@ -44,7 +55,7 @@ pub struct ErrorResponse {
         ("id" = String, Path, description = "Connection ID")
     ),
     responses(
-        (status = 200, description = "OAuth2 authorization URL generated", body = OAuthAuthorizeResponse),
+        (status = 200, description = "OAuth2 authorization URL generated; sets the flow's cookie", body = OAuthAuthorizeResponse),
         (status = 400, description = "Integration does not support OAuth or missing required parameter", body = crate::types::ErrorResponse),
         (status = 404, description = "Connection not found", body = crate::types::ErrorResponse),
         (status = 500, description = "Internal server error", body = crate::types::ErrorResponse)
@@ -55,12 +66,12 @@ pub async fn authorize_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(state): State<ConnectionsState>,
     Path(id): Path<String>,
-) -> Result<Json<OAuthAuthorizeResponse>, (axum::http::StatusCode, Json<ErrorResponse>)> {
+) -> Result<Response, (axum::http::StatusCode, Json<ErrorResponse>)> {
     let events = state.connection_events.clone();
-    let service = OAuthService::new(state.db_pool, state.cipher, state.public_base_url);
+    let service = OAuthService::from_state(&state);
 
-    match service.generate_authorization_url(&id, &tenant_id).await {
-        Ok(url) => {
+    match service.start(&id, &tenant_id, StartBinding::Browser).await {
+        Ok(flow) => {
             crate::events::emit(
                 &events,
                 Some(&tenant_id),
@@ -68,10 +79,22 @@ pub async fn authorize_handler(
                     connection_id: id.clone(),
                 },
             );
-            Ok(Json(OAuthAuthorizeResponse {
+            let mut response = Json(OAuthAuthorizeResponse {
                 success: true,
-                authorization_url: url,
-            }))
+                authorization_url: flow.authorization_url,
+                redirect_uri: flow.redirect_uri,
+            })
+            .into_response();
+            if let Some(nonce) = &flow.browser_nonce {
+                set_cookie(
+                    response.headers_mut(),
+                    &oauth_flow::binding_cookie(&flow.state, nonce, service.secure_cookies()),
+                );
+            }
+            response
+                .headers_mut()
+                .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            Ok(response)
         }
         Err(OAuthError::ConnectionNotFound) => Err((
             axum::http::StatusCode::NOT_FOUND,
@@ -119,7 +142,94 @@ pub struct OAuthCallbackQuery {
     pub error_description: Option<String>,
 }
 
-/// Handle the OAuth2 provider callback.
+/// Handle the OAuth2 provider callback, for a connection whose redirect URI
+/// names no tenant.
+///
+/// This is a PUBLIC endpoint (no JWT required) — called by the OAuth provider
+/// redirecting the user's browser after consent. The tenant comes from the
+/// flow the state names. A tenant this process does not serve is sent on to
+/// its own callback URL, which the edge routes to the process that serves it.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    get,
+    path = "/api/oauth/callback",
+    params(
+        ("code" = Option<String>, Query, description = "Authorization code returned by the provider"),
+        ("state" = Option<String>, Query, description = "Opaque state value naming the flow"),
+        ("error" = Option<String>, Query, description = "Error code if the provider reports a failure"),
+        ("error_description" = Option<String>, Query, description = "Human-readable error description from the provider")
+    ),
+    responses(
+        (status = 303, description = "Redirect to the console's OAuth landing page, with the outcome in its query"),
+        (status = 307, description = "The flow's tenant is served elsewhere: the same request at its tenant's callback URL"),
+        (status = 200, description = "Plain-text outcome, when no console is configured", content_type = "text/plain")
+    ),
+    tag = "oauth-callback"
+))]
+pub async fn tenantless_callback_handler(
+    State(state): State<ConnectionsState>,
+    Query(params): Query<OAuthCallbackQuery>,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let flow_state = params.state.clone().filter(|s| !s.is_empty());
+    let tenant = match &flow_state {
+        Some(flow_state) => OAuthService::from_state(&state).tenant_of(flow_state).await,
+        None => Ok(None),
+    };
+    let tenant = match tenant {
+        Ok(Some(tenant)) => tenant,
+        // No flow to learn the tenant from: the provider's error, or a state
+        // that is unknown or expired. Either way no tenant is verified.
+        Ok(None) => return finish_callback(state, None, params, raw_query, headers).await,
+        Err(error) => {
+            tracing::error!(%error, "looking up an OAuth flow's tenant failed");
+            let secure = state.public_base_url.starts_with("https://");
+            let mut response = callback_response(
+                state.oauth_complete_url.as_ref(),
+                CallbackOutcome::Failed("server_error".to_string()),
+            );
+            if let Some(flow_state) = &flow_state {
+                set_cookie(
+                    response.headers_mut(),
+                    &oauth_flow::clearing_cookie(flow_state, secure),
+                );
+            }
+            return response;
+        }
+    };
+    if !state.oauth.tenants.serves(&tenant) {
+        let location = format!(
+            "{}/api/oauth/{}/callback?{}",
+            state.public_base_url.trim_end_matches('/'),
+            urlencoding::encode(&tenant),
+            raw_query.unwrap_or_default()
+        );
+        return (
+            StatusCode::TEMPORARY_REDIRECT,
+            [
+                (LOCATION, location),
+                (CACHE_CONTROL, "no-store".to_string()),
+                (REFERRER_POLICY, "no-referrer".to_string()),
+            ],
+        )
+            .into_response();
+    }
+    let host = state.oauth.tenants.clone();
+    host.scoped(
+        tenant.clone(),
+        Box::pin(finish_callback(
+            state,
+            Some(tenant),
+            params,
+            raw_query,
+            headers,
+        )),
+    )
+    .await
+}
+
+/// Handle the OAuth2 provider callback, for a connection registered with its
+/// tenant's own redirect URI.
 ///
 /// This is a PUBLIC endpoint (no JWT required) — called by the OAuth provider
 /// redirecting the user's browser after consent. The consent popup is then
@@ -131,7 +241,7 @@ pub struct OAuthCallbackQuery {
     params(
         ("tenant_id" = String, Path, description = "Tenant ID encoded in the OAuth redirect URI"),
         ("code" = Option<String>, Query, description = "Authorization code returned by the provider"),
-        ("state" = Option<String>, Query, description = "Opaque state value used for CSRF protection and connection lookup"),
+        ("state" = Option<String>, Query, description = "Opaque state value naming the flow"),
         ("error" = Option<String>, Query, description = "Error code if the provider reports a failure"),
         ("error_description" = Option<String>, Query, description = "Human-readable error description from the provider")
     ),
@@ -146,14 +256,48 @@ pub async fn callback_handler(
     Path(tenant_id): Path<String>,
     Query(params): Query<OAuthCallbackQuery>,
     axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    finish_callback(state, Some(tenant_id), params, raw_query, headers).await
+}
+
+/// The rest of a callback, in the tenant a flow is to be redeemed in: `None`
+/// when no flow could name one, so only a failure remains to report.
+async fn finish_callback(
+    state: ConnectionsState,
+    tenant_id: Option<String>,
+    params: OAuthCallbackQuery,
+    raw_query: Option<String>,
+    headers: HeaderMap,
+) -> Response {
+    let flow_state = params.state.clone().filter(|s| !s.is_empty());
+    let secure = state.public_base_url.starts_with("https://");
+    let mut response = callback_outcome(state, tenant_id, params, raw_query, &headers).await;
+    // The flow's cookie has done its job whatever the outcome. A callback
+    // without a state names no cookie; the others may belong to flows still
+    // open, and expire on their own.
+    if let Some(flow_state) = &flow_state {
+        set_cookie(
+            response.headers_mut(),
+            &oauth_flow::clearing_cookie(flow_state, secure),
+        );
+    }
+    response
+}
+
+async fn callback_outcome(
+    state: ConnectionsState,
+    tenant_id: Option<String>,
+    params: OAuthCallbackQuery,
+    raw_query: Option<String>,
+    headers: &HeaderMap,
 ) -> Response {
     let events = state.connection_events.clone();
-    // The path names the tenant the redirect URI was issued for. It is only
-    // trusted once a state issued for that tenant has been redeemed; events
-    // before that carry no tenant.
+    // A tenant is trusted only once a flow issued for it has been redeemed;
+    // events before that carry no tenant.
 
     // The full callback query, from which the descriptor's extra_callback_params
-    // (e.g. Intuit realmId) are captured in handle_callback.
+    // (e.g. Intuit realmId) are captured when the flow completes.
     let callback_params: std::collections::HashMap<String, String> = raw_query
         .as_deref()
         .map(|q| {
@@ -198,22 +342,51 @@ pub async fn callback_handler(
         }
     };
 
+    let Some(tenant_id) = tenant_id else {
+        crate::events::emit(
+            &events,
+            None,
+            crate::events::ConnectionLifecycleEvent::OAuthFailed {
+                reason: "invalid_state".to_string(),
+            },
+        );
+        return callback_response(
+            state.oauth_complete_url.as_ref(),
+            CallbackOutcome::Failed("invalid_state".to_string()),
+        );
+    };
+
+    let secure = state.public_base_url.starts_with("https://");
+    let cookie_name = oauth_flow::cookie_name(&oauth_state, secure);
+    let browser_nonce = headers
+        .get_all(COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find_map(|header| oauth_flow::cookie_value(header, &cookie_name))
+        .map(str::to_owned);
+
     let complete_url = state.oauth_complete_url.clone();
-    let service = OAuthService::new(state.db_pool, state.cipher, state.public_base_url);
+    let service = OAuthService::from_state(&state);
 
     let outcome = match service
-        .handle_callback(&tenant_id, &oauth_state, &code, &callback_params)
+        .complete(
+            &tenant_id,
+            &oauth_state,
+            &code,
+            &callback_params,
+            browser_nonce.as_deref(),
+        )
         .await
     {
-        Ok(connection_id) => {
+        Ok(completed) => {
             crate::events::emit(
                 &events,
                 Some(&tenant_id),
                 crate::events::ConnectionLifecycleEvent::OAuthCompleted {
-                    connection_id: connection_id.clone(),
+                    connection_id: completed.connection_id.clone(),
                 },
             );
-            CallbackOutcome::Connected(connection_id)
+            CallbackOutcome::Connected(completed.connection_id)
         }
         Err(OAuthError::InvalidState) => {
             crate::events::emit(
@@ -224,6 +397,17 @@ pub async fn callback_handler(
                 },
             );
             CallbackOutcome::Failed("invalid_state".to_string())
+        }
+        Err(OAuthError::BrowserMismatch) => {
+            // The flow was redeemed, so its tenant is verified.
+            crate::events::emit(
+                &events,
+                Some(&tenant_id),
+                crate::events::ConnectionLifecycleEvent::OAuthFailed {
+                    reason: "browser_mismatch".to_string(),
+                },
+            );
+            CallbackOutcome::Failed("browser_mismatch".to_string())
         }
         Err(OAuthError::TokenExchangeFailed(msg)) => {
             crate::events::emit(
@@ -249,6 +433,13 @@ pub async fn callback_handler(
         }
     };
     callback_response(complete_url.as_ref(), outcome)
+}
+
+/// Add a `Set-Cookie` header.
+fn set_cookie(headers: &mut HeaderMap, cookie: &str) {
+    if let Ok(value) = HeaderValue::from_str(cookie) {
+        headers.append(SET_COOKIE, value);
+    }
 }
 
 /// How a callback ended, as the console's landing page is told it.
@@ -338,6 +529,7 @@ fn outcome_text(outcome: &CallbackOutcome) -> String {
             let reason = match code.as_str() {
                 "invalid_state" => "Invalid or expired authorization. Please try again.",
                 "access_denied" => "Access was denied.",
+                "browser_mismatch" => "Finish the authorization in the browser you started it in.",
                 "token_exchange_failed" => "The provider did not issue a token.",
                 _ => "Authorization failed.",
             };

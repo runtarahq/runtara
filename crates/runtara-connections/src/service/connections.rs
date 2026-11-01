@@ -496,6 +496,7 @@ pub struct ConnectionService {
     repository: Arc<ConnectionRepository>,
     compatibility: Arc<IntegrationCompatibility>,
     rate_limit_service: Option<Arc<RateLimitService>>,
+    tenantless_oauth_callback: bool,
 }
 
 impl ConnectionService {
@@ -507,7 +508,15 @@ impl ConnectionService {
             repository,
             compatibility,
             rate_limit_service: None,
+            tenantless_oauth_callback: false,
         }
+    }
+
+    /// Give new authorization-code connections the OAuth callback that names
+    /// no tenant (see [`crate::config::OAuthOptions::tenantless_callback`]).
+    pub fn with_tenantless_oauth_callback(mut self, enabled: bool) -> Self {
+        self.tenantless_oauth_callback = enabled;
+        self
     }
 
     /// Create a new connection service with rate limit support for runtime API
@@ -520,6 +529,7 @@ impl ConnectionService {
             repository,
             compatibility,
             rate_limit_service: Some(rate_limit_service),
+            tenantless_oauth_callback: false,
         }
     }
 
@@ -646,6 +656,23 @@ impl ConnectionService {
         } else {
             ConnectionStatus::Active
         };
+
+        // A new authorization-code connection is registered with the callback
+        // that names no tenant; the redirect URI is recorded on it so later
+        // reconnects keep sending the one registered.
+        if self.tenantless_oauth_callback && requires_interactive_oauth(&integration_id) {
+            let params = request
+                .connection_parameters
+                .get_or_insert_with(|| serde_json::json!({}));
+            if let Some(params) = params.as_object_mut() {
+                params.insert(
+                    crate::service::oauth::OAUTH_CALLBACK_PARAM.to_string(),
+                    serde_json::Value::String(
+                        crate::service::oauth::OAUTH_CALLBACK_TENANTLESS.to_string(),
+                    ),
+                );
+            }
+        }
 
         // Generate new connection ID
         let connection_id = Uuid::new_v4().to_string();

@@ -42,11 +42,13 @@ pub async fn create_connection_handler(
     State(cipher): State<Arc<dyn CredentialCipher>>,
     State(compatibility): State<Arc<IntegrationCompatibility>>,
     State(events): State<crate::events::ConnectionEvents>,
+    State(oauth): State<crate::config::OAuthOptions>,
     Json(payload): Json<CreateConnectionRequest>,
 ) -> Result<(StatusCode, Json<CreateConnectionResponse>), (StatusCode, Json<Value>)> {
     // Create service with repository
     let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
-    let service = ConnectionService::new(repository, compatibility);
+    let service = ConnectionService::new(repository, compatibility)
+        .with_tenantless_oauth_callback(oauth.tenantless_callback);
 
     // Capture the integration id before `payload` is consumed by the service.
     let integration = payload.integration_id.clone();
