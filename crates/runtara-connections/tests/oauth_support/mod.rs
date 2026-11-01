@@ -56,7 +56,10 @@ impl Fixture {
                 connection_subtype VARCHAR(255),
                 connection_parameters JSONB,
                 rate_limit_config JSONB,
-                status VARCHAR(64) DEFAULT 'UNKNOWN',
+                status VARCHAR(64) DEFAULT 'UNKNOWN'
+                    -- As the server's schema allows (its migrations).
+                    CHECK (status IN ('UNKNOWN', 'ACTIVE', 'REQUIRES_RECONNECTION',
+                        'INVALID_CREDENTIALS', 'PENDING_CONFIRMATION')),
                 refresh_token_hash TEXT DEFAULT NULL,
                 is_default_file_storage BOOLEAN NOT NULL DEFAULT FALSE,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
