@@ -878,7 +878,7 @@ fn compose_direct_workflow_selected(
         // The run's Store also holds the linked stdlib instance.
         for component in &shared_components {
             if component.package == STDLIB_COMPONENT_PACKAGE {
-                let stdlib = std::fs::read(&component.wasm_path).map_err(|error| {
+                let stdlib = crate::compile_fs::read(&component.wasm_path).map_err(|error| {
                     component_error(format!("read {}: {error}", component.wasm_path.display()))
                 })?;
                 memory_floor_bytes += initial_memory_bytes(&stdlib)?;

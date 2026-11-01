@@ -30,7 +30,7 @@ use crate::compile::{
     NativeCompilationResult, WorkflowCompilerMode, compile_workflow_direct,
 };
 use crate::compile_fs::{MemoryFs, in_memory};
-use crate::direct_wasm::DirectCompileError;
+use crate::direct_wasm::{DirectCompileError, DirectStdlibMode};
 
 /// Where the compiler sees the shared and agent components.
 const COMPONENTS: &str = "/components";
@@ -98,6 +98,10 @@ pub struct CompileRequest {
     /// The extra component directories, in order (a tenant's staged
     /// workflow-agents), each by file name: each file's SHA-256.
     pub extra_components: Vec<BTreeMap<String, String>>,
+    /// How the workflow reaches the stdlib: the host's mode, as its runtime
+    /// runs the artifact. A request without one compiles in the compiler's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdlib: Option<DirectStdlibMode>,
 }
 
 /// A child dependency the compile recorded.
@@ -290,6 +294,7 @@ pub fn request(
             source_checksum: options.source_checksum.clone(),
             components,
             extra_components,
+            stdlib: Some(DirectStdlibMode::current()),
         },
         paths,
     ))
@@ -334,6 +339,7 @@ pub fn request_published_agent(
             source_checksum: input.source_checksum.clone(),
             components,
             extra_components,
+            stdlib: Some(DirectStdlibMode::current()),
         },
         paths,
     ))
@@ -347,6 +353,20 @@ pub fn compile(
     request: CompileRequest,
     fetch: impl Fn(&str) -> io::Result<Vec<u8>> + Send + Sync + 'static,
 ) -> Result<(CompileOutcome, Vec<u8>), CompileFailure> {
+    if let Some(mode) = request.stdlib {
+        let in_force = DirectStdlibMode::install(mode);
+        if in_force != mode {
+            return Err(CompileFailure {
+                kind: format!("{:?}", io::ErrorKind::Unsupported),
+                message: format!(
+                    "this compiler compiles the stdlib {}, and the request asks for it {}",
+                    in_force.tag(),
+                    mode.tag()
+                ),
+                stale: None,
+            });
+        }
+    }
     let mut by_path = BTreeMap::new();
     for (name, digest) in &request.components {
         by_path.insert(Path::new(COMPONENTS).join(name), digest.clone());

@@ -684,7 +684,7 @@ jobs:
           cargo test -p runtara-workflows \
             --features direct-wasm-integration-tests \
             --config 'profile.dev.package.runtara-component-host.opt-level=3' \
-            --test direct_wasm_execute
+            --test direct_wasm_execute --test compile_request
 
       - name: Run composed runner DSL, cancellation, persistence, agent suspension and WaitForInstances integration tests
         env:
@@ -784,7 +784,7 @@ jobs:
         run: |
           cargo test -p runtara-workflows \
             --features direct-wasm-integration-tests \
-            --test direct_wasm_execute
+            --test direct_wasm_execute --test compile_request
 
   notify-result:
     # Posts success or failure once all build/test jobs finish.

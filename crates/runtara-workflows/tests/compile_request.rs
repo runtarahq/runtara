@@ -184,3 +184,36 @@ fn a_publish_elsewhere_makes_what_one_in_process_does() {
     );
     assert_eq!(remote.artifact_metadata, local.artifact_metadata);
 }
+
+/// The request carries the host's stdlib mode, as its runtime runs the
+/// artifact, and a compiler fixed to the other mode refuses it rather than
+/// make an artifact the host cannot run. A request without one (an older
+/// host's) compiles in the compiler's mode.
+#[test]
+fn a_compile_elsewhere_is_in_the_hosts_stdlib_mode() {
+    use runtara_workflows::compile_request::CompileRequest;
+    use runtara_workflows::direct_wasm::DirectStdlibMode;
+    let temp = tempfile::tempdir().unwrap();
+    let opts = options(temp.path().join("remote"), temp.path().join("staged"));
+    let (req, paths) = request(&input(agent_graph()), &opts).unwrap();
+    let mode = DirectStdlibMode::current();
+    assert_eq!(req.stdlib, Some(mode));
+
+    let mut wire = serde_json::to_value(&req).unwrap();
+    wire.as_object_mut().unwrap().remove("stdlib");
+    let older: CompileRequest = serde_json::from_value(wire).unwrap();
+    assert_eq!(older.stdlib, None);
+
+    let mut other = req;
+    other.stdlib = Some(match mode {
+        DirectStdlibMode::Fused => DirectStdlibMode::Linked,
+        DirectStdlibMode::Linked => DirectStdlibMode::Fused,
+    });
+    let failure = compile(other, move |digest| std::fs::read(&paths[digest])).unwrap_err();
+    assert_eq!(failure.kind, "Unsupported");
+    assert!(
+        failure.message.contains("the request asks for it"),
+        "{}",
+        failure.message
+    );
+}
