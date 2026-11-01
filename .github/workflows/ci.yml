@@ -677,9 +677,13 @@ jobs:
         # safe at the default thread count. The compile happens off the executor
         # lock, so N tests compile concurrently. The few wall-clock-sensitive
         # parallel-split tests self-serialize via PARALLEL_TIMING_LOCK.
+        # Workflows link the stdlib by default: the host's typed forwarders
+        # copy through generic code compiled in runtara-component-host, byte
+        # by byte at opt-level 0, so that one crate is optimized here.
         run: |
           cargo test -p runtara-workflows \
             --features direct-wasm-integration-tests \
+            --config 'profile.dev.package.runtara-component-host.opt-level=3' \
             --test direct_wasm_execute
 
       - name: Run composed runner DSL, cancellation, persistence, agent suspension and WaitForInstances integration tests
@@ -739,12 +743,16 @@ jobs:
           RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
         # These composed tests use private emitter internals, so they are a
         # feature-gated lib target rather than an integration test.
-        run: cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib agent_deadline_tests
+        run: |
+          cargo test -p runtara-workflows --features direct-wasm-integration-tests \
+            --config 'profile.dev.package.runtara-component-host.opt-level=3' \
+            --lib agent_deadline_tests
 
-  # The direct WASM smoke battery with the stdlib linked by the host instead of
-  # composed into each artifact (RUNTARA_DIRECT_STDLIB). Its own job, so the
-  # second mode runs alongside components-build rather than after it.
-  test-linked-stdlib:
+  # The direct WASM smoke battery with the stdlib composed into each artifact
+  # (RUNTARA_DIRECT_STDLIB=fused), the mode older artifacts still run in. Its
+  # own job, so the second mode runs alongside components-build rather than
+  # after it.
+  test-fused-stdlib:
     runs-on: ubuntu-latest
     needs: wit-package
 
@@ -769,17 +777,13 @@ jobs:
           RUNTARA_NO_INSTALL_TOOLS: "1"
         run: scripts/build-agent-components.sh
 
-      - name: Run direct WASM workflow execution smoke tests with the stdlib linked
+      - name: Run direct WASM workflow execution smoke tests with the stdlib fused
         env:
           RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/agent-components
-          RUNTARA_DIRECT_STDLIB: linked
-        # The host serves the stdlib through typed forwarders whose copies are
-        # generic code compiled in runtara-component-host; at opt-level 0
-        # they copy byte by byte, so that one crate is optimized here.
+          RUNTARA_DIRECT_STDLIB: fused
         run: |
           cargo test -p runtara-workflows \
             --features direct-wasm-integration-tests \
-            --config 'profile.dev.package.runtara-component-host.opt-level=3' \
             --test direct_wasm_execute
 
   notify-result:
@@ -799,7 +803,7 @@ jobs:
       - wit-package
       - components-build
       - test-composed-deadlines
-      - test-linked-stdlib
+      - test-fused-stdlib
     if: |
       !cancelled() && github.actor != 'dependabot[bot]' && (
         (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)

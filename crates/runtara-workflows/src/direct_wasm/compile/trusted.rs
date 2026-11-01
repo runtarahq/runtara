@@ -80,6 +80,65 @@ pub(super) fn pin_trusted_dependencies(
     Ok(())
 }
 
+/// Pin a linked artifact to the stdlib it was built against, so the host
+/// links exactly that one (see `runtara_wit::stdlib_link::pin`). Every logic
+/// instance in a run shares the run's stdlib, so a staged workflow-agent
+/// linked against a different stdlib is refused: it must be republished.
+/// A fused workflow-agent carries its own stdlib and no pin.
+pub(super) fn pin_linked_stdlib(
+    wasm: &mut Vec<u8>,
+    stdlib_sha256: &str,
+    agent_components: &[ResolvedComponentDependency],
+) -> Result<(), DirectCompileError> {
+    let pin = runtara_wit::stdlib_link::pin(stdlib_sha256);
+    for dep in agent_components {
+        let bytes = crate::compile_fs::read(&dep.wasm_path)?;
+        for name in top_level_imports(&bytes)? {
+            if let Some(pinned) = runtara_wit::stdlib_link::pinned_sha256(&name)
+                && pinned != stdlib_sha256
+            {
+                return Err(DirectCompileError::Component(format!(
+                    "workflow-agent `{}` was linked against workflow stdlib {pinned}, not \
+                     {stdlib_sha256}; republish it",
+                    dep.package
+                )));
+            }
+        }
+    }
+    // A linked workflow-agent's pin already bubbled up through composition.
+    if top_level_imports(wasm)?.contains(&pin) {
+        return Ok(());
+    }
+    let types = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all())
+        .validate_all(wasm)
+        .map_err(|e| DirectCompileError::Component(e.to_string()))?;
+    let index = types.as_ref().component_type_count();
+    append_pins(wasm, index, std::iter::once(pin.as_str()));
+    Ok(())
+}
+
+/// The names `wasm` imports at the top level.
+fn top_level_imports(wasm: &[u8]) -> Result<Vec<String>, DirectCompileError> {
+    let mut depth = 0usize;
+    let mut names = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(wasm) {
+        match payload.map_err(|e| DirectCompileError::Component(e.to_string()))? {
+            wasmparser::Payload::ModuleSection { .. }
+            | wasmparser::Payload::ComponentSection { .. } => depth += 1,
+            wasmparser::Payload::End(_) => depth = depth.saturating_sub(1),
+            wasmparser::Payload::ComponentImportSection(reader) if depth == 0 => {
+                for import in reader {
+                    let import =
+                        import.map_err(|e| DirectCompileError::Component(e.to_string()))?;
+                    names.push(import.name.0.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(names)
+}
+
 /// A published workflow-agent keeps the pins of the trusted and control
 /// built-in versions it was composed against; nothing restages it when the
 /// operator upgrades one. A parent composed from it would pin a version no

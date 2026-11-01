@@ -305,6 +305,28 @@ runs 2.7x faster.
 Exit: compile latency per workflow and CI time recorded; a parked run survives
 a release change.
 
+**As built:**
+- **Pin:** an empty-instance import, `runtara:stdlib-artifacts/workflow-stdlib-h<sha256>@0.1.0`,
+  the trusted-pin pattern. The host reads it from the compiled component, so
+  the precompile protocol is unchanged. A staged workflow-agent linked against
+  a different stdlib is refused at compile time.
+- **Sources:** `WorkflowExecutor::set_workflow_stdlib_source`; stdlibs are
+  compiled once per digest.
+  - The embedded runner's source reads the artifact store by digest. Hosts
+    whose store holds no release (tests) fall back to the components
+    directory if it holds that exact stdlib.
+  - It compiles through `ComponentPrecompiler::compile_stdlib`: the child
+    worker in production, in-process for the DB tests.
+- **Warm-up:** a stdlib compiles on first use rather than at boot. The
+  worker's wasmtime disk cache makes that cheap after the first time.
+- **Default:** linked. `RUNTARA_DIRECT_STDLIB=fused` opts out; the compiler's
+  own unit tests default to fused, because they pin the fused layout.
+- **CI:** `components-build` and `test-composed-deadlines` run linked, with
+  the host crate optimized. `test-fused-stdlib` runs the battery fused.
+- **E2E:** `e2e/test_linked_stdlib_release_upgrade.sh` parks a run, restarts
+  the server on a release with a different stdlib, and checks that the run
+  completes, then compiles and runs a new workflow on the new release.
+
 ## Phase 4 (optional): the context owns the scope
 
 Stage B in the design note. The context holds the scope as parsed values and

@@ -1,6 +1,7 @@
 # Runtime-linked workflow stdlib
 
-Status: spike measured, not implemented.
+Status: implemented; linked is the default. The phases and what was built
+are in `docs/stdlib-runtime-linking-plan.md`.
 
 ## Why
 

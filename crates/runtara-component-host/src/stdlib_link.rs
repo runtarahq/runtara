@@ -20,6 +20,10 @@ use wasmtime::component::{
 
 use crate::workflow::WorkflowState;
 
+/// The types a [`WorkflowStdlibSource`] works with.
+pub use wasmtime::Engine as StdlibEngine;
+pub use wasmtime::component::Component as StdlibComponent;
+
 /// The interface linked workflow logic imports.
 pub const LINK_INTERFACE: &str = runtara_wit::stdlib_link::JSON;
 /// The interface the stdlib exports.
@@ -268,6 +272,22 @@ where
     Ok(())
 }
 
+/// Where a host gets the stdlib a linked workflow was built against.
+#[async_trait::async_trait]
+pub trait WorkflowStdlibSource: Send + Sync {
+    /// The compiled workflow stdlib whose wasm has SHA-256 `sha256`.
+    async fn load(&self, engine: &Arc<wasmtime::Engine>, sha256: &str) -> Result<Component>;
+}
+
+/// The SHA-256 of the stdlib `component` was linked against: its
+/// `runtara:stdlib-artifacts/…` pin.
+pub fn pinned_stdlib(component: &Component) -> Option<String> {
+    component
+        .component_type()
+        .imports(component.engine())
+        .find_map(|(name, _)| runtara_wit::stdlib_link::pinned_sha256(name).map(str::to_owned))
+}
+
 /// Whether `component` imports the linked stdlib.
 pub fn imports_linked_stdlib(component: &Component) -> bool {
     component
@@ -302,12 +322,40 @@ pub(crate) async fn instantiate(
     Ok(LinkedStdlib { functions })
 }
 
-/// The stdlib component in `dir` (`runtara_workflow_stdlib.wasm`).
-pub(crate) fn load(engine: &wasmtime::Engine, dir: &std::path::Path) -> Result<Component> {
-    let path = dir.join("runtara_workflow_stdlib.wasm");
-    Component::from_file(engine, &path).map_err(|error| {
-        anyhow::anyhow!("compile the workflow stdlib {}: {error:#}", path.display())
+/// The stdlib in the components directory (`RUNTARA_DIRECT_WASM_COMPONENTS_DIR`,
+/// else `RUNTARA_AGENT_COMPONENTS_DIR`), compiled in process: the source of a
+/// host that configured none (tests, local runs). It must be the one pinned.
+pub(crate) async fn load_from_components_dir(
+    engine: &Arc<wasmtime::Engine>,
+    sha256: &str,
+) -> Result<Component> {
+    let path = components_dir_stdlib(sha256)?;
+    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let engine = Arc::clone(engine);
+    tokio::task::spawn_blocking(move || {
+        Component::new(&engine, &bytes)
+            .map_err(|error| anyhow::anyhow!("compile the workflow stdlib: {error:#}"))
     })
+    .await
+    .context("workflow stdlib compile task panicked")?
+}
+
+/// The components directory's stdlib (`RUNTARA_DIRECT_WASM_COMPONENTS_DIR`, else
+/// `RUNTARA_AGENT_COMPONENTS_DIR`), when it is the one with SHA-256 `sha256`.
+pub fn components_dir_stdlib(sha256: &str) -> Result<std::path::PathBuf> {
+    let dir = std::env::var_os("RUNTARA_DIRECT_WASM_COMPONENTS_DIR")
+        .or_else(|| std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR"))
+        .map(std::path::PathBuf::from)
+        .context("a linked workflow needs the workflow stdlib, and none is configured")?;
+    let path = dir.join("runtara_workflow_stdlib.wasm");
+    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let found = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&bytes));
+    anyhow::ensure!(
+        found == sha256,
+        "{} is workflow stdlib {found}, not {sha256} that the workflow was linked against",
+        path.display()
+    );
+    Ok(path)
 }
 
 /// Shared ownership for the executor's compiled stdlib.

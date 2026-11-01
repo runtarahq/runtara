@@ -864,6 +864,14 @@ fn compose_direct_workflow_selected(
         "compose: in-process wac-graph composition complete",
     );
     trusted::pin_trusted_dependencies(&mut composed_wasm, &agent_components, components_dir)?;
+    if linked {
+        let stdlib = shared_components
+            .iter()
+            .find(|component| component.package == STDLIB_COMPONENT_PACKAGE)
+            .and_then(|component| component.metadata.wasm.as_ref())
+            .ok_or_else(|| component_error("linked compile: no workflow stdlib digest"))?;
+        trusted::pin_linked_stdlib(&mut composed_wasm, &stdlib.sha256, &agent_components)?;
+    }
     // Before isolated children are appended: they run in Stores of their own.
     let mut memory_floor_bytes = initial_memory_bytes(&composed_wasm)?;
     if linked {

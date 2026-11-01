@@ -26,13 +26,16 @@ pub enum DirectStdlibMode {
 }
 
 impl DirectStdlibMode {
-    /// The process's mode: `RUNTARA_DIRECT_STDLIB=linked` or `fused`
-    /// (the default).
+    /// The process's mode: `RUNTARA_DIRECT_STDLIB=linked` or `fused`, else
+    /// linked. This crate's own unit tests default to fused: they pin the
+    /// composed layout's import names, and the integration suites run both.
     pub fn current() -> Self {
         static MODE: std::sync::OnceLock<DirectStdlibMode> = std::sync::OnceLock::new();
         *MODE.get_or_init(|| match std::env::var("RUNTARA_DIRECT_STDLIB").as_deref() {
+            Ok("fused") => Self::Fused,
             Ok("linked") => Self::Linked,
-            _ => Self::Fused,
+            _ if cfg!(test) => Self::Fused,
+            _ => Self::Linked,
         })
     }
 

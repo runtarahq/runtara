@@ -341,3 +341,21 @@ fn error_info_appends_details_without_moving_a_field() {
         .collect();
     assert_eq!(offsets, [0, 8, 16, 24, 32, 40, 56, 68]);
 }
+
+#[test]
+fn a_stdlib_pin_names_its_digest() {
+    let sha256 = "0123456789abcdef".repeat(4);
+    let pin = crate::stdlib_link::pin(&sha256);
+    assert_eq!(
+        crate::stdlib_link::pinned_sha256(&pin),
+        Some(sha256.as_str())
+    );
+    assert_eq!(
+        crate::stdlib_link::pinned_sha256("runtara:stdlib-artifacts/workflow-stdlib-hzz@0.1.0"),
+        None
+    );
+    assert_eq!(
+        crate::stdlib_link::pinned_sha256(crate::stdlib_link::JSON),
+        None
+    );
+}

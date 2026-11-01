@@ -1126,6 +1126,7 @@ fn run_direct_workflow_capture_attempt(
         input_responses,
         managed_inputs,
         Vec::new(),
+        None,
     )
 }
 
@@ -1152,6 +1153,7 @@ fn run_direct_workflow_with_llm_script_and_children(
         Vec::new(),
         None,
         child_workflows,
+        None,
     )
 }
 
@@ -1171,6 +1173,7 @@ fn run_direct_workflow_capture_attempt_with_children(
     input_responses: Vec<Value>,
     managed_inputs: Option<Arc<direct_managed_inputs::ManagedInputs>>,
     child_workflows: Vec<runtara_workflows::compile::ChildWorkflowInput>,
+    stdlib_source: Option<Arc<dyn runtara_component_host::stdlib_link::WorkflowStdlibSource>>,
 ) -> CapturedRun {
     let temp = tempfile::tempdir().expect("tempdir");
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
@@ -1238,6 +1241,7 @@ fn run_direct_workflow_capture_attempt_with_children(
         runtime_host,
         workflow_input.as_ref().clone(),
         server_state_for_assertions.clone(),
+        stdlib_source,
     );
 
     // The run's terminal is the entry's return value: the output bytes of a
@@ -1557,6 +1561,7 @@ fn execute_via_embedded_invoke(
     runtime_host: Arc<dyn runtara_component_host::runtime_host::RuntimeHost>,
     input: Vec<u8>,
     connections: Arc<ServerState>,
+    stdlib_source: Option<Arc<dyn runtara_component_host::stdlib_link::WorkflowStdlibSource>>,
 ) -> (
     bool,
     String,
@@ -1564,6 +1569,9 @@ fn execute_via_embedded_invoke(
     Option<runtara_component_host::runtime_host::RunTerminal>,
 ) {
     let executor = executor_with_connections(connections);
+    if let Some(source) = stdlib_source {
+        executor.set_workflow_stdlib_source(source);
+    }
     let mut limits = runtara_component_host::WorkflowLimits::default();
     if let Some(max) = env_pairs
         .iter()
@@ -1854,11 +1862,23 @@ fn direct_compose_leaves_only_wasi_for_the_host() {
     let linked = runtara_workflows::direct_wasm::DirectStdlibMode::current()
         == runtara_workflows::direct_wasm::DirectStdlibMode::Linked;
     let stdlib = runtara_wit::stdlib_link::JSON;
+    // ...and the pin naming which stdlib (the host defines nothing for it).
+    let pin = runtara_wit::stdlib_link::pin(&format!(
+        "{:x}",
+        <sha2::Sha256 as sha2::Digest>::digest(
+            fs::read(components_dir.join("runtara_workflow_stdlib.wasm")).unwrap()
+        )
+    ));
     assert!(
         imports.iter().all(|name| name.starts_with("wasi:")
             || name == "runtara:agent/types@1.0.0"
-            || (linked && name == stdlib)),
+            || (linked && (name == stdlib || *name == pin))),
         "only WASI (and the type-only agent types) reach the host; imports: {imports:?}"
+    );
+    assert_eq!(
+        imports.contains(&pin),
+        linked,
+        "a linked artifact pins its stdlib; imports: {imports:?}"
     );
     assert_eq!(
         imports.iter().any(|name| name == stdlib),
@@ -1871,6 +1891,86 @@ fn direct_compose_leaves_only_wasi_for_the_host() {
             .any(|name| name.starts_with("wasi:http/client@0.3")),
         "the workflow API transport is imported; imports: {imports:?}"
     );
+}
+
+/// A linked artifact pins the stdlib it was built against, and its runs get
+/// exactly that one from the host's source, even after the components
+/// directory moves on (a release upgrade while a run is parked): the source
+/// here serves only the pinned digest, from bytes it holds itself.
+#[test]
+fn a_linked_run_is_served_the_stdlib_it_pinned() {
+    use runtara_workflows::direct_wasm::DirectStdlibMode;
+    if DirectStdlibMode::current() != DirectStdlibMode::Linked {
+        return;
+    }
+    struct PinnedOnly {
+        sha256: String,
+        bytes: Vec<u8>,
+        asked: Mutex<Vec<String>>,
+    }
+    #[async_trait::async_trait]
+    impl runtara_component_host::stdlib_link::WorkflowStdlibSource for PinnedOnly {
+        async fn load(
+            &self,
+            engine: &Arc<runtara_component_host::stdlib_link::StdlibEngine>,
+            sha256: &str,
+        ) -> anyhow::Result<runtara_component_host::stdlib_link::StdlibComponent> {
+            self.asked.lock().unwrap().push(sha256.to_owned());
+            anyhow::ensure!(sha256 == self.sha256, "no workflow stdlib {sha256} here");
+            runtara_component_host::stdlib_link::StdlibComponent::new(engine, &self.bytes)
+                .map_err(|error| anyhow::anyhow!("{error:#}"))
+        }
+    }
+
+    let components_dir = direct_e2e_components_dir();
+    let bytes = fs::read(components_dir.join("runtara_workflow_stdlib.wasm")).unwrap();
+    let sha256 = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&bytes));
+    let source = Arc::new(PinnedOnly {
+        sha256: sha256.clone(),
+        bytes,
+        asked: Mutex::new(Vec::new()),
+    });
+    let captured = run_direct_workflow_capture_attempt_with_children(
+        &components_dir,
+        "linked-pin",
+        SIMPLE_PASSTHROUGH,
+        br#"{"input":"x"}"#,
+        false,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        None,
+        Vec::new(),
+        Some(source.clone()),
+    );
+    assert!(captured.status_success, "{}", captured.stderr);
+    assert_eq!(*source.asked.lock().unwrap(), vec![sha256.clone()]);
+
+    // A source without that stdlib cannot serve the run.
+    let other = Arc::new(PinnedOnly {
+        sha256: "0".repeat(64),
+        bytes: Vec::new(),
+        asked: Mutex::new(Vec::new()),
+    });
+    let refused = run_direct_workflow_capture_attempt_with_children(
+        &components_dir,
+        "linked-pin-missing",
+        SIMPLE_PASSTHROUGH,
+        br#"{"input":"x"}"#,
+        false,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        None,
+        Vec::new(),
+        Some(other.clone()),
+    );
+    assert!(!refused.status_success);
+    assert_eq!(*other.asked.lock().unwrap(), vec![sha256]);
 }
 
 /// Everything the workflow logic and its agents use goes through the

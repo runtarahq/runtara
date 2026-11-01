@@ -463,42 +463,54 @@ pub struct WorkflowExecutor {
     engine: Arc<Engine>,
     linker: Linker<WorkflowState>,
     cache: tokio::sync::Mutex<HashMap<PathBuf, CachedComponent>>,
-    /// The stdlib linked workflows are served, compiled once.
-    stdlib: tokio::sync::OnceCell<crate::stdlib_link::StdlibPre>,
+    /// Where linked workflows' stdlibs come from.
+    stdlib_source: std::sync::RwLock<Option<Arc<dyn crate::stdlib_link::WorkflowStdlibSource>>>,
+    /// Each stdlib a linked workflow pinned, compiled once, by SHA-256.
+    stdlibs: tokio::sync::Mutex<
+        HashMap<String, Arc<tokio::sync::OnceCell<crate::stdlib_link::StdlibPre>>>,
+    >,
 }
 
 impl WorkflowExecutor {
-    /// Serve linked workflows `component`, the compiled workflow stdlib. Set
-    /// before the first linked run; otherwise the first one compiles
-    /// `runtara_workflow_stdlib.wasm` from the components directory
-    /// (`RUNTARA_DIRECT_WASM_COMPONENTS_DIR`, else
-    /// `RUNTARA_AGENT_COMPONENTS_DIR`).
-    pub fn set_workflow_stdlib(&self, component: Component) -> Result<()> {
-        let pre = Arc::new(self.linker.instantiate_pre(&component)?);
-        self.stdlib
-            .set(pre)
-            .map_err(|_| anyhow::anyhow!("workflow stdlib already configured"))
+    /// Serve linked workflows the stdlibs `source` gives, each the one the
+    /// workflow pinned. Without a source, a linked run compiles the stdlib in
+    /// the components directory in process, if it is the pinned one.
+    pub fn set_workflow_stdlib_source(
+        &self,
+        source: Arc<dyn crate::stdlib_link::WorkflowStdlibSource>,
+    ) {
+        *self
+            .stdlib_source
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(source);
     }
 
-    async fn workflow_stdlib(&self) -> Result<&crate::stdlib_link::StdlibPre> {
-        self.stdlib
+    /// The stdlib with SHA-256 `sha256`, compiled and linked once.
+    async fn workflow_stdlib(&self, sha256: &str) -> Result<crate::stdlib_link::StdlibPre> {
+        let cell = Arc::clone(
+            self.stdlibs
+                .lock()
+                .await
+                .entry(sha256.to_owned())
+                .or_default(),
+        );
+        let stdlib = cell
             .get_or_try_init(|| async {
-                let dir = std::env::var_os("RUNTARA_DIRECT_WASM_COMPONENTS_DIR")
-                    .or_else(|| std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR"))
-                    .map(PathBuf::from)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "a linked workflow needs the workflow stdlib, and none is configured"
-                        )
-                    })?;
-                let engine = Arc::clone(&self.engine);
-                let component =
-                    tokio::task::spawn_blocking(move || crate::stdlib_link::load(&engine, &dir))
-                        .await
-                        .context("workflow stdlib compile task panicked")??;
-                Ok(Arc::new(self.linker.instantiate_pre(&component)?))
+                let source = self
+                    .stdlib_source
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
+                let component = match source {
+                    Some(source) => source.load(&self.engine, sha256).await?,
+                    None => {
+                        crate::stdlib_link::load_from_components_dir(&self.engine, sha256).await?
+                    }
+                };
+                Ok::<_, anyhow::Error>(Arc::new(self.linker.instantiate_pre(&component)?))
             })
-            .await
+            .await?;
+        Ok(Arc::clone(stdlib))
     }
 
     /// Instantiate the run's stdlib when `pre`'s workflow imports it.
@@ -508,8 +520,11 @@ impl WorkflowExecutor {
         store: &mut Store<WorkflowState>,
     ) -> Result<()> {
         if crate::stdlib_link::imports_linked_stdlib(pre.component()) {
-            let stdlib = self.workflow_stdlib().await?;
-            let linked = crate::stdlib_link::instantiate(stdlib, store).await?;
+            let sha256 = crate::stdlib_link::pinned_stdlib(pre.component()).ok_or_else(|| {
+                anyhow::anyhow!("a linked workflow names no workflow stdlib; recompile it")
+            })?;
+            let stdlib = self.workflow_stdlib(&sha256).await?;
+            let linked = crate::stdlib_link::instantiate(&stdlib, store).await?;
             store.data_mut().stdlib = Some(linked);
         }
         Ok(())
@@ -672,7 +687,8 @@ impl WorkflowExecutor {
             engine,
             linker,
             cache: tokio::sync::Mutex::new(HashMap::new()),
-            stdlib: tokio::sync::OnceCell::new(),
+            stdlib_source: std::sync::RwLock::new(None),
+            stdlibs: tokio::sync::Mutex::new(HashMap::new()),
         })
     }
 

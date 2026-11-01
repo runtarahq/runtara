@@ -96,6 +96,29 @@ pub mod stdlib_link {
     pub const PACKAGE: &str = concat!("runtara:workflow-stdlib-link@", v!());
     pub const JSON: &str = concat!("runtara:workflow-stdlib-link/json@", v!());
 
+    /// Prefix of a stdlib pin: an empty-instance import of a linked
+    /// artifact naming the SHA-256 of the stdlib it was built against, so
+    /// the host links that exact stdlib. The host defines nothing for it.
+    pub const PIN_PREFIX: &str = "runtara:stdlib-artifacts/";
+
+    /// The pin of the stdlib whose wasm has SHA-256 `sha256` (lowercase hex).
+    pub fn pin(sha256: &str) -> String {
+        format!("{PIN_PREFIX}workflow-stdlib-h{sha256}@0.1.0")
+    }
+
+    /// The SHA-256 a [`pin`] names, or `None` when `import` is not one.
+    pub fn pinned_sha256(import: &str) -> Option<&str> {
+        let sha256 = import
+            .strip_prefix(PIN_PREFIX)?
+            .strip_prefix("workflow-stdlib-h")?
+            .strip_suffix("@0.1.0")?;
+        (sha256.len() == 64
+            && sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        .then_some(sha256)
+    }
+
     /// The package's WIT text.
     pub fn wit() -> String {
         let package = concat!("package ", "runtara:workflow-stdlib@", v!(), ";");

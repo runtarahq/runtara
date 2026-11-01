@@ -37,8 +37,8 @@ use tracing::{debug, error, info, warn};
 
 use runtara_component_host::precompile::{
     PRECOMPILE_NONCE_BYTES, PRECOMPILE_WORKER_ARGUMENT, PrecompileRequest, PrecompileResponse,
-    deserialize_trusted_precompiled_package, read_precompile_response_async,
-    validate_precompile_response, write_precompile_request_async,
+    deserialize_trusted_precompiled_component, deserialize_trusted_precompiled_package,
+    read_precompile_response_async, validate_precompile_response, write_precompile_request_async,
 };
 use runtara_component_host::{
     EngineConfig, PreparedWorkflow, WorkflowExecutor, WorkflowLimits, WorkflowRunSpec,
@@ -299,6 +299,56 @@ trait ComponentPrecompiler: Send + Sync {
         options: &LaunchOptions,
         wasm_path: &Path,
     ) -> Result<PreparedWorkflow>;
+
+    /// Compile the workflow stdlib at `wasm_path` for `engine`: the stdlib
+    /// linked workflows are served (see [`RunnerStdlibSource`]).
+    async fn compile_stdlib(
+        &self,
+        engine: &Arc<runtara_component_host::stdlib_link::StdlibEngine>,
+        wasm_path: &Path,
+    ) -> Result<runtara_component_host::stdlib_link::StdlibComponent>;
+}
+
+/// Serves linked workflows the stdlib they pinned: from the artifact store,
+/// where every component release keeps its stdlib by content digest, else
+/// (hosts whose store holds no release, as in tests) from the components
+/// directory when it holds that exact stdlib. Compiled behind the runner's
+/// precompile boundary.
+struct RunnerStdlibSource {
+    artifacts: Arc<dyn runtara_artifact_store::ArtifactStore>,
+    precompiler: Arc<dyn ComponentPrecompiler>,
+}
+
+#[async_trait]
+impl runtara_component_host::stdlib_link::WorkflowStdlibSource for RunnerStdlibSource {
+    async fn load(
+        &self,
+        engine: &Arc<runtara_component_host::stdlib_link::StdlibEngine>,
+        sha256: &str,
+    ) -> anyhow::Result<runtara_component_host::stdlib_link::StdlibComponent> {
+        let digest = runtara_artifact_store::Digest::parse(sha256)
+            .map_err(|error| anyhow::anyhow!("workflow stdlib digest {sha256}: {error}"))?;
+        let stored = self
+            .artifacts
+            .local_path(&digest)
+            .await
+            .map_err(|error| anyhow::anyhow!("find workflow stdlib {sha256}: {error}"))?;
+        let path = match stored {
+            Some(path) => path,
+            None => runtara_component_host::stdlib_link::components_dir_stdlib(sha256).map_err(
+                |error| {
+                    anyhow::anyhow!(
+                        "workflow stdlib {sha256} is not in the artifact store ({error:#}); \
+                         recompile the workflow"
+                    )
+                },
+            )?,
+        };
+        self.precompiler
+            .compile_stdlib(engine, &path)
+            .await
+            .map_err(|error| anyhow::anyhow!("compile workflow stdlib {sha256}: {error}"))
+    }
 }
 
 /// Production implementation of [`ComponentPrecompiler`].
@@ -354,6 +404,14 @@ impl ChildComponentPrecompiler {
         let deadline = options
             .preparation_deadline
             .unwrap_or_else(|| tokio::time::Instant::now() + DEFAULT_PRECOMPILER_TIMEOUT);
+        self.exchange_until(deadline, wasm_path).await
+    }
+
+    async fn exchange_until(
+        &self,
+        deadline: tokio::time::Instant,
+        wasm_path: &Path,
+    ) -> Result<(PrecompileRequest, PrecompileResponse)> {
         if deadline <= tokio::time::Instant::now() {
             return Err(RunnerError::PreparationTimedOut(
                 "precompile worker reached its preparation deadline before launch".to_string(),
@@ -498,6 +556,22 @@ impl ComponentPrecompiler for ChildComponentPrecompiler {
             .await;
         Ok(workflow)
     }
+
+    async fn compile_stdlib(
+        &self,
+        engine: &Arc<runtara_component_host::stdlib_link::StdlibEngine>,
+        wasm_path: &Path,
+    ) -> Result<runtara_component_host::stdlib_link::StdlibComponent> {
+        let deadline = tokio::time::Instant::now() + DEFAULT_PRECOMPILER_TIMEOUT;
+        let (request, response) = self.exchange_until(deadline, wasm_path).await?;
+        validate_precompile_response(&request, &response)
+            .map_err(|error| map_precompile_error(wasm_path, error))?;
+        // SAFETY: as in `prepare`: the response came from the private stdout
+        // pipe of the worker command spawned above, and its nonce, digest and
+        // engine fingerprint were validated.
+        unsafe { deserialize_trusted_precompiled_component(engine, &request, &response) }
+            .map_err(|error| map_precompile_error(wasm_path, error))
+    }
 }
 
 /// Test-only protocol-compatible precompiler.
@@ -549,6 +623,30 @@ impl ComponentPrecompiler for InProcessTestComponentPrecompiler {
                 RunnerError::StartFailed(format!("link test precompiled workflow: {error:#}"))
             })?;
         Ok(workflow)
+    }
+
+    async fn compile_stdlib(
+        &self,
+        engine: &Arc<runtara_component_host::stdlib_link::StdlibEngine>,
+        wasm_path: &Path,
+    ) -> Result<runtara_component_host::stdlib_link::StdlibComponent> {
+        let request =
+            PrecompileRequest::for_artifact(precompile_nonce()?, wasm_path).map_err(|error| {
+                RunnerError::StartFailed(format!("build test precompile request: {error:#}"))
+            })?;
+        let worker_request = request.clone();
+        let response = tokio::task::spawn_blocking(move || {
+            runtara_component_host::precompile::precompile_artifact(&worker_request)
+                .map(PrecompileResponse::Success)
+        })
+        .await
+        .map_err(|error| RunnerError::Other(format!("test precompile worker panicked: {error}")))?
+        .map_err(|error| map_precompile_error(wasm_path, error))?;
+        validate_precompile_response(&request, &response)
+            .map_err(|error| map_precompile_error(wasm_path, error))?;
+        // SAFETY: as in `prepare`: the same precompile function, in process.
+        unsafe { deserialize_trusted_precompiled_component(engine, &request, &response) }
+            .map_err(|error| map_precompile_error(wasm_path, error))
     }
 }
 
@@ -698,7 +796,12 @@ impl EmbeddedWasmRunner {
         let run_limit = max_concurrent_runs();
         warn_if_run_bound_exceeds_memory(run_limit);
         let preparation_limit = max_concurrent_preparations();
-        let precompiler = Arc::new(ChildComponentPrecompiler::new(preparation_limit));
+        let precompiler: Arc<dyn ComponentPrecompiler> =
+            Arc::new(ChildComponentPrecompiler::new(preparation_limit));
+        executor.set_workflow_stdlib_source(Arc::new(RunnerStdlibSource {
+            artifacts: Arc::clone(&artifacts),
+            precompiler: Arc::clone(&precompiler),
+        }));
         let preparation_permits = Arc::new(tokio::sync::Semaphore::new(preparation_limit));
         let run_permits = Arc::new(tokio::sync::Semaphore::new(run_limit));
         let metrics = PipelineMetrics::global().cloned();
@@ -866,6 +969,11 @@ impl EmbeddedWasmRunner {
     #[cfg(feature = "db-integration-tests")]
     pub fn with_in_process_precompiler_for_tests(mut self) -> Self {
         self.precompiler = Arc::new(InProcessTestComponentPrecompiler);
+        self.executor
+            .set_workflow_stdlib_source(Arc::new(RunnerStdlibSource {
+                artifacts: Arc::clone(&self.artifacts),
+                precompiler: Arc::clone(&self.precompiler),
+            }));
         self
     }
 
