@@ -1887,6 +1887,7 @@ async fn synchronous_compile_refuses_an_artifact_pinning_an_uninstalled_trusted_
         .with_direct_compilation(DirectCompilationSettings {
             components_dir: Some(components.clone()),
             extra_component_dirs: vec![],
+            stdlib: runtara_workflows::direct_wasm::DirectStdlibMode::current(),
         });
     let result = service
         .compile_workflow(&tenant, &workflow_id, 1, true)
