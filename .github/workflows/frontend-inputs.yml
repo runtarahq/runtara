@@ -3,7 +3,8 @@ name: Frontend Inputs
 # What runtarahq/runtara-frontend builds against from this repository, attached
 # to a runtara GitHub release, where the frontend pins it by version:
 #   runtara-validation-wasm-<version>.tgz — the browser validation WASM (the
-#     DSL validator), as an npm package tarball the frontend depends on by URL
+#     DSL validator), as an npm package tarball the frontend depends on by URL;
+#     <version>-dev-<build number> on a dev snapshot
 #   openapi.json — the runtime API the frontend's client is generated from
 #
 # release.yml calls this for every release and attaches the files itself. Run
@@ -56,6 +57,9 @@ jobs:
         env:
           # Absolute: wasm-pack runs cargo from the crate's directory.
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/validation-wasm-pack
+          # A dev snapshot (no release tag) versions the package
+          # <version>-dev-<build number>, so it is never taken for a release.
+          DEV_SUFFIX: ${{ !inputs.tag && !startsWith(github.ref, 'refs/tags/v') && format('-dev-{0}', github.run_number) || '' }}
         run: |
           out="${GITHUB_WORKSPACE}/target/frontend-inputs"
           mkdir -p "$out"
@@ -65,6 +69,10 @@ jobs:
           # wasm-pack writes a `*` .gitignore into the package; drop it so
           # nothing reads it as a packing rule.
           rm -f "$out/pkg/.gitignore"
+          if [ -n "$DEV_SUFFIX" ]; then
+              version="$(node -p "require('$out/pkg/package.json').version")"
+              (cd "$out/pkg" && npm pkg set version="${version}${DEV_SUFFIX}")
+          fi
           (cd "$out/pkg" && npm pack --pack-destination "$out")
 
       - name: Dump the runtime API's OpenAPI document
