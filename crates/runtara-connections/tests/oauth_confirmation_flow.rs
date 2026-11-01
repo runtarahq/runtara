@@ -30,9 +30,18 @@ mod valkey_support;
 use oauth_support::*;
 
 async fn post(api: &Router, uri: &str) -> (StatusCode, Value) {
+    post_json(api, uri, None).await
+}
+
+async fn post_json(api: &Router, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+    let request = Request::post(uri).header(header::CONTENT_TYPE, "application/json");
     let response = api
         .clone()
-        .oneshot(Request::post(uri).body(Body::empty()).unwrap())
+        .oneshot(
+            request
+                .body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))
+                .unwrap(),
+        )
         .await
         .unwrap();
     let status = response.status();
@@ -103,6 +112,25 @@ async fn link_and_return(fixture: &Fixture, id: &str) {
     );
 }
 
+/// A member's decision on connection `id`'s pending authorization, the one
+/// the console shows now.
+async fn decide(fixture: &Fixture, channel: CallerChannel, id: &str, decision: &str) -> StatusCode {
+    let pending_id = fixture
+        .service()
+        .pending_confirmation("acme", id)
+        .await
+        .unwrap()
+        .map(|pending| pending.id)
+        .unwrap_or_default();
+    post_json(
+        &api_as(fixture, "acme", channel),
+        &format!("/connections/{id}/oauth/{decision}"),
+        Some(json!({ "pendingId": pending_id })),
+    )
+    .await
+    .0
+}
+
 /// Move a pending connection's deadline into the past.
 async fn expire(fixture: &Fixture, id: &str) {
     sqlx::query(
@@ -165,24 +193,30 @@ async fn a_link_flow_waits_unusable_until_a_member_confirms() {
 
     // Neither an API key nor an MCP client may confirm.
     for channel in [CallerChannel::ApiKey, CallerChannel::Mcp] {
-        let (status, _) = post(
-            &api_as(&fixture, "acme", channel),
-            "/connections/c1/oauth/confirm",
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{channel:?}");
-        let (status, _) = post(
-            &api_as(&fixture, "acme", channel),
-            "/connections/c1/oauth/reject",
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{channel:?}");
+        for decision in ["confirm", "reject"] {
+            assert_eq!(
+                decide(&fixture, channel, "c1", decision).await,
+                StatusCode::FORBIDDEN,
+                "{channel:?} {decision}"
+            );
+        }
     }
     assert_eq!(fixture.stored("c1").await.1, "PENDING_CONFIRMATION");
 
+    // A decision names the authorization it is for.
+    let (status, _) = post_json(
+        &api_for(&fixture, "acme"),
+        "/connections/c1/oauth/confirm",
+        Some(json!({ "pendingId": "not-this-one" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
     // Any member who may edit connections may.
-    let (status, _) = post(&api_for(&fixture, "acme"), "/connections/c1/oauth/confirm").await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        decide(&fixture, CallerChannel::Member, "c1", "confirm").await,
+        StatusCode::OK
+    );
     let (stored, status) = fixture.stored("c1").await;
     assert_eq!(status, "ACTIVE");
     assert_eq!(stored["access_token"], "at-pending");
@@ -190,8 +224,10 @@ async fn a_link_flow_waits_unusable_until_a_member_confirms() {
     assert!(stored.get("pending_oauth").is_none());
 
     // Nothing is left to confirm.
-    let (status, _) = post(&api_for(&fixture, "acme"), "/connections/c1/oauth/confirm").await;
-    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        decide(&fixture, CallerChannel::Member, "c1", "confirm").await,
+        StatusCode::CONFLICT
+    );
 }
 
 #[tokio::test]
@@ -201,8 +237,10 @@ async fn rejecting_drops_and_revokes_the_tokens() {
     let provider = revocable(&fixture, "c1", 1).await;
     link_and_return(&fixture, "c1").await;
 
-    let (status, _) = post(&api_for(&fixture, "acme"), "/connections/c1/oauth/reject").await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        decide(&fixture, CallerChannel::Member, "c1", "reject").await,
+        StatusCode::OK
+    );
     let (stored, status) = fixture.stored("c1").await;
     assert_ne!(status, "PENDING_CONFIRMATION");
     assert_ne!(status, "ACTIVE");
@@ -219,8 +257,10 @@ async fn confirming_after_fifteen_minutes_is_refused_and_drops_the_tokens() {
     link_and_return(&fixture, "c1").await;
     expire(&fixture, "c1").await;
 
-    let (status, body) = post(&api_for(&fixture, "acme"), "/connections/c1/oauth/confirm").await;
-    assert_eq!(status, StatusCode::GONE, "{body}");
+    assert_eq!(
+        decide(&fixture, CallerChannel::Member, "c1", "confirm").await,
+        StatusCode::GONE
+    );
     let (stored, status) = fixture.stored("c1").await;
     assert_ne!(status, "ACTIVE");
     assert!(stored.get("pending_oauth").is_none());
@@ -263,7 +303,12 @@ async fn a_reconnection_keeps_the_old_tokens_until_confirmed() {
     let (stored, _) = fixture.stored("c1").await;
     assert_eq!(stored["access_token"], "at-old");
     let service = fixture.service();
-    service.confirm("acme", "c1").await.unwrap();
+    let pending = service
+        .pending_confirmation("acme", "c1")
+        .await
+        .unwrap()
+        .unwrap();
+    service.confirm("acme", "c1", &pending.id).await.unwrap();
     assert_eq!(fixture.stored("c1").await.0["access_token"], "at-new");
 
     // Rejecting a later reconnection restores the status it had.
@@ -282,7 +327,12 @@ async fn a_reconnection_keeps_the_old_tokens_until_confirmed() {
         .complete("acme", &flow.state, "code-2", &HashMap::new(), None)
         .await
         .unwrap();
-    service.reject("acme", "c1").await.unwrap();
+    let pending = service
+        .pending_confirmation("acme", "c1")
+        .await
+        .unwrap()
+        .unwrap();
+    service.reject("acme", "c1", &pending.id).await.unwrap();
     let (stored, status) = fixture.stored("c1").await;
     assert_eq!(status, "ACTIVE");
     assert_eq!(stored["access_token"], "at-new");
@@ -380,4 +430,97 @@ async fn without_browser_binding_console_flows_wait_for_confirmation() {
         .unwrap()
         .unwrap();
     assert_eq!(pending.started_by, "unknown");
+}
+
+#[tokio::test]
+async fn a_later_flow_is_never_confirmed_unseen() {
+    allow_loopback_endpoints();
+    let fixture = Fixture::start().await;
+    let provider = MockServer::start().await;
+    provider_issuing(&provider, "code-1", "at-first").await;
+    provider_issuing(&provider, "code-2", "at-second").await;
+    fixture
+        .insert("c1", "acme", params(&provider, Some("tenantless")))
+        .await;
+    let service = fixture.service();
+    let link = |code: &'static str| {
+        let service = &service;
+        async move {
+            let flow = service
+                .start(
+                    "c1",
+                    "acme",
+                    StartBinding::Confirm {
+                        started_by: "api_key:user-1".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            service
+                .complete("acme", &flow.state, code, &HashMap::new(), None)
+                .await
+                .unwrap();
+        }
+    };
+    link("code-1").await;
+    let reviewed = service
+        .pending_confirmation("acme", "c1")
+        .await
+        .unwrap()
+        .unwrap();
+    // Someone completes another flow before the member decides.
+    link("code-2").await;
+    assert!(matches!(
+        service.confirm("acme", "c1", &reviewed.id).await,
+        Err(OAuthError::PendingChanged)
+    ));
+    assert!(fixture.stored("c1").await.0.get("access_token").is_none());
+    let current = service
+        .pending_confirmation("acme", "c1")
+        .await
+        .unwrap()
+        .unwrap();
+    service.confirm("acme", "c1", &current.id).await.unwrap();
+    assert_eq!(fixture.stored("c1").await.0["access_token"], "at-second");
+}
+
+#[tokio::test]
+async fn a_change_of_client_drops_the_authorization_waiting() {
+    allow_loopback_endpoints();
+    let fixture = Fixture::start().await;
+    let _provider = revocable(&fixture, "c1", 0).await;
+    link_and_return(&fixture, "c1").await;
+    let api = api_for(&fixture, "acme");
+    let response = api
+        .clone()
+        .oneshot(Request::get("/connections/c1").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let got: Value = serde_json::from_slice(&body).unwrap();
+    let version = got["connection"]["editProjection"]["version"]
+        .as_str()
+        .expect("version")
+        .to_string();
+    let response = api
+        .oneshot(
+            Request::put("/connections/c1")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "version": version,
+                        "connectionParameterPatch": { "set": { "client_id": "another-client" } }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let (stored, status) = fixture.stored("c1").await;
+    assert_eq!(status, "REQUIRES_RECONNECTION");
+    assert!(stored.get("pending_oauth").is_none(), "{stored}");
 }

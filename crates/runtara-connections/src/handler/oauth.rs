@@ -134,7 +134,9 @@ fn error_response(error: OAuthError) -> (StatusCode, Json<ErrorResponse>) {
             ),
         ),
         OAuthError::App(message) => (StatusCode::BAD_REQUEST, message),
-        OAuthError::NotPending => (StatusCode::CONFLICT, error.to_string()),
+        OAuthError::NotPending | OAuthError::PendingChanged => {
+            (StatusCode::CONFLICT, error.to_string())
+        }
         OAuthError::ConfirmationExpired => (StatusCode::GONE, error.to_string()),
         e => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
@@ -250,6 +252,15 @@ pub async fn pending_handler(
     }))
 }
 
+/// Which pending authorization a confirmation or rejection is for: the `id`
+/// `GET .../oauth/pending` showed.
+#[derive(Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct OAuthPendingDecision {
+    pub pending_id: String,
+}
+
 /// A confirmation must come from a person at the console.
 fn require_member(
     caller: Option<&crate::tenant::Caller>,
@@ -276,11 +287,12 @@ fn require_member(
     params(
         ("id" = String, Path, description = "Connection ID")
     ),
+    request_body = OAuthPendingDecision,
     responses(
         (status = 200, description = "Confirmed; the connection is ACTIVE"),
         (status = 403, description = "Not a member signed in to the console", body = crate::types::ErrorResponse),
         (status = 404, description = "Connection not found", body = crate::types::ErrorResponse),
-        (status = 409, description = "No authorization is waiting for confirmation", body = crate::types::ErrorResponse),
+        (status = 409, description = "No authorization is waiting for confirmation, or not the one named", body = crate::types::ErrorResponse),
         (status = 410, description = "It waited too long and was dropped", body = crate::types::ErrorResponse)
     ),
     tag = "connections-controller"
@@ -290,10 +302,11 @@ pub async fn confirm_handler(
     caller: Option<axum::Extension<crate::tenant::Caller>>,
     State(state): State<ConnectionsState>,
     Path(id): Path<String>,
+    Json(decision): Json<OAuthPendingDecision>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     require_member(caller.as_deref())?;
     OAuthService::from_state(&state)
-        .confirm(&tenant_id, &id)
+        .confirm(&tenant_id, &id, &decision.pending_id)
         .await
         .map_err(error_response)?;
     crate::events::emit(
@@ -315,11 +328,12 @@ pub async fn confirm_handler(
     params(
         ("id" = String, Path, description = "Connection ID")
     ),
+    request_body = OAuthPendingDecision,
     responses(
         (status = 200, description = "Rejected; the tokens were dropped"),
         (status = 403, description = "Not a member signed in to the console", body = crate::types::ErrorResponse),
         (status = 404, description = "Connection not found", body = crate::types::ErrorResponse),
-        (status = 409, description = "No authorization is waiting for confirmation", body = crate::types::ErrorResponse)
+        (status = 409, description = "No authorization is waiting for confirmation, or not the one named", body = crate::types::ErrorResponse)
     ),
     tag = "connections-controller"
 ))]
@@ -328,10 +342,11 @@ pub async fn reject_handler(
     caller: Option<axum::Extension<crate::tenant::Caller>>,
     State(state): State<ConnectionsState>,
     Path(id): Path<String>,
+    Json(decision): Json<OAuthPendingDecision>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     require_member(caller.as_deref())?;
     OAuthService::from_state(&state)
-        .reject(&tenant_id, &id)
+        .reject(&tenant_id, &id, &decision.pending_id)
         .await
         .map_err(error_response)?;
     crate::events::emit(

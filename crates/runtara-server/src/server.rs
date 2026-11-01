@@ -374,6 +374,7 @@ use runtime_client::RuntimeClient;
             runtara_connections::types::ListConnectionTypesResponse,
             runtara_connections::handler::oauth::OAuthAuthorizeResponse,
             runtara_connections::handler::oauth::OAuthLinkResponse,
+            runtara_connections::handler::oauth::OAuthPendingDecision,
             runtara_connections::handler::oauth::OAuthPendingResponse,
             runtara_connections::service::oauth::PendingConfirmation,
             runtara_connections::OAuthAppSummary,

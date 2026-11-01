@@ -45,6 +45,9 @@ pub enum OAuthError {
     NotPending,
     /// The authorization waited too long for confirmation, and was dropped.
     ConfirmationExpired,
+    /// The authorization waiting for confirmation is not the one named: a
+    /// later flow replaced it, or it was already confirmed or rejected.
+    PendingChanged,
     /// Token exchange failed
     TokenExchangeFailed(String),
     /// Internal error
@@ -71,6 +74,10 @@ impl std::fmt::Display for OAuthError {
                     "The connection has no authorization waiting for confirmation"
                 )
             }
+            OAuthError::PendingChanged => write!(
+                f,
+                "The authorization waiting for confirmation has changed; review it again"
+            ),
             OAuthError::ConfirmationExpired => write!(
                 f,
                 "The authorization waited too long for confirmation; start it again"
@@ -107,6 +114,9 @@ pub const PENDING_OAUTH_PARAM: &str = "pending_oauth";
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PendingConfirmation {
+    /// Names this authorization: confirming or rejecting it names it, so a
+    /// later flow that replaced it is never confirmed unseen.
+    pub id: String,
     /// The provider account connected, when the provider says which.
     pub account: Option<Value>,
     /// Who started the flow (`channel:id`).
@@ -512,6 +522,7 @@ impl OAuthService {
                     obj.insert(
                         PENDING_OAUTH_PARAM.to_string(),
                         json!({
+                            "id": oauth_flow::new_nonce(),
                             "fields": granted,
                             "account": account,
                             "started_by": started_by,
@@ -565,6 +576,7 @@ impl OAuthService {
     ) -> Result<Option<PendingConfirmation>, OAuthError> {
         let (_, pending) = self.pending(tenant_id, connection_id).await?;
         Ok(pending.map(|pending| PendingConfirmation {
+            id: pending["id"].as_str().unwrap_or_default().to_string(),
             account: pending.get("account").filter(|a| !a.is_null()).cloned(),
             started_by: pending["started_by"]
                 .as_str()
@@ -583,9 +595,17 @@ impl OAuthService {
     /// Confirm a connection a flow started without a browser authorized: its
     /// tokens become the connection's, and it becomes `ACTIVE`. Refused once
     /// its time to be confirmed is over; the tokens are then dropped.
-    pub async fn confirm(&self, tenant_id: &str, connection_id: &str) -> Result<(), OAuthError> {
+    pub async fn confirm(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        pending_id: &str,
+    ) -> Result<(), OAuthError> {
         let (mut params, pending) = self.pending(tenant_id, connection_id).await?;
         let pending = pending.ok_or(OAuthError::NotPending)?;
+        if !pending_named(&pending, pending_id) {
+            return Err(OAuthError::PendingChanged);
+        }
         if pending_expired(&pending, chrono::Utc::now()) {
             self.drop_pending(tenant_id, connection_id, params, &pending)
                 .await?;
@@ -611,16 +631,25 @@ impl OAuthService {
 
     /// Reject a connection a flow started without a browser authorized: its
     /// tokens are dropped and revoked at the provider.
-    pub async fn reject(&self, tenant_id: &str, connection_id: &str) -> Result<(), OAuthError> {
+    pub async fn reject(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        pending_id: &str,
+    ) -> Result<(), OAuthError> {
         let (params, pending) = self.pending(tenant_id, connection_id).await?;
         let pending = pending.ok_or(OAuthError::NotPending)?;
+        if !pending_named(&pending, pending_id) {
+            return Err(OAuthError::PendingChanged);
+        }
         self.drop_pending(tenant_id, connection_id, params, &pending)
             .await
     }
 
     /// Drop and revoke the pending authorization of every connection whose
     /// time to be confirmed is over. Returns how many were dropped. Runs on
-    /// the system path, across the tenants the pool sees.
+    /// the system path, across the tenants the pool sees. A connection that
+    /// fails is logged and left for the next sweep; the others go on.
     pub async fn expire_pending(&self) -> Result<u64, OAuthError> {
         let now = chrono::Utc::now();
         let mut dropped = 0;
@@ -630,14 +659,25 @@ impl OAuthService {
             .await
             .map_err(|e| OAuthError::Internal(e.to_string()))?
         {
-            let (params, pending) = self.pending(&tenant_id, &connection_id).await?;
-            let Some(pending) = pending else {
-                continue;
+            let expired = async {
+                let (params, pending) = self.pending(&tenant_id, &connection_id).await?;
+                match pending {
+                    Some(pending) if pending_expired(&pending, now) => {
+                        self.drop_pending(&tenant_id, &connection_id, params, &pending)
+                            .await?;
+                        Ok::<_, OAuthError>(true)
+                    }
+                    _ => Ok(false),
+                }
             };
-            if pending_expired(&pending, now) {
-                self.drop_pending(&tenant_id, &connection_id, params, &pending)
-                    .await?;
-                dropped += 1;
+            match expired.await {
+                Ok(true) => dropped += 1,
+                Ok(false) | Err(OAuthError::ConnectionNotFound) => {}
+                Err(error) => tracing::warn!(
+                    connection_id,
+                    %error,
+                    "dropping an unconfirmed OAuth authorization failed; retried next sweep"
+                ),
             }
         }
         Ok(dropped)
@@ -704,6 +744,11 @@ impl OAuthService {
         }
         Ok(())
     }
+}
+
+/// Whether `pending` is the authorization `pending_id` names.
+fn pending_named(pending: &Value, pending_id: &str) -> bool {
+    !pending_id.is_empty() && pending["id"].as_str() == Some(pending_id)
 }
 
 /// Whether a pending authorization's time to be confirmed is over at `now`.

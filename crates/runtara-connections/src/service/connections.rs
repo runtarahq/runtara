@@ -1088,6 +1088,9 @@ impl ConnectionService {
             obj.remove("refresh_token");
             obj.remove("token_expires_at");
             obj.remove("authorized_at");
+            // An authorization waiting for confirmation was for the client
+            // being replaced; it goes with the tokens.
+            obj.remove(crate::service::oauth::PENDING_OAUTH_PARAM);
         }
 
         // Execute update
