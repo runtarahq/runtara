@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use crate::crypto::CredentialCipher;
+use crate::oauth_apps::{self, OAuthApps};
 use crate::repository::connections::ConnectionRepository;
 use crate::repository::oauth::OAuthRepository;
 use crate::service::oauth_flow::{self, FlowBinding, FlowRecord, FlowStore};
@@ -38,6 +39,8 @@ pub enum OAuthError {
     InvalidState,
     /// A flow started in a browser came back without that browser's cookie.
     BrowserMismatch,
+    /// The connection's platform OAuth app cannot be used.
+    App(String),
     /// The connection has no authorization waiting for confirmation.
     NotPending,
     /// The authorization waited too long for confirmation, and was dropped.
@@ -61,6 +64,7 @@ impl std::fmt::Display for OAuthError {
                 f,
                 "The authorization was not finished in the browser that started it"
             ),
+            OAuthError::App(msg) => write!(f, "{msg}"),
             OAuthError::NotPending => {
                 write!(
                     f,
@@ -152,6 +156,7 @@ pub struct OAuthService {
     public_base_url: String,
     flows: Option<FlowStore>,
     tenantless_callback: bool,
+    apps: Option<Arc<dyn OAuthApps>>,
 }
 
 impl OAuthService {
@@ -162,7 +167,25 @@ impl OAuthService {
             public_base_url,
             flows: None,
             tenantless_callback: true,
+            apps: None,
         }
+    }
+
+    /// Resolve connections' platform OAuth apps from `apps`.
+    pub fn with_apps(mut self, apps: Option<Arc<dyn OAuthApps>>) -> Self {
+        self.apps = apps;
+        self
+    }
+
+    /// The platform app a connection's `params` name, for `tenant`.
+    fn app_for(
+        &self,
+        tenant_id: &str,
+        integration_id: &str,
+        params: &Value,
+    ) -> Result<Option<Arc<oauth_apps::OAuthAppCredentials>>, OAuthError> {
+        oauth_apps::app_for(self.apps.as_deref(), tenant_id, integration_id, params)
+            .map_err(OAuthError::App)
     }
 
     /// The service as a request's state configures it.
@@ -172,7 +195,8 @@ impl OAuthService {
             state.cipher.clone(),
             state.public_base_url.clone(),
         )
-        .with_tenantless_callback(state.oauth.tenantless_callback);
+        .with_tenantless_callback(state.oauth.tenantless_callback)
+        .with_apps(state.oauth.apps.clone());
         match &state.redis_manager {
             Some(valkey) => service.with_flows(valkey.clone()),
             None => service,
@@ -206,7 +230,9 @@ impl OAuthService {
     /// The redirect URI a connection with `params` uses in `tenant`.
     pub fn redirect_uri(&self, tenant_id: &str, params: &Value) -> String {
         let base = self.public_base_url.trim_end_matches('/');
-        let tenantless = params[OAUTH_CALLBACK_PARAM].as_str() == Some(OAUTH_CALLBACK_TENANTLESS);
+        // A platform app is registered with the one callback every tenant shares.
+        let tenantless = params[OAUTH_CALLBACK_PARAM].as_str() == Some(OAUTH_CALLBACK_TENANTLESS)
+            || params.get(oauth_apps::OAUTH_APP_PARAM).is_some();
         if tenantless && self.tenantless_callback {
             format!("{base}/api/oauth/callback")
         } else {
@@ -254,13 +280,29 @@ impl OAuthService {
             return Err(OAuthError::MissingParameter("auth_url".to_string()));
         }
 
-        let client_id = params["client_id"]
-            .as_str()
-            .ok_or(OAuthError::MissingParameter("client_id".to_string()))?;
-
-        let scopes = params["scopes"]
-            .as_str()
-            .unwrap_or(oauth_config.default_scopes);
+        let app = self.app_for(tenant_id, integration_id, &params)?;
+        if app.is_some() && !self.tenantless_callback {
+            return Err(OAuthError::App(
+                "platform OAuth apps need the OAuth callback that names no tenant".to_string(),
+            ));
+        }
+        let (client_id, scopes) = match &app {
+            Some(app) => (
+                app.client_id.clone(),
+                oauth_apps::scopes_for(app, params["scopes"].as_str(), oauth_config.default_scopes)
+                    .map_err(OAuthError::App)?,
+            ),
+            None => (
+                params["client_id"]
+                    .as_str()
+                    .ok_or(OAuthError::MissingParameter("client_id".to_string()))?
+                    .to_string(),
+                params["scopes"]
+                    .as_str()
+                    .unwrap_or(oauth_config.default_scopes)
+                    .to_string(),
+            ),
+        };
 
         // Generate a cryptographically random state token
         let state = generate_state();
@@ -312,9 +354,9 @@ impl OAuthService {
         let authorization_url = format!(
             "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}{}",
             effective.auth_url,
-            urlencoding::encode(client_id),
+            urlencoding::encode(&client_id),
             urlencoding::encode(&redirect_uri),
-            urlencoding::encode(scopes),
+            urlencoding::encode(&scopes),
             urlencoding::encode(&state),
             pkce_query,
         );
@@ -417,10 +459,16 @@ impl OAuthService {
             .ok_or(OAuthError::ConnectionNotFound)?;
 
         let params = conn.connection_parameters.unwrap_or(json!({}));
-        let client_id = params["client_id"]
+        // A platform app's credentials go to the provider only: `effective`
+        // is never written back.
+        let effective = match self.app_for(tenant_id, &flow.integration_id, &params)? {
+            Some(app) => oauth_apps::with_app_credentials(&params, &app),
+            None => params.clone(),
+        };
+        let client_id = effective["client_id"]
             .as_str()
             .ok_or(OAuthError::MissingParameter("client_id".to_string()))?;
-        let client_secret = params["client_secret"]
+        let client_secret = effective["client_secret"]
             .as_str()
             .ok_or(OAuthError::MissingParameter("client_secret".to_string()))?;
 
@@ -428,7 +476,7 @@ impl OAuthService {
         // authorize step generated one).
         let token_response = exchange_code(
             oauth_config,
-            &params,
+            &effective,
             code,
             client_id,
             client_secret,
@@ -627,9 +675,12 @@ impl OAuthService {
             .as_deref()
             .and_then(find_connection_type)
             .and_then(|meta| meta.oauth_config);
-        if let Some(oauth_config) = oauth_config {
+        if let (Some(oauth_config), Some(integration_id)) = (oauth_config, integration_id) {
             // The dropped tokens, with the connection's client credentials.
-            let mut revoked = params.clone();
+            let mut revoked = match self.app_for(tenant_id, &integration_id, &params) {
+                Ok(Some(app)) => oauth_apps::with_app_credentials(&params, &app),
+                _ => params.clone(),
+            };
             if let (Some(obj), Some(fields)) =
                 (revoked.as_object_mut(), pending["fields"].as_object())
             {
@@ -968,6 +1019,64 @@ mod tests {
         .await
         .expect_err("an http revocation endpoint must be refused");
         assert!(err.contains("https"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_platform_apps_credentials_go_to_the_provider_and_nowhere_else() {
+        use wiremock::matchers::{body_string_contains, header, method, path};
+        let _loopback = crate::net::test_allowlist::allow("127.0.0.1");
+        let server = wiremock::MockServer::start().await;
+        // base64("platform-client:platform-secret")
+        wiremock::Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(header(
+                "Authorization",
+                "Basic cGxhdGZvcm0tY2xpZW50OnBsYXRmb3JtLXNlY3JldA==",
+            ))
+            .and(body_string_contains("code=code-1"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"access_token": "at-1"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let config = OAuthConfig {
+            token_url: Box::leak(format!("{}/token", server.uri()).into_boxed_str()),
+            token_endpoint_auth: TokenEndpointAuth::HttpBasic,
+            ..cfg_with(&[])
+        };
+        let app = crate::oauth_apps::tests::app("hubspot", "hubspot_private_app");
+        let stored = serde_json::json!({ "oauth_app": "hubspot", "scopes": "oauth" });
+        let effective = crate::oauth_apps::with_app_credentials(&stored, &app);
+        exchange_code(
+            &config,
+            &effective,
+            "code-1",
+            effective["client_id"].as_str().unwrap(),
+            effective["client_secret"].as_str().unwrap(),
+            "https://runtara.example/api/oauth/callback",
+            None,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("exchange: {err}"));
+
+        // What a completed flow writes back is the stored parameters and the
+        // grant; neither holds the app's secret.
+        let mut written = stored.clone();
+        written.as_object_mut().unwrap().extend(
+            granted_fields(
+                &serde_json::json!({"access_token": "at-1"}),
+                &config,
+                &HashMap::new(),
+            )
+            .unwrap(),
+        );
+        assert!(
+            !written.to_string().contains("platform-secret"),
+            "{written}"
+        );
+        assert!(written.get("client_id").is_none());
     }
 
     static REALM: &[ExtraCallbackParam] = &[ExtraCallbackParam {

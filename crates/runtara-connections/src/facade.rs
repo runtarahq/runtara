@@ -342,12 +342,26 @@ impl ConnectionsFacade {
         params: &Value,
         headers: &mut HashMap<String, String>,
     ) -> Result<ResolvedConnectionAuth, ConnectionsError> {
+        // A platform app's credentials go to the provider only: `params`, not
+        // `effective`, is what a refresh writes back.
+        let app = crate::oauth_apps::app_for(
+            self.state.oauth.apps.as_deref(),
+            tenant_id,
+            integration_id,
+            params,
+        )
+        .map_err(|error| {
+            ConnectionsError::AuthResolution(
+                crate::auth::token_cache::AuthResolutionError::permanent(error),
+            )
+        })?;
+        let effective = app.map(|app| crate::oauth_apps::with_app_credentials(params, &app));
         let resolved = match provider_auth::resolve_connection_auth(
             &self.state.http_client,
             tenant_id,
             connection_id,
             integration_id,
-            params,
+            effective.as_ref().unwrap_or(params),
             headers,
             &self.state.connection_events,
         )

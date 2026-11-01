@@ -287,6 +287,12 @@ fn build_edit_projection(
         }
     }
 
+    // A connection on a platform OAuth app names it, for the console to say
+    // the client credentials are the platform's.
+    if let Some(app) = params.and_then(|params| params.get(crate::oauth_apps::OAUTH_APP_PARAM)) {
+        values.insert(crate::oauth_apps::OAUTH_APP_PARAM.to_string(), app.clone());
+    }
+
     ConnectionEditProjection {
         values: serde_json::Value::Object(values),
         secret_state,
@@ -497,6 +503,36 @@ pub struct ConnectionService {
     compatibility: Arc<IntegrationCompatibility>,
     rate_limit_service: Option<Arc<RateLimitService>>,
     tenantless_oauth_callback: bool,
+    oauth_apps: Option<Arc<dyn crate::oauth_apps::OAuthApps>>,
+}
+
+/// What stands in for a platform app's client credentials while a connection
+/// on one is checked against its type's form, which asks for its own. Never
+/// stored.
+const PLATFORM_APP_STAND_IN: &str = "(platform app)";
+
+/// `params` with stand-ins for the client credentials a platform app provides.
+fn with_platform_app_stand_ins(params: Option<&serde_json::Value>) -> serde_json::Value {
+    let mut params = params.cloned().unwrap_or_else(|| serde_json::json!({}));
+    if let Some(obj) = params.as_object_mut() {
+        for field in ["client_id", "client_secret"] {
+            obj.entry(field)
+                .or_insert_with(|| serde_json::Value::String(PLATFORM_APP_STAND_IN.into()));
+        }
+    }
+    params
+}
+
+/// The platform app a request's `oauth_app` names: a non-empty string.
+fn requested_app(value: &serde_json::Value) -> Result<String, ServiceError> {
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|app| !app.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            ServiceError::ValidationError("oauth_app must name a platform OAuth app".to_string())
+        })
 }
 
 impl ConnectionService {
@@ -509,7 +545,55 @@ impl ConnectionService {
             compatibility,
             rate_limit_service: None,
             tenantless_oauth_callback: false,
+            oauth_apps: None,
         }
+    }
+
+    /// Run as `oauth` configures OAuth: the redirect URI new connections get,
+    /// and the platform apps connections may use.
+    pub fn with_oauth(mut self, oauth: &crate::config::OAuthOptions) -> Self {
+        self.tenantless_oauth_callback = oauth.tenantless_callback;
+        self.oauth_apps = oauth.apps.clone();
+        self
+    }
+
+    /// Whether a connection of `integration_id` with `params` may use the
+    /// platform app `app_id` in `tenant_id`, including the scopes it asks for.
+    fn check_platform_app(
+        &self,
+        tenant_id: &str,
+        integration_id: &str,
+        app_id: &str,
+        params: &serde_json::Value,
+    ) -> Result<(), ServiceError> {
+        if !self.tenantless_oauth_callback {
+            return Err(ServiceError::ValidationError(
+                "Platform OAuth apps need the OAuth callback that names no tenant".to_string(),
+            ));
+        }
+        let app = crate::oauth_apps::app_for(
+            self.oauth_apps.as_deref(),
+            tenant_id,
+            integration_id,
+            &serde_json::json!({ crate::oauth_apps::OAUTH_APP_PARAM: app_id }),
+        )
+        .map_err(ServiceError::ValidationError)?
+        .ok_or_else(|| {
+            ServiceError::ValidationError(format!(
+                "the platform OAuth app '{app_id}' is not available"
+            ))
+        })?;
+        let default_scopes = runtara_agents::registry::find_connection_type(integration_id)
+            .and_then(|meta| meta.oauth_config)
+            .map(|oauth_config| oauth_config.default_scopes)
+            .unwrap_or_default();
+        crate::oauth_apps::scopes_for(
+            &app,
+            params.get("scopes").and_then(serde_json::Value::as_str),
+            default_scopes,
+        )
+        .map(|_| ())
+        .map_err(ServiceError::ValidationError)
     }
 
     /// Give new authorization-code connections the OAuth callback that names
@@ -530,6 +614,7 @@ impl ConnectionService {
             compatibility,
             rate_limit_service: Some(rate_limit_service),
             tenantless_oauth_callback: false,
+            oauth_apps: None,
         }
     }
 
@@ -623,14 +708,57 @@ impl ConnectionService {
             validate_rate_limit_config(cfg)?;
         }
 
+        // A platform OAuth app, named in the reserved `oauth_app`, stands in for
+        // the client credentials: the connection then has none of its own.
+        let platform_app = match request
+            .connection_parameters
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|params| params.remove(crate::oauth_apps::OAUTH_APP_PARAM))
+        {
+            Some(app) => Some(requested_app(&app)?),
+            None => None,
+        };
+        if let Some(app_id) = &platform_app {
+            let params = request
+                .connection_parameters
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({}));
+            if params.get("client_id").is_some() || params.get("client_secret").is_some() {
+                return Err(ServiceError::ValidationError(
+                    "A connection on a platform OAuth app takes no client ID or secret".to_string(),
+                ));
+            }
+            self.check_platform_app(
+                tenant_id,
+                request.integration_id.as_deref().unwrap_or_default(),
+                app_id,
+                &params,
+            )?;
+        }
+
         // Public creation accepts only descriptor-declared writable fields and
         // runs the complete canonical Rust form analysis. Provider-captured OAuth
         // state is stored later through the dedicated internal repository path.
         if let Some(ref integration_id) = request.integration_id {
-            validate_create_connection_parameters(
-                integration_id,
-                request.connection_parameters.as_ref(),
-            )?;
+            let checked = match platform_app {
+                Some(_) => Some(with_platform_app_stand_ins(
+                    request.connection_parameters.as_ref(),
+                )),
+                None => request.connection_parameters.clone(),
+            };
+            validate_create_connection_parameters(integration_id, checked.as_ref())?;
+        }
+        if let Some(app_id) = platform_app
+            && let Some(params) = request
+                .connection_parameters
+                .get_or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+        {
+            params.insert(
+                crate::oauth_apps::OAUTH_APP_PARAM.to_string(),
+                serde_json::Value::String(app_id),
+            );
         }
 
         let default_for = Self::normalize_default_for(
@@ -819,6 +947,40 @@ impl ConnectionService {
         } else {
             serde_json::Value::Null
         };
+        // Moving to a platform OAuth app (`set`) or off one (`clear`) is a
+        // change of client, handled here rather than as a descriptor field.
+        let app_change: Option<Option<String>> = match request.connection_parameter_patch.as_mut() {
+            Some(patch) => {
+                let set = patch.set.remove(crate::oauth_apps::OAUTH_APP_PARAM);
+                let cleared = patch
+                    .clear
+                    .iter()
+                    .position(|name| name == crate::oauth_apps::OAUTH_APP_PARAM)
+                    .map(|position| patch.clear.remove(position))
+                    .is_some();
+                match (set, cleared) {
+                    (Some(_), true) => {
+                        return Err(ServiceError::ValidationError(
+                            "Connection field 'oauth_app' appears in multiple patch operations"
+                                .to_string(),
+                        ));
+                    }
+                    (Some(app), false) => Some(Some(requested_app(&app)?)),
+                    (None, true) => Some(None),
+                    (None, false) => None,
+                }
+            }
+            None => None,
+        };
+        let old_app = old_params
+            .get(crate::oauth_apps::OAUTH_APP_PARAM)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let patch_base = if old_app.is_some() {
+            with_platform_app_stand_ins(Some(&old_params))
+        } else {
+            old_params.clone()
+        };
         let touched_parameter_fields: std::collections::HashSet<String> = request
             .connection_parameter_patch
             .as_ref()
@@ -835,7 +997,7 @@ impl ConnectionService {
         let mut effective_parameters = request
             .connection_parameter_patch
             .as_ref()
-            .map(|patch| apply_connection_parameter_patch(&integration_id, &old_params, patch))
+            .map(|patch| apply_connection_parameter_patch(&integration_id, &patch_base, patch))
             .transpose()?;
 
         // Validate the EFFECTIVE (merged) parameters against the type schema — a
@@ -843,6 +1005,53 @@ impl ConnectionService {
         // that live in the preserved existing params.
         if effective_parameters.is_some() {
             validate_connection_parameters(&integration_id, effective_parameters.as_ref())?;
+        }
+
+        let mut new_app = old_app.clone();
+        if let Some(merged) = effective_parameters
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            match &app_change {
+                Some(Some(app_id)) => {
+                    merged.insert(
+                        crate::oauth_apps::OAUTH_APP_PARAM.to_string(),
+                        serde_json::Value::String(app_id.clone()),
+                    );
+                    new_app = Some(app_id.clone());
+                }
+                Some(None) => {
+                    merged.remove(crate::oauth_apps::OAUTH_APP_PARAM);
+                    new_app = None;
+                }
+                None => {}
+            }
+            if new_app.is_some() {
+                if touched_parameter_fields.contains("client_id")
+                    || touched_parameter_fields.contains("client_secret")
+                {
+                    return Err(ServiceError::ValidationError(
+                        "A connection on a platform OAuth app takes no client ID or secret"
+                            .to_string(),
+                    ));
+                }
+                merged.remove("client_id");
+                merged.remove("client_secret");
+            } else if old_app.is_some()
+                && ["client_id", "client_secret"].iter().any(|field| {
+                    merged
+                        .get(*field)
+                        .and_then(serde_json::Value::as_str)
+                        .is_none_or(|value| value == PLATFORM_APP_STAND_IN)
+                })
+            {
+                return Err(ServiceError::ValidationError(
+                    "Using your own OAuth app needs its client ID and secret".to_string(),
+                ));
+            }
+        }
+        if let (Some(app_id), Some(merged)) = (&new_app, effective_parameters.as_ref()) {
+            self.check_platform_app(tenant_id, &integration_id, app_id, merged)?;
         }
 
         if let Some(ref default_for) = default_for {
@@ -857,11 +1066,14 @@ impl ConnectionService {
             .as_ref()
             .and_then(|merged_params| {
                 runtara_agents::registry::find_connection_type(&integration_id).map(|meta| {
-                    meta.fields.iter().any(|field| {
-                        touched_parameter_fields.contains(field.name)
-                            && field.behavior.requires_reauthorization
-                            && old_params.get(field.name) != merged_params.get(field.name)
-                    })
+                    // A different client, platform app or own, cannot refresh
+                    // the old one's tokens.
+                    old_app != new_app
+                        || meta.fields.iter().any(|field| {
+                            touched_parameter_fields.contains(field.name)
+                                && field.behavior.requires_reauthorization
+                                && old_params.get(field.name) != merged_params.get(field.name)
+                        })
                 })
             })
             .unwrap_or(false);
@@ -967,6 +1179,16 @@ impl ConnectionService {
         let params = conn
             .connection_parameters
             .unwrap_or(serde_json::Value::Null);
+        // A platform app's credentials, for this request only.
+        let params = match crate::oauth_apps::app_for(
+            self.oauth_apps.as_deref(),
+            tenant_id,
+            integration_id,
+            &params,
+        ) {
+            Ok(Some(app)) => crate::oauth_apps::with_app_credentials(&params, &app),
+            _ => params,
+        };
         let client = crate::net::shared_hardened_client();
         if let Err(e) =
             crate::auth::provider_auth::revoke_oauth_token(client, oauth_config, &params).await

@@ -133,6 +133,7 @@ fn error_response(error: OAuthError) -> (StatusCode, Json<ErrorResponse>) {
                 p
             ),
         ),
+        OAuthError::App(message) => (StatusCode::BAD_REQUEST, message),
         OAuthError::NotPending => (StatusCode::CONFLICT, error.to_string()),
         OAuthError::ConfirmationExpired => (StatusCode::GONE, error.to_string()),
         e => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),

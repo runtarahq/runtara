@@ -376,6 +376,7 @@ use runtime_client::RuntimeClient;
             runtara_connections::handler::oauth::OAuthLinkResponse,
             runtara_connections::handler::oauth::OAuthPendingResponse,
             runtara_connections::service::oauth::PendingConfirmation,
+            runtara_connections::OAuthAppSummary,
             api::dto::triggers::InvocationTrigger,
             api::dto::triggers::TriggerType,
             api::dto::triggers::CreateInvocationTriggerRequest,
@@ -752,6 +753,10 @@ pub struct ServerOptions {
     /// supplies its own, such as a `runtara_connections::TenantKeyedCipher`;
     /// every call names the tenant and connection it is for.
     pub credential_cipher: Option<Arc<dyn runtara_connections::CredentialCipher>>,
+    /// OAuth apps the platform registered with providers, which tenants'
+    /// connections may use in place of their own client credentials; `None`
+    /// reads them from the file `RUNTARA_OAUTH_APPS_FILE` names, if any.
+    pub oauth_apps: Option<Arc<dyn runtara_connections::OAuthApps>>,
 }
 
 pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -1266,6 +1271,20 @@ pub async fn start_with(
         }
     };
 
+    let oauth_apps: Option<Arc<dyn runtara_connections::OAuthApps>> = match options
+        .oauth_apps
+        .clone()
+    {
+        Some(apps) => Some(apps),
+        None => match runtara_connections::FileOAuthApps::from_env() {
+            Ok(apps) => apps.map(|apps| Arc::new(apps) as Arc<dyn runtara_connections::OAuthApps>),
+            Err(msg) => {
+                eprintln!("❌ Configuration error: {msg}");
+                std::process::exit(1);
+            }
+        },
+    };
+
     // Construct connections crate config and facade.
     let connections_config = runtara_connections::ConnectionsConfig {
         db_pool: pool.clone(),
@@ -1287,6 +1306,7 @@ pub async fn start_with(
             tenantless_callback: config::get().oauth_tenantless_callback,
             browser_binding: config::get().oauth_browser_binding,
             tenants: Arc::new(crate::middleware::tenant_path::ServedTenants),
+            apps: oauth_apps,
         },
     };
     let connections_state =

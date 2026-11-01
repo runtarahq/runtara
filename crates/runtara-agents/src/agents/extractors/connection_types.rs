@@ -959,8 +959,11 @@ impl HttpConnectionExtractor for QuickBooksOnlineExtractor {
 
     fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
         // access_token/refresh_token/realm_id arrive later via the OAuth callback,
-        // so client_id is the only field guaranteed present on a stored connection.
-        if params.get("client_id").and_then(|v| v.as_str()).is_none() {
+        // so the client (its own client_id, or a platform app) is the only thing
+        // guaranteed present on a stored connection.
+        if params.get("client_id").and_then(|v| v.as_str()).is_none()
+            && params.get("oauth_app").and_then(|v| v.as_str()).is_none()
+        {
             return Err("Invalid quickbooks_online connection: missing client_id".to_string());
         }
 
@@ -990,8 +993,11 @@ impl HttpConnectionExtractor for HubSpotExtractor {
     }
 
     fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
-        // Validate at least client_id exists (access_token/refresh_token may come later via OAuth callback)
-        if params.get("client_id").and_then(|v| v.as_str()).is_none() {
+        // Validate the client exists, its own client_id or a platform app
+        // (access_token/refresh_token may come later via OAuth callback)
+        if params.get("client_id").and_then(|v| v.as_str()).is_none()
+            && params.get("oauth_app").and_then(|v| v.as_str()).is_none()
+        {
             return Err("Invalid hubspot_private_app connection: missing client_id".to_string());
         }
 

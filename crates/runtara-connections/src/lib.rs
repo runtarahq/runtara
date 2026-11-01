@@ -7,6 +7,7 @@ pub mod facade;
 pub mod handler;
 pub mod integration_compatibility;
 pub mod net;
+pub mod oauth_apps;
 pub mod repository;
 pub mod resolution;
 pub mod resource_resolver;
@@ -31,6 +32,7 @@ pub use error::ConnectionsError;
 pub use events::{ConnectionEventSink, ConnectionEvents, ConnectionLifecycleEvent};
 pub use facade::ConnectionsFacade;
 pub use integration_compatibility::{IntegrationCompatibility, OBJECT_STORAGE_DEFAULT_FOR};
+pub use oauth_apps::{FileOAuthApps, OAuthAppCredentials, OAuthAppSummary, OAuthApps};
 pub use repository::connections::{ConnectionWithParameters, ReencryptionStats};
 pub use resolution::{
     ConnectionDescriptor, ConnectionResourceDefinition, ConnectionResourceItem,

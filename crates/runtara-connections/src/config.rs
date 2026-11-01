@@ -101,6 +101,9 @@ pub struct OAuthOptions {
     pub browser_binding: bool,
     /// The tenants this process serves, for the tenant-less callback.
     pub tenants: Arc<dyn TenantHost>,
+    /// OAuth apps the platform registered, which connections may use in
+    /// place of their own client credentials. `None`: there are none.
+    pub apps: Option<Arc<dyn crate::oauth_apps::OAuthApps>>,
 }
 
 impl Default for OAuthOptions {
@@ -109,6 +112,7 @@ impl Default for OAuthOptions {
             tenantless_callback: true,
             browser_binding: true,
             tenants: Arc::new(EveryTenant),
+            apps: None,
         }
     }
 }

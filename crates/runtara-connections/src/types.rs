@@ -942,6 +942,10 @@ pub struct ConnectionTypeDto {
     /// OAuth2 configuration (only for auth_type = oauth2_authorization_code)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth_config: Option<OAuthConfigDto>,
+    /// OAuth apps the platform registered for this type that the calling
+    /// tenant may connect with, in place of its own client credentials.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_apps: Vec<crate::oauth_apps::OAuthAppSummary>,
 }
 
 /// Response for listing all connection types
