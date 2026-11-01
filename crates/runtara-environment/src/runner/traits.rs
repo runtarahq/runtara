@@ -578,6 +578,15 @@ pub trait Runner: Send + Sync {
     /// Runner type identifier (e.g., "wasm-embedded", "mock")
     fn runner_type(&self) -> &'static str;
 
+    /// Whether this runner links the workflow stdlib into a run, as the
+    /// embedded runner's host does, so workflows may be compiled to import
+    /// it. A runner whose runs get only WASI (a VM running a stock component
+    /// runtime) answers false, and workflows are compiled with the stdlib
+    /// composed in, which every runner runs.
+    fn links_workflow_stdlib(&self) -> bool {
+        false
+    }
+
     /// Launch an instance without waiting for completion, but only when
     /// runner capacity is immediately available.
     ///

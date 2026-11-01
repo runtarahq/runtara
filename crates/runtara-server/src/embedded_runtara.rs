@@ -156,8 +156,13 @@ impl EmbeddedRuntara {
                 None => runtara_environment::runner::build_embedded_runner(parts),
             }
             .map_err(|e| anyhow::anyhow!("build workflow runner: {e}"))?;
+        // Workflows compile to run on this runner: with the stdlib composed
+        // in unless it links one into each run.
+        let stdlib =
+            crate::compile_executor::set_runner_links_stdlib(runner.links_workflow_stdlib());
         info!(
             runner_type = runner.runner_type(),
+            stdlib = ?stdlib,
             "Workflow runner initialized"
         );
 

@@ -117,6 +117,28 @@ pub(super) fn pin_linked_stdlib(
     Ok(())
 }
 
+/// A fused artifact carries its own stdlib, so a workflow-agent published
+/// linked, which imports the stdlib from the host, cannot be composed into
+/// one: a runner that links no stdlib into a run could not run it. It must
+/// be republished. `agents` are the composed agents, by package and path.
+pub(super) fn refuse_linked_agents<'a>(
+    agents: impl IntoIterator<Item = (&'a str, &'a std::path::Path)>,
+) -> Result<(), DirectCompileError> {
+    for (package, path) in agents {
+        let bytes = crate::compile_fs::read(path)?;
+        if top_level_imports(&bytes)?.iter().any(|name| {
+            name == runtara_wit::stdlib_link::JSON
+                || runtara_wit::stdlib_link::pinned_sha256(name).is_some()
+        }) {
+            return Err(DirectCompileError::Component(format!(
+                "workflow-agent `{package}` was published with the workflow stdlib linked, \
+                 and this workflow composes the stdlib in; republish it"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The names `wasm` imports at the top level.
 fn top_level_imports(wasm: &[u8]) -> Result<Vec<String>, DirectCompileError> {
     let mut depth = 0usize;
@@ -308,6 +330,29 @@ mod tests {
             }
         }
         assert!(found);
+    }
+
+    #[test]
+    fn a_fused_workflow_refuses_an_agent_published_linked() {
+        let dir = tempfile::tempdir().unwrap();
+        let fused = dir.path().join("runtara_agent_fused.wasm");
+        std::fs::write(&fused, wasm_encoder::Component::new().finish()).unwrap();
+        let mut wasm = wasm_encoder::Component::new().finish();
+        let pin = runtara_wit::stdlib_link::pin(&"c".repeat(64));
+        append_pins(&mut wasm, 0, std::iter::once(pin.as_str()));
+        let linked = dir.path().join("runtara_agent_linked.wasm");
+        std::fs::write(&linked, wasm).unwrap();
+
+        refuse_linked_agents([("fused", fused.as_path())]).unwrap();
+        let error =
+            refuse_linked_agents([("fused", fused.as_path()), ("linked", linked.as_path())])
+                .unwrap_err()
+                .to_string();
+        assert!(
+            error.contains("`linked` was published with the workflow stdlib linked")
+                && error.contains("republish it"),
+            "{error}"
+        );
     }
 
     #[test]
