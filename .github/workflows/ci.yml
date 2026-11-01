@@ -107,7 +107,8 @@ jobs:
 
       - name: Build the validation WASM package
         env:
-          CARGO_TARGET_DIR: target/validation-wasm-pack
+          # Absolute: wasm-pack runs cargo from the crate's directory.
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/validation-wasm-pack
         run: |
           wasm-pack build crates/runtara-validation-wasm \
               --target web --release \
