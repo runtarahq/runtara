@@ -513,17 +513,27 @@ impl WorkflowExecutor {
         Ok(Arc::clone(stdlib))
     }
 
+    /// The stdlib `component` pinned, compiled, when it imports one.
+    async fn pinned_workflow_stdlib(
+        &self,
+        component: &Component,
+    ) -> Result<Option<crate::stdlib_link::StdlibPre>> {
+        if !crate::stdlib_link::imports_linked_stdlib(component) {
+            return Ok(None);
+        }
+        let sha256 = crate::stdlib_link::pinned_stdlib(component).ok_or_else(|| {
+            anyhow::anyhow!("a linked workflow names no workflow stdlib; recompile it")
+        })?;
+        Ok(Some(self.workflow_stdlib(&sha256).await?))
+    }
+
     /// Instantiate the run's stdlib when `pre`'s workflow imports it.
     async fn link_stdlib(
         &self,
         pre: &wasmtime::component::InstancePre<WorkflowState>,
         store: &mut Store<WorkflowState>,
     ) -> Result<()> {
-        if crate::stdlib_link::imports_linked_stdlib(pre.component()) {
-            let sha256 = crate::stdlib_link::pinned_stdlib(pre.component()).ok_or_else(|| {
-                anyhow::anyhow!("a linked workflow names no workflow stdlib; recompile it")
-            })?;
-            let stdlib = self.workflow_stdlib(&sha256).await?;
+        if let Some(stdlib) = self.pinned_workflow_stdlib(pre.component()).await? {
             let linked = crate::stdlib_link::instantiate(&stdlib, store).await?;
             store.data_mut().stdlib = Some(linked);
         }
@@ -900,6 +910,9 @@ impl WorkflowExecutor {
              republish this workflow",
             crate::lifecycle::ENTRY_INTERFACE_NAME
         );
+        // Compile a linked workflow's stdlib now, so its first run does not
+        // pay for it after the start gate opens or inside its own deadline.
+        self.pinned_workflow_stdlib(&component).await?;
         let instance_pre = Arc::new(
             self.linker_with_trusted_pins(&component)?
                 .instantiate_pre(&component)

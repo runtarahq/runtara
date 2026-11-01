@@ -1970,7 +1970,42 @@ fn a_linked_run_is_served_the_stdlib_it_pinned() {
         Some(other.clone()),
     );
     assert!(!refused.status_success);
-    assert_eq!(*other.asked.lock().unwrap(), vec![sha256]);
+    assert_eq!(*other.asked.lock().unwrap(), vec![sha256.clone()]);
+
+    // Preparing a launch compiles the pinned stdlib, so a run never pays for
+    // it after its start gate opens or inside its own deadline.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let compiled = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "linked-pin-prepare".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_str(SIMPLE_PASSTHROUGH).expect("fixture parses"),
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        &components_dir,
+        WorkflowRole::Root,
+        false,
+    )
+    .expect("direct composed compile");
+    let prepared = Arc::new(PinnedOnly {
+        sha256: sha256.clone(),
+        bytes: fs::read(components_dir.join("runtara_workflow_stdlib.wasm")).unwrap(),
+        asked: Mutex::new(Vec::new()),
+    });
+    let executor =
+        runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))
+            .unwrap();
+    executor.set_workflow_stdlib_source(prepared.clone());
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(executor.prepare_path(&compiled.wasm_path))
+        .expect("prepare a linked workflow");
+    assert_eq!(*prepared.asked.lock().unwrap(), vec![sha256]);
 }
 
 /// Everything the workflow logic and its agents use goes through the
