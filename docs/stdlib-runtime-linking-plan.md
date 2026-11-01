@@ -334,6 +334,23 @@ only ids cross the boundary. Checkpoints keep storing plain JSON values: export
 before save, import on a replay hit, never a handle or context id. Gate it on a
 profile showing what share of a typical run goes to JSON parse and serialize.
 
+**Gate result: not now.** Measured with the instrumented spike harness
+(typed forwarders, as built):
+- **Suite:** execution is about 3% of the smoke battery's CPU (37 s summed,
+  under load, out of about 1,100 CPU-s). Compilation dominates, so Phase 4
+  can't move CI time.
+- **Large-scope runs:** about 92% of execution is inside stdlib calls. The two
+  that re-parse the whole scope (`build-source`, `split-iteration-variables`)
+  take about 85% of that.
+
+Phase 4 would pay off only for large-scope production runs, against the
+checkpoint redesign above. It stays a separate project, to start when
+large-scope run latency matters.
+
+**Fused path:** kept. Parked runs and old images are fused artifacts, and
+`RUNTARA_DIRECT_STDLIB=fused` is the opt-out. Remove it once no supported
+release produces fused artifacts.
+
 ## Risks
 
 - **wasmtime API.** `func_wrap_concurrent` behind sync-lowered imports is
