@@ -1,0 +1,93 @@
+name: Frontend Inputs
+
+# What runtarahq/runtara-frontend builds against from this repository, attached
+# to a runtara GitHub release, where the frontend pins it by version:
+#   runtara-validation-wasm-<version>.tgz — the browser validation WASM (the
+#     DSL validator), as an npm package tarball the frontend depends on by URL
+#   openapi.json — the runtime API the frontend's client is generated from
+#
+# release.yml calls this for every release and attaches the files itself. Run
+# it by hand to attach them to a release that predates this workflow.
+
+on:
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build from and attach to (e.g. v10.0.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  SQLX_OFFLINE: true
+  WASM_PACK_VERSION: "0.13.1"
+
+jobs:
+  build:
+    name: Build Frontend Inputs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+          cache: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: frontend-inputs
+
+      - name: Install wasm-pack (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@${{ env.WASM_PACK_VERSION }}
+
+      - name: Build the validation WASM package
+        env:
+          CARGO_TARGET_DIR: target/validation-wasm-pack
+        run: |
+          out="${GITHUB_WORKSPACE}/target/frontend-inputs"
+          mkdir -p "$out"
+          wasm-pack build crates/runtara-validation-wasm \
+              --target web --release \
+              --out-dir "$out/pkg" --out-name runtara_validation
+          # wasm-pack writes a `*` .gitignore into the package; drop it so
+          # nothing reads it as a packing rule.
+          rm -f "$out/pkg/.gitignore"
+          (cd "$out/pkg" && npm pack --pack-destination "$out")
+
+      - name: Dump the runtime API's OpenAPI document
+        run: |
+          cargo run -q -p runtara-server --bin dump_openapi \
+              > target/frontend-inputs/openapi.json
+          jq -e '.openapi and .paths' target/frontend-inputs/openapi.json >/dev/null
+
+      - name: Upload frontend inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-inputs
+          path: |
+            target/frontend-inputs/runtara-validation-wasm-*.tgz
+            target/frontend-inputs/openapi.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Attach to the release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release upload "$TAG" --clobber \
+              target/frontend-inputs/runtara-validation-wasm-*.tgz \
+              target/frontend-inputs/openapi.json

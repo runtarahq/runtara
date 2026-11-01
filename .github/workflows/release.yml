@@ -86,6 +86,12 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # The validation WASM package and openapi.json that runtarahq/runtara-frontend
+  # builds against, attached to the release below.
+  frontend-inputs:
+    name: Frontend Inputs
+    uses: ./.github/workflows/frontend-inputs.yml
+
   # The agent/workflow components target wasm32-wasip2, so one build serves all
   # three platforms. Previously this ran *after* the server build inside each
   # bundle job — 114s of components plus 160s of emit-meta on the critical path,
@@ -418,7 +424,7 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: smoke
+    needs: [smoke, frontend-inputs]
 
     steps:
       - name: Checkout code
@@ -453,6 +459,12 @@ jobs:
           pattern: bundle-*
           path: artifacts
           merge-multiple: true
+
+      - name: Download frontend inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-inputs
+          path: artifacts
 
       - name: List artifacts
         run: ls -lh artifacts/
@@ -506,6 +518,8 @@ jobs:
               artifacts/runtara-*.tar.gz
               artifacts/runtara-*.tar.gz.sha256
               artifacts/SHA256SUMS
+              artifacts/runtara-validation-wasm-*.tgz
+              artifacts/openapi.json
               scripts/install.sh
           )
 
