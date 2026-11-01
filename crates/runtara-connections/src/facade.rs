@@ -381,7 +381,9 @@ impl ConnectionsFacade {
                 crate::auth::token_cache::AuthResolutionError::permanent(error),
             )
         })?;
-        let effective = app.map(|app| crate::oauth_apps::with_app_credentials(params, &app));
+        let effective = app
+            .as_ref()
+            .map(|app| crate::oauth_apps::with_app_credentials(params, app));
         let resolved = match provider_auth::resolve_connection_auth(
             &self.state.http_client,
             tenant_id,
@@ -395,6 +397,9 @@ impl ConnectionsFacade {
         {
             Ok(resolved) => resolved,
             Err(e) => {
+                if let Some(app) = &app {
+                    crate::oauth_apps::record_provider_error(&app.app_id, "refresh", &e.message);
+                }
                 // A dead grant (e.g. `invalid_grant` on refresh) means retrying forever
                 // is pointless — flip the connection to REQUIRES_RECONNECTION so the UI
                 // can prompt a reconnect.

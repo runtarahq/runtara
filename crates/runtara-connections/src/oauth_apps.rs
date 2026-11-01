@@ -12,7 +12,10 @@
 //! none.
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+
+use opentelemetry::KeyValue;
+use opentelemetry::metrics::Counter;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -77,6 +80,51 @@ pub trait OAuthApps: Send + Sync {
     fn get(&self, tenant: &str, app_id: &str) -> Option<Arc<OAuthAppCredentials>>;
     /// The apps `tenant` may use.
     fn available(&self, tenant: &str) -> Vec<OAuthAppSummary>;
+}
+
+/// Errors providers answered to requests made with a platform app, by app,
+/// stage (`exchange`, `refresh`) and kind: every tenant on an app shares its
+/// standing with the provider, so a rise in `rate_limited` or
+/// `invalid_client` on one app is worth an alert.
+static PROVIDER_ERRORS: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    opentelemetry::global::meter("runtara-connections")
+        .u64_counter("runtara.oauth_app.provider_errors")
+        .with_description(
+            "Errors a provider answered to requests made with a platform OAuth app, by app, stage and kind",
+        )
+        .build()
+});
+
+/// The kind of a token endpoint's error, from its message (`... returned
+/// {status}: {error} ...`): what an alert on a platform app watches for.
+pub fn provider_error_kind(message: &str) -> &'static str {
+    let status = message
+        .split_once("returned ")
+        .and_then(|(_, rest)| rest.get(..3))
+        .and_then(|status| status.parse::<u16>().ok());
+    if status == Some(429) {
+        "rate_limited"
+    } else if message.contains("invalid_client") {
+        "invalid_client"
+    } else if message.contains("invalid_grant") {
+        "invalid_grant"
+    } else if status.is_some_and(|status| status >= 500) {
+        "provider_unavailable"
+    } else {
+        "other"
+    }
+}
+
+/// Counts an error a provider answered to a request `app_id` made at `stage`.
+pub fn record_provider_error(app_id: &str, stage: &'static str, message: &str) {
+    PROVIDER_ERRORS.add(
+        1,
+        &[
+            KeyValue::new("app", app_id.to_owned()),
+            KeyValue::new("stage", stage),
+            KeyValue::new("kind", provider_error_kind(message)),
+        ],
+    );
 }
 
 /// The settings that name the apps file.
@@ -360,6 +408,31 @@ pub(crate) mod tests {
         );
         let error = scopes_for(&app, Some("crm.objects.contacts.write"), default).unwrap_err();
         assert!(error.contains("'crm.objects.contacts.write'"), "{error}");
+    }
+
+    #[test]
+    fn a_providers_error_is_told_apart_for_alerts() {
+        for (message, kind) in [
+            (
+                "Token endpoint returned 429 Too Many Requests: unknown_error",
+                "rate_limited",
+            ),
+            (
+                "token endpoint returned 401 Unauthorized: invalid_client bad secret",
+                "invalid_client",
+            ),
+            (
+                "Token endpoint returned 400 Bad Request: invalid_grant expired",
+                "invalid_grant",
+            ),
+            (
+                "Token endpoint returned 503 Service Unavailable: unknown_error",
+                "provider_unavailable",
+            ),
+            ("error sending request", "other"),
+        ] {
+            assert_eq!(provider_error_kind(message), kind, "{message}");
+        }
     }
 
     struct One(Arc<OAuthAppCredentials>);

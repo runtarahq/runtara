@@ -471,8 +471,9 @@ impl OAuthService {
         let params = conn.connection_parameters.unwrap_or(json!({}));
         // A platform app's credentials go to the provider only: `effective`
         // is never written back.
-        let effective = match self.app_for(tenant_id, &flow.integration_id, &params)? {
-            Some(app) => oauth_apps::with_app_credentials(&params, &app),
+        let app = self.app_for(tenant_id, &flow.integration_id, &params)?;
+        let effective = match &app {
+            Some(app) => oauth_apps::with_app_credentials(&params, app),
             None => params.clone(),
         };
         let client_id = effective["client_id"]
@@ -493,7 +494,12 @@ impl OAuthService {
             &flow.redirect_uri,
             flow.code_verifier.as_deref(),
         )
-        .await?;
+        .await
+        .inspect_err(|error| {
+            if let (Some(app), OAuthError::TokenExchangeFailed(message)) = (&app, error) {
+                oauth_apps::record_provider_error(&app.app_id, "exchange", message);
+            }
+        })?;
 
         let granted = granted_fields(&token_response, oauth_config, callback_params)?;
         let mut updated_params = params.clone();
