@@ -16,7 +16,8 @@
 use runtara_wit::stdlib::PACKAGE as STDLIB_PACKAGE;
 
 /// How workflow logic reaches the stdlib.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DirectStdlibMode {
     /// Composed into every workflow artifact.
     Fused,
@@ -30,13 +31,20 @@ impl DirectStdlibMode {
     /// linked. This crate's own unit tests default to fused: they pin the
     /// composed layout's import names, and the integration suites run both.
     pub fn current() -> Self {
-        static MODE: std::sync::OnceLock<DirectStdlibMode> = std::sync::OnceLock::new();
-        *MODE.get_or_init(|| match std::env::var("RUNTARA_DIRECT_STDLIB").as_deref() {
+        *STDLIB_MODE.get_or_init(|| match std::env::var("RUNTARA_DIRECT_STDLIB").as_deref() {
             Ok("fused") => Self::Fused,
             Ok("linked") => Self::Linked,
             _ if cfg!(test) => Self::Fused,
             _ => Self::Linked,
         })
+    }
+
+    /// Fixes the process's mode to `mode`, for a host whose runtime serves
+    /// only one (a runner that does not link the stdlib needs fused) or a
+    /// compiler that compiles as its request says. Answers the mode in
+    /// force: `mode`, unless the process's mode was already fixed.
+    pub fn install(mode: Self) -> Self {
+        *STDLIB_MODE.get_or_init(|| mode)
     }
 
     /// The stdlib interface workflow logic imports.
@@ -54,6 +62,8 @@ impl DirectStdlibMode {
         }
     }
 }
+
+static STDLIB_MODE: std::sync::OnceLock<DirectStdlibMode> = std::sync::OnceLock::new();
 
 /// Package of the world direct-emitted workflow logic is encoded against, and
 /// of the logic component in the composition.
