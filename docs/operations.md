@@ -123,7 +123,7 @@ Paths are relative to `crates/`.
 | Updates | Polling (the UI refetches every 10 s); no push for run changes | yes |
 
 The existing UI already has most of the pieces (under
-`runtara-server/frontend/src/`):
+runtara-frontend's `src/`):
 
 - the tenant-wide run list (`features/invocation-history`), with an "Input"
   chip on runs that wait;
@@ -509,7 +509,7 @@ Backend:
   Keep the new run ID and existing original-run link. Preserve an absent
   label as absent; do not generate a replacement or append an attempt suffix.
 
-Frontend (`runtara-server/frontend/src/`):
+Frontend (runtara-frontend's `src/`):
 
 - **W5.** A read-only renderer of typed state values (numbers, strings,
   datetime, enum, relative time), used by queue cells, the state panel and a

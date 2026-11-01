@@ -61,23 +61,18 @@ resolved timeout is logged at startup.
 
 ## Embedded UI (optional)
 
-The crate can bundle the `./frontend` React app into the binary behind the
-`embed-ui` cargo feature:
+The console lives in
+[runtarahq/runtara-frontend](https://github.com/runtarahq/runtara-frontend).
+The `embed-ui` cargo feature embeds the release pinned in `frontend.lock`
+(version and SHA-256); `build.rs` fetches it into `frontend-dist/` with
+`scripts/fetch-frontend.sh`, once:
 
 ```bash
-(cd frontend && npm ci && npm run build)      # produces frontend/dist/
 cargo build -p runtara-server --features embed-ui
 ```
 
-`npm run build` refreshes the browser validation WASM package before
-creating `frontend/dist`. The `embed-ui` Cargo build also refreshes it when
-Rust validation or agent metadata sources change, then rebuilds `frontend/dist`
-so embedded assets stay in sync. Install `wasm-pack` if the generated package
-is stale:
-
-```bash
-cargo install wasm-pack --locked
-```
+To embed another release, change `frontend.lock`. Console X.Y works with server
+X.Y and the minor on either side.
 
 Without env config the UI is served at `/ui/` (self-hosted). For a tenant
 deployed behind a gateway that routes `/ui/<tenant-id>/…` externally, set
@@ -93,7 +88,7 @@ console's `oauth-complete.html`; without the setting it uses the UI this
 server serves, and with no UI it answers in plain text. A console on another
 origin also needs that origin in `CORS_ALLOWED_ORIGINS`.
 
-`RUNTARA_UI_DIST_DIR=<path to frontend/dist>` serves the UI from that directory
+`RUNTARA_UI_DIST_DIR=<path to a runtara-frontend dist/>` serves the UI from that directory
 at request time instead of from the embedded snapshot. It works with or without
 `embed-ui` and in any profile, and takes precedence when both are available.
 Its point is development: an embedded bundle is fixed at link time, so
@@ -102,7 +97,7 @@ binary is rebuilt. Pointing at `dist` makes a save plus a reload the whole loop
 — and lets a dev build drop `embed-ui`, which is what stops a running watcher
 from invalidating every cargo build. Assets from a disk source are served
 `no-cache` rather than `immutable`, and a read that lands mid-rebuild returns
-503 rather than a stale page. See `frontend/README.md` for the dev loops.
+503 rather than a stale page. See runtara-frontend's README for the dev loops.
 
 ## Inside Runtara
 

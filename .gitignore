@@ -89,8 +89,9 @@ src/operators_lib/target/
 # Generated specification files (created during build)
 specs/
 
-# Generated browser validation WASM package (created by frontend prebuild/build.rs)
-crates/runtara-server/frontend/src/wasm/validation/
+# The runtara-frontend release embed-ui embeds (scripts/fetch-frontend.sh)
+crates/runtara-server/frontend-dist/
+crates/runtara-server/frontend-dist.release
 
 # Claude Code — ignore user-specific state, track team-shared files
 .claude/settings.local.json

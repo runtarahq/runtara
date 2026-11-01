@@ -24,7 +24,6 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   SQLX_OFFLINE: true
-  WASM_PACK_VERSION: "0.13.1"
 
 jobs:
   bundle:
@@ -49,18 +48,6 @@ jobs:
         with:
           shared-key: release-bundle-linux-x86_64
           save-if: false
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: crates/runtara-server/frontend/.node-version
-          cache: npm
-          cache-dependency-path: crates/runtara-server/frontend/package-lock.json
-
-      - name: Install wasm-pack (prebuilt)
-        uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-pack@${{ env.WASM_PACK_VERSION }}
 
       - name: Build bundle
         run: ./scripts/build-bundle.sh --output-dir target/bundle --version "${{ inputs.version }}"

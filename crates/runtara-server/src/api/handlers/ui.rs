@@ -19,20 +19,15 @@ use crate::entitlements::EntitlementSnapshot;
 
 #[cfg(feature = "embed-ui")]
 #[derive(RustEmbed)]
-#[folder = "frontend/dist/"]
+#[folder = "frontend-dist/"]
 struct UiAssets;
 
 /// Where the served UI bytes come from.
 ///
-/// The two sources exist so that "which cargo profile am I running" and "can I
-/// see my frontend changes" are independent questions. Embedding is a
-/// compile-time snapshot: in a `--release` build `npm run build:watch` output is
-/// invisible until the crate is recompiled and the ~113MB binary relinked. That
-/// relink is also what makes a running watcher poison every cargo build, since
-/// `build.rs` declares `rerun-if-changed=frontend/dist` under `embed-ui`.
-///
-/// `Disk` breaks that coupling: point a server of any profile at a dist
-/// directory and it reads assets per request, so the frontend loop costs a
+/// `Embedded` is the runtara-frontend release pinned in `frontend.lock`,
+/// fetched into `frontend-dist/` by `build.rs`: a compile-time snapshot.
+/// `Disk` serves any dist directory per request (a runtara-frontend checkout's
+/// `npm run build:watch` output, say), so working on the console costs a
 /// browser reload and no cargo work at all.
 #[derive(Clone)]
 pub enum AssetSource {
@@ -156,7 +151,7 @@ impl AssetSource {
             #[cfg(feature = "embed-ui")]
             Self::Embedded => {
                 if cfg!(debug_assertions) {
-                    "embedded (debug: read from the compile-time frontend/dist)".to_string()
+                    "embedded (debug: read from the compile-time frontend-dist)".to_string()
                 } else {
                     "embedded (compile-time snapshot)".to_string()
                 }
@@ -423,7 +418,7 @@ fn build_index_html(
         None => {
             tracing::error!(
                 source = %source.describe(),
-                "index.html not found — run `npm run build` in ./frontend"
+                "index.html not found in the UI assets"
             );
             return None;
         }
@@ -447,7 +442,7 @@ fn build_index_html(
         None => {
             tracing::error!(
                 source = %source.describe(),
-                "expected a `<base href=\"...\">` tag in index.html. Check frontend/index.html."
+                "expected a `<base href=\"...\">` tag in index.html. Check runtara-frontend's index.html."
             );
             return None;
         }
@@ -474,7 +469,7 @@ fn build_index_html(
             tracing::error!(
                 source = %source.describe(),
                 "expected a `<script id=\"runtara-runtime-config\">` element in index.html. \
-                 Check frontend/index.html."
+                 Check runtara-frontend's index.html."
             );
             return None;
         }
@@ -483,7 +478,7 @@ fn build_index_html(
         tracing::error!(
             source = %source.describe(),
             "`<script id=\"runtara-runtime-config\">` in index.html no longer assigns \
-             `window.__RUNTARA_CONFIG__`. Check frontend/index.html."
+             `window.__RUNTARA_CONFIG__`. Check runtara-frontend's index.html."
         );
         return None;
     }
@@ -860,8 +855,8 @@ fn tenant_index_response(state: &UiState, tenant: &TenantIndex) -> Response {
 fn frontend_unavailable_response(source: &AssetSource) -> Response {
     let body = format!(
         "Frontend bundle unavailable.\n\nAsset source: {}\n\n\
-         If a build is in flight this resolves on the next reload. Otherwise run \
-         `npm run build` in crates/runtara-server/frontend.\n",
+         If a build is in flight this resolves on the next reload. Otherwise \
+         check that the directory holds a runtara-frontend build.\n",
         source.describe()
     );
     Response::builder()
