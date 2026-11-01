@@ -85,6 +85,7 @@ pub enum EventType {
     ConnectionDeleted,
     ConnectionOauthStarted,
     ConnectionOauthCompleted,
+    ConnectionOauthPendingConfirmation,
     ConnectionOauthFailed,
     ConnectionTokenRefreshed,
     // Billing-relevant (future-proofing)
@@ -117,6 +118,9 @@ impl EventType {
             EventType::ConnectionDeleted => "connection.deleted",
             EventType::ConnectionOauthStarted => "connection.oauth_started",
             EventType::ConnectionOauthCompleted => "connection.oauth_completed",
+            EventType::ConnectionOauthPendingConfirmation => {
+                "connection.oauth_pending_confirmation"
+            }
             EventType::ConnectionOauthFailed => "connection.oauth_failed",
             EventType::ConnectionTokenRefreshed => "connection.token_refreshed",
             EventType::QuotaExceeded => "quota.exceeded",
@@ -565,6 +569,11 @@ impl runtara_connections::events::ConnectionEventSink for ConnectionEventBridge 
             }
             Lifecycle::OAuthCompleted { connection_id } => {
                 ProductEvent::for_tenant(EventType::ConnectionOauthCompleted, tenant_id)
+                    .no_user_actor("connections", ActorType::System)
+                    .resource(connection_id, "connection")
+            }
+            Lifecycle::OAuthPendingConfirmation { connection_id } => {
+                ProductEvent::for_tenant(EventType::ConnectionOauthPendingConfirmation, tenant_id)
                     .no_user_actor("connections", ActorType::System)
                     .resource(connection_id, "connection")
             }

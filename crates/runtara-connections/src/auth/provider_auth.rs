@@ -80,6 +80,17 @@ pub async fn resolve_connection_auth(
     headers: &mut HashMap<String, String>,
     events: &crate::events::ConnectionEvents,
 ) -> Result<ResolvedConnectionAuth, token_cache::AuthResolutionError> {
+    // Authorized by a flow started without a browser and not yet confirmed:
+    // its tokens are held apart, and the connection has none of its own.
+    if params
+        .get(crate::service::oauth::PENDING_OAUTH_PARAM)
+        .is_some()
+        && params.get("access_token").is_none()
+    {
+        return Err(token_cache::AuthResolutionError::permanent(
+            "the connection's authorization is waiting for a member to confirm it in the console",
+        ));
+    }
     let descriptor = describe_connection_auth(connection_id, integration_id, params, headers);
     let mtls_client = if integration_id == "http_mtls" {
         Some(net::build_hardened_mtls_client(params).map_err(|error| {

@@ -64,70 +64,283 @@ pub struct ErrorResponse {
 ))]
 pub async fn authorize_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
+    caller: Option<axum::Extension<crate::tenant::Caller>>,
     State(state): State<ConnectionsState>,
     Path(id): Path<String>,
 ) -> Result<Response, (axum::http::StatusCode, Json<ErrorResponse>)> {
     let events = state.connection_events.clone();
     let service = OAuthService::from_state(&state);
-
-    match service.start(&id, &tenant_id, StartBinding::Browser).await {
-        Ok(flow) => {
-            crate::events::emit(
-                &events,
-                Some(&tenant_id),
-                crate::events::ConnectionLifecycleEvent::OAuthStarted {
-                    connection_id: id.clone(),
-                },
-            );
-            let mut response = Json(OAuthAuthorizeResponse {
-                success: true,
-                authorization_url: flow.authorization_url,
-                redirect_uri: flow.redirect_uri,
-            })
-            .into_response();
-            if let Some(nonce) = &flow.browser_nonce {
-                set_cookie(
-                    response.headers_mut(),
-                    &oauth_flow::binding_cookie(&flow.state, nonce, service.secure_cookies()),
-                );
-            }
-            response
-                .headers_mut()
-                .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-            Ok(response)
+    // Without browser binding (a console on another origin than the
+    // callback), the flow waits for a member's confirmation instead.
+    let binding = if state.oauth.browser_binding {
+        StartBinding::Browser
+    } else {
+        StartBinding::Confirm {
+            started_by: started_by(caller.as_deref()),
         }
-        Err(OAuthError::ConnectionNotFound) => Err((
-            axum::http::StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                success: false,
-                error: "Connection not found".to_string(),
-            }),
-        )),
-        Err(OAuthError::NotOAuthIntegration(id)) => Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                success: false,
-                error: format!("Integration '{}' does not support OAuth", id),
-            }),
-        )),
-        Err(OAuthError::MissingParameter(p)) => Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                success: false,
-                error: format!(
-                    "Missing connection parameter '{}'. Save the connection first.",
-                    p
-                ),
-            }),
-        )),
-        Err(e) => Err((
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                success: false,
-                error: e.to_string(),
-            }),
-        )),
+    };
+
+    let flow = service
+        .start(&id, &tenant_id, binding)
+        .await
+        .map_err(error_response)?;
+    crate::events::emit(
+        &events,
+        Some(&tenant_id),
+        crate::events::ConnectionLifecycleEvent::OAuthStarted {
+            connection_id: id.clone(),
+        },
+    );
+    let mut response = Json(OAuthAuthorizeResponse {
+        success: true,
+        authorization_url: flow.authorization_url,
+        redirect_uri: flow.redirect_uri,
+    })
+    .into_response();
+    if let Some(nonce) = &flow.browser_nonce {
+        set_cookie(
+            response.headers_mut(),
+            &oauth_flow::binding_cookie(&flow.state, nonce, service.secure_cookies()),
+        );
     }
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
+/// The caller as recorded on a flow it starts.
+fn started_by(caller: Option<&crate::tenant::Caller>) -> String {
+    caller
+        .map(crate::tenant::Caller::label)
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// An [`OAuthError`] as the API answers it.
+fn error_response(error: OAuthError) -> (StatusCode, Json<ErrorResponse>) {
+    let (status, message) = match error {
+        OAuthError::ConnectionNotFound => {
+            (StatusCode::NOT_FOUND, "Connection not found".to_string())
+        }
+        OAuthError::NotOAuthIntegration(id) => (
+            StatusCode::BAD_REQUEST,
+            format!("Integration '{}' does not support OAuth", id),
+        ),
+        OAuthError::MissingParameter(p) => (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Missing connection parameter '{}'. Save the connection first.",
+                p
+            ),
+        ),
+        OAuthError::NotPending => (StatusCode::CONFLICT, error.to_string()),
+        OAuthError::ConfirmationExpired => (StatusCode::GONE, error.to_string()),
+        e => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    (
+        status,
+        Json(ErrorResponse {
+            success: false,
+            error: message,
+        }),
+    )
+}
+
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct OAuthLinkResponse {
+    pub success: bool,
+    /// The link to hand the person who is to authorize at the provider.
+    pub authorization_url: String,
+    pub redirect_uri: String,
+    /// After this the link no longer works.
+    pub expires_at: String,
+}
+
+/// Start an OAuth2 flow without a browser, for an API client or an MCP tool
+/// to hand someone a link.
+///
+/// Whoever opens the link authorizes at the provider; the connection then
+/// waits as `PENDING_CONFIRMATION`, unusable, until a member confirms it in
+/// the console within 15 minutes.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    post,
+    path = "/api/runtime/connections/{id}/oauth/link",
+    params(
+        ("id" = String, Path, description = "Connection ID")
+    ),
+    responses(
+        (status = 200, description = "A provider link for a flow that waits for confirmation", body = OAuthLinkResponse),
+        (status = 400, description = "Integration does not support OAuth or missing required parameter", body = crate::types::ErrorResponse),
+        (status = 404, description = "Connection not found", body = crate::types::ErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::types::ErrorResponse)
+    ),
+    tag = "connections-controller"
+))]
+pub async fn link_handler(
+    crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
+    caller: Option<axum::Extension<crate::tenant::Caller>>,
+    State(state): State<ConnectionsState>,
+    Path(id): Path<String>,
+) -> Result<Json<OAuthLinkResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let flow = OAuthService::from_state(&state)
+        .start(
+            &id,
+            &tenant_id,
+            StartBinding::Confirm {
+                started_by: started_by(caller.as_deref()),
+            },
+        )
+        .await
+        .map_err(error_response)?;
+    crate::events::emit(
+        &state.connection_events,
+        Some(&tenant_id),
+        crate::events::ConnectionLifecycleEvent::OAuthStarted {
+            connection_id: id.clone(),
+        },
+    );
+    let expires_at =
+        chrono::Utc::now() + chrono::Duration::seconds(oauth_flow::FLOW_TTL_SECONDS as i64);
+    Ok(Json(OAuthLinkResponse {
+        success: true,
+        authorization_url: flow.authorization_url,
+        redirect_uri: flow.redirect_uri,
+        expires_at: expires_at.to_rfc3339(),
+    }))
+}
+
+#[derive(Serialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct OAuthPendingResponse {
+    pub success: bool,
+    /// The authorization waiting for confirmation, if any.
+    pub pending: Option<crate::service::oauth::PendingConfirmation>,
+}
+
+/// What a connection's authorization waiting for confirmation connected, and
+/// who started it. No secrets.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    get,
+    path = "/api/runtime/connections/{id}/oauth/pending",
+    params(
+        ("id" = String, Path, description = "Connection ID")
+    ),
+    responses(
+        (status = 200, description = "The pending authorization, or none", body = OAuthPendingResponse),
+        (status = 404, description = "Connection not found", body = crate::types::ErrorResponse)
+    ),
+    tag = "connections-controller"
+))]
+pub async fn pending_handler(
+    crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
+    State(state): State<ConnectionsState>,
+    Path(id): Path<String>,
+) -> Result<Json<OAuthPendingResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let pending = OAuthService::from_state(&state)
+        .pending_confirmation(&tenant_id, &id)
+        .await
+        .map_err(error_response)?;
+    Ok(Json(OAuthPendingResponse {
+        success: true,
+        pending,
+    }))
+}
+
+/// A confirmation must come from a person at the console.
+fn require_member(
+    caller: Option<&crate::tenant::Caller>,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if caller.is_some_and(crate::tenant::Caller::may_confirm) {
+        return Ok(());
+    }
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(ErrorResponse {
+            success: false,
+            error: "Only a member signed in to the console can confirm or reject an \
+                    authorization; not an API key or an MCP client"
+                .to_string(),
+        }),
+    ))
+}
+
+/// Confirm the authorization a flow started without a browser obtained: the
+/// connection becomes usable. Only a member signed in to the console.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    post,
+    path = "/api/runtime/connections/{id}/oauth/confirm",
+    params(
+        ("id" = String, Path, description = "Connection ID")
+    ),
+    responses(
+        (status = 200, description = "Confirmed; the connection is ACTIVE"),
+        (status = 403, description = "Not a member signed in to the console", body = crate::types::ErrorResponse),
+        (status = 404, description = "Connection not found", body = crate::types::ErrorResponse),
+        (status = 409, description = "No authorization is waiting for confirmation", body = crate::types::ErrorResponse),
+        (status = 410, description = "It waited too long and was dropped", body = crate::types::ErrorResponse)
+    ),
+    tag = "connections-controller"
+))]
+pub async fn confirm_handler(
+    crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
+    caller: Option<axum::Extension<crate::tenant::Caller>>,
+    State(state): State<ConnectionsState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    require_member(caller.as_deref())?;
+    OAuthService::from_state(&state)
+        .confirm(&tenant_id, &id)
+        .await
+        .map_err(error_response)?;
+    crate::events::emit(
+        &state.connection_events,
+        Some(&tenant_id),
+        crate::events::ConnectionLifecycleEvent::OAuthCompleted {
+            connection_id: id.clone(),
+        },
+    );
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
+/// Reject the authorization a flow started without a browser obtained: its
+/// tokens are dropped and revoked at the provider. Only a member signed in to
+/// the console.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    post,
+    path = "/api/runtime/connections/{id}/oauth/reject",
+    params(
+        ("id" = String, Path, description = "Connection ID")
+    ),
+    responses(
+        (status = 200, description = "Rejected; the tokens were dropped"),
+        (status = 403, description = "Not a member signed in to the console", body = crate::types::ErrorResponse),
+        (status = 404, description = "Connection not found", body = crate::types::ErrorResponse),
+        (status = 409, description = "No authorization is waiting for confirmation", body = crate::types::ErrorResponse)
+    ),
+    tag = "connections-controller"
+))]
+pub async fn reject_handler(
+    crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
+    caller: Option<axum::Extension<crate::tenant::Caller>>,
+    State(state): State<ConnectionsState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    require_member(caller.as_deref())?;
+    OAuthService::from_state(&state)
+        .reject(&tenant_id, &id)
+        .await
+        .map_err(error_response)?;
+    crate::events::emit(
+        &state.connection_events,
+        Some(&tenant_id),
+        crate::events::ConnectionLifecycleEvent::OAuthFailed {
+            reason: "rejected".to_string(),
+        },
+    );
+    Ok(Json(serde_json::json!({ "success": true })))
 }
 
 // ============================================================================
@@ -378,6 +591,16 @@ async fn callback_outcome(
         )
         .await
     {
+        Ok(completed) if completed.pending_confirmation => {
+            crate::events::emit(
+                &events,
+                Some(&tenant_id),
+                crate::events::ConnectionLifecycleEvent::OAuthPendingConfirmation {
+                    connection_id: completed.connection_id.clone(),
+                },
+            );
+            CallbackOutcome::Pending(completed.connection_id)
+        }
         Ok(completed) => {
             crate::events::emit(
                 &events,
@@ -447,6 +670,8 @@ fn set_cookie(headers: &mut HeaderMap, cookie: &str) {
 enum CallbackOutcome {
     /// The connection now holds the provider's tokens.
     Connected(String),
+    /// The provider's tokens wait for a member's confirmation.
+    Pending(String),
     /// The flow failed: an OAuth error code, the provider's or our own.
     Failed(String),
 }
@@ -510,6 +735,11 @@ fn landing_url(complete_url: &url::Url, outcome: &CallbackOutcome) -> url::Url {
                     .append_pair("result", "ok")
                     .append_pair("connection", connection_id);
             }
+            CallbackOutcome::Pending(connection_id) => {
+                query
+                    .append_pair("result", "pending")
+                    .append_pair("connection", connection_id);
+            }
             CallbackOutcome::Failed(code) => {
                 query
                     .append_pair("result", "error")
@@ -525,6 +755,10 @@ fn outcome_text(outcome: &CallbackOutcome) -> String {
         CallbackOutcome::Connected(_) => {
             "Authorization successful. You can close this window.".to_string()
         }
+        CallbackOutcome::Pending(_) => "Authorization received. A member must confirm the \
+                                        connection in the console within 15 minutes. You can \
+                                        close this window."
+            .to_string(),
         CallbackOutcome::Failed(code) => {
             let reason = match code.as_str() {
                 "invalid_state" => "Invalid or expired authorization. Please try again.",

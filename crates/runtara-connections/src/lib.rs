@@ -37,7 +37,7 @@ pub use resolution::{
     ConnectionResourcePage, ConnectionResourceRequest,
 };
 pub use router::{connections_router, oauth_callback_router};
-pub use tenant::TenantId;
+pub use tenant::{Caller, CallerChannel, TenantId};
 pub use types::{
     ConnectionDto, ConnectionStatus, CreateConnectionRequest, RateLimitConfigDto,
     RateLimitEventType, RuntimeConnectionResponse, UpdateConnectionRequest,

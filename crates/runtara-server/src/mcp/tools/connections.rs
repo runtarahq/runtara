@@ -70,6 +70,13 @@ pub struct DescribeConnectionParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct StartConnectionAuthorizationParams {
+    #[schemars(description = "Connection UUID returned by list_connections")]
+    pub connection_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ResolveConnectionResourceParams {
     #[schemars(description = "Connection UUID returned by list_connections")]
     pub connection_id: String,
@@ -150,6 +157,23 @@ pub async fn describe_connection(
     let result = api_get(
         server,
         &format!("/api/runtime/connections/{}/metadata", params.connection_id),
+    )
+    .await?;
+    json_result(result)
+}
+
+pub async fn start_connection_authorization(
+    server: &SmoMcpServer,
+    params: StartConnectionAuthorizationParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("connection_id", &params.connection_id)?;
+    let result = api_post(
+        server,
+        &format!(
+            "/api/runtime/connections/{}/oauth/link",
+            params.connection_id
+        ),
+        None,
     )
     .await?;
     json_result(result)

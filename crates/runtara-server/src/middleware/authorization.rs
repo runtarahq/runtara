@@ -477,7 +477,15 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         ("GET", "/api/runtime/connections/types/{integration_id}")
         | ("GET", "/connections/types/{integration_id}") => ConnectionRead,
         ("GET", "/api/runtime/connections/{id}/oauth/authorize")
-        | ("GET", "/connections/{id}/oauth/authorize") => ConnectionUpdate,
+        | ("GET", "/connections/{id}/oauth/authorize")
+        | ("POST", "/api/runtime/connections/{id}/oauth/link")
+        | ("POST", "/connections/{id}/oauth/link")
+        | ("POST", "/api/runtime/connections/{id}/oauth/confirm")
+        | ("POST", "/connections/{id}/oauth/confirm")
+        | ("POST", "/api/runtime/connections/{id}/oauth/reject")
+        | ("POST", "/connections/{id}/oauth/reject") => ConnectionUpdate,
+        ("GET", "/api/runtime/connections/{id}/oauth/pending")
+        | ("GET", "/connections/{id}/oauth/pending") => ConnectionRead,
         ("GET", "/api/runtime/rate-limits") | ("GET", "/rate-limits") => ConnectionRead,
         ("GET", "/api/runtime/connections/{id}/rate-limit-status")
         | ("GET", "/connections/{id}/rate-limit-status") => ConnectionRead,
@@ -1247,6 +1255,22 @@ mod tests {
         assert_eq!(
             permission_for(&Method::GET, "/connections/{id}/oauth/authorize"),
             Some(Permission::ConnectionUpdate)
+        );
+        // Starting a flow without a browser, and confirming or rejecting what
+        // it obtained, take the right to edit connections; anyone with it may
+        // confirm.
+        for action in ["link", "confirm", "reject"] {
+            assert_eq!(
+                permission_for(
+                    &Method::POST,
+                    &format!("/connections/{{id}}/oauth/{action}")
+                ),
+                Some(Permission::ConnectionUpdate)
+            );
+        }
+        assert_eq!(
+            permission_for(&Method::GET, "/connections/{id}/oauth/pending"),
+            Some(Permission::ConnectionRead)
         );
     }
 

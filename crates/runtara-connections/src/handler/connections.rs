@@ -106,7 +106,7 @@ pub async fn create_connection_handler(
     path = "/api/runtime/connections",
     params(
         ("integrationId" = Option<String>, Query, description = "Filter by integration ID (connection type identifier)"),
-        ("status" = Option<String>, Query, description = "Filter by status (UNKNOWN, ACTIVE, REQUIRES_RECONNECTION, INVALID_CREDENTIALS)"),
+        ("status" = Option<String>, Query, description = "Filter by status (UNKNOWN, ACTIVE, REQUIRES_RECONNECTION, INVALID_CREDENTIALS, PENDING_CONFIRMATION)"),
         ("includeRateLimitStats" = Option<bool>, Query, description = "Include rate limit statistics for each connection"),
         ("interval" = Option<String>, Query, description = "Time interval for rate limit stats: 1h, 24h, 7d, 30d (default: 24h)")
     ),
@@ -434,7 +434,7 @@ pub async fn delete_connection_handler(
     path = "/api/runtime/connections/operator/{operatorName}",
     params(
         ("operatorName" = String, Path, description = "Operator name (e.g., 'HTTP', 'Shopify', 'MCP')"),
-        ("status" = Option<String>, Query, description = "Filter by status (UNKNOWN, ACTIVE, REQUIRES_RECONNECTION, INVALID_CREDENTIALS)")
+        ("status" = Option<String>, Query, description = "Filter by status (UNKNOWN, ACTIVE, REQUIRES_RECONNECTION, INVALID_CREDENTIALS, PENDING_CONFIRMATION)")
     ),
     responses(
         (status = 200, description = "List of connections for the operator (without sensitive connection_parameters)", body = ListConnectionsResponse),

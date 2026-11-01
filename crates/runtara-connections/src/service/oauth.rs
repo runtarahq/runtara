@@ -9,6 +9,7 @@ use crate::crypto::CredentialCipher;
 use crate::repository::connections::ConnectionRepository;
 use crate::repository::oauth::OAuthRepository;
 use crate::service::oauth_flow::{self, FlowBinding, FlowRecord, FlowStore};
+use crate::types::ConnectionStatus;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::RngCore;
@@ -37,6 +38,10 @@ pub enum OAuthError {
     InvalidState,
     /// A flow started in a browser came back without that browser's cookie.
     BrowserMismatch,
+    /// The connection has no authorization waiting for confirmation.
+    NotPending,
+    /// The authorization waited too long for confirmation, and was dropped.
+    ConfirmationExpired,
     /// Token exchange failed
     TokenExchangeFailed(String),
     /// Internal error
@@ -56,6 +61,16 @@ impl std::fmt::Display for OAuthError {
                 f,
                 "The authorization was not finished in the browser that started it"
             ),
+            OAuthError::NotPending => {
+                write!(
+                    f,
+                    "The connection has no authorization waiting for confirmation"
+                )
+            }
+            OAuthError::ConfirmationExpired => write!(
+                f,
+                "The authorization waited too long for confirmation; start it again"
+            ),
             OAuthError::TokenExchangeFailed(msg) => write!(f, "Token exchange failed: {}", msg),
             OAuthError::Internal(msg) => write!(f, "Internal error: {}", msg),
         }
@@ -67,6 +82,35 @@ impl std::fmt::Display for OAuthError {
 pub enum StartBinding {
     /// In the console: a cookie the browser must bring back.
     Browser,
+    /// Without a browser (an API client or an MCP tool handing someone a
+    /// link): the connection waits for a member's confirmation. `started_by`
+    /// is the caller, for the audit trail and the confirmation screen.
+    Confirm { started_by: String },
+}
+
+/// How long a connection authorized by a flow started without a browser
+/// waits for a member's confirmation, from the callback.
+pub const PENDING_CONFIRMATION_SECONDS: i64 = 15 * 60;
+
+/// The connection parameter holding what a flow started without a browser
+/// obtained, until a member confirms it: the tokens (sealed with the rest of
+/// the parameters, and never where a request would use them), the provider
+/// account, who started the flow, and until when it may be confirmed.
+pub const PENDING_OAUTH_PARAM: &str = "pending_oauth";
+
+/// What a pending connection shows whoever is to confirm it. No secrets.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PendingConfirmation {
+    /// The provider account connected, when the provider says which.
+    pub account: Option<Value>,
+    /// Who started the flow (`channel:id`).
+    pub started_by: String,
+    /// When the provider sent the user back.
+    pub authorized_at: Option<String>,
+    /// After this, the connection can no longer be confirmed.
+    pub pending_until: String,
 }
 
 /// A flow just started.
@@ -86,6 +130,8 @@ pub struct StartedFlow {
 #[derive(Debug, PartialEq, Eq)]
 pub struct CompletedFlow {
     pub connection_id: String,
+    /// The connection waits for a member's confirmation.
+    pub pending_confirmation: bool,
 }
 
 /// A redeemed flow: from Valkey, or from the `oauth_state` table for a flow
@@ -243,6 +289,7 @@ impl OAuthService {
                     Some(nonce),
                 )
             }
+            StartBinding::Confirm { started_by } => (FlowBinding::Confirm { started_by }, None),
         };
         flows
             .put(
@@ -341,17 +388,18 @@ impl OAuthService {
         browser_nonce: Option<&str>,
     ) -> Result<CompletedFlow, OAuthError> {
         let flow = self.redeem(tenant_id, state).await?;
-        match &flow.binding {
+        let started_by = match &flow.binding {
             Some(FlowBinding::Browser { nonce_hash }) => {
                 if !oauth_flow::nonce_matches(nonce_hash, browser_nonce) {
                     return Err(OAuthError::BrowserMismatch);
                 }
+                None
             }
-            // Not issued until flows started without a browser exist.
-            Some(FlowBinding::Confirm { .. }) => return Err(OAuthError::InvalidState),
+            // Bound by a member's confirmation instead, whoever holds the link.
+            Some(FlowBinding::Confirm { started_by }) => Some(started_by.clone()),
             // Started before flows were bound; accepted for this release only.
-            None => {}
-        }
+            None => None,
+        };
 
         // Look up OAuthConfig
         let meta = find_connection_type(&flow.integration_id)
@@ -391,19 +439,269 @@ impl OAuthService {
 
         let granted = granted_fields(&token_response, oauth_config, callback_params)?;
         let mut updated_params = params.clone();
-        if let Some(obj) = updated_params.as_object_mut() {
-            obj.extend(granted);
-        }
+        let status = match started_by {
+            None => {
+                if let Some(obj) = updated_params.as_object_mut() {
+                    obj.extend(granted);
+                }
+                ConnectionStatus::Active
+            }
+            Some(started_by) => {
+                // Held apart until a member confirms: nothing that uses a
+                // connection's tokens finds these.
+                let account = oauth_account(&flow.integration_id, &granted).await;
+                let previous_status = self
+                    .connection_repo
+                    .get_by_id(&flow.connection_id, tenant_id)
+                    .await
+                    .map_err(|e| OAuthError::Internal(e.to_string()))?
+                    .map(|connection| connection.status)
+                    .filter(|status| *status != ConnectionStatus::PendingConfirmation)
+                    .unwrap_or(ConnectionStatus::RequiresReconnection);
+                let pending_until =
+                    chrono::Utc::now() + chrono::Duration::seconds(PENDING_CONFIRMATION_SECONDS);
+                if let Some(obj) = updated_params.as_object_mut() {
+                    obj.insert(
+                        PENDING_OAUTH_PARAM.to_string(),
+                        json!({
+                            "fields": granted,
+                            "account": account,
+                            "started_by": started_by,
+                            "pending_until": pending_until.to_rfc3339(),
+                            "previous_status": previous_status.as_str(),
+                        }),
+                    );
+                }
+                ConnectionStatus::PendingConfirmation
+            }
+        };
 
-        // Update connection: set parameters + status = ACTIVE
         self.connection_repo
-            .update_parameters_and_status(&flow.connection_id, tenant_id, &updated_params, "ACTIVE")
+            .update_parameters_and_status(
+                &flow.connection_id,
+                tenant_id,
+                &updated_params,
+                status.as_str(),
+            )
             .await
             .map_err(|e| OAuthError::Internal(e.to_string()))?;
 
         Ok(CompletedFlow {
             connection_id: flow.connection_id,
+            pending_confirmation: status == ConnectionStatus::PendingConfirmation,
         })
+    }
+
+    /// A connection's parameters and its pending authorization, if it has one.
+    async fn pending(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+    ) -> Result<(Value, Option<Value>), OAuthError> {
+        let conn = self
+            .connection_repo
+            .get_with_parameters(connection_id, tenant_id)
+            .await
+            .map_err(|e| OAuthError::Internal(e.to_string()))?
+            .ok_or(OAuthError::ConnectionNotFound)?;
+        let params = conn.connection_parameters.unwrap_or(json!({}));
+        let pending = params.get(PENDING_OAUTH_PARAM).cloned();
+        Ok((params, pending))
+    }
+
+    /// What a pending connection shows whoever is to confirm it.
+    pub async fn pending_confirmation(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+    ) -> Result<Option<PendingConfirmation>, OAuthError> {
+        let (_, pending) = self.pending(tenant_id, connection_id).await?;
+        Ok(pending.map(|pending| PendingConfirmation {
+            account: pending.get("account").filter(|a| !a.is_null()).cloned(),
+            started_by: pending["started_by"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            authorized_at: pending["fields"]["authorized_at"]
+                .as_str()
+                .map(str::to_string),
+            pending_until: pending["pending_until"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        }))
+    }
+
+    /// Confirm a connection a flow started without a browser authorized: its
+    /// tokens become the connection's, and it becomes `ACTIVE`. Refused once
+    /// its time to be confirmed is over; the tokens are then dropped.
+    pub async fn confirm(&self, tenant_id: &str, connection_id: &str) -> Result<(), OAuthError> {
+        let (mut params, pending) = self.pending(tenant_id, connection_id).await?;
+        let pending = pending.ok_or(OAuthError::NotPending)?;
+        if pending_expired(&pending, chrono::Utc::now()) {
+            self.drop_pending(tenant_id, connection_id, params, &pending)
+                .await?;
+            return Err(OAuthError::ConfirmationExpired);
+        }
+        if let Some(obj) = params.as_object_mut() {
+            obj.remove(PENDING_OAUTH_PARAM);
+            if let Some(fields) = pending["fields"].as_object() {
+                obj.extend(fields.clone());
+            }
+        }
+        self.connection_repo
+            .update_parameters_and_status(
+                connection_id,
+                tenant_id,
+                &params,
+                ConnectionStatus::Active.as_str(),
+            )
+            .await
+            .map_err(|e| OAuthError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Reject a connection a flow started without a browser authorized: its
+    /// tokens are dropped and revoked at the provider.
+    pub async fn reject(&self, tenant_id: &str, connection_id: &str) -> Result<(), OAuthError> {
+        let (params, pending) = self.pending(tenant_id, connection_id).await?;
+        let pending = pending.ok_or(OAuthError::NotPending)?;
+        self.drop_pending(tenant_id, connection_id, params, &pending)
+            .await
+    }
+
+    /// Drop and revoke the pending authorization of every connection whose
+    /// time to be confirmed is over. Returns how many were dropped. Runs on
+    /// the system path, across the tenants the pool sees.
+    pub async fn expire_pending(&self) -> Result<u64, OAuthError> {
+        let now = chrono::Utc::now();
+        let mut dropped = 0;
+        for (connection_id, tenant_id) in self
+            .connection_repo
+            .list_with_status(ConnectionStatus::PendingConfirmation.as_str())
+            .await
+            .map_err(|e| OAuthError::Internal(e.to_string()))?
+        {
+            let (params, pending) = self.pending(&tenant_id, &connection_id).await?;
+            let Some(pending) = pending else {
+                continue;
+            };
+            if pending_expired(&pending, now) {
+                self.drop_pending(&tenant_id, &connection_id, params, &pending)
+                    .await?;
+                dropped += 1;
+            }
+        }
+        Ok(dropped)
+    }
+
+    /// Remove a pending authorization, restore the status the connection had
+    /// before, and revoke the dropped tokens at the provider (best effort).
+    async fn drop_pending(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        mut params: Value,
+        pending: &Value,
+    ) -> Result<(), OAuthError> {
+        if let Some(obj) = params.as_object_mut() {
+            obj.remove(PENDING_OAUTH_PARAM);
+        }
+        let status = pending["previous_status"]
+            .as_str()
+            .map(ConnectionStatus::parse)
+            .filter(|status| *status != ConnectionStatus::Unknown)
+            .unwrap_or(ConnectionStatus::RequiresReconnection);
+        self.connection_repo
+            .update_parameters_and_status(connection_id, tenant_id, &params, status.as_str())
+            .await
+            .map_err(|e| OAuthError::Internal(e.to_string()))?;
+
+        let integration_id = self
+            .connection_repo
+            .get_by_id(connection_id, tenant_id)
+            .await
+            .map_err(|e| OAuthError::Internal(e.to_string()))?
+            .and_then(|connection| connection.integration_id);
+        let oauth_config = integration_id
+            .as_deref()
+            .and_then(find_connection_type)
+            .and_then(|meta| meta.oauth_config);
+        if let Some(oauth_config) = oauth_config {
+            // The dropped tokens, with the connection's client credentials.
+            let mut revoked = params.clone();
+            if let (Some(obj), Some(fields)) =
+                (revoked.as_object_mut(), pending["fields"].as_object())
+            {
+                obj.remove("access_token");
+                obj.remove("refresh_token");
+                obj.extend(fields.clone());
+            }
+            if let Err(error) = crate::auth::provider_auth::revoke_oauth_token(
+                crate::net::shared_hardened_client(),
+                oauth_config,
+                &revoked,
+            )
+            .await
+            {
+                tracing::warn!(
+                    connection_id,
+                    %error,
+                    "revoking an unconfirmed OAuth authorization failed"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether a pending authorization's time to be confirmed is over at `now`.
+/// One with no readable deadline is over.
+fn pending_expired(pending: &Value, now: chrono::DateTime<chrono::Utc>) -> bool {
+    pending["pending_until"]
+        .as_str()
+        .and_then(|until| chrono::DateTime::parse_from_rfc3339(until).ok())
+        .is_none_or(|until| until <= now)
+}
+
+/// The provider account a flow connected, for whoever confirms it: a stable
+/// id and a display string, never a secret. `None` when the provider does not
+/// say.
+async fn oauth_account(
+    integration_id: &str,
+    granted: &serde_json::Map<String, Value>,
+) -> Option<Value> {
+    match integration_id {
+        // Intuit names the company (its realm) in the callback.
+        "quickbooks_online" => granted
+            .get("realm_id")
+            .and_then(Value::as_str)
+            .map(|realm| json!({ "id": realm, "display": format!("QuickBooks company {realm}") })),
+        // HubSpot describes a token: its portal (hub) and the approving user.
+        "hubspot_private_app" => {
+            let token = granted.get("access_token")?.as_str()?;
+            let response = crate::net::shared_hardened_client()
+                .get(format!(
+                    "https://api.hubapi.com/oauth/v1/access-tokens/{}",
+                    urlencoding::encode(token)
+                ))
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await
+                .ok()?;
+            if !response.status().is_success() {
+                return None;
+            }
+            let info: Value = response.json().await.ok()?;
+            let hub = info["hub_id"].as_u64()?;
+            let domain = info["hub_domain"].as_str().unwrap_or_default();
+            let user = info["user"].as_str().unwrap_or_default();
+            Some(json!({
+                "id": hub.to_string(),
+                "display": format!("{domain} ({user})").trim().to_string(),
+            }))
+        }
+        _ => None,
     }
 }
 

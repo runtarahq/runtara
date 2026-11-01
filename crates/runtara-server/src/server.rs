@@ -148,6 +148,10 @@ use runtime_client::RuntimeClient;
         runtara_connections::handler::oauth::authorize_handler,
         runtara_connections::handler::oauth::callback_handler,
         runtara_connections::handler::oauth::tenantless_callback_handler,
+        runtara_connections::handler::oauth::link_handler,
+        runtara_connections::handler::oauth::pending_handler,
+        runtara_connections::handler::oauth::confirm_handler,
+        runtara_connections::handler::oauth::reject_handler,
         // Metrics endpoints
         api::metrics::get_workflow_metrics,
         api::metrics::get_workflow_stats,
@@ -369,6 +373,9 @@ use runtime_client::RuntimeClient;
             runtara_connections::types::ConnectionTypeResponse,
             runtara_connections::types::ListConnectionTypesResponse,
             runtara_connections::handler::oauth::OAuthAuthorizeResponse,
+            runtara_connections::handler::oauth::OAuthLinkResponse,
+            runtara_connections::handler::oauth::OAuthPendingResponse,
+            runtara_connections::service::oauth::PendingConfirmation,
             api::dto::triggers::InvocationTrigger,
             api::dto::triggers::TriggerType,
             api::dto::triggers::CreateInvocationTriggerRequest,
@@ -1716,6 +1723,37 @@ pub async fn start_with(
                 cleanup_shutdown,
             );
             worker.run().await;
+        });
+    }
+
+    // Unconfirmed OAuth authorizations: a flow started without a browser whose
+    // connection no member confirmed within 15 minutes has its tokens dropped
+    // and revoked. Confirming checks the deadline itself, so a late sweep only
+    // delays the revocation.
+    {
+        let state = runtara_connections::ConnectionsState::from_config(connections_config.clone());
+        let pending_shutdown = shutdown_signal.clone();
+        shutdown_coordinator.spawn_intake(async move {
+            let service = runtara_connections::service::oauth::OAuthService::from_state(&state);
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = pending_shutdown.clone().wait() => return,
+                    _ = interval.tick() => {}
+                }
+                match service.expire_pending().await {
+                    Ok(0) => {}
+                    Ok(dropped) => tracing::info!(
+                        dropped,
+                        "dropped OAuth authorizations no member confirmed in time"
+                    ),
+                    Err(error) => tracing::warn!(
+                        %error,
+                        "sweeping unconfirmed OAuth authorizations failed"
+                    ),
+                }
+            }
         });
     }
 

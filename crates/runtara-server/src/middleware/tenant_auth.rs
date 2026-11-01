@@ -12,20 +12,40 @@ use crate::product_events::EventSource;
 /// Middleware that bridges server auth context to `runtara_connections::TenantId`.
 ///
 /// Reads `AuthContext` from request extensions (inserted by the auth middleware)
-/// and inserts `runtara_connections::TenantId` so crate handlers can extract it.
+/// and inserts `runtara_connections::TenantId` so crate handlers can extract it,
+/// and `runtara_connections::Caller`, which says whether a person at the console
+/// is calling (only they may confirm an OAuth authorization).
 pub async fn inject_connections_tenant_id(
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let tenant_id = req
-        .extensions()
-        .get::<AuthContext>()
-        .map(|ctx| ctx.org_id.clone());
-    if let Some(org_id) = tenant_id {
+    let auth = req.extensions().get::<AuthContext>().cloned();
+    if let Some(auth) = auth {
+        let via_mcp = req.extensions().get::<EventSource>() == Some(&EventSource::Mcp);
         req.extensions_mut()
-            .insert(runtara_connections::TenantId(org_id));
+            .insert(runtara_connections::TenantId(auth.org_id.clone()));
+        req.extensions_mut()
+            .insert(connections_caller(&auth, via_mcp));
     }
     next.run(req).await
+}
+
+/// The caller as the connections crate sees it.
+fn connections_caller(auth: &AuthContext, via_mcp: bool) -> runtara_connections::Caller {
+    use runtara_connections::CallerChannel;
+    let channel = if via_mcp {
+        CallerChannel::Mcp
+    } else {
+        match auth.auth_method {
+            AuthMethod::Jwt => CallerChannel::Member,
+            AuthMethod::ApiKey => CallerChannel::ApiKey,
+            AuthMethod::Unauthenticated => CallerChannel::Trusted,
+        }
+    };
+    runtara_connections::Caller {
+        id: auth.user_id.clone(),
+        channel,
+    }
 }
 
 /// Axum extractor that pulls the validated org_id from request extensions.
@@ -153,6 +173,27 @@ impl<S: Send + Sync> FromRequestParts<S> for Caller {
 mod tests {
     use super::*;
     use axum::http::Request;
+
+    #[test]
+    fn only_a_member_or_a_trusted_host_may_confirm() {
+        use runtara_connections::CallerChannel;
+        let caller = |method, via_mcp| {
+            connections_caller(
+                &AuthContext::new("acme".into(), "user-1".into(), method),
+                via_mcp,
+            )
+        };
+        let member = caller(AuthMethod::Jwt, false);
+        assert_eq!(member.channel, CallerChannel::Member);
+        assert_eq!(member.label(), "member:user-1");
+        assert!(member.may_confirm());
+        assert!(caller(AuthMethod::Unauthenticated, false).may_confirm());
+        assert!(!caller(AuthMethod::ApiKey, false).may_confirm());
+        // An MCP client is refused whatever credential it carries.
+        let mcp = caller(AuthMethod::Jwt, true);
+        assert_eq!(mcp.channel, CallerChannel::Mcp);
+        assert!(!mcp.may_confirm());
+    }
 
     /// Build request `Parts` with the given extensions populated.
     fn parts_with(f: impl FnOnce(&mut axum::http::Extensions)) -> Parts {

@@ -63,6 +63,22 @@ pub fn connections_router(config: ConnectionsConfig) -> Router {
             get(handler::oauth::authorize_handler),
         )
         .route(
+            "/connections/{id}/oauth/link",
+            post(handler::oauth::link_handler),
+        )
+        .route(
+            "/connections/{id}/oauth/pending",
+            get(handler::oauth::pending_handler),
+        )
+        .route(
+            "/connections/{id}/oauth/confirm",
+            post(handler::oauth::confirm_handler),
+        )
+        .route(
+            "/connections/{id}/oauth/reject",
+            post(handler::oauth::reject_handler),
+        )
+        .route(
             "/rate-limits",
             get(handler::rate_limits::list_rate_limits_handler),
         )
