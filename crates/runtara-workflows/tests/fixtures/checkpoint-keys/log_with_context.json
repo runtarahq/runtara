@@ -1,0 +1,4 @@
+[
+  "runtara:v2:[\"agent\",\"smoke-log_with_context\",[],[],[\"transform\",\"map-fields\",\"transform\"]]",
+  "runtara:v2:[\"agent\",\"smoke-log_with_context\",[],[],[\"transform\",\"map-fields\",\"transform\"]]::attempt::1"
+]

@@ -6125,6 +6125,42 @@ fn run_smoke_case(fixture: &str, input: &[u8], expect: ExpectedOutcome) {
         captured.sleeps.len(),
         stderr_tail(&captured.stderr),
     );
+    assert_checkpoint_keys(fixture, &captured.checkpoints);
+}
+
+/// Pin the checkpoint ids each smoke fixture writes. Replay finds its rows and
+/// scope collapse deletes them by these exact bytes, so any change to how a
+/// key is derived (the emitter, the stdlib, its context) must show up here.
+/// `RUNTARA_UPDATE_CHECKPOINT_KEYS=1` rewrites the golden files.
+fn assert_checkpoint_keys(fixture: &str, checkpoints: &[CheckpointRequest]) {
+    let mut keys: Vec<&str> = checkpoints
+        .iter()
+        .map(|checkpoint| checkpoint.checkpoint_id.as_str())
+        .collect();
+    // Parallel branches save in no fixed order.
+    keys.sort_unstable();
+    keys.dedup();
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("checkpoint-keys")
+        .join(format!("{fixture}.json"));
+    let actual = serde_json::to_string_pretty(&keys).expect("keys serialize") + "\n";
+    if std::env::var_os("RUNTARA_UPDATE_CHECKPOINT_KEYS").is_some() {
+        std::fs::create_dir_all(path.parent().expect("golden dir")).expect("golden dir");
+        std::fs::write(&path, &actual).expect("write golden keys");
+        return;
+    }
+    let expected = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "read {}: {e}; run with RUNTARA_UPDATE_CHECKPOINT_KEYS=1 to record it",
+            path.display()
+        )
+    });
+    assert_eq!(
+        actual, expected,
+        "checkpoint keys of {fixture} changed; replay and scope collapse match rows by these bytes"
+    );
 }
 
 /// Expands each `fixture => input, Outcome` entry into its own
