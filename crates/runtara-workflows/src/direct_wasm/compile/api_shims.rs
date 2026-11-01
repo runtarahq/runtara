@@ -901,7 +901,7 @@ pub(super) fn emit_runtime_shims(
     let stdlib_sig = resolve.wasm_signature(mangling.import_variant(), stdlib_fn);
     // `ctx` first: the stdlib-context pass supplies it, so callers here pass
     // only the rest.
-    if stdlib_sig.params != [I32, P, L, P, L, I32, I64, P] {
+    if stdlib_sig.params != [I64, P, L, P, L, I32, I64, P] {
         return Err(component_error(format!(
             "api shim: stdlib.api-error-json has flat params {:?}",
             stdlib_sig.params

@@ -100,7 +100,7 @@ mod component {
     }
 
     impl Guest for Component {
-        fn init_manifest(prior: u32, manifest: Vec<u8>) -> Result<u32, String> {
+        fn init_manifest(prior: u64, manifest: Vec<u8>) -> Result<u64, String> {
             let id = context::open(prior);
             context::run(id, || {
                 // Start each run with an empty interning arena so a reused component
@@ -116,7 +116,7 @@ mod component {
         }
 
         fn value_store_retain(
-            ctx: u32,
+            ctx: u64,
             parent_source: Vec<u8>,
             survivor: Vec<u8>,
         ) -> Result<(), String> {
@@ -127,12 +127,12 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn value_store_scope(ctx: u32) -> u64 {
+        fn value_store_scope(ctx: u64) -> u64 {
             context::run(ctx, direct_json::value_store_scope).unwrap_or_default()
         }
 
         fn value_store_retain_scoped(
-            ctx: u32,
+            ctx: u64,
             parent_source: Vec<u8>,
             survivor: Vec<u8>,
             scope: u64,
@@ -148,7 +148,7 @@ mod component {
         }
 
         fn build_source(
-            ctx: u32,
+            ctx: u64,
             data: Vec<u8>,
             variables: Vec<u8>,
             steps: Vec<u8>,
@@ -157,7 +157,7 @@ mod component {
                 .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn apply_mapping(ctx: u32, mapping_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn apply_mapping(ctx: u64, mapping_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -170,7 +170,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn eval_condition(ctx: u32, condition_id: u32, source: Vec<u8>) -> Result<bool, String> {
+        fn eval_condition(ctx: u64, condition_id: u32, source: Vec<u8>) -> Result<bool, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -184,7 +184,7 @@ mod component {
         }
 
         fn conditional_output(
-            ctx: u32,
+            ctx: u64,
             condition_id: u32,
             source: Vec<u8>,
             decision: bool,
@@ -201,7 +201,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn process_switch(ctx: u32, switch_id: u32, source: Vec<u8>) -> Result<String, String> {
+        fn process_switch(ctx: u64, switch_id: u32, source: Vec<u8>) -> Result<String, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -214,7 +214,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn value_switch(ctx: u32, switch_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn value_switch(ctx: u64, switch_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -227,7 +227,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn split_items(ctx: u32, split_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn split_items(ctx: u64, split_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -240,7 +240,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn split_item_count(ctx: u32, split_id: u32, source: Vec<u8>) -> Result<u32, String> {
+        fn split_item_count(ctx: u64, split_id: u32, source: Vec<u8>) -> Result<u32, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -254,7 +254,7 @@ mod component {
         }
 
         fn split_item(
-            ctx: u32,
+            ctx: u64,
             split_id: u32,
             source: Vec<u8>,
             index: u32,
@@ -272,7 +272,7 @@ mod component {
         }
 
         fn split_iteration_variables(
-            ctx: u32,
+            ctx: u64,
             split_id: u32,
             source: Vec<u8>,
             item: Vec<u8>,
@@ -291,7 +291,7 @@ mod component {
         }
 
         fn split_validate_input(
-            ctx: u32,
+            ctx: u64,
             split_id: u32,
             item: Vec<u8>,
             index: u32,
@@ -309,7 +309,7 @@ mod component {
         }
 
         fn split_validate_output(
-            ctx: u32,
+            ctx: u64,
             split_id: u32,
             output: Vec<u8>,
             index: u32,
@@ -326,7 +326,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn split_initial_results(ctx: u32, split_id: u32) -> Result<Vec<u8>, String> {
+        fn split_initial_results(ctx: u64, split_id: u32) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -340,7 +340,7 @@ mod component {
         }
 
         fn split_append_output(
-            ctx: u32,
+            ctx: u64,
             split_id: u32,
             results: Vec<u8>,
             output: Vec<u8>,
@@ -358,7 +358,7 @@ mod component {
         }
 
         fn split_append_error(
-            ctx: u32,
+            ctx: u64,
             split_id: u32,
             results: Vec<u8>,
             error: String,
@@ -377,7 +377,7 @@ mod component {
         }
 
         fn split_output(
-            ctx: u32,
+            ctx: u64,
             split_id: u32,
             source: Vec<u8>,
             results: Vec<u8>,
@@ -394,7 +394,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn split_cache_key(ctx: u32, split_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn split_cache_key(ctx: u64, split_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -408,7 +408,7 @@ mod component {
         }
 
         fn split_result(
-            ctx: u32,
+            ctx: u64,
             split_id: u32,
             source: Vec<u8>,
             results: Vec<u8>,
@@ -426,7 +426,7 @@ mod component {
         }
 
         fn split_output_from_result(
-            ctx: u32,
+            ctx: u64,
             split_id: u32,
             source: Vec<u8>,
             step_result: Vec<u8>,
@@ -443,7 +443,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn while_max_iterations(ctx: u32, while_id: u32) -> Result<u32, String> {
+        fn while_max_iterations(ctx: u64, while_id: u32) -> Result<u32, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -456,7 +456,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn while_initial_state(ctx: u32, while_id: u32) -> Result<Vec<u8>, String> {
+        fn while_initial_state(ctx: u64, while_id: u32) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -470,7 +470,7 @@ mod component {
         }
 
         fn while_condition_source(
-            ctx: u32,
+            ctx: u64,
             while_id: u32,
             source: Vec<u8>,
             state: Vec<u8>,
@@ -487,7 +487,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn while_condition(ctx: u32, while_id: u32, source: Vec<u8>) -> Result<bool, String> {
+        fn while_condition(ctx: u64, while_id: u32, source: Vec<u8>) -> Result<bool, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -501,7 +501,7 @@ mod component {
         }
 
         fn while_iteration_variables(
-            ctx: u32,
+            ctx: u64,
             while_id: u32,
             source: Vec<u8>,
             state: Vec<u8>,
@@ -519,7 +519,7 @@ mod component {
         }
 
         fn while_advance_state(
-            ctx: u32,
+            ctx: u64,
             while_id: u32,
             state: Vec<u8>,
             output: Vec<u8>,
@@ -537,7 +537,7 @@ mod component {
         }
 
         fn while_output(
-            ctx: u32,
+            ctx: u64,
             while_id: u32,
             source: Vec<u8>,
             state: Vec<u8>,
@@ -554,7 +554,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn while_cache_key(ctx: u32, while_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn while_cache_key(ctx: u64, while_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -568,7 +568,7 @@ mod component {
         }
 
         fn while_result(
-            ctx: u32,
+            ctx: u64,
             while_id: u32,
             source: Vec<u8>,
             state: Vec<u8>,
@@ -586,7 +586,7 @@ mod component {
         }
 
         fn while_output_from_result(
-            ctx: u32,
+            ctx: u64,
             while_id: u32,
             source: Vec<u8>,
             step_result: Vec<u8>,
@@ -603,7 +603,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn filter(ctx: u32, filter_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn filter(ctx: u64, filter_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -616,7 +616,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn log_event(ctx: u32, log_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn log_event(ctx: u64, log_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -629,7 +629,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn log(ctx: u32, log_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn log(ctx: u64, log_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -642,7 +642,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn error_event(ctx: u32, error_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn error_event(ctx: u64, error_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -655,7 +655,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn error(ctx: u32, error_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn error(ctx: u64, error_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -669,7 +669,7 @@ mod component {
         }
 
         fn error_steps(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             error: Vec<u8>,
             steps: Vec<u8>,
@@ -678,7 +678,7 @@ mod component {
                 .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn group_by(ctx: u32, group_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn group_by(ctx: u64, group_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -691,7 +691,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn delay_duration_ms(ctx: u32, delay_id: u32, source: Vec<u8>) -> Result<u64, String> {
+        fn delay_duration_ms(ctx: u64, delay_id: u32, source: Vec<u8>) -> Result<u64, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -705,7 +705,7 @@ mod component {
         }
 
         fn delay(
-            ctx: u32,
+            ctx: u64,
             delay_id: u32,
             source: Vec<u8>,
             duration_ms: u64,
@@ -723,7 +723,7 @@ mod component {
         }
 
         fn loop_deadline_key(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             source: Vec<u8>,
             complete: bool,
@@ -742,7 +742,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn delay_sleep_key(ctx: u32, step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn delay_sleep_key(ctx: u64, step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -757,7 +757,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn invoke_error_fields(ctx: u32, error: Vec<u8>) -> Result<InvokeError, String> {
+        fn invoke_error_fields(ctx: u64, error: Vec<u8>) -> Result<InvokeError, String> {
             context::run(ctx, || {
                 let fields = direct_json::invoke_error_fields(&error);
                 Ok(InvokeError {
@@ -774,7 +774,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn breakpoint_key(ctx: u32, step_id: String, source: Vec<u8>) -> Result<String, String> {
+        fn breakpoint_key(ctx: u64, step_id: String, source: Vec<u8>) -> Result<String, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -787,7 +787,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn breakpoint_event(ctx: u32, step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn breakpoint_event(ctx: u64, step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -801,7 +801,7 @@ mod component {
         }
 
         fn wait_signal_id(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             instance_id: String,
             source: Vec<u8>,
@@ -819,7 +819,7 @@ mod component {
         }
 
         fn wait_timeout_ms(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             source: Vec<u8>,
         ) -> Result<Option<u64>, String> {
@@ -836,7 +836,7 @@ mod component {
         }
 
         fn wait_timeout_error(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             signal_id: String,
             timeout_ms: u64,
@@ -854,7 +854,7 @@ mod component {
         }
 
         fn wait_timeout_error_envelope(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             signal_id: String,
             timeout_ms: u64,
@@ -872,7 +872,7 @@ mod component {
         }
 
         fn wait_closed_error(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             signal_id: String,
             reason: String,
@@ -891,7 +891,7 @@ mod component {
         }
 
         fn wait_on_wait_variables(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             instance_id: String,
             signal_id: String,
@@ -910,7 +910,7 @@ mod component {
         }
 
         fn wait_on_wait_error(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             error: Vec<u8>,
         ) -> Result<Vec<u8>, String> {
@@ -926,7 +926,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn wait_poll_interval_ms(ctx: u32, step_id: String) -> Result<u64, String> {
+        fn wait_poll_interval_ms(ctx: u64, step_id: String) -> Result<u64, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -940,7 +940,7 @@ mod component {
         }
 
         fn wait_poll_interval_ms_scoped(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             source: Vec<u8>,
         ) -> Result<u64, String> {
@@ -957,7 +957,7 @@ mod component {
         }
 
         fn wait_event(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             signal_id: String,
             source: Vec<u8>,
@@ -975,7 +975,7 @@ mod component {
         }
 
         fn wait_debug_start(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             signal_id: String,
             timeout_ms: Option<u64>,
@@ -994,7 +994,7 @@ mod component {
         }
 
         fn wait_output(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             signal_id: String,
             signal_payload: Vec<u8>,
@@ -1013,7 +1013,7 @@ mod component {
         }
 
         fn wait_instances_key(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             source: Vec<u8>,
         ) -> Result<String, String> {
@@ -1030,7 +1030,7 @@ mod component {
         }
 
         fn wait_instances_request(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             source: Vec<u8>,
             now_ms: u64,
@@ -1047,7 +1047,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn wait_instances_state(ctx: u32, wait: Vec<u8>) -> Result<WaitInstancesProgress, String> {
+        fn wait_instances_state(ctx: u64, wait: Vec<u8>) -> Result<WaitInstancesProgress, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -1065,7 +1065,7 @@ mod component {
         }
 
         fn wait_instances_output(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             wait: Vec<u8>,
             source: Vec<u8>,
@@ -1083,7 +1083,7 @@ mod component {
         }
 
         fn wait_instances_error(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             error: Vec<u8>,
         ) -> Result<Vec<u8>, String> {
@@ -1100,7 +1100,7 @@ mod component {
         }
 
         fn state_key(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             source: Vec<u8>,
             local: bool,
@@ -1111,21 +1111,21 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn state_patch(ctx: u32, step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn state_patch(ctx: u64, step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 with_manifest(|manifest| manifest.state_patch(&step_id, &source))
             })
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn state_local_set(ctx: u32, step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn state_local_set(ctx: u64, step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 with_manifest(|manifest| manifest.state_local_set(&step_id, &source))
             })
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn state_local_get(ctx: u32, step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn state_local_get(ctx: u64, step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 with_manifest(|manifest| manifest.state_local_get(&step_id, &source))
             })
@@ -1133,7 +1133,7 @@ mod component {
         }
 
         fn state_local_restore(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             value: Vec<u8>,
             source: Vec<u8>,
@@ -1145,7 +1145,7 @@ mod component {
         }
 
         fn state_output(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             value: Vec<u8>,
             source: Vec<u8>,
@@ -1156,7 +1156,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn state_error(ctx: u32, step_id: String, error: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn state_error(ctx: u64, step_id: String, error: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 with_manifest(|manifest| manifest.state_error(&step_id, &error))
             })
@@ -1164,7 +1164,7 @@ mod component {
         }
 
         fn api_error_json(
-            ctx: u32,
+            ctx: u64,
             code: String,
             message: String,
             retry_after_ms: Option<u64>,
@@ -1176,7 +1176,7 @@ mod component {
         }
 
         fn agent_operation_input(
-            ctx: u32,
+            ctx: u64,
             input: Vec<u8>,
             operation_id: Option<String>,
             continuation: Option<Vec<u8>>,
@@ -1192,7 +1192,7 @@ mod component {
         }
 
         fn ai_wait_tool_signal_id(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             instance_id: String,
             label: String,
@@ -1217,7 +1217,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn ai_wait_tool_result(ctx: u32, signal_payload: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn ai_wait_tool_result(ctx: u64, signal_payload: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -1231,7 +1231,7 @@ mod component {
         }
 
         fn embed_workflow_cache_key(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             source: Vec<u8>,
         ) -> Result<Vec<u8>, String> {
@@ -1248,7 +1248,7 @@ mod component {
         }
 
         fn embed_workflow_variables(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             source: Vec<u8>,
             child_input: Vec<u8>,
@@ -1266,7 +1266,7 @@ mod component {
         }
 
         fn embed_workflow_result(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             source: Vec<u8>,
             child_output: Vec<u8>,
@@ -1284,7 +1284,7 @@ mod component {
         }
 
         fn embed_workflow_output_from_result(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             source: Vec<u8>,
             step_result: Vec<u8>,
@@ -1302,7 +1302,7 @@ mod component {
         }
 
         fn embed_workflow_error(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             child_error: Vec<u8>,
         ) -> Result<Vec<u8>, String> {
@@ -1319,7 +1319,7 @@ mod component {
         }
 
         fn embed_workflow_error_scoped(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             source: Vec<u8>,
             child_error: Vec<u8>,
@@ -1337,7 +1337,7 @@ mod component {
         }
 
         fn retry_sleep_key(
-            ctx: u32,
+            ctx: u64,
             checkpoint_id: String,
             attempt_number: u32,
         ) -> Result<Vec<u8>, String> {
@@ -1351,7 +1351,7 @@ mod component {
         }
 
         fn agent_attempt_result_key(
-            ctx: u32,
+            ctx: u64,
             checkpoint_id: String,
             attempt_number: u32,
         ) -> Result<Vec<u8>, String> {
@@ -1365,7 +1365,7 @@ mod component {
         }
 
         fn agent_attempt_envelope(
-            ctx: u32,
+            ctx: u64,
             tag: u8,
             retryable: bool,
             rate_limited: bool,
@@ -1387,7 +1387,7 @@ mod component {
         }
 
         fn retry_delay_ms(
-            ctx: u32,
+            ctx: u64,
             attempt_number: u32,
             total_attempts: u32,
             base_delay_ms: u64,
@@ -1406,7 +1406,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn workflow_error_retryable(ctx: u32, error: Vec<u8>) -> Result<bool, String> {
+        fn workflow_error_retryable(ctx: u64, error: Vec<u8>) -> Result<bool, String> {
             context::run(ctx, || {
                 Ok(direct_json::DirectJsonManifest::workflow_error_retryable(
                     &error,
@@ -1415,14 +1415,14 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn workflow_error_rate_limited(ctx: u32, error: Vec<u8>) -> Result<bool, String> {
+        fn workflow_error_rate_limited(ctx: u64, error: Vec<u8>) -> Result<bool, String> {
             context::run(ctx, || {
                 Ok(direct_json::DirectJsonManifest::workflow_error_rate_limited(&error))
             })
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn workflow_error_retry_after_ms(ctx: u32, error: Vec<u8>) -> Result<Option<u64>, String> {
+        fn workflow_error_retry_after_ms(ctx: u64, error: Vec<u8>) -> Result<Option<u64>, String> {
             context::run(ctx, || {
                 Ok(direct_json::DirectJsonManifest::workflow_error_retry_after_ms(&error))
             })
@@ -1430,7 +1430,7 @@ mod component {
         }
 
         fn agent_output(
-            ctx: u32,
+            ctx: u64,
             agent_id: u32,
             source: Vec<u8>,
             output: Vec<u8>,
@@ -1448,7 +1448,7 @@ mod component {
         }
 
         fn ai_agent_output(
-            ctx: u32,
+            ctx: u64,
             agent_id: u32,
             source: Vec<u8>,
             output: Vec<u8>,
@@ -1466,7 +1466,7 @@ mod component {
         }
 
         fn ai_turn_next_input(
-            ctx: u32,
+            ctx: u64,
             base: Vec<u8>,
             turn_out: Vec<u8>,
             pending: Vec<u8>,
@@ -1477,28 +1477,28 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn ai_turn_is_complete(ctx: u32, turn_out: Vec<u8>) -> Result<bool, String> {
+        fn ai_turn_is_complete(ctx: u64, turn_out: Vec<u8>) -> Result<bool, String> {
             context::run(ctx, || {
                 direct_json::DirectJsonManifest::ai_turn_is_complete(&turn_out)
             })
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn ai_turn_tool_count(ctx: u32, turn_out: Vec<u8>) -> Result<u32, String> {
+        fn ai_turn_tool_count(ctx: u64, turn_out: Vec<u8>) -> Result<u32, String> {
             context::run(ctx, || {
                 direct_json::DirectJsonManifest::ai_turn_tool_count(&turn_out)
             })
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn ai_turn_tool_args(ctx: u32, turn_out: Vec<u8>, index: u32) -> Result<Vec<u8>, String> {
+        fn ai_turn_tool_args(ctx: u64, turn_out: Vec<u8>, index: u32) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 direct_json::DirectJsonManifest::ai_turn_tool_args(&turn_out, index)
             })
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn ai_turn_tool_index(ctx: u32, turn_out: Vec<u8>, index: u32) -> Result<u32, String> {
+        fn ai_turn_tool_index(ctx: u64, turn_out: Vec<u8>, index: u32) -> Result<u32, String> {
             context::run(ctx, || {
                 direct_json::DirectJsonManifest::ai_turn_tool_index(&turn_out, index)
             })
@@ -1506,7 +1506,7 @@ mod component {
         }
 
         fn ai_tool_args_with_timeout(
-            ctx: u32,
+            ctx: u64,
             args: Vec<u8>,
             timeout_ms: u64,
         ) -> Result<Vec<u8>, String> {
@@ -1517,7 +1517,7 @@ mod component {
         }
 
         fn ai_turn_add_result(
-            ctx: u32,
+            ctx: u64,
             pending: Vec<u8>,
             turn_out: Vec<u8>,
             index: u32,
@@ -1535,7 +1535,7 @@ mod component {
         }
 
         fn ai_turn_cache_key(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             iteration: u32,
             source: Vec<u8>,
@@ -1547,7 +1547,7 @@ mod component {
         }
 
         fn ai_turn_response_key(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             iteration: u32,
             source: Vec<u8>,
@@ -1558,7 +1558,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn ai_turn_response_validate(ctx: u32, response: Vec<u8>) -> Result<(), String> {
+        fn ai_turn_response_validate(ctx: u64, response: Vec<u8>) -> Result<(), String> {
             context::run(ctx, || {
                 direct_json::DirectJsonManifest::ai_turn_response_validate(&response)
             })
@@ -1566,7 +1566,7 @@ mod component {
         }
 
         fn ai_turn_snapshot(
-            ctx: u32,
+            ctx: u64,
             state: Vec<u8>,
             pending: Vec<u8>,
             tool_calls: u32,
@@ -1581,7 +1581,7 @@ mod component {
         }
 
         fn ai_turn_snapshot_part(
-            ctx: u32,
+            ctx: u64,
             snapshot: Vec<u8>,
             part: u32,
         ) -> Result<Vec<u8>, String> {
@@ -1591,14 +1591,14 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn ai_turn_snapshot_tool_calls(ctx: u32, snapshot: Vec<u8>) -> Result<u32, String> {
+        fn ai_turn_snapshot_tool_calls(ctx: u64, snapshot: Vec<u8>) -> Result<u32, String> {
             context::run(ctx, || {
                 direct_json::DirectJsonManifest::ai_turn_snapshot_tool_calls(&snapshot)
             })
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn ai_turn_snapshot_complete(ctx: u32, snapshot: Vec<u8>) -> Result<bool, String> {
+        fn ai_turn_snapshot_complete(ctx: u64, snapshot: Vec<u8>) -> Result<bool, String> {
             context::run(ctx, || {
                 direct_json::DirectJsonManifest::ai_turn_snapshot_complete(&snapshot)
             })
@@ -1606,7 +1606,7 @@ mod component {
         }
 
         fn ai_turn_slot_key(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             iteration: u32,
             source: Vec<u8>,
@@ -1618,7 +1618,7 @@ mod component {
         }
 
         fn ai_turn_slot_snapshot(
-            ctx: u32,
+            ctx: u64,
             state: Vec<u8>,
             pending: Vec<u8>,
             tool_calls: u32,
@@ -1632,14 +1632,14 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn ai_turn_snapshot_turn(ctx: u32, snapshot: Vec<u8>) -> Result<u32, String> {
+        fn ai_turn_snapshot_turn(ctx: u64, snapshot: Vec<u8>) -> Result<u32, String> {
             context::run(ctx, || {
                 direct_json::DirectJsonManifest::ai_turn_snapshot_turn(&snapshot)
             })
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn ai_turn_latest(ctx: u32, first: Vec<u8>, second: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn ai_turn_latest(ctx: u64, first: Vec<u8>, second: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 direct_json::DirectJsonManifest::ai_turn_latest(&first, &second)
             })
@@ -1647,7 +1647,7 @@ mod component {
         }
 
         fn ai_agent_result_key(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             source: Vec<u8>,
         ) -> Result<String, String> {
@@ -1657,14 +1657,14 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn ai_agent_result(ctx: u32, state: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn ai_agent_result(ctx: u64, state: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 direct_json::DirectJsonManifest::ai_agent_result(&state)
             })
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn ai_summary_key(ctx: u32, step_id: String, source: Vec<u8>) -> Result<String, String> {
+        fn ai_summary_key(ctx: u64, step_id: String, source: Vec<u8>) -> Result<String, String> {
             context::run(ctx, || {
                 direct_json::DirectJsonManifest::ai_summary_key(&step_id, &source)
             })
@@ -1672,7 +1672,7 @@ mod component {
         }
 
         fn ai_turn_output(
-            ctx: u32,
+            ctx: u64,
             agent_id: u32,
             source: Vec<u8>,
             turn_out: Vec<u8>,
@@ -1690,7 +1690,7 @@ mod component {
         }
 
         fn ai_tool_debug_start(
-            ctx: u32,
+            ctx: u64,
             agent_id: u32,
             turn_out: Vec<u8>,
             index: u32,
@@ -1718,7 +1718,7 @@ mod component {
         }
 
         fn ai_tool_debug_end(
-            ctx: u32,
+            ctx: u64,
             agent_id: u32,
             turn_out: Vec<u8>,
             index: u32,
@@ -1748,7 +1748,7 @@ mod component {
         }
 
         fn ai_memory_debug_start(
-            ctx: u32,
+            ctx: u64,
             agent_id: u32,
             phase: u32,
             conversation: Vec<u8>,
@@ -1776,7 +1776,7 @@ mod component {
         }
 
         fn ai_memory_debug_end(
-            ctx: u32,
+            ctx: u64,
             agent_id: u32,
             phase: u32,
             conversation: Vec<u8>,
@@ -1805,7 +1805,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn ai_memory_initial_state(ctx: u32, load_output: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn ai_memory_initial_state(ctx: u64, load_output: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 direct_json::DirectJsonManifest::ai_memory_initial_state(&load_output)
             })
@@ -1813,7 +1813,7 @@ mod component {
         }
 
         fn ai_memory_save_input(
-            ctx: u32,
+            ctx: u64,
             conversation: Vec<u8>,
             final_state: Vec<u8>,
         ) -> Result<Vec<u8>, String> {
@@ -1824,7 +1824,7 @@ mod component {
         }
 
         fn ai_memory_compact_sliding(
-            ctx: u32,
+            ctx: u64,
             state: Vec<u8>,
             max_messages: u32,
         ) -> Result<Vec<u8>, String> {
@@ -1835,7 +1835,7 @@ mod component {
         }
 
         fn ai_summarize_input(
-            ctx: u32,
+            ctx: u64,
             base: Vec<u8>,
             state: Vec<u8>,
             max_messages: u32,
@@ -1846,7 +1846,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn ai_summarize_output(ctx: u32, result: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn ai_summarize_output(ctx: u64, result: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 direct_json::DirectJsonManifest::ai_summarize_output(&result)
             })
@@ -1854,7 +1854,7 @@ mod component {
         }
 
         fn agent_validate_input(
-            ctx: u32,
+            ctx: u64,
             agent_id: u32,
             input: Vec<u8>,
         ) -> Result<Vec<u8>, String> {
@@ -1871,7 +1871,7 @@ mod component {
         }
 
         fn agent_connection_input(
-            ctx: u32,
+            ctx: u64,
             agent_id: u32,
             input: Vec<u8>,
             descriptor: Vec<u8>,
@@ -1889,7 +1889,7 @@ mod component {
         }
 
         fn agent_connection_id(
-            ctx: u32,
+            ctx: u64,
             agent_id: u32,
             source: Vec<u8>,
         ) -> Result<Vec<u8>, String> {
@@ -1906,7 +1906,7 @@ mod component {
         }
 
         fn agent_scope_input(
-            ctx: u32,
+            ctx: u64,
             agent_id: u32,
             input: Vec<u8>,
             source: Vec<u8>,
@@ -1924,7 +1924,7 @@ mod component {
         }
 
         fn agent_tool_scope_input(
-            ctx: u32,
+            ctx: u64,
             ai_step_id: String,
             label: String,
             call_counter: u32,
@@ -1944,7 +1944,7 @@ mod component {
         }
 
         fn tool_scope_source(
-            ctx: u32,
+            ctx: u64,
             ai_step_id: String,
             label: String,
             call_counter: u32,
@@ -1962,7 +1962,7 @@ mod component {
         }
 
         fn agent_aux_scope_source(
-            ctx: u32,
+            ctx: u64,
             agent_id: u32,
             source: Vec<u8>,
         ) -> Result<Vec<u8>, String> {
@@ -1978,7 +1978,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn agent_cache_key(ctx: u32, agent_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn agent_cache_key(ctx: u64, agent_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -1992,7 +1992,7 @@ mod component {
         }
 
         fn agent_retry_sleep_key(
-            ctx: u32,
+            ctx: u64,
             checkpoint_id: String,
             attempt_number: u32,
         ) -> Result<Vec<u8>, String> {
@@ -2006,7 +2006,7 @@ mod component {
         }
 
         fn agent_retry_delay_ms(
-            ctx: u32,
+            ctx: u64,
             attempt_number: u32,
             total_attempts: u32,
             base_delay_ms: u64,
@@ -2045,7 +2045,7 @@ mod component {
             }
         }
 
-        fn agent_error(ctx: u32, agent_id: u32, error: ErrorInfo) -> Result<Vec<u8>, String> {
+        fn agent_error(agent_id: u32, error: ErrorInfo, ctx: u64) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -2069,7 +2069,7 @@ mod component {
         }
 
         fn agent_error_from_info(
-            ctx: u32,
+            ctx: u64,
             agent_id: u32,
             error_info: Vec<u8>,
         ) -> Result<Vec<u8>, String> {
@@ -2086,7 +2086,7 @@ mod component {
         }
 
         fn agent_debug_error(
-            ctx: u32,
+            ctx: u64,
             agent_id: u32,
             source: Vec<u8>,
             error: Vec<u8>,
@@ -2103,7 +2103,7 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
-        fn step_debug_start(ctx: u32, step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
+        fn step_debug_start(ctx: u64, step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
             context::run(ctx, || {
                 MANIFEST.with(|slot| {
                     let slot = slot.borrow();
@@ -2117,7 +2117,7 @@ mod component {
         }
 
         fn step_debug_end(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             source: Vec<u8>,
             launched_at_ms: u64,
@@ -2136,7 +2136,7 @@ mod component {
         }
 
         fn step_debug_error(
-            ctx: u32,
+            ctx: u64,
             step_id: String,
             source: Vec<u8>,
             error: Vec<u8>,

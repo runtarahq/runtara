@@ -7,8 +7,8 @@
 //! caller's context: `init-manifest` takes the caller's previous context and
 //! returns the one to use, and every other function takes it first.
 //!
-//! The emitter writes stdlib calls without the context. This pass adds a
-//! `ctx` global (initially -1: no context yet), one shim per stdlib import
+//! The emitter writes stdlib calls without the context. This pass adds an
+//! i64 `ctx` global (initially -1, `u64::MAX`: no context yet), one shim per stdlib import
 //! that pushes the global ahead of its own parameters and calls the import,
 //! and routes every call through its shim. The `init-manifest` shim also
 //! stores the context it returns. Types, functions and the global are
@@ -16,9 +16,9 @@
 //!
 //! Two functions flatten past 16 values and take their arguments by pointer.
 //! `agent-retry-error-info` is pure and takes no context. `agent-error`'s
-//! arguments are the Agent's result area, `agent-id @0, error-info @8`; with
-//! the context first they lay out as `ctx @0, agent-id @4, error-info @8`, so
-//! its shim moves the agent id up a word and writes the context in front.
+//! arguments are the Agent's result area, `agent-id @0, error-info @8`; its
+//! context comes last, at [`AGENT_ERROR_CONTEXT_OFFSET`], so its shim writes
+//! the context there and leaves the record where the Agent wrote it.
 
 use wasm_encoder::reencode::{Reencode, utils};
 use wasm_encoder::{ConstExpr, Function, GlobalType, Instruction, MemArg, ValType};
@@ -27,6 +27,9 @@ use super::{DirectCompileError, component_error};
 
 const INIT_MANIFEST: &str = "init-manifest";
 const AGENT_ERROR: &str = "agent-error";
+/// Where `agent-error`'s trailing context sits in its argument area: after
+/// `agent-id: u32` and the 80-byte, 8-aligned `error-info` at 8.
+pub(super) const AGENT_ERROR_CONTEXT_OFFSET: u64 = 88;
 /// Stdlib functions without a context parameter.
 const CONTEXT_FREE: &[&str] = &["agent-retry-error-info"];
 
@@ -98,7 +101,7 @@ pub(super) fn thread_stdlib_context(core: &[u8]) -> Result<Vec<u8>, DirectCompil
                                     // (args pointer, return pointer), unchanged.
                                     Shim::Area if params == [ValType::I32, ValType::I32] => params,
                                     Shim::Prepend | Shim::Init
-                                        if params.first() == Some(&ValType::I32) =>
+                                        if params.first() == Some(&ValType::I64) =>
                                     {
                                         params[1..].to_vec()
                                     }
@@ -176,10 +179,11 @@ pub(super) fn shims(core: &[u8]) -> Vec<(u32, u32)> {
         .collect()
 }
 
-/// Whether `name`, a stdlib import, takes the context first.
+/// Whether `name`, a stdlib import, takes the context as its first core
+/// parameter (`agent-error` takes it in its argument area).
 #[cfg(test)]
 pub(super) fn takes_context(name: &str) -> bool {
-    !CONTEXT_FREE.contains(&name)
+    !CONTEXT_FREE.contains(&name) && name != AGENT_ERROR
 }
 
 fn val_type(ty: wasmparser::ValType) -> Result<ValType, DirectCompileError> {
@@ -206,21 +210,15 @@ struct Pass {
 impl Pass {
     fn shim_body(&self, import: &StdlibImport) -> Function {
         let own = &import.params;
-        let word = |offset| MemArg {
-            offset,
-            align: 2,
-            memory_index: 0,
-        };
         let mut body = Function::new([]);
         if import.shim == Shim::Area {
-            // area[4] = area[0] (the agent id); area[0] = ctx.
-            body.instruction(&Instruction::LocalGet(0));
-            body.instruction(&Instruction::LocalGet(0));
-            body.instruction(&Instruction::I32Load(word(0)));
-            body.instruction(&Instruction::I32Store(word(4)));
             body.instruction(&Instruction::LocalGet(0));
             body.instruction(&Instruction::GlobalGet(self.ctx_global));
-            body.instruction(&Instruction::I32Store(word(0)));
+            body.instruction(&Instruction::I64Store(MemArg {
+                offset: AGENT_ERROR_CONTEXT_OFFSET,
+                align: 3,
+                memory_index: 0,
+            }));
         } else {
             body.instruction(&Instruction::GlobalGet(self.ctx_global));
         }
@@ -229,8 +227,8 @@ impl Pass {
         }
         body.instruction(&Instruction::Call(import.index));
         if import.shim == Shim::Init {
-            // `result<u32, string>` at the return pointer (the last
-            // parameter): tag byte at 0, the context at 4 when it is `ok`.
+            // `result<u64, string>` at the return pointer (the last
+            // parameter): tag byte at 0, the context at 8 when it is `ok`.
             let retptr = own.len() as u32 - 1;
             body.instruction(&Instruction::LocalGet(retptr));
             body.instruction(&Instruction::I32Load8U(MemArg {
@@ -241,9 +239,9 @@ impl Pass {
             body.instruction(&Instruction::I32Eqz);
             body.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
             body.instruction(&Instruction::LocalGet(retptr));
-            body.instruction(&Instruction::I32Load(MemArg {
-                offset: 4,
-                align: 2,
+            body.instruction(&Instruction::I64Load(MemArg {
+                offset: 8,
+                align: 3,
                 memory_index: 0,
             }));
             body.instruction(&Instruction::GlobalSet(self.ctx_global));
@@ -300,11 +298,11 @@ impl Reencode for Pass {
         utils::parse_global_section(self, globals, section)?;
         globals.global(
             GlobalType {
-                val_type: ValType::I32,
+                val_type: ValType::I64,
                 mutable: true,
                 shared: false,
             },
-            &ConstExpr::i32_const(-1),
+            &ConstExpr::i64_const(-1),
         );
         Ok(())
     }
@@ -340,6 +338,25 @@ mod tests {
     fn a_module_without_stdlib_imports_is_unchanged() {
         let core = wat::parse_str(r#"(module (global (mut i32) (i32.const 8)))"#).unwrap();
         assert_eq!(thread_stdlib_context(&core).unwrap(), core);
+    }
+
+    /// The shim writes `agent-error`'s context where the canonical ABI lays
+    /// out its last argument.
+    #[test]
+    fn agent_error_context_offset_matches_the_wit() {
+        let resolve = runtara_wit::resolve().unwrap();
+        let interface = resolve
+            .interfaces
+            .iter()
+            .find(|(id, _)| resolve.id_of(*id).as_deref() == Some(runtara_wit::stdlib::JSON))
+            .map(|(_, interface)| interface)
+            .unwrap();
+        let function = &interface.functions[AGENT_ERROR];
+        let mut sizes = wit_parser::SizeAlign::default();
+        sizes.fill(&resolve);
+        let offsets = sizes.field_offsets(function.params.iter().map(|param| &param.ty));
+        let (offset, _) = offsets.last().unwrap();
+        assert_eq!(offset.size_wasm32() as u64, AGENT_ERROR_CONTEXT_OFFSET);
     }
 
     #[test]
@@ -383,9 +400,9 @@ mod tests {
         let core = wat::parse_str(
             r#"(module
                 (import "cm32p2|runtara:workflow-stdlib/json@1" "init-manifest"
-                    (func $init (param i32 i32 i32 i32)))
+                    (func $init (param i64 i32 i32 i32)))
                 (import "cm32p2|runtara:workflow-stdlib/json@1" "value-store-scope"
-                    (func $scope (param i32) (result i64)))
+                    (func $scope (param i64) (result i64)))
                 (memory 1)
                 (global $heap (mut i32) (i32.const 1024))
                 (func (export "run") (result i64)

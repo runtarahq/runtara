@@ -4712,7 +4712,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "init-manifest",
             vec![
-                WasmType::I32,
+                WasmType::I64,
                 WasmType::Pointer,
                 WasmType::Length,
                 WasmType::Pointer,
@@ -4724,7 +4724,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "build-source",
             vec![
-                WasmType::I32,
+                WasmType::I64,
                 WasmType::Pointer,
                 WasmType::Length,
                 WasmType::Pointer,
@@ -4740,7 +4740,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "apply-mapping",
             vec![
-                WasmType::I32,
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4753,7 +4753,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "eval-condition",
             vec![
-                WasmType::I32,
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4766,7 +4766,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "filter",
             vec![
-                WasmType::I32,
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4779,7 +4779,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "log-event",
             vec![
-                WasmType::I32,
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4792,7 +4792,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "log",
             vec![
-                WasmType::I32,
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4805,7 +4805,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "process-switch",
             vec![
-                WasmType::I32,
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4818,7 +4818,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "value-switch",
             vec![
-                WasmType::I32,
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4831,7 +4831,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "group-by",
             vec![
-                WasmType::I32,
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4844,7 +4844,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "delay-duration-ms",
             vec![
-                WasmType::I32,
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4857,7 +4857,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "delay",
             vec![
-                WasmType::I32,
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4871,7 +4871,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "agent-output",
             vec![
-                WasmType::I32,
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4886,7 +4886,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "step-debug-start",
             vec![
-                WasmType::I32,
+                WasmType::I64,
                 WasmType::Pointer,
                 WasmType::Length,
                 WasmType::Pointer,
@@ -4903,7 +4903,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             // settled-at-ms (i64), retptr — the two u64 timestamps carry the real
             // parallel-branch launch/settle interval (0 == absent).
             vec![
-                WasmType::I32,
+                WasmType::I64,
                 WasmType::Pointer,
                 WasmType::Length,
                 WasmType::Pointer,
@@ -4927,7 +4927,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "error-event",
             vec![
-                WasmType::I32,
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4940,7 +4940,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "error",
             vec![
-                WasmType::I32,
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,

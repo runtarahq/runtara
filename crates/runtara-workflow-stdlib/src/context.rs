@@ -5,6 +5,10 @@
 //! current context's manifest, interning arena and handle nonce live in
 //! [`MANIFEST`] and the `direct_json` thread-locals for the length of a call;
 //! the others wait in [`CONTEXTS`].
+//!
+//! A context is a random 64-bit handle, not an index: logic instances share
+//! the stdlib instance, so a guessable handle would let one read another's
+//! manifest and values.
 
 // Only the wasm component calls into contexts; the tests below exercise them
 // natively.
@@ -14,13 +18,14 @@
 )]
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use crate::direct_json::{self, DirectJsonManifest, ValueStoreSlot};
 
 thread_local! {
     /// The current context's manifest.
     pub(crate) static MANIFEST: RefCell<Option<DirectJsonManifest>> = const { RefCell::new(None) };
-    static CONTEXTS: RefCell<Vec<Context>> = const { RefCell::new(Vec::new()) };
+    static CONTEXTS: RefCell<HashMap<u64, Context>> = RefCell::new(HashMap::new());
 }
 
 #[derive(Default)]
@@ -40,25 +45,38 @@ impl Context {
 
 /// The context a logic instance starts with: `prior`, reused, when it names
 /// one, else a new one.
-pub(crate) fn open(prior: u32) -> u32 {
+pub(crate) fn open(prior: u64) -> u64 {
     CONTEXTS.with(|contexts| {
         let mut contexts = contexts.borrow_mut();
-        if (prior as usize) < contexts.len() {
+        if contexts.contains_key(&prior) {
             return prior;
         }
-        contexts.push(Context::default());
-        (contexts.len() - 1) as u32
+        let mut handle = fresh_handle();
+        while handle == u64::MAX || contexts.contains_key(&handle) {
+            handle = fresh_handle();
+        }
+        contexts.insert(handle, Context::default());
+        handle
     })
+}
+
+/// An unpredictable handle, from the entropy std seeds its hash maps with
+/// (WASI's `random_get` in the guest).
+fn fresh_handle() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish()
 }
 
 /// Run `call` with `ctx` current. `None` when no such context exists. Stdlib
 /// calls never call out, so they never nest.
-pub(crate) fn run<R>(ctx: u32, call: impl FnOnce() -> R) -> Option<R> {
-    let exchange = |ctx: u32| {
+pub(crate) fn run<R>(ctx: u64, call: impl FnOnce() -> R) -> Option<R> {
+    let exchange = |ctx: u64| {
         CONTEXTS.with(|contexts| {
             contexts
                 .borrow_mut()
-                .get_mut(ctx as usize)
+                .get_mut(&ctx)
                 .map(Context::swap)
                 .is_some()
         })
@@ -71,7 +89,7 @@ pub(crate) fn run<R>(ctx: u32, call: impl FnOnce() -> R) -> Option<R> {
     Some(result)
 }
 
-pub(crate) fn unknown(ctx: u32) -> String {
+pub(crate) fn unknown(ctx: u64) -> String {
     format!("unknown stdlib context {ctx}")
 }
 
@@ -84,7 +102,7 @@ mod tests {
         serde_json::to_vec(&json!({ "graph": { "steps": [] } })).unwrap()
     }
 
-    fn init(prior: u32) -> u32 {
+    fn init(prior: u64) -> u64 {
         let id = open(prior);
         run(id, || {
             direct_json::reset_value_store();
@@ -110,8 +128,8 @@ mod tests {
 
     #[test]
     fn contexts_keep_their_own_manifest_and_values() {
-        let a = init(u32::MAX);
-        let b = init(u32::MAX);
+        let a = init(u64::MAX);
+        let b = init(u64::MAX);
         assert_ne!(a, b);
 
         let in_a = run(a, || intern_large("a")).unwrap();
@@ -130,7 +148,7 @@ mod tests {
 
     #[test]
     fn prior_context_is_reset_and_reused() {
-        let first = init(u32::MAX);
+        let first = init(u64::MAX);
         let handle = run(first, || intern_large("a")).unwrap();
         let again = init(first);
         assert_eq!(again, first);
@@ -141,6 +159,6 @@ mod tests {
 
     #[test]
     fn an_unknown_context_runs_nothing() {
-        assert_eq!(run(u32::MAX - 1, || 1), None);
+        assert_eq!(run(u64::MAX - 1, || 1), None);
     }
 }

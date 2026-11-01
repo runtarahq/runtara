@@ -40,9 +40,11 @@ interface json {
 
     // Start (or restart) a logic instance's context with its manifest. One
     // stdlib instance serves every logic instance in a run, so each passes
-    // the context it was given before (u32::MAX for none), which is reset and
-    // reused; the context to pass to every other function comes back.
-    init-manifest: func(prior: u32, manifest: list<u8>) -> result<u32, string>;
+    // the context it was given before (u64::MAX for none), which is reset and
+    // reused; the context to pass to every other function comes back. A
+    // context is a random handle, not an index: another logic instance in
+    // the run cannot name it.
+    init-manifest: func(prior: u64, manifest: list<u8>) -> result<u64, string>;
 
     // Legacy unscoped collection. Callers must supply all live roots; new
     // emitters use value-store-retain-scoped to protect enclosing frames.
@@ -51,29 +53,29 @@ interface json {
     // iteration boundary to reclaim the previous iteration's superseded values,
     // bounding a growing-accumulator loop to ~one live copy. Best-effort: a
     // root that fails to parse frees nothing.
-    value-store-retain: func(ctx: u32, parent-source: list<u8>, survivor: list<u8>) -> result<_, string>;
+    value-store-retain: func(ctx: u64, parent-source: list<u8>, survivor: list<u8>) -> result<_, string>;
 
     // Run-local allocation boundary; saved/restored with each loop frame.
-    value-store-scope: func(ctx: u32) -> u64;
+    value-store-scope: func(ctx: u64) -> u64;
     // Preserve entries predating scope as well as transitive local roots.
     // New emitters use this for sequential iterations and parallel chunk resets.
-    value-store-retain-scoped: func(ctx: u32, parent-source: list<u8>, survivor: list<u8>, scope: u64) -> result<_, string>;
+    value-store-retain-scoped: func(ctx: u64, parent-source: list<u8>, survivor: list<u8>, scope: u64) -> result<_, string>;
 
     build-source: func(
-        ctx: u32,
+        ctx: u64,
         data: list<u8>,
         variables: list<u8>,
         steps: list<u8>,
     ) -> result<list<u8>, string>;
 
     apply-mapping: func(
-        ctx: u32,
+        ctx: u64,
         mapping-id: u32,
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
     eval-condition: func(
-        ctx: u32,
+        ctx: u64,
         condition-id: u32,
         source: list<u8>,
     ) -> result<bool, string>;
@@ -81,45 +83,45 @@ interface json {
     /// Record a Conditional step's evaluated `result` as its output and
     /// return the updated steps context.
     conditional-output: func(
-        ctx: u32,
+        ctx: u64,
         condition-id: u32,
         source: list<u8>,
         decision: bool,
     ) -> result<list<u8>, string>;
 
     process-switch: func(
-        ctx: u32,
+        ctx: u64,
         switch-id: u32,
         source: list<u8>,
     ) -> result<string, string>;
 
     value-switch: func(
-        ctx: u32,
+        ctx: u64,
         switch-id: u32,
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
     split-items: func(
-        ctx: u32,
+        ctx: u64,
         split-id: u32,
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
     split-item-count: func(
-        ctx: u32,
+        ctx: u64,
         split-id: u32,
         source: list<u8>,
     ) -> result<u32, string>;
 
     split-item: func(
-        ctx: u32,
+        ctx: u64,
         split-id: u32,
         source: list<u8>,
         index: u32,
     ) -> result<list<u8>, string>;
 
     split-iteration-variables: func(
-        ctx: u32,
+        ctx: u64,
         split-id: u32,
         source: list<u8>,
         item: list<u8>,
@@ -127,33 +129,33 @@ interface json {
     ) -> result<list<u8>, string>;
 
     split-validate-input: func(
-        ctx: u32,
+        ctx: u64,
         split-id: u32,
         item: list<u8>,
         index: u32,
     ) -> result<_, string>;
 
     split-validate-output: func(
-        ctx: u32,
+        ctx: u64,
         split-id: u32,
         output: list<u8>,
         index: u32,
     ) -> result<_, string>;
 
     split-initial-results: func(
-        ctx: u32,
+        ctx: u64,
         split-id: u32,
     ) -> result<list<u8>, string>;
 
     split-append-output: func(
-        ctx: u32,
+        ctx: u64,
         split-id: u32,
         results: list<u8>,
         output: list<u8>,
     ) -> result<list<u8>, string>;
 
     split-append-error: func(
-        ctx: u32,
+        ctx: u64,
         split-id: u32,
         results: list<u8>,
         error: string,
@@ -161,147 +163,147 @@ interface json {
     ) -> result<list<u8>, string>;
 
     split-output: func(
-        ctx: u32,
+        ctx: u64,
         split-id: u32,
         source: list<u8>,
         results: list<u8>,
     ) -> result<list<u8>, string>;
 
     split-cache-key: func(
-        ctx: u32,
+        ctx: u64,
         split-id: u32,
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
     split-result: func(
-        ctx: u32,
+        ctx: u64,
         split-id: u32,
         source: list<u8>,
         results: list<u8>,
     ) -> result<list<u8>, string>;
 
     split-output-from-result: func(
-        ctx: u32,
+        ctx: u64,
         split-id: u32,
         source: list<u8>,
         step-result: list<u8>,
     ) -> result<list<u8>, string>;
 
     while-max-iterations: func(
-        ctx: u32,
+        ctx: u64,
         while-id: u32,
     ) -> result<u32, string>;
 
     while-initial-state: func(
-        ctx: u32,
+        ctx: u64,
         while-id: u32,
     ) -> result<list<u8>, string>;
 
     while-condition-source: func(
-        ctx: u32,
+        ctx: u64,
         while-id: u32,
         source: list<u8>,
         state: list<u8>,
     ) -> result<list<u8>, string>;
 
     while-condition: func(
-        ctx: u32,
+        ctx: u64,
         while-id: u32,
         source: list<u8>,
     ) -> result<bool, string>;
 
     while-iteration-variables: func(
-        ctx: u32,
+        ctx: u64,
         while-id: u32,
         source: list<u8>,
         state: list<u8>,
     ) -> result<list<u8>, string>;
 
     while-advance-state: func(
-        ctx: u32,
+        ctx: u64,
         while-id: u32,
         state: list<u8>,
         output: list<u8>,
     ) -> result<list<u8>, string>;
 
     while-output: func(
-        ctx: u32,
+        ctx: u64,
         while-id: u32,
         source: list<u8>,
         state: list<u8>,
     ) -> result<list<u8>, string>;
 
     while-cache-key: func(
-        ctx: u32,
+        ctx: u64,
         while-id: u32,
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
     while-result: func(
-        ctx: u32,
+        ctx: u64,
         while-id: u32,
         source: list<u8>,
         state: list<u8>,
     ) -> result<list<u8>, string>;
 
     while-output-from-result: func(
-        ctx: u32,
+        ctx: u64,
         while-id: u32,
         source: list<u8>,
         step-result: list<u8>,
     ) -> result<list<u8>, string>;
 
     filter: func(
-        ctx: u32,
+        ctx: u64,
         filter-id: u32,
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
     log-event: func(
-        ctx: u32,
+        ctx: u64,
         log-id: u32,
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
     log: func(
-        ctx: u32,
+        ctx: u64,
         log-id: u32,
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
     error-event: func(
-        ctx: u32,
+        ctx: u64,
         error-id: u32,
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
     error: func(
-        ctx: u32,
+        ctx: u64,
         error-id: u32,
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
     error-steps: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         error: list<u8>,
         steps: list<u8>,
     ) -> result<list<u8>, string>;
 
     group-by: func(
-        ctx: u32,
+        ctx: u64,
         group-id: u32,
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
     delay-duration-ms: func(
-        ctx: u32,
+        ctx: u64,
         delay-id: u32,
         source: list<u8>,
     ) -> result<u64, string>;
 
     delay: func(
-        ctx: u32,
+        ctx: u64,
         delay-id: u32,
         source: list<u8>,
         duration-ms: u64,
@@ -312,10 +314,10 @@ interface json {
     // iterations (folding `variables._loop_indices` like breakpoint-key) —
     // without the fold, per-item durable delays collide on ONE key.
     /// Timer/completion checkpoint identity for one loop invocation.
-    loop-deadline-key: func(ctx: u32, step-id: string, source: list<u8>, complete: bool) -> result<list<u8>, string>;
+    loop-deadline-key: func(ctx: u64, step-id: string, source: list<u8>, complete: bool) -> result<list<u8>, string>;
 
     delay-sleep-key: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         source: list<u8>,
     ) -> result<list<u8>, string>;
@@ -326,37 +328,37 @@ interface json {
     // else rides `message` verbatim. Infallible by construction — the err arm
     // exists only for WIT-convention uniformity.
     invoke-error-fields: func(
-        ctx: u32,
+        ctx: u64,
         error: list<u8>,
     ) -> result<invoke-error, string>;
 
     breakpoint-key: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         source: list<u8>,
     ) -> result<string, string>;
 
     breakpoint-event: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
     wait-signal-id: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         instance-id: string,
         source: list<u8>,
     ) -> result<string, string>;
 
     wait-timeout-ms: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         source: list<u8>,
     ) -> result<option<u64>, string>;
 
     wait-timeout-error: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         signal-id: string,
         timeout-ms: u64,
@@ -367,7 +369,7 @@ interface json {
     // handlers need {code, message, category, severity} so steps.__error.*
     // references resolve.
     wait-timeout-error-envelope: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         signal-id: string,
         timeout-ms: u64,
@@ -375,7 +377,7 @@ interface json {
 
     // Managed closure is authoritative, including for waits without a timeout.
     wait-closed-error: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         signal-id: string,
         reason: string,
@@ -383,7 +385,7 @@ interface json {
     ) -> result<list<u8>, string>;
 
     wait-on-wait-variables: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         instance-id: string,
         signal-id: string,
@@ -391,32 +393,32 @@ interface json {
     ) -> result<list<u8>, string>;
 
     wait-on-wait-error: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         error: list<u8>,
     ) -> result<list<u8>, string>;
 
     wait-poll-interval-ms: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
     ) -> result<u64, string>;
 
     /// Graph-qualified variant; legacy callers retain wait-poll-interval-ms.
     wait-poll-interval-ms-scoped: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         source: list<u8>,
     ) -> result<u64, string>;
 
     wait-event: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         signal-id: string,
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
     wait-debug-start: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         signal-id: string,
         timeout-ms: option<u64>,
@@ -424,7 +426,7 @@ interface json {
     ) -> result<list<u8>, string>;
 
     wait-output: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         signal-id: string,
         signal-payload: list<u8>,
@@ -435,7 +437,7 @@ interface json {
     // hashes it into the step's wait id; the settled wait is checkpointed
     // under it.
     wait-instances-key: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         source: list<u8>,
     ) -> result<string, string>;
@@ -444,7 +446,7 @@ interface json {
     // `deadlineMs = now-ms + timeoutMs` with a timeout). The error is a wait
     // error JSON (`{code, message}`), like the host's.
     wait-instances-request: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         source: list<u8>,
         now-ms: u64,
@@ -452,14 +454,14 @@ interface json {
 
     // WaitForInstances: whether a JSON wait read is pending, and its deadline.
     wait-instances-state: func(
-        ctx: u32,
+        ctx: u64,
         wait: list<u8>,
     ) -> result<wait-instances-progress, string>;
 
     // WaitForInstances: store a settled wait as the step's outputs; returns
     // the steps context.
     wait-instances-output: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         wait: list<u8>,
         source: list<u8>,
@@ -467,7 +469,7 @@ interface json {
 
     // WaitForInstances: a wait error JSON as the step's structured error.
     wait-instances-error: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         error: list<u8>,
     ) -> result<list<u8>, string>;
@@ -476,7 +478,7 @@ interface json {
     // `state` / `state-read` (the host keys the write by it); local state
     // `state-local` / `state-read-local` (a checkpoint key only).
     state-key: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         source: list<u8>,
         local: bool,
@@ -486,7 +488,7 @@ interface json {
     // against the workflow's `stateSchema`, as a JSON patch. The error is a
     // state error JSON (`{code, message}`), like the host's.
     state-patch: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         source: list<u8>,
     ) -> result<list<u8>, string>;
@@ -495,14 +497,14 @@ interface json {
     // the invocation's local state. Returns the record to checkpoint:
     // `{patch, state}`. The error is a state error JSON.
     state-local-set: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
     // GetState, local: the invocation's local state as a JSON object.
     state-local-get: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         source: list<u8>,
     ) -> result<list<u8>, string>;
@@ -511,7 +513,7 @@ interface json {
     // read (GetState) the invocation's local state, and return the step's
     // output value: the patch, or the state.
     state-local-restore: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         value: list<u8>,
         source: list<u8>,
@@ -521,7 +523,7 @@ interface json {
     // read; empty bytes are `{}`) as the step's outputs; returns the steps
     // context.
     state-output: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         value: list<u8>,
         source: list<u8>,
@@ -531,7 +533,7 @@ interface json {
     // JSON the wait and state errors above read: how logic built for the
     // workflow API ABI hands them an API failure.
     api-error-json: func(
-        ctx: u32,
+        ctx: u64,
         code: string,
         message: string,
         retry-after-ms: option<u64>,
@@ -542,7 +544,7 @@ interface json {
     // loaded, hex-encoded (a suspending site). Replaces whatever the step
     // mapped there; with neither, removes it.
     agent-operation-input: func(
-        ctx: u32,
+        ctx: u64,
         input: list<u8>,
         operation-id: option<string>,
         continuation: option<list<u8>>,
@@ -550,7 +552,7 @@ interface json {
 
     // SetState / GetState: a state error JSON as the step's structured error.
     state-error: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         error: list<u8>,
     ) -> result<list<u8>, string>;
@@ -559,7 +561,7 @@ interface json {
     // tool: `{instance}/{workflow}/{step}.tool.{label}.{call}{indices}`, matching
     // the generated `emit_wait_for_signal_tool_arm`.
     ai-wait-tool-signal-id: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         instance-id: string,
         label: string,
@@ -571,59 +573,59 @@ interface json {
     // model sees: `{ "status": "received", "human_response": <payload> }`,
     // matching the generated tool arm.
     ai-wait-tool-result: func(
-        ctx: u32,
+        ctx: u64,
         signal-payload: list<u8>,
     ) -> result<list<u8>, string>;
 
     embed-workflow-cache-key: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
     embed-workflow-variables: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         source: list<u8>,
         child-input: list<u8>,
     ) -> result<list<u8>, string>;
 
     embed-workflow-result: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         source: list<u8>,
         child-output: list<u8>,
     ) -> result<list<u8>, string>;
 
     embed-workflow-output-from-result: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         source: list<u8>,
         step-result: list<u8>,
     ) -> result<list<u8>, string>;
 
     embed-workflow-error: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         child-error: list<u8>,
     ) -> result<list<u8>, string>;
 
     /// Graph-qualified variant for the current EmbedWorkflow call site.
     embed-workflow-error-scoped: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         source: list<u8>,
         child-error: list<u8>,
     ) -> result<list<u8>, string>;
 
     retry-sleep-key: func(
-        ctx: u32,
+        ctx: u64,
         checkpoint-id: string,
         attempt-number: u32,
     ) -> result<list<u8>, string>;
 
     retry-delay-ms: func(
-        ctx: u32,
+        ctx: u64,
         attempt-number: u32,
         total-attempts: u32,
         base-delay-ms: u64,
@@ -632,22 +634,22 @@ interface json {
     ) -> result<u64, string>;
 
     workflow-error-retryable: func(
-        ctx: u32,
+        ctx: u64,
         error: list<u8>,
     ) -> result<bool, string>;
 
     workflow-error-rate-limited: func(
-        ctx: u32,
+        ctx: u64,
         error: list<u8>,
     ) -> result<bool, string>;
 
     workflow-error-retry-after-ms: func(
-        ctx: u32,
+        ctx: u64,
         error: list<u8>,
     ) -> result<option<u64>, string>;
 
     agent-output: func(
-        ctx: u32,
+        ctx: u64,
         agent-id: u32,
         source: list<u8>,
         output: list<u8>,
@@ -658,7 +660,7 @@ interface json {
     // the generated-code-compatible `{response, iterations, toolCalls}` envelope
     // under the AiAgent step's id. Single-shot (one iteration, no tool calls).
     ai-agent-output: func(
-        ctx: u32,
+        ctx: u64,
         agent-id: u32,
         source: list<u8>,
         output: list<u8>,
@@ -668,31 +670,31 @@ interface json {
     // Build the next chat-turn input from the constant base config, the prior
     // turn output (loop state), and this round's pending tool results.
     ai-turn-next-input: func(
-        ctx: u32,
+        ctx: u64,
         base: list<u8>,
         turn-out: list<u8>,
         pending: list<u8>,
     ) -> result<list<u8>, string>;
     // True when the turn's action is `complete`.
-    ai-turn-is-complete: func(ctx: u32, turn-out: list<u8>) -> result<bool, string>;
+    ai-turn-is-complete: func(ctx: u64, turn-out: list<u8>) -> result<bool, string>;
     // Number of tool calls the turn requested.
-    ai-turn-tool-count: func(ctx: u32, turn-out: list<u8>) -> result<u32, string>;
+    ai-turn-tool-count: func(ctx: u64, turn-out: list<u8>) -> result<u32, string>;
     // The index-th tool call's arguments, as the tool agent input payload.
-    ai-turn-tool-args: func(ctx: u32, turn-out: list<u8>, index: u32) -> result<list<u8>, string>;
+    ai-turn-tool-args: func(ctx: u64, turn-out: list<u8>, index: u32) -> result<list<u8>, string>;
     // The resolved tool index for the index-th tool call (u32::MAX = unknown).
-    ai-turn-tool-index: func(ctx: u32, turn-out: list<u8>, index: u32) -> result<u32, string>;
+    ai-turn-tool-index: func(ctx: u64, turn-out: list<u8>, index: u32) -> result<u32, string>;
     // Merge a `timeout_ms` field into a tool call's argument object so the
     // dispatched tool capability applies the configured per-call timeout. The
     // arguments come from the model, so the emitter injects the tool's own
     // Agent-step timeout here. A non-object args value is returned unchanged.
     ai-tool-args-with-timeout: func(
-        ctx: u32,
+        ctx: u64,
         args: list<u8>,
         timeout-ms: u64,
     ) -> result<list<u8>, string>;
     // Append the index-th tool call's dispatched result to the pending list.
     ai-turn-add-result: func(
-        ctx: u32,
+        ctx: u64,
         pending: list<u8>,
         turn-out: list<u8>,
         index: u32,
@@ -703,53 +705,53 @@ interface json {
     // breakpoint/agent cache keys. A loop keeps its latest turn in a slot
     // (ai-turn-slot-key) and uses this key only where a store kept both slots.
     ai-turn-cache-key: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         iteration: u32,
         source: list<u8>,
     ) -> result<string, string>;
     // Persisted model decision, before tools, separate from completed turns.
-    ai-turn-response-key: func(ctx: u32, step-id: string, iteration: u32, source: list<u8>) -> result<string, string>;
-    ai-turn-response-validate: func(ctx: u32, response: list<u8>) -> result<_, string>;
+    ai-turn-response-key: func(ctx: u64, step-id: string, iteration: u32, source: list<u8>) -> result<string, string>;
+    ai-turn-response-validate: func(ctx: u64, response: list<u8>) -> result<_, string>;
     // Per-turn durability: wrap the post-turn loop state
     // ({state, pending, toolCalls, complete}) for the turn checkpoint.
     ai-turn-snapshot: func(
-        ctx: u32,
+        ctx: u64,
         state: list<u8>,
         pending: list<u8>,
         tool-calls: u32,
         complete: bool,
     ) -> result<list<u8>, string>;
     // Per-turn durability: unpack a snapshot field (0 = state, 1 = pending).
-    ai-turn-snapshot-part: func(ctx: u32, snapshot: list<u8>, part: u32) -> result<list<u8>, string>;
+    ai-turn-snapshot-part: func(ctx: u64, snapshot: list<u8>, part: u32) -> result<list<u8>, string>;
     // Per-turn durability: the snapshot's monotonic tool-call counter.
-    ai-turn-snapshot-tool-calls: func(ctx: u32, snapshot: list<u8>) -> result<u32, string>;
+    ai-turn-snapshot-tool-calls: func(ctx: u64, snapshot: list<u8>) -> result<u32, string>;
     // Per-turn durability: whether the snapshotted turn completed the loop.
-    ai-turn-snapshot-complete: func(ctx: u32, snapshot: list<u8>) -> result<bool, string>;
+    ai-turn-snapshot-complete: func(ctx: u64, snapshot: list<u8>) -> result<bool, string>;
     // The key of the slot (one of two, alternating) that turn `iteration`
     // saves its snapshot in.
-    ai-turn-slot-key: func(ctx: u32, step-id: string, iteration: u32, source: list<u8>) -> result<string, string>;
+    ai-turn-slot-key: func(ctx: u64, step-id: string, iteration: u32, source: list<u8>) -> result<string, string>;
     // A slot snapshot: ai-turn-snapshot's fields plus the turn it follows.
     ai-turn-slot-snapshot: func(
-        ctx: u32,
+        ctx: u64,
         state: list<u8>,
         pending: list<u8>,
         tool-calls: u32,
         turn: u32,
     ) -> result<list<u8>, string>;
     // The turn a slot snapshot follows (0 when it names none).
-    ai-turn-snapshot-turn: func(ctx: u32, snapshot: list<u8>) -> result<u32, string>;
+    ai-turn-snapshot-turn: func(ctx: u64, snapshot: list<u8>) -> result<u32, string>;
     // The newer of two slot snapshots; an empty list is an empty slot.
-    ai-turn-latest: func(ctx: u32, first: list<u8>, second: list<u8>) -> result<list<u8>, string>;
+    ai-turn-latest: func(ctx: u64, first: list<u8>, second: list<u8>) -> result<list<u8>, string>;
     // The key of an AiAgent's result, and the result kept from its final
     // state (the fields its output is built from).
-    ai-agent-result-key: func(ctx: u32, step-id: string, source: list<u8>) -> result<string, string>;
-    ai-agent-result: func(ctx: u32, state: list<u8>) -> result<list<u8>, string>;
+    ai-agent-result-key: func(ctx: u64, step-id: string, source: list<u8>) -> result<string, string>;
+    ai-agent-result: func(ctx: u64, state: list<u8>) -> result<list<u8>, string>;
     // The key of an AiAgent's memory summary.
-    ai-summary-key: func(ctx: u32, step-id: string, source: list<u8>) -> result<string, string>;
+    ai-summary-key: func(ctx: u64, step-id: string, source: list<u8>) -> result<string, string>;
     // Build the AiAgent step output context from a completed turn.
     ai-turn-output: func(
-        ctx: u32,
+        ctx: u64,
         agent-id: u32,
         source: list<u8>,
         turn-out: list<u8>,
@@ -760,7 +762,7 @@ interface json {
     // call-counter is the loop's 0-based monotonic counter; the visible
     // call number is 1-based.
     ai-tool-debug-start: func(
-        ctx: u32,
+        ctx: u64,
         agent-id: u32,
         turn-out: list<u8>,
         index: u32,
@@ -770,7 +772,7 @@ interface json {
     ) -> result<list<u8>, string>;
     // The matching step-debug-end payload carrying the dispatched result.
     ai-tool-debug-end: func(
-        ctx: u32,
+        ctx: u64,
         agent-id: u32,
         turn-out: list<u8>,
         index: u32,
@@ -786,7 +788,7 @@ interface json {
     // when the history is at/below the threshold — the emitter skips the
     // event, matching the generated "only when exceeded" gate.
     ai-memory-debug-start: func(
-        ctx: u32,
+        ctx: u64,
         agent-id: u32,
         phase: u32,
         conversation: list<u8>,
@@ -798,7 +800,7 @@ interface json {
     // state; `prior-state` is the pre-compaction state (empty object for
     // load/save).
     ai-memory-debug-end: func(
-        ctx: u32,
+        ctx: u64,
         agent-id: u32,
         phase: u32,
         conversation: list<u8>,
@@ -809,34 +811,34 @@ interface json {
     ) -> result<list<u8>, string>;
     // Build the initial loop state from a load-memory result (loaded
     // conversation becomes the starting chat history).
-    ai-memory-initial-state: func(ctx: u32, load-output: list<u8>) -> result<list<u8>, string>;
+    ai-memory-initial-state: func(ctx: u64, load-output: list<u8>) -> result<list<u8>, string>;
     // Build the save-memory input `{conversation_id, messages}` from the final
     // loop state and the resolved conversation object.
     ai-memory-save-input: func(
-        ctx: u32,
+        ctx: u64,
         conversation: list<u8>,
         final-state: list<u8>,
     ) -> result<list<u8>, string>;
     // Sliding-window compaction: drop the oldest messages from the loop state's
     // chat history so at most max-messages remain (no-op below the threshold).
     ai-memory-compact-sliding: func(
-        ctx: u32,
+        ctx: u64,
         state: list<u8>,
         max-messages: u32,
     ) -> result<list<u8>, string>;
     // Build the summarize-memory capability input `{provider, model,
     // max_messages, state}` from the base chat-turn config and the loop state.
     ai-summarize-input: func(
-        ctx: u32,
+        ctx: u64,
         base: list<u8>,
         state: list<u8>,
         max-messages: u32,
     ) -> result<list<u8>, string>;
     // Unwrap the loop state from a summarize-memory result (`{state}`).
-    ai-summarize-output: func(ctx: u32, summarize-result: list<u8>) -> result<list<u8>, string>;
+    ai-summarize-output: func(ctx: u64, summarize-result: list<u8>) -> result<list<u8>, string>;
 
     agent-validate-input: func(
-        ctx: u32,
+        ctx: u64,
         agent-id: u32,
         input: list<u8>,
     ) -> result<list<u8>, string>;
@@ -844,7 +846,7 @@ interface json {
     // Resolve the concrete id first. A `connection_ref` (dynamic selection or
     // rotation) wins over the literal `connection_id`; empty means no binding.
     agent-connection-id: func(
-        ctx: u32,
+        ctx: u64,
         agent-id: u32,
         source: list<u8>,
     ) -> result<list<u8>, string>;
@@ -853,7 +855,7 @@ interface json {
     // This is the SINGLE connection channel — agents read `input._connection`
     // directly; there is no out-of-band connection argument.
     agent-connection-input: func(
-        ctx: u32,
+        ctx: u64,
         agent-id: u32,
         input: list<u8>,
         descriptor: list<u8>,
@@ -868,7 +870,7 @@ interface json {
     // Emitted ONLY for workflow-agent targets — native agents receive the
     // bare input unchanged.
     agent-scope-input: func(
-        ctx: u32,
+        ctx: u64,
         agent-id: u32,
         input: list<u8>,
         source: list<u8>,
@@ -882,7 +884,7 @@ interface json {
     // counter is the loop's replay-stable tool-call counter (restored from
     // the turn snapshot), so replays re-derive identical scopes.
     agent-tool-scope-input: func(
-        ctx: u32,
+        ctx: u64,
         ai-step-id: string,
         label: string,
         call-counter: u32,
@@ -892,7 +894,7 @@ interface json {
 
     // Inline tool source with the same per-call identity as workflow-agent tools.
     tool-scope-source: func(
-        ctx: u32,
+        ctx: u64,
         ai-step-id: string,
         label: string,
         call-counter: u32,
@@ -901,19 +903,19 @@ interface json {
 
     // Memory activation scope, distinct from model-selected tool calls.
     agent-aux-scope-source: func(
-        ctx: u32,
+        ctx: u64,
         agent-id: u32,
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
     agent-cache-key: func(
-        ctx: u32,
+        ctx: u64,
         agent-id: u32,
         source: list<u8>,
     ) -> result<list<u8>, string>;
 
     agent-retry-sleep-key: func(
-        ctx: u32,
+        ctx: u64,
         checkpoint-id: string,
         attempt-number: u32,
     ) -> result<list<u8>, string>;
@@ -926,7 +928,7 @@ interface json {
     // retry attempt durable so a resumed retry loop short-circuits attempts that
     // already ran instead of re-invoking the agent.
     agent-attempt-result-key: func(
-        ctx: u32,
+        ctx: u64,
         checkpoint-id: string,
         attempt-number: u32,
     ) -> result<list<u8>, string>;
@@ -939,7 +941,7 @@ interface json {
     // of re-invoking the agent. The leading tag byte keeps the envelope
     // non-empty (a `checkpoint` with empty state is treated as a read probe).
     agent-attempt-envelope: func(
-        ctx: u32,
+        ctx: u64,
         tag: u8,
         retryable: bool,
         rate-limited: bool,
@@ -949,7 +951,7 @@ interface json {
     ) -> result<list<u8>, string>;
 
     agent-retry-delay-ms: func(
-        ctx: u32,
+        ctx: u64,
         attempt-number: u32,
         total-attempts: u32,
         base-delay-ms: u64,
@@ -967,30 +969,31 @@ interface json {
     ) -> result<agent-retry-error, string>;
 
     // An Agent's error as the step's envelope, with its invocation context.
-    // `(ctx, agent-id, error)` lays out as the Agent's result area once its
-    // first two words hold the context and agent id (the record stays at 8),
-    // so the caller passes that area.
+    // `(agent-id, error, ctx)` lays out as the Agent's result area once its
+    // tag word holds the agent id and the context follows the record at 88,
+    // so the caller passes that area. The context comes last to leave the
+    // record where the Agent wrote it.
     agent-error: func(
-        ctx: u32,
         agent-id: u32,
         error: error-info,
+        ctx: u64,
     ) -> result<list<u8>, string>;
 
     agent-error-from-info: func(
-        ctx: u32,
+        ctx: u64,
         agent-id: u32,
         error-info: list<u8>,
     ) -> result<list<u8>, string>;
 
     agent-debug-error: func(
-        ctx: u32,
+        ctx: u64,
         agent-id: u32,
         source: list<u8>,
         error: list<u8>,
     ) -> result<list<u8>, string>;
 
     step-debug-start: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         source: list<u8>,
     ) -> result<list<u8>, string>;
@@ -1003,7 +1006,7 @@ interface json {
     // is a sequential/linearised step): the payload then carries neither field and
     // consumers fall back to the assemble timestamp. Purely observational.
     step-debug-end: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         source: list<u8>,
         launched-at-ms: u64,
@@ -1014,7 +1017,7 @@ interface json {
     // step type (generic analogue of agent-debug-error, keyed by step id). Used
     // to attribute an unhandled mapping/condition/config failure to the step.
     step-debug-error: func(
-        ctx: u32,
+        ctx: u64,
         step-id: string,
         source: list<u8>,
         error: list<u8>,

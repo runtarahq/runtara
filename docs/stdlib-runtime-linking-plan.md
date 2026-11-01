@@ -67,13 +67,16 @@ before and after.
   (`C/stdlib_context.rs`, run at the end of `emit_direct_core_module`) adds
   the `ctx` global and one shim per stdlib import, and routes calls through
   the shims.
-- **`init-manifest`:** takes the caller's previous context (`u32::MAX` for
+- **`init-manifest`:** takes the caller's previous context (`u64::MAX` for
   none), resets and reuses it, and returns it. Otherwise a published agent
   would open a new context on every invocation.
+- **Contexts are random 64-bit handles**, not indices. Linked, every logic
+  instance in a run shares one stdlib instance, so a guessable handle would let
+  a composed workflow-agent read another instance's manifest and values.
 - **The two by-pointer functions:**
   - `agent-retry-error-info` is pure and takes no context;
-  - the `agent-error` shim rewrites its argument area in place (`ctx @0`,
-    `agent-id @4`, record unchanged at 8).
+  - `agent-error` takes its context last, so the shim writes it into the
+    argument area at 88 and leaves the record where the Agent wrote it.
 - **Stdlib:** keeps its thread-locals as the current context.
   `src/context.rs` swaps a context in for each call and back out, so
   `direct_json.rs` is untouched.
