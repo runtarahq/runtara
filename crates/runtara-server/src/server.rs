@@ -147,6 +147,11 @@ use runtime_client::RuntimeClient;
         runtara_connections::handler::connections::list_connection_auth_types_handler,
         runtara_connections::handler::oauth::authorize_handler,
         runtara_connections::handler::oauth::callback_handler,
+        runtara_connections::handler::oauth::tenantless_callback_handler,
+        runtara_connections::handler::oauth::link_handler,
+        runtara_connections::handler::oauth::pending_handler,
+        runtara_connections::handler::oauth::confirm_handler,
+        runtara_connections::handler::oauth::reject_handler,
         // Metrics endpoints
         api::metrics::get_workflow_metrics,
         api::metrics::get_workflow_stats,
@@ -368,6 +373,11 @@ use runtime_client::RuntimeClient;
             runtara_connections::types::ConnectionTypeResponse,
             runtara_connections::types::ListConnectionTypesResponse,
             runtara_connections::handler::oauth::OAuthAuthorizeResponse,
+            runtara_connections::handler::oauth::OAuthLinkResponse,
+            runtara_connections::handler::oauth::OAuthPendingDecision,
+            runtara_connections::handler::oauth::OAuthPendingResponse,
+            runtara_connections::service::oauth::PendingConfirmation,
+            runtara_connections::OAuthAppSummary,
             api::dto::triggers::InvocationTrigger,
             api::dto::triggers::TriggerType,
             api::dto::triggers::CreateInvocationTriggerRequest,
@@ -744,6 +754,10 @@ pub struct ServerOptions {
     /// supplies its own, such as a `runtara_connections::TenantKeyedCipher`;
     /// every call names the tenant and connection it is for.
     pub credential_cipher: Option<Arc<dyn runtara_connections::CredentialCipher>>,
+    /// OAuth apps the platform registered with providers, which tenants'
+    /// connections may use in place of their own client credentials; `None`
+    /// reads them from the file `RUNTARA_OAUTH_APPS_FILE` names, if any.
+    pub oauth_apps: Option<Arc<dyn runtara_connections::OAuthApps>>,
 }
 
 pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -1258,6 +1272,20 @@ pub async fn start_with(
         }
     };
 
+    let oauth_apps: Option<Arc<dyn runtara_connections::OAuthApps>> = match options
+        .oauth_apps
+        .clone()
+    {
+        Some(apps) => Some(apps),
+        None => match runtara_connections::FileOAuthApps::from_env() {
+            Ok(apps) => apps.map(|apps| Arc::new(apps) as Arc<dyn runtara_connections::OAuthApps>),
+            Err(msg) => {
+                eprintln!("❌ Configuration error: {msg}");
+                std::process::exit(1);
+            }
+        },
+    };
+
     // Construct connections crate config and facade.
     let connections_config = runtara_connections::ConnectionsConfig {
         db_pool: pool.clone(),
@@ -1275,6 +1303,12 @@ pub async fn start_with(
         connection_events: Some(Arc::new(product_events::ConnectionEventBridge::new(
             product_event_sink.clone(),
         ))),
+        oauth: runtara_connections::OAuthOptions {
+            tenantless_callback: config::get().oauth_tenantless_callback,
+            browser_binding: config::get().oauth_browser_binding,
+            tenants: Arc::new(crate::middleware::tenant_path::ServedTenants),
+            apps: oauth_apps,
+        },
     };
     let connections_state =
         runtara_connections::ConnectionsState::from_config(connections_config.clone());
@@ -1710,6 +1744,37 @@ pub async fn start_with(
                 cleanup_shutdown,
             );
             worker.run().await;
+        });
+    }
+
+    // Unconfirmed OAuth authorizations: a flow started without a browser whose
+    // connection no member confirmed within 15 minutes has its tokens dropped
+    // and revoked. Confirming checks the deadline itself, so a late sweep only
+    // delays the revocation.
+    {
+        let state = runtara_connections::ConnectionsState::from_config(connections_config.clone());
+        let pending_shutdown = shutdown_signal.clone();
+        shutdown_coordinator.spawn_intake(async move {
+            let service = runtara_connections::service::oauth::OAuthService::from_state(&state);
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = pending_shutdown.clone().wait() => return,
+                    _ = interval.tick() => {}
+                }
+                match service.expire_pending(config::served_tenants()).await {
+                    Ok(0) => {}
+                    Ok(dropped) => tracing::info!(
+                        dropped,
+                        "dropped OAuth authorizations no member confirmed in time"
+                    ),
+                    Err(error) => tracing::warn!(
+                        %error,
+                        "sweeping unconfirmed OAuth authorizations failed"
+                    ),
+                }
+            }
         });
     }
 

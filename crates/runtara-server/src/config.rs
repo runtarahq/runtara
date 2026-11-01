@@ -69,6 +69,16 @@ pub struct Config {
     /// `{tenant}:session:…`), and never touches the unscoped legacy keys or
     /// scans for other tenants' streams. It implies no legacy member keys.
     pub valkey_tenant_scoped: bool,
+    /// Whether OAuth connections can use the callback that names no tenant,
+    /// `/api/oauth/callback` (`RUNTARA_OAUTH_TENANTLESS_CALLBACK`, default
+    /// true). New authorization-code connections are given it; connections
+    /// made before keep their tenant's callback.
+    pub oauth_tenantless_callback: bool,
+    /// Whether OAuth flows started in the console are bound to the browser by
+    /// a cookie (`RUNTARA_OAUTH_BROWSER_BINDING`, default true). Off, for a
+    /// console on another origin than `PUBLIC_BASE_URL`, they wait for a
+    /// member's confirmation instead.
+    pub oauth_browser_binding: bool,
     /// Maximum pool connections for the object model database.
     pub object_model_max_connections: u32,
     /// Whether the object model uses soft delete.
@@ -220,6 +230,8 @@ impl Config {
             parse_usize_or("OBJECT_MODEL_TENANT_POOL_MAX", 16)?;
         let legacy_member_keys = parse_bool_or("RUNTARA_AUTH_LEGACY_MEMBER_KEYS", true)?;
         let valkey_tenant_scoped = parse_bool_or("RUNTARA_VALKEY_TENANT_SCOPED", false)?;
+        let oauth_tenantless_callback = parse_bool_or("RUNTARA_OAUTH_TENANTLESS_CALLBACK", true)?;
+        let oauth_browser_binding = parse_bool_or("RUNTARA_OAUTH_BROWSER_BINDING", true)?;
         let object_model_max_connections: u32 = parse_u32_or("OBJECT_MODEL_MAX_CONNECTIONS", 10)?;
         let object_model_soft_delete: bool = parse_bool_or("OBJECT_MODEL_SOFT_DELETE", true)?;
         let object_model_bulk_request_limit: usize = parse_usize_or(
@@ -369,6 +381,8 @@ impl Config {
             object_model_tenant_pool_max,
             legacy_member_keys,
             valkey_tenant_scoped,
+            oauth_tenantless_callback,
+            oauth_browser_binding,
             object_model_max_connections,
             object_model_soft_delete,
             object_model_bulk_request_limit,

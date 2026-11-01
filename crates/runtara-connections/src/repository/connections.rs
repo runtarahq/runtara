@@ -1024,6 +1024,21 @@ impl ConnectionRepository {
         Ok(result.rows_affected())
     }
 
+    /// Every connection of `tenants` with `status`, as `(id, tenant_id)`.
+    pub async fn list_with_status(
+        &self,
+        status: &str,
+        tenants: &[String],
+    ) -> Result<Vec<(String, String)>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT id, tenant_id FROM connection_data_entity WHERE status = $1 AND tenant_id = ANY($2)",
+        )
+        .bind(status)
+        .bind(tenants)
+        .fetch_all(&self.pool)
+        .await
+    }
+
     /// Update only the connection status (parameters untouched). Used to flip a
     /// connection to `REQUIRES_RECONNECTION` when its OAuth grant is dead.
     pub async fn update_status(

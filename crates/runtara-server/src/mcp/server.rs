@@ -1007,6 +1007,16 @@ impl SmoMcpServer {
     }
 
     #[tool(
+        description = "Start authorizing an OAuth connection at its provider without a browser. Returns authorizationUrl (valid 10 minutes) to hand the person who will sign in at the provider. Afterwards the connection is PENDING_CONFIRMATION and unusable until a member confirms it in the Runtara console within 15 minutes; this tool cannot confirm it."
+    )]
+    async fn start_connection_authorization(
+        &self,
+        params: Parameters<tools::connections::StartConnectionAuthorizationParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::connections::start_connection_authorization(self, params.0).await
+    }
+
+    #[tool(
         description = "List or search a dynamic resource advertised by a configured connection. resource_name must come from describe_connection. search is optional free text; cursor and limit provide generic pagination. Provider-specific arguments and credentials are neither accepted nor exposed."
     )]
     async fn resolve_connection_resource(
@@ -1157,7 +1167,7 @@ impl ServerHandler for SmoMcpServer {
                 **Agents & DSL**: list_agents, get_agent, get_capability, test_capability, list_step_types, get_step_type_schema\n\
                 **Graph Reads/Mutations**: summarize_workflow, get_workflow_metadata, list_steps, get_step, list_edges, get_step_edges, get_step_mappings, get_workflow_slice, find_references, list_unmapped_inputs, get_input_schema, get_output_schema, get_state_schema, list_variables, list_references, set_workflow_metadata, add_agent_step, add_step, remove_step, update_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema (replace all), set_input_schema_field, remove_input_schema_field, set_output_schema, set_state_schema, set_variable, remove_variable, apply_graph_mutations (batch, one save) — MCP graph mutations are serialized per tenant/workflow so parallel tool calls do not clobber each other; first mutating call creates a new version, subsequent mutating calls update it in-place. All except the root-only state schema tools support nested subgraphs via optional path parameter. Prefer focused graph reads and mutation tools over raw get_workflow/update_workflow JSON. Use deploy_latest after mutations to compile and deploy.\n\
                 **Signals & Actions**: list_pending_signals, get_signal_schema, submit_signal_response, submit_action_response — interact with WaitForSignal / human-in-the-loop steps and open workflow actions in running executions\n\
-                **Connections**: list_connections, list_integrations, get_integration, describe_connection, resolve_connection_resource. To wire a connection into an Agent step:\n\
+                **Connections**: list_connections, list_integrations, get_integration, describe_connection, resolve_connection_resource, start_connection_authorization (an OAuth link a member must then confirm in the console). To wire a connection into an Agent step:\n\
                   1. `list_agents` — each entry carries `supportsConnections` and `integrationIds`. Skip agents where `supportsConnections=false`.\n\
                   2. For an agent that needs credentials, call `list_connections(integration_id=<one of the agent's integrationIds>)` to find tenant connections of the right type.\n\
                   3. Use the returned connection's **`id` (UUID)** — NOT its `title` or `integrationId` — as the `connection_id` argument to `add_agent_step`, or as the `connectionId` field on a raw Agent step. `add_agent_step` validates this up front and rejects mismatches.\n\

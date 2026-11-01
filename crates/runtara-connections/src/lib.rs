@@ -7,6 +7,7 @@ pub mod facade;
 pub mod handler;
 pub mod integration_compatibility;
 pub mod net;
+pub mod oauth_apps;
 pub mod repository;
 pub mod resolution;
 pub mod resource_resolver;
@@ -20,7 +21,9 @@ pub use auth::aws_signing::AwsSigningParams;
 pub use auth::azure_signing::AzureSigningParams;
 pub use auth::provider_auth::{ResolvedConnectionAuth, resolve_connection_auth};
 pub use auth::token_cache::AuthResolutionError;
-pub use config::{ConnectionsConfig, ConnectionsState};
+pub use config::{
+    ConnectionsConfig, ConnectionsState, EveryTenant, HostFuture, OAuthOptions, TenantHost,
+};
 pub use crypto::{
     CipherError, CredentialCipher, ENCRYPTION_KEY_ENV, ENVELOPE_ALG, ENVELOPE_VERSION,
     TenantKeyedCipher, cipher_from_env,
@@ -29,13 +32,14 @@ pub use error::ConnectionsError;
 pub use events::{ConnectionEventSink, ConnectionEvents, ConnectionLifecycleEvent};
 pub use facade::ConnectionsFacade;
 pub use integration_compatibility::{IntegrationCompatibility, OBJECT_STORAGE_DEFAULT_FOR};
+pub use oauth_apps::{FileOAuthApps, OAuthAppCredentials, OAuthAppSummary, OAuthApps};
 pub use repository::connections::{ConnectionWithParameters, ReencryptionStats};
 pub use resolution::{
     ConnectionDescriptor, ConnectionResourceDefinition, ConnectionResourceItem,
     ConnectionResourcePage, ConnectionResourceRequest,
 };
 pub use router::{connections_router, oauth_callback_router};
-pub use tenant::TenantId;
+pub use tenant::{Caller, CallerChannel, TenantId};
 pub use types::{
     ConnectionDto, ConnectionStatus, CreateConnectionRequest, RateLimitConfigDto,
     RateLimitEventType, RuntimeConnectionResponse, UpdateConnectionRequest,

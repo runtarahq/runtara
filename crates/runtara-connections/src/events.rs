@@ -28,6 +28,9 @@ pub enum ConnectionLifecycleEvent {
     OAuthStarted { connection_id: String },
     /// The OAuth callback completed successfully (funnel: completed).
     OAuthCompleted { connection_id: String },
+    /// A flow started without a browser came back from the provider; the
+    /// connection waits for a member to confirm it in the console.
+    OAuthPendingConfirmation { connection_id: String },
     /// The OAuth flow failed (funnel: drop-off). `reason` is a short, non-sensitive description.
     OAuthFailed { reason: String },
     /// A connection's OAuth access token was refreshed via the refresh-token grant (long-term

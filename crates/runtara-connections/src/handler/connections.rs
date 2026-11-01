@@ -42,11 +42,12 @@ pub async fn create_connection_handler(
     State(cipher): State<Arc<dyn CredentialCipher>>,
     State(compatibility): State<Arc<IntegrationCompatibility>>,
     State(events): State<crate::events::ConnectionEvents>,
+    State(oauth): State<crate::config::OAuthOptions>,
     Json(payload): Json<CreateConnectionRequest>,
 ) -> Result<(StatusCode, Json<CreateConnectionResponse>), (StatusCode, Json<Value>)> {
     // Create service with repository
     let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
-    let service = ConnectionService::new(repository, compatibility);
+    let service = ConnectionService::new(repository, compatibility).with_oauth(&oauth);
 
     // Capture the integration id before `payload` is consumed by the service.
     let integration = payload.integration_id.clone();
@@ -104,7 +105,7 @@ pub async fn create_connection_handler(
     path = "/api/runtime/connections",
     params(
         ("integrationId" = Option<String>, Query, description = "Filter by integration ID (connection type identifier)"),
-        ("status" = Option<String>, Query, description = "Filter by status (UNKNOWN, ACTIVE, REQUIRES_RECONNECTION, INVALID_CREDENTIALS)"),
+        ("status" = Option<String>, Query, description = "Filter by status (UNKNOWN, ACTIVE, REQUIRES_RECONNECTION, INVALID_CREDENTIALS, PENDING_CONFIRMATION)"),
         ("includeRateLimitStats" = Option<bool>, Query, description = "Include rate limit statistics for each connection"),
         ("interval" = Option<String>, Query, description = "Time interval for rate limit stats: 1h, 24h, 7d, 30d (default: 24h)")
     ),
@@ -307,12 +308,13 @@ pub async fn update_connection_handler(
     State(pool): State<PgPool>,
     State(cipher): State<Arc<dyn CredentialCipher>>,
     State(compatibility): State<Arc<IntegrationCompatibility>>,
+    State(oauth): State<crate::config::OAuthOptions>,
     Path(id): Path<String>,
     Json(payload): Json<UpdateConnectionRequest>,
 ) -> Result<Json<ConnectionResponse>, (StatusCode, Json<Value>)> {
     // Create service with repository
     let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
-    let service = ConnectionService::new(repository, compatibility);
+    let service = ConnectionService::new(repository, compatibility).with_oauth(&oauth);
 
     match service.update_connection(&id, &tenant_id, payload).await {
         Ok(connection) => Ok(Json(ConnectionResponse {
@@ -374,11 +376,12 @@ pub async fn delete_connection_handler(
     State(cipher): State<Arc<dyn CredentialCipher>>,
     State(compatibility): State<Arc<IntegrationCompatibility>>,
     State(events): State<crate::events::ConnectionEvents>,
+    State(oauth): State<crate::config::OAuthOptions>,
     Path(id): Path<String>,
 ) -> Result<Json<DeleteConnectionResponse>, (StatusCode, Json<Value>)> {
     // Create service with repository
     let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
-    let service = ConnectionService::new(repository, compatibility);
+    let service = ConnectionService::new(repository, compatibility).with_oauth(&oauth);
 
     match service.delete_connection(&id, &tenant_id).await {
         Ok(()) => {
@@ -432,7 +435,7 @@ pub async fn delete_connection_handler(
     path = "/api/runtime/connections/operator/{operatorName}",
     params(
         ("operatorName" = String, Path, description = "Operator name (e.g., 'HTTP', 'Shopify', 'MCP')"),
-        ("status" = Option<String>, Query, description = "Filter by status (UNKNOWN, ACTIVE, REQUIRES_RECONNECTION, INVALID_CREDENTIALS)")
+        ("status" = Option<String>, Query, description = "Filter by status (UNKNOWN, ACTIVE, REQUIRES_RECONNECTION, INVALID_CREDENTIALS, PENDING_CONFIRMATION)")
     ),
     responses(
         (status = 200, description = "List of connections for the operator (without sensitive connection_parameters)", body = ListConnectionsResponse),
@@ -522,6 +525,31 @@ fn meta_to_dto(meta: &runtara_dsl::agent_meta::ConnectionTypeMeta) -> Connection
             token_url: c.token_url.to_string(),
             default_scopes: c.default_scopes.to_string(),
         }),
+        managed_apps: Vec::new(),
+    }
+}
+
+/// `dto` with the platform apps `tenant` may use for its type.
+fn with_managed_apps(
+    mut dto: ConnectionTypeDto,
+    apps: &[crate::oauth_apps::OAuthAppSummary],
+) -> ConnectionTypeDto {
+    dto.managed_apps = apps
+        .iter()
+        .filter(|app| app.integration_id == dto.integration_id)
+        .cloned()
+        .collect();
+    dto
+}
+
+/// The platform apps `tenant` may use, when platform apps can be used here.
+fn managed_apps(
+    oauth: &crate::config::OAuthOptions,
+    tenant_id: &str,
+) -> Vec<crate::oauth_apps::OAuthAppSummary> {
+    match &oauth.apps {
+        Some(apps) if oauth.tenantless_callback => apps.available(tenant_id),
+        _ => Vec::new(),
     }
 }
 
@@ -537,9 +565,14 @@ fn meta_to_dto(meta: &runtara_dsl::agent_meta::ConnectionTypeMeta) -> Connection
     ),
     tag = "connections-controller"
 ))]
-pub async fn list_connection_types_handler() -> Json<ListConnectionTypesResponse> {
-    let connection_types: Vec<ConnectionTypeDto> =
-        get_all_connection_types().map(meta_to_dto).collect();
+pub async fn list_connection_types_handler(
+    crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
+    State(oauth): State<crate::config::OAuthOptions>,
+) -> Json<ListConnectionTypesResponse> {
+    let apps = managed_apps(&oauth, &tenant_id);
+    let connection_types: Vec<ConnectionTypeDto> = get_all_connection_types()
+        .map(|meta| with_managed_apps(meta_to_dto(meta), &apps))
+        .collect();
     let count = connection_types.len();
 
     Json(ListConnectionTypesResponse {
@@ -618,12 +651,17 @@ pub async fn list_connection_auth_types_handler() -> Json<ListConnectionAuthType
     tag = "connections-controller"
 ))]
 pub async fn get_connection_type_handler(
+    crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
+    State(oauth): State<crate::config::OAuthOptions>,
     Path(integration_id): Path<String>,
 ) -> Result<Json<ConnectionTypeResponse>, (StatusCode, Json<Value>)> {
     match find_connection_type(&integration_id) {
         Some(meta) => Ok(Json(ConnectionTypeResponse {
             success: true,
-            connection_type: meta_to_dto(meta),
+            connection_type: with_managed_apps(
+                meta_to_dto(meta),
+                &managed_apps(&oauth, &tenant_id),
+            ),
         })),
         None => Err((
             StatusCode::NOT_FOUND,

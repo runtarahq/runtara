@@ -56,6 +56,65 @@ pub struct ConnectionsConfig {
     /// stays unaware of the host's product-events pipeline. See [`crate::events`].
     #[allow(clippy::type_complexity)]
     pub connection_events: crate::events::ConnectionEvents,
+
+    /// How OAuth authorization-code flows are started and completed.
+    pub oauth: OAuthOptions,
+}
+
+/// The work a request leaves to the host, as a boxed future.
+pub type HostFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = axum::response::Response> + Send + 'static>>;
+
+/// What the host knows about the tenants this process serves, for the OAuth
+/// callback that names no tenant: it learns the tenant from the flow, then
+/// asks whether it is served here and runs the rest in that tenant's scope.
+pub trait TenantHost: Send + Sync {
+    /// Whether this process serves `tenant`.
+    fn serves(&self, tenant: &str) -> bool;
+    /// `work`, run in `tenant`'s scope (for example, row-level security).
+    fn scoped(&self, tenant: String, work: HostFuture) -> HostFuture;
+}
+
+/// A host that serves every tenant and has no scope to enter.
+pub struct EveryTenant;
+
+impl TenantHost for EveryTenant {
+    fn serves(&self, _tenant: &str) -> bool {
+        true
+    }
+
+    fn scoped(&self, _tenant: String, work: HostFuture) -> HostFuture {
+        work
+    }
+}
+
+/// How OAuth authorization-code flows run.
+#[derive(Clone)]
+pub struct OAuthOptions {
+    /// Serve the callback that names no tenant (`/api/oauth/callback`), and
+    /// give new connections that redirect URI. Off: new connections keep the
+    /// tenant's own callback (`/api/oauth/{tenant}/callback`).
+    pub tenantless_callback: bool,
+    /// Bind flows started in the console to the browser by a cookie. Off:
+    /// they need a member's confirmation, like flows started without a
+    /// browser (for a console on another origin than the callback).
+    pub browser_binding: bool,
+    /// The tenants this process serves, for the tenant-less callback.
+    pub tenants: Arc<dyn TenantHost>,
+    /// OAuth apps the platform registered, which connections may use in
+    /// place of their own client credentials. `None`: there are none.
+    pub apps: Option<Arc<dyn crate::oauth_apps::OAuthApps>>,
+}
+
+impl Default for OAuthOptions {
+    fn default() -> Self {
+        Self {
+            tenantless_callback: true,
+            browser_binding: true,
+            tenants: Arc::new(EveryTenant),
+            apps: None,
+        }
+    }
 }
 
 /// Runtime state shared across all handlers in the connections crate.
@@ -73,6 +132,7 @@ pub struct ConnectionsState {
     pub compatibility: Arc<IntegrationCompatibility>,
     pub agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
     pub connection_events: crate::events::ConnectionEvents,
+    pub oauth: OAuthOptions,
 }
 
 impl ConnectionsState {
@@ -87,6 +147,7 @@ impl ConnectionsState {
             compatibility: config.compatibility,
             agent_catalog: config.agent_catalog,
             connection_events: config.connection_events,
+            oauth: config.oauth,
         }
     }
 }
@@ -118,5 +179,11 @@ impl axum::extract::FromRef<ConnectionsState> for Arc<runtara_dsl::agent_meta::A
 impl axum::extract::FromRef<ConnectionsState> for crate::events::ConnectionEvents {
     fn from_ref(state: &ConnectionsState) -> crate::events::ConnectionEvents {
         state.connection_events.clone()
+    }
+}
+
+impl axum::extract::FromRef<ConnectionsState> for OAuthOptions {
+    fn from_ref(state: &ConnectionsState) -> OAuthOptions {
+        state.oauth.clone()
     }
 }

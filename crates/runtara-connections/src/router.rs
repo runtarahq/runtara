@@ -63,6 +63,22 @@ pub fn connections_router(config: ConnectionsConfig) -> Router {
             get(handler::oauth::authorize_handler),
         )
         .route(
+            "/connections/{id}/oauth/link",
+            post(handler::oauth::link_handler),
+        )
+        .route(
+            "/connections/{id}/oauth/pending",
+            get(handler::oauth::pending_handler),
+        )
+        .route(
+            "/connections/{id}/oauth/confirm",
+            post(handler::oauth::confirm_handler),
+        )
+        .route(
+            "/connections/{id}/oauth/reject",
+            post(handler::oauth::reject_handler),
+        )
+        .route(
             "/rate-limits",
             get(handler::rate_limits::list_rate_limits_handler),
         )
@@ -82,9 +98,22 @@ pub fn connections_router(config: ConnectionsConfig) -> Router {
 }
 
 /// OAuth callback router (public, no auth).
+///
+/// `/callback` serves connections whose redirect URI names no tenant, when
+/// [`crate::config::OAuthOptions::tenantless_callback`] is on;
+/// `/{tenant_id}/callback` serves the others, and the tenant-less callback
+/// sends there a flow whose tenant is served by another process.
 pub fn oauth_callback_router(config: ConnectionsConfig) -> Router {
     let state = ConnectionsState::from_config(config);
-    Router::new()
+    let router = if state.oauth.tenantless_callback {
+        Router::new().route(
+            "/callback",
+            get(handler::oauth::tenantless_callback_handler),
+        )
+    } else {
+        Router::new()
+    };
+    router
         .route(
             "/{tenant_id}/callback",
             get(handler::oauth::callback_handler),

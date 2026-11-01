@@ -299,6 +299,7 @@ async fn native_descriptions_and_resources_enforce_tenant_and_safe_metadata() {
         compatibility: Arc::new(IntegrationCompatibility::from_catalog(&catalog)),
         agent_catalog: catalog,
         connection_events: None,
+        oauth: Default::default(),
     });
     assert!(
         facade

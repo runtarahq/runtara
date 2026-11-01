@@ -350,6 +350,9 @@ pub enum ConnectionStatus {
     Active,
     RequiresReconnection,
     InvalidCredentials,
+    /// Authorized at the provider by a flow started without a browser; not
+    /// usable until a member confirms it in the console.
+    PendingConfirmation,
 }
 
 impl ConnectionStatus {
@@ -359,6 +362,7 @@ impl ConnectionStatus {
             ConnectionStatus::Active => "ACTIVE",
             ConnectionStatus::RequiresReconnection => "REQUIRES_RECONNECTION",
             ConnectionStatus::InvalidCredentials => "INVALID_CREDENTIALS",
+            ConnectionStatus::PendingConfirmation => "PENDING_CONFIRMATION",
         }
     }
 
@@ -367,6 +371,7 @@ impl ConnectionStatus {
             "ACTIVE" => ConnectionStatus::Active,
             "REQUIRES_RECONNECTION" => ConnectionStatus::RequiresReconnection,
             "INVALID_CREDENTIALS" => ConnectionStatus::InvalidCredentials,
+            "PENDING_CONFIRMATION" => ConnectionStatus::PendingConfirmation,
             _ => ConnectionStatus::Unknown,
         }
     }
@@ -937,6 +942,10 @@ pub struct ConnectionTypeDto {
     /// OAuth2 configuration (only for auth_type = oauth2_authorization_code)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth_config: Option<OAuthConfigDto>,
+    /// OAuth apps the platform registered for this type that the calling
+    /// tenant may connect with, in place of its own client credentials.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_apps: Vec<crate::oauth_apps::OAuthAppSummary>,
 }
 
 /// Response for listing all connection types

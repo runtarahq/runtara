@@ -245,6 +245,8 @@ fn init_config() {
             object_model_tenant_pool_max: 16,
             legacy_member_keys: true,
             valkey_tenant_scoped: false,
+            oauth_tenantless_callback: true,
+            oauth_browser_binding: true,
             object_model_max_connections: 1,
             object_model_soft_delete: true,
             object_model_bulk_request_limit: 100,

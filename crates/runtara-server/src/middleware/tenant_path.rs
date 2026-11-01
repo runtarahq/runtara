@@ -59,6 +59,26 @@ pub async fn scope_requested_tenant(
     }
 }
 
+/// The tenants this process serves, for the OAuth callback that names no
+/// tenant: it learns the tenant from the flow, then runs the rest of the
+/// request in that tenant's scope, as [`scope_requested_tenant`] does for a
+/// tenant named in the path.
+pub struct ServedTenants;
+
+impl runtara_connections::TenantHost for ServedTenants {
+    fn serves(&self, tenant: &str) -> bool {
+        crate::config::is_served_tenant(tenant)
+    }
+
+    fn scoped(
+        &self,
+        tenant: String,
+        work: runtara_connections::HostFuture,
+    ) -> runtara_connections::HostFuture {
+        Box::pin(runtara_store_postgres::tenant_scope::scoped(tenant, work))
+    }
+}
+
 /// The served tenant an OAuth redirect's path names.
 fn oauth_tenant(path: &str, is_served: impl Fn(&str) -> bool) -> Option<String> {
     let (segment, _) = path.strip_prefix("/api/oauth/")?.split_once('/')?;

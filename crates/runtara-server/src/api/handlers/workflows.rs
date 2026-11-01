@@ -2742,6 +2742,7 @@ pub(crate) fn graph_validate_routes(
             compatibility: Arc::new(IntegrationCompatibility::new(Default::default())),
             agent_catalog: catalog.clone(),
             connection_events: None,
+            oauth: Default::default(),
         },
     )));
     axum::Router::new().route(

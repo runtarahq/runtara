@@ -169,6 +169,7 @@ fn facade(pool: PgPool) -> ConnectionsFacade {
         compatibility: test_compatibility(),
         agent_catalog: test_agent_catalog(),
         connection_events: None,
+        oauth: Default::default(),
     }))
 }
 

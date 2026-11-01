@@ -6,12 +6,15 @@
 
 use std::sync::Arc;
 
+use redis::AsyncCommands;
 use runtara_connections::crypto::noop::NoOpCipher;
-use runtara_connections::service::oauth::OAuthService;
+use runtara_connections::service::oauth::{OAuthService, StartBinding};
 use sqlx::PgPool;
 use testcontainers::ContainerAsync;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
+
+mod valkey_support;
 
 struct PgFixture {
     pool: PgPool,
@@ -33,8 +36,7 @@ impl PgFixture {
         let pool = PgPool::connect(&url)
             .await
             .expect("required Postgres connection");
-        // Minimal schema for generate_authorization_url: the columns get_with_parameters
-        // reads, plus the oauth_state table create_state writes.
+        // Minimal schema for starting a flow: the columns get_with_parameters reads.
         sqlx::query(
             r#"
             CREATE TABLE connection_data_entity (
@@ -50,22 +52,6 @@ impl PgFixture {
         .execute(&pool)
         .await
         .expect("create required connection table");
-        sqlx::query(
-            r#"
-            CREATE TABLE oauth_state (
-                state TEXT PRIMARY KEY,
-                tenant_id TEXT NOT NULL,
-                connection_id TEXT NOT NULL,
-                integration_id TEXT NOT NULL,
-                redirect_uri TEXT NOT NULL,
-                code_verifier TEXT,
-                expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '10 minutes')
-            )
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .expect("create required OAuth state table");
         Self {
             pool,
             _container: container,
@@ -76,6 +62,7 @@ impl PgFixture {
 #[tokio::test]
 async fn quickbooks_authorize_url_is_descriptor_driven() {
     let fixture = PgFixture::start().await;
+    let valkey = valkey_support::ValkeyFixture::start().await;
 
     sqlx::query(
         "INSERT INTO connection_data_entity (id, tenant_id, integration_id, connection_parameters) \
@@ -93,12 +80,14 @@ async fn quickbooks_authorize_url_is_descriptor_driven() {
         fixture.pool.clone(),
         Arc::new(NoOpCipher),
         "https://platform.example.com".to_string(),
-    );
+    )
+    .with_flows(valkey.manager.clone());
 
-    let url = service
-        .generate_authorization_url("conn_qb", "tenant_qb")
+    let flow = service
+        .start("conn_qb", "tenant_qb", StartBinding::Browser)
         .await
         .expect("generate quickbooks authorize url");
+    let url = flow.authorization_url.clone();
 
     // Authorization endpoint comes from the descriptor, not any QuickBooks-specific code.
     assert!(
@@ -127,17 +116,24 @@ async fn quickbooks_authorize_url_is_descriptor_driven() {
     assert!(url.contains("code_challenge="), "url: {url}");
     assert!(url.contains("code_challenge_method=S256"), "url: {url}");
 
-    // The CSRF state row was persisted with a PKCE verifier for the callback to consume.
-    let (count, verifier): (i64, Option<String>) = sqlx::query_as(
-        "SELECT COUNT(*)::int8, MAX(code_verifier) FROM oauth_state WHERE connection_id = $1",
-    )
-    .bind("conn_qb")
-    .fetch_one(&fixture.pool)
-    .await
-    .expect("count state rows");
-    assert_eq!(count, 1, "authorize must persist exactly one state row");
+    // The flow was stored, under the tenant, with a PKCE verifier for the
+    // callback to send.
+    // The flow is this Valkey's only one.
+    let mut valkey = valkey.manager.clone();
+    let records: Vec<String> = valkey
+        .keys("tenant_qb:oauth_state:*")
+        .await
+        .expect("list flow records");
+    let [record_key] = records.as_slice() else {
+        panic!("one flow record under tenant_qb: {records:?}");
+    };
+    let record: String = valkey.get(record_key).await.expect("read flow record");
+    let record: serde_json::Value = serde_json::from_str(&record).expect("flow record");
+    assert_eq!(record["connection_id"], "conn_qb");
     assert!(
-        verifier.is_some_and(|v| v.len() == 43),
-        "a PKCE verifier must be stored on the state row"
+        record["code_verifier"]
+            .as_str()
+            .is_some_and(|v| v.len() == 43),
+        "a PKCE verifier must be kept with the flow"
     );
 }

@@ -103,6 +103,7 @@ fn facade_with_redis(
             Vec::new(),
         )),
         connection_events: None,
+        oauth: Default::default(),
     }))
 }
 
