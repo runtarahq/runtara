@@ -1763,7 +1763,7 @@ pub async fn start_with(
                     _ = pending_shutdown.clone().wait() => return,
                     _ = interval.tick() => {}
                 }
-                match service.expire_pending().await {
+                match service.expire_pending(config::served_tenants()).await {
                     Ok(0) => {}
                     Ok(dropped) => tracing::info!(
                         dropped,

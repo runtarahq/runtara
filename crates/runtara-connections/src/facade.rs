@@ -96,6 +96,32 @@ fn record_rate_limit_fail_open(reason: &'static str) {
     }
 }
 
+/// The stored `params` with a refresh's tokens: what a refresh writes back.
+/// Built from the parameters as stored, never from the view of them a request
+/// was made with, so a platform app's credentials are not written.
+fn rotated_parameters(params: &Value, rotated: &RotatedCredentials) -> Value {
+    let old_refresh = params.get("refresh_token").and_then(|v| v.as_str());
+    // A provider may omit refresh_token on refresh (non-rotating) — keep the old one.
+    let new_refresh = rotated.refresh_token.as_deref().or(old_refresh);
+    let mut merged = params.clone();
+    if let Some(obj) = merged.as_object_mut() {
+        obj.insert(
+            "access_token".to_string(),
+            Value::String(rotated.access_token.clone()),
+        );
+        if let Some(rt) = new_refresh {
+            obj.insert("refresh_token".to_string(), Value::String(rt.to_string()));
+        }
+        if let Some(exp) = rotated.token_expires_at {
+            obj.insert(
+                "token_expires_at".to_string(),
+                Value::String(exp.to_rfc3339()),
+            );
+        }
+    }
+    merged
+}
+
 impl ConnectionsFacade {
     pub fn new(state: ConnectionsState) -> Self {
         Self { state }
@@ -463,23 +489,7 @@ impl ConnectionsFacade {
         let old_refresh = params.get("refresh_token").and_then(|v| v.as_str());
         // A provider may omit refresh_token on refresh (non-rotating) — keep the old one.
         let new_refresh = rotated.refresh_token.as_deref().or(old_refresh);
-
-        let mut merged = params.clone();
-        if let Some(obj) = merged.as_object_mut() {
-            obj.insert(
-                "access_token".to_string(),
-                Value::String(rotated.access_token.clone()),
-            );
-            if let Some(rt) = new_refresh {
-                obj.insert("refresh_token".to_string(), Value::String(rt.to_string()));
-            }
-            if let Some(exp) = rotated.token_expires_at {
-                obj.insert(
-                    "token_expires_at".to_string(),
-                    Value::String(exp.to_rfc3339()),
-                );
-            }
-        }
+        let merged = rotated_parameters(params, rotated);
 
         let expected_hash = old_refresh.map(refresh_token_hash);
         let new_hash = new_refresh.map(refresh_token_hash);
@@ -678,6 +688,35 @@ end
 mod tests {
     use super::{FAIL_OPEN_WARN_INTERVAL_MS, claim_warn_slot, is_reauth_error};
     use std::sync::atomic::AtomicI64;
+
+    #[test]
+    fn a_refresh_writes_back_the_stored_parameters_not_a_platform_apps_view() {
+        use super::{RotatedCredentials, rotated_parameters};
+        let app = crate::oauth_apps::tests::app("hubspot", "hubspot_private_app");
+        let stored = serde_json::json!({
+            "oauth_app": "hubspot",
+            "access_token": "at-old",
+            "refresh_token": "rt-old",
+        });
+        // The refresh was made with the app's credentials added...
+        let effective = crate::oauth_apps::with_app_credentials(&stored, &app);
+        assert_eq!(effective["client_secret"], "platform-secret");
+        // ...and what is written back is the stored parameters with new tokens.
+        let rotated = RotatedCredentials {
+            access_token: "at-new".into(),
+            refresh_token: Some("rt-new".into()),
+            token_expires_at: None,
+        };
+        let written = rotated_parameters(&stored, &rotated);
+        assert_eq!(written["access_token"], "at-new");
+        assert_eq!(written["refresh_token"], "rt-new");
+        assert_eq!(written["oauth_app"], "hubspot");
+        assert!(written.get("client_id").is_none(), "{written}");
+        assert!(
+            !written.to_string().contains("platform-secret"),
+            "{written}"
+        );
+    }
 
     #[test]
     fn reauth_error_matches_only_declared_codes() {

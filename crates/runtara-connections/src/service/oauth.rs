@@ -646,16 +646,18 @@ impl OAuthService {
             .await
     }
 
-    /// Drop and revoke the pending authorization of every connection whose
-    /// time to be confirmed is over. Returns how many were dropped. Runs on
-    /// the system path, across the tenants the pool sees. A connection that
-    /// fails is logged and left for the next sweep; the others go on.
-    pub async fn expire_pending(&self) -> Result<u64, OAuthError> {
+    /// Drop and revoke the pending authorization of every connection of
+    /// `tenants` whose time to be confirmed is over. Returns how many were
+    /// dropped. Only the tenants a process serves: where processes share a
+    /// database, another's tenants' credentials are sealed under keys this one
+    /// does not hold. A connection that fails is logged and left for the next
+    /// sweep; the others go on.
+    pub async fn expire_pending(&self, tenants: &[String]) -> Result<u64, OAuthError> {
         let now = chrono::Utc::now();
         let mut dropped = 0;
         for (connection_id, tenant_id) in self
             .connection_repo
-            .list_with_status(ConnectionStatus::PendingConfirmation.as_str())
+            .list_with_status(ConnectionStatus::PendingConfirmation.as_str(), tenants)
             .await
             .map_err(|e| OAuthError::Internal(e.to_string()))?
         {

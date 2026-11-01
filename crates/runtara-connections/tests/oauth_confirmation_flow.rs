@@ -278,7 +278,24 @@ async fn the_sweep_drops_only_expired_authorizations() {
     link_and_return(&fixture, "fresh").await;
     expire(&fixture, "late").await;
 
-    assert_eq!(fixture.service().expire_pending().await.unwrap(), 1);
+    // Only the tenants a process serves are swept.
+    assert_eq!(
+        fixture
+            .service()
+            .expire_pending(&["beta".to_string()])
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(fixture.stored("late").await.1, "PENDING_CONFIRMATION");
+    assert_eq!(
+        fixture
+            .service()
+            .expire_pending(&["acme".to_string()])
+            .await
+            .unwrap(),
+        1
+    );
     assert_ne!(fixture.stored("late").await.1, "PENDING_CONFIRMATION");
     assert_eq!(fixture.stored("fresh").await.1, "PENDING_CONFIRMATION");
     expired.verify().await;
