@@ -79,6 +79,8 @@ fn emitted_helper(context: Context, scope_alarm: bool) -> Vec<u8> {
             _ => {}
         }
     }
+    // The stdlib-context shims come after the helpers.
+    defined -= super::super::stdlib_context::shims(&bytes).len() as u32;
     // Export helpers by their emitted registry positions, without assuming
     // Await/WindowWait remain the last functions when another helper is added.
     let helpers: Vec<_> = Helper::ALL

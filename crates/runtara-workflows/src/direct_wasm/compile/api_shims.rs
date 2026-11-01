@@ -899,7 +899,9 @@ pub(super) fn emit_runtime_shims(
         .ok_or_else(|| component_error("api shim: stdlib.api-error-json not imported"))?;
     let stdlib_fn = function(resolve, "runtara:workflow-stdlib", "json", "api-error-json")?;
     let stdlib_sig = resolve.wasm_signature(mangling.import_variant(), stdlib_fn);
-    if stdlib_sig.params != [P, L, P, L, I32, I64, P] {
+    // `ctx` first: the stdlib-context pass supplies it, so callers here pass
+    // only the rest.
+    if stdlib_sig.params != [I32, P, L, P, L, I32, I64, P] {
         return Err(component_error(format!(
             "api shim: stdlib.api-error-json has flat params {:?}",
             stdlib_sig.params

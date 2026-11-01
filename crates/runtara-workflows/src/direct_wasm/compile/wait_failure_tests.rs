@@ -67,6 +67,11 @@ fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
                     panic!("non-function import")
                 };
                 let name = import.name().to_owned();
+                // Stdlib calls carry the caller's context first.
+                let skip = usize::from(
+                    super::stdlib_context::is_stdlib_module(import.module())
+                        && super::stdlib_context::takes_context(import.name()),
+                );
                 let memory_name = memory_name.clone();
                 linker
                     .func_new(
@@ -74,6 +79,7 @@ fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
                         import.name(),
                         ty,
                         move |mut caller, args, results| {
+                            let args = &args[skip..];
                             if caller.data().closed != 0 {
                                 caller.data_mut().after_close.push(name.clone());
                             }

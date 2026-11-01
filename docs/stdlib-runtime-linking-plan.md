@@ -62,6 +62,22 @@ before and after.
 
 ## Phase 1: stdlib contexts (fused, behaviour-neutral)
 
+**As built:**
+- **Emitter:** unchanged at its ~189 call sites. A post-pass
+  (`C/stdlib_context.rs`, run at the end of `emit_direct_core_module`) adds
+  the `ctx` global and one shim per stdlib import, and routes calls through
+  the shims.
+- **`init-manifest`:** takes the caller's previous context (`u32::MAX` for
+  none), resets and reuses it, and returns it. Otherwise a published agent
+  would open a new context on every invocation.
+- **The two by-pointer functions:**
+  - `agent-retry-error-info` is pure and takes no context;
+  - the `agent-error` shim rewrites its argument area in place (`ctx @0`,
+    `agent-id @4`, record unchanged at 8).
+- **Stdlib:** keeps its thread-locals as the current context.
+  `src/context.rs` swaps a context in for each call and back out, so
+  `direct_json.rs` is untouched.
+
 One stdlib instance will later serve the root logic and every published
 workflow-agent logic in the run (`DW/compile_request.rs:430-475`; parallel
 pools instantiate an agent K times, `DW/component.rs:542-547`). Each needs its
