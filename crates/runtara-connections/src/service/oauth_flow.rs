@@ -198,13 +198,13 @@ mod tests {
 
     #[test]
     fn keys_hold_the_state_only_as_a_hash() {
-        let hash = sha256_hex("s3cret-state");
+        let hash = sha256_hex("flow-state-1");
         assert_eq!(index_key(&hash), format!("runtara:oauth_state:{hash}"));
         assert_eq!(
             record_key("acme", &hash),
             format!("acme:oauth_state:{hash}")
         );
-        assert!(!index_key(&hash).contains("s3cret"));
+        assert!(!index_key(&hash).contains("flow-state-1"));
     }
 
     #[test]
@@ -215,8 +215,9 @@ mod tests {
         assert_ne!(name, cookie_name("state-2", true));
         assert!(cookie_name("state-1", false).starts_with("runtara-oauth-"));
 
-        let set = binding_cookie("state-1", "nonce", true);
-        assert!(set.starts_with(&format!("{name}=nonce;")));
+        let nonce = new_nonce();
+        let set = binding_cookie("state-1", &nonce, true);
+        assert!(set.starts_with(&format!("{name}={nonce};")));
         for attribute in [
             "Path=/",
             "HttpOnly",
@@ -226,7 +227,7 @@ mod tests {
         ] {
             assert!(set.contains(attribute), "{set}");
         }
-        assert!(!binding_cookie("state-1", "nonce", false).contains("Secure"));
+        assert!(!binding_cookie("state-1", &nonce, false).contains("Secure"));
         assert!(clearing_cookie("state-1", true).contains("Max-Age=0"));
     }
 

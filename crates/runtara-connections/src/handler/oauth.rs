@@ -551,7 +551,7 @@ async fn callback_outcome(
         );
     }
 
-    let oauth_state = match params.state {
+    let flow_state = match params.state {
         Some(s) if !s.is_empty() => s,
         _ => {
             return callback_response(
@@ -586,7 +586,7 @@ async fn callback_outcome(
     };
 
     let secure = state.public_base_url.starts_with("https://");
-    let cookie_name = oauth_flow::cookie_name(&oauth_state, secure);
+    let cookie_name = oauth_flow::cookie_name(&flow_state, secure);
     let browser_nonce = headers
         .get_all(COOKIE)
         .iter()
@@ -600,7 +600,7 @@ async fn callback_outcome(
     let outcome = match service
         .complete(
             &tenant_id,
-            &oauth_state,
+            &flow_state,
             &code,
             &callback_params,
             browser_nonce.as_deref(),

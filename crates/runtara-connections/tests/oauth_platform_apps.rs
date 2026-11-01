@@ -156,7 +156,7 @@ async fn a_connection_on_a_platform_app_has_no_credentials_of_its_own() {
     let url = flow.authorization_url;
     assert!(
         url.starts_with("https://app.hubspot.com/oauth/authorize?"),
-        "{url}"
+        "the flow goes to HubSpot's authorize endpoint"
     );
     assert_eq!(
         query_param(&url, "client_id").as_deref(),
