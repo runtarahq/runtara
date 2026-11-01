@@ -89,7 +89,7 @@ wasmparser = "0.247"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Embedded-vs-CLI A/B in tests/direct_wasm_execute.rs: the composed component
 # must behave identically under the in-process WorkflowExecutor.
-runtara-component-host = { path = "../runtara-component-host" }
+runtara-component-host = { path = "../runtara-component-host", features = ["test-incremental-cache"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
 # Precompile fixtures draw per-launch nonces the way the embedded runner does.
 getrandom = "0.3"

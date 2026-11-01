@@ -714,6 +714,10 @@ fn direct_core_functions(core: &[u8]) -> Vec<DirectCoreFunction<'_>> {
             }
         }
     }
+    // The emitter's stdlib calls go through the context shims.
+    for (import, shim) in super::stdlib_context::shims(core) {
+        functions[import as usize].index = shim;
+    }
     let api_runtime = functions
         .iter()
         .any(|function| function.module == "cm32p2|runtara:api/run@1");
@@ -899,6 +903,15 @@ fn entry_operators_with_helpers(core: &[u8]) -> Vec<Operator<'_>> {
     let mut out = Vec::new();
     expand(run_body, imported, run_body, &bodies, 0, &mut out);
     out
+}
+
+/// The function the emitter's calls to `import` reach: its stdlib-context
+/// shim for a stdlib import, else the import itself.
+fn stdlib_call_index(core: &[u8], import: u32) -> u32 {
+    super::stdlib_context::shims(core)
+        .into_iter()
+        .find_map(|(stdlib, shim)| (stdlib == import).then_some(shim))
+        .unwrap_or(import)
 }
 
 fn direct_core_import(imports: &HashMap<String, u32>, module: &str, name: &str) -> u32 {
@@ -4698,7 +4711,12 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "runtara:workflow-stdlib/json",
             "cm32p2|runtara:workflow-stdlib/json@1",
             "init-manifest",
-            vec![WasmType::Pointer, WasmType::Length, WasmType::Pointer],
+            vec![
+                WasmType::I64,
+                WasmType::Pointer,
+                WasmType::Length,
+                WasmType::Pointer,
+            ],
         ),
         (
             "stdlib.build-source",
@@ -4706,6 +4724,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "build-source",
             vec![
+                WasmType::I64,
                 WasmType::Pointer,
                 WasmType::Length,
                 WasmType::Pointer,
@@ -4721,6 +4740,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "apply-mapping",
             vec![
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4733,6 +4753,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "eval-condition",
             vec![
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4745,6 +4766,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "filter",
             vec![
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4757,6 +4779,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "log-event",
             vec![
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4769,6 +4792,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "log",
             vec![
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4781,6 +4805,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "process-switch",
             vec![
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4793,6 +4818,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "value-switch",
             vec![
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4805,6 +4831,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "group-by",
             vec![
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4817,6 +4844,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "delay-duration-ms",
             vec![
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4829,6 +4857,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "delay",
             vec![
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4842,6 +4871,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "agent-output",
             vec![
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4856,6 +4886,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "step-debug-start",
             vec![
+                WasmType::I64,
                 WasmType::Pointer,
                 WasmType::Length,
                 WasmType::Pointer,
@@ -4868,10 +4899,11 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "runtara:workflow-stdlib/json",
             "cm32p2|runtara:workflow-stdlib/json@1",
             "step-debug-end",
-            // step-id (ptr,len), source (ptr,len), launched-at-ms (i64),
+            // ctx, step-id (ptr,len), source (ptr,len), launched-at-ms (i64),
             // settled-at-ms (i64), retptr — the two u64 timestamps carry the real
             // parallel-branch launch/settle interval (0 == absent).
             vec![
+                WasmType::I64,
                 WasmType::Pointer,
                 WasmType::Length,
                 WasmType::Pointer,
@@ -4895,6 +4927,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "error-event",
             vec![
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -4907,6 +4940,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             "cm32p2|runtara:workflow-stdlib/json@1",
             "error",
             vec![
+                WasmType::I64,
                 WasmType::I32,
                 WasmType::Pointer,
                 WasmType::Length,
@@ -5625,7 +5659,7 @@ fn direct_core_lowers_non_durable_agent_call() {
                     let import = import.expect("core import");
                     if import.module == actual_module && import.name == actual_name {
                         saw_agent_invoke = true;
-                        agent_invoke_index = Some(next_function_index);
+                        agent_invoke_index = Some(stdlib_call_index(&core, next_function_index));
                     }
                     saw_agent_output |= import.module.contains("runtara:workflow-stdlib/json")
                         && import.name == "agent-output";
@@ -5633,13 +5667,14 @@ fn direct_core_lowers_non_durable_agent_call() {
                         && import.name == "agent-validate-input"
                     {
                         saw_agent_validate_input = true;
-                        agent_validate_input_index = Some(next_function_index);
+                        agent_validate_input_index =
+                            Some(stdlib_call_index(&core, next_function_index));
                     }
                     if import.module.contains("runtara:workflow-stdlib/json")
                         && import.name == "agent-error"
                     {
                         saw_agent_error = true;
-                        agent_error_index = Some(next_function_index);
+                        agent_error_index = Some(stdlib_call_index(&core, next_function_index));
                     }
                     saw_agent_debug_error |= import.module.contains("runtara:workflow-stdlib/json")
                         && import.name == "agent-debug-error";
@@ -6933,20 +6968,23 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
                 for import in reader.into_imports() {
                     let import = import.expect("core import");
                     if import.module == actual_module && import.name == actual_name {
-                        agent_invoke_index = Some(next_function_index);
+                        agent_invoke_index = Some(stdlib_call_index(&core, next_function_index));
                     }
                     if import.module.contains("runtara:workflow-stdlib/json")
                         && import.name == "agent-connection-id"
                     {
-                        agent_connection_id_index = Some(next_function_index);
+                        agent_connection_id_index =
+                            Some(stdlib_call_index(&core, next_function_index));
                     }
                     if import.module == resolver_module && import.name == resolver_name {
-                        connection_describe_index = Some(next_function_index);
+                        connection_describe_index =
+                            Some(stdlib_call_index(&core, next_function_index));
                     }
                     if import.module.contains("runtara:workflow-stdlib/json")
                         && import.name == "agent-connection-input"
                     {
-                        agent_connection_input_index = Some(next_function_index);
+                        agent_connection_input_index =
+                            Some(stdlib_call_index(&core, next_function_index));
                     }
                     if matches!(import.ty, TypeRef::Func(_)) {
                         next_function_index += 1;
@@ -7041,12 +7079,12 @@ fn direct_core_lowers_non_durable_agent_on_error_route() {
                     if import.module.contains("runtara:workflow-stdlib/json")
                         && import.name == "error-steps"
                     {
-                        error_steps_index = Some(next_function_index);
+                        error_steps_index = Some(stdlib_call_index(&core, next_function_index));
                     }
                     if import.module.contains("runtara:workflow-stdlib/json")
                         && import.name == "eval-condition"
                     {
-                        eval_condition_index = Some(next_function_index);
+                        eval_condition_index = Some(stdlib_call_index(&core, next_function_index));
                     }
                     if matches!(import.ty, TypeRef::Func(_)) {
                         next_function_index += 1;
@@ -7610,25 +7648,37 @@ fn direct_core_run_lowers_split_loop_through_stdlib() {
                     if import.module.contains("runtara:workflow-stdlib/json") {
                         match import.name {
                             "split-item-count" => {
-                                split_item_count_index = Some(next_function_index)
+                                split_item_count_index =
+                                    Some(stdlib_call_index(&core, next_function_index))
                             }
-                            "split-item" => split_item_index = Some(next_function_index),
+                            "split-item" => {
+                                split_item_index =
+                                    Some(stdlib_call_index(&core, next_function_index))
+                            }
                             "split-iteration-variables" => {
-                                split_iteration_variables_index = Some(next_function_index)
+                                split_iteration_variables_index =
+                                    Some(stdlib_call_index(&core, next_function_index))
                             }
                             "split-validate-input" => {
-                                split_validate_input_index = Some(next_function_index)
+                                split_validate_input_index =
+                                    Some(stdlib_call_index(&core, next_function_index))
                             }
                             "split-validate-output" => {
-                                split_validate_output_index = Some(next_function_index)
+                                split_validate_output_index =
+                                    Some(stdlib_call_index(&core, next_function_index))
                             }
                             "split-initial-results" => {
-                                split_initial_results_index = Some(next_function_index)
+                                split_initial_results_index =
+                                    Some(stdlib_call_index(&core, next_function_index))
                             }
                             "split-append-output" => {
-                                split_append_output_index = Some(next_function_index)
+                                split_append_output_index =
+                                    Some(stdlib_call_index(&core, next_function_index))
                             }
-                            "split-output" => split_output_index = Some(next_function_index),
+                            "split-output" => {
+                                split_output_index =
+                                    Some(stdlib_call_index(&core, next_function_index))
+                            }
                             _ => {}
                         }
                     }
@@ -8381,22 +8431,24 @@ fn direct_core_run_collects_split_validation_errors_when_dont_stop_is_enabled() 
                     if import.module.contains("runtara:workflow-stdlib/json")
                         && import.name == "split-append-error"
                     {
-                        split_append_error_index = Some(next_function_index);
+                        split_append_error_index =
+                            Some(stdlib_call_index(&core, next_function_index));
                     }
                     if import.module.contains("runtara:workflow-stdlib/json")
                         && import.name == "apply-mapping"
                     {
-                        apply_mapping_index = Some(next_function_index);
+                        apply_mapping_index = Some(stdlib_call_index(&core, next_function_index));
                     }
                     if import.module.contains("runtara:workflow-stdlib/json")
                         && import.name == "agent-validate-input"
                     {
-                        agent_validate_input_index = Some(next_function_index);
+                        agent_validate_input_index =
+                            Some(stdlib_call_index(&core, next_function_index));
                     }
                     if import.module.contains("runtara:workflow-stdlib/json")
                         && matches!(import.name, "agent-error" | "agent-error-from-info")
                     {
-                        agent_failure_index = Some(next_function_index);
+                        agent_failure_index = Some(stdlib_call_index(&core, next_function_index));
                     }
                     if matches!(import.ty, TypeRef::Func(_)) {
                         next_function_index += 1;
@@ -8507,12 +8559,13 @@ fn direct_core_run_collects_split_error_steps_when_dont_stop_is_enabled() {
                     if import.module.contains("runtara:workflow-stdlib/json")
                         && import.name == "error"
                     {
-                        error_index = Some(next_function_index);
+                        error_index = Some(stdlib_call_index(&core, next_function_index));
                     }
                     if import.module.contains("runtara:workflow-stdlib/json")
                         && import.name == "split-append-error"
                     {
-                        split_append_error_index = Some(next_function_index);
+                        split_append_error_index =
+                            Some(stdlib_call_index(&core, next_function_index));
                     }
                     if matches!(import.ty, TypeRef::Func(_)) {
                         next_function_index += 1;

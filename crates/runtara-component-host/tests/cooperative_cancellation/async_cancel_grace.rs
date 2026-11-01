@@ -88,6 +88,7 @@ fn async_cancel_requires_an_additional_engine_capability() -> anyhow::Result<()>
     let engine = runtara_component_host::build_engine(&runtara_component_host::EngineConfig {
         cache_dir: None,
         enable_epoch_interruption: false,
+        incremental_cache: false,
     })?;
     let error = Component::new(&engine, source(Cleanup::Acknowledge))
         .expect_err("production engine must reject the unqualified ABI extension");

@@ -1,0 +1,5 @@
+[
+  "runtara:v2:[\"delay\",\"smoke-parallel_branches_sync_diamond\",[],[],[\"branch_a\"]]",
+  "runtara:v2:[\"delay\",\"smoke-parallel_branches_sync_diamond\",[],[],[\"branch_b\"]]",
+  "runtara:v2:[\"delay\",\"smoke-parallel_branches_sync_diamond\",[],[],[\"entry\"]]"
+]

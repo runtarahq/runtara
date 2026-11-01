@@ -21,6 +21,11 @@ pub struct EngineConfig {
     /// every deployed image. `None` disables the disk cache (compiles stay
     /// in-memory only, the pre-cache behavior).
     pub cache_dir: Option<PathBuf>,
+    /// Tests only: reuse Cranelift output per function across every engine in
+    /// the process. Composed workflows differ only in their small logic
+    /// module, so a suite stops recompiling the shared stdlib and agents for
+    /// each one. Ignored unless the `test-incremental-cache` feature is on.
+    pub incremental_cache: bool,
 }
 
 impl Default for EngineConfig {
@@ -28,6 +33,7 @@ impl Default for EngineConfig {
         Self {
             enable_epoch_interruption: true,
             cache_dir: default_cache_dir(),
+            incremental_cache: false,
         }
     }
 }
@@ -77,7 +83,59 @@ pub fn build_engine(cfg: &EngineConfig) -> Result<Arc<Engine>> {
         }
     }
 
+    if cfg.incremental_cache {
+        enable_incremental_cache(&mut c)?;
+    }
+
     Ok(Arc::new(Engine::new(&c)?))
+}
+
+#[cfg(feature = "test-incremental-cache")]
+fn enable_incremental_cache(c: &mut Config) -> Result<()> {
+    let store: Arc<dyn wasmtime::CacheStore> = incremental_store::shared().clone();
+    c.enable_incremental_compilation(store)?;
+    Ok(())
+}
+
+#[cfg(not(feature = "test-incremental-cache"))]
+fn enable_incremental_cache(_: &mut Config) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(feature = "test-incremental-cache")]
+mod incremental_store {
+    use std::borrow::Cow;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    /// Process-wide, unbounded: test processes are short-lived and the
+    /// entries are compiled stdlib/agent functions.
+    #[derive(Debug, Default)]
+    pub(super) struct MemoryStore(Mutex<HashMap<Vec<u8>, Vec<u8>>>);
+
+    impl wasmtime::CacheStore for MemoryStore {
+        fn get(&self, key: &[u8]) -> Option<Cow<'_, [u8]>> {
+            let entries = self
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            entries.get(key).map(|value| Cow::Owned(value.clone()))
+        }
+
+        fn insert(&self, key: &[u8], value: Vec<u8>) -> bool {
+            let mut entries = self
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            entries.insert(key.to_vec(), value);
+            true
+        }
+    }
+
+    pub(super) fn shared() -> &'static Arc<MemoryStore> {
+        static STORE: OnceLock<Arc<MemoryStore>> = OnceLock::new();
+        STORE.get_or_init(Arc::default)
+    }
 }
 
 /// Duration of one epoch tick as driven by [`spawn_epoch_ticker`]. A deadline

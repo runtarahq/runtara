@@ -85,6 +85,53 @@ pub mod stdlib {
     pub const WIT: &str = include_str!("../wit/workflow-stdlib/runtara-workflow-stdlib.wit");
 }
 
+/// `runtara:workflow-stdlib-link`: the stdlib as workflow logic imports it
+/// when the host links one stdlib instance into the run instead of composing
+/// it into each workflow. Derived from [`stdlib::WIT`]: the same functions,
+/// each `async`, so the host can serve the import by calling the stdlib
+/// instance (a synchronously typed host function cannot call another guest
+/// instance in a concurrent Store). The logic lowers them synchronously, so
+/// its code is the same either way.
+pub mod stdlib_link {
+    pub const PACKAGE: &str = concat!("runtara:workflow-stdlib-link@", v!());
+    pub const JSON: &str = concat!("runtara:workflow-stdlib-link/json@", v!());
+
+    /// Prefix of a stdlib pin: an empty-instance import of a linked
+    /// artifact naming the SHA-256 of the stdlib it was built against, so
+    /// the host links that exact stdlib. The host defines nothing for it.
+    pub const PIN_PREFIX: &str = "runtara:stdlib-artifacts/";
+
+    /// The pin of the stdlib whose wasm has SHA-256 `sha256` (lowercase hex).
+    pub fn pin(sha256: &str) -> String {
+        format!("{PIN_PREFIX}workflow-stdlib-h{sha256}@0.1.0")
+    }
+
+    /// The SHA-256 a [`pin`] names, or `None` when `import` is not one.
+    pub fn pinned_sha256(import: &str) -> Option<&str> {
+        let sha256 = import
+            .strip_prefix(PIN_PREFIX)?
+            .strip_prefix("workflow-stdlib-h")?
+            .strip_suffix("@0.1.0")?;
+        (sha256.len() == 64
+            && sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        .then_some(sha256)
+    }
+
+    /// The package's WIT text.
+    pub fn wit() -> String {
+        let package = concat!("package ", "runtara:workflow-stdlib@", v!(), ";");
+        let linked = concat!("package ", "runtara:workflow-stdlib-link@", v!(), ";");
+        assert!(super::stdlib::WIT.contains(package), "stdlib package line");
+        let world_start = super::stdlib::WIT.rfind("\nworld ").expect("stdlib world");
+        super::stdlib::WIT[..world_start]
+            .replacen(package, linked, 1)
+            .replace(": func(", ": async func(")
+            + "\nworld host {\n    import json;\n}\n"
+    }
+}
+
 /// `runtara:trusted`: approved trusted agents only.
 pub mod trusted {
     pub const PACKAGE: &str = concat!("runtara:trusted@", v!());
@@ -151,6 +198,9 @@ pub fn resolve() -> Result<wit_parser::Resolve, String> {
             .push_str(name, wit)
             .map_err(|error| format!("{name}: {error:#}"))?;
     }
+    resolve
+        .push_str("runtara-workflow-stdlib-link.wit", &stdlib_link::wit())
+        .map_err(|error| format!("runtara-workflow-stdlib-link.wit: {error:#}"))?;
     Ok(resolve)
 }
 
