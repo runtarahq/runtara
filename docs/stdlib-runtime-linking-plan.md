@@ -323,6 +323,14 @@ a release change.
   own unit tests default to fused, because they pin the fused layout.
 - **CI:** `components-build` and `test-composed-deadlines` run linked, with
   the host crate optimized. `test-fused-stdlib` runs the battery fused.
+- **CI (x86, GitHub-hosted, PR #365):**
+
+  | | Before (main) | After |
+  |---|---|---|
+  | direct WASM smoke step | 30 min 7 s | 8 min 58 s (linked) |
+  | `test-composed-deadlines` job | 16 min 10 s | 8 min 53 s |
+  | fused battery | none | `test-fused-stdlib` 11 min 48 s, in parallel |
+
 - **E2E:** `e2e/test_linked_stdlib_release_upgrade.sh` parks a run, restarts
   the server on a release with a different stdlib, and checks that the run
   completes, then compiles and runs a new workflow on the new release.
