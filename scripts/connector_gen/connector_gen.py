@@ -490,8 +490,9 @@ def normalize_schemas(sliced: dict) -> None:
             del node["additionalProperties"]
         # A schema's `required` lists field names; one written on the field itself
         # (UPS's `required: SecurePINType`) fails the generator's spec validation.
-        # Parameters, request bodies and headers have a boolean `required` of their own.
-        if "required" in node and not isinstance(node["required"], list) and not node.keys() & {"in", "content", "schema"}:
+        # Parameters, request bodies and headers have a boolean `required` of their
+        # own, and in a map of names (`components.schemas`) `required` is an entry.
+        if isinstance(node.get("required"), (str, bool)) and not node.keys() & {"in", "content", "schema"}:
             del node["required"]
         # An inline object is named after a one-word `title`: the generator spells
         # the struct `Pod` but types the field with the raw `POD` (UPS's proof of
@@ -719,9 +720,12 @@ def merge_slices(slices: list) -> dict:
     differently under one generated name (UPS's Tracking and Shipping both
     define `ErrorResponse`) each get it renamed `<spec name><Schema>`
     (`TrackingErrorResponse`); a schema they define identically is kept once."""
-    names = [name for name, _ in slices]
-    if not all(names) or len(set(names)) != len(names):
-        sys.exit("each entry of `specs` needs a `name` of its own")
+    # Names are compared as the prefixes they become: `Tracking` and `tracking`
+    # would rename a schema to the same `TrackingErrorResponse`, forever.
+    prefixes = [rust_model_name(name or "") for name, _ in slices]
+    if not all(prefixes) or len(set(prefixes)) != len(prefixes):
+        sys.exit("each entry of `specs` needs a `name` of its own, "
+                 "not one that differs from another only in case or punctuation")
     if len({canonical(sliced.get("servers")) for _, sliced in slices}) > 1:
         sys.exit("the specs list different `servers`; the generated requests share one base path")
 

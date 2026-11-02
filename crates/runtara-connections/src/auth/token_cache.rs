@@ -476,21 +476,22 @@ async fn parse_token_response(
     // The (possibly rotated) refresh token, when the provider returns one.
     let refresh_token = body["refresh_token"].as_str().map(|s| s.to_string());
 
-    let expires_at = expires_in_seconds(&body)
-        .map(|ttl| Utc::now() + Duration::seconds(ttl))
-        .or_else(|| {
-            if default_ttl_seconds > 0 {
-                Some(Utc::now() + Duration::seconds(default_ttl_seconds))
-            } else {
-                None
-            }
-        });
-
     Ok(TokenResponse {
         access_token,
-        expires_at,
+        expires_at: token_expiry(&body, default_ttl_seconds),
         refresh_token,
     })
+}
+
+/// When the token expires: after its `expires_in`, or after the default
+/// lifetime when the provider sends none, or one too large to be a date.
+fn token_expiry(body: &Value, default_ttl_seconds: i64) -> Option<DateTime<Utc>> {
+    let after = |seconds: i64| Utc::now().checked_add_signed(Duration::try_seconds(seconds)?);
+    match expires_in_seconds(body).and_then(after) {
+        Some(expiry) => Some(expiry),
+        None if default_ttl_seconds > 0 => after(default_ttl_seconds),
+        None => None,
+    }
 }
 
 /// The token's lifetime in seconds: `expires_in` as a number, or as a numeric
@@ -801,6 +802,24 @@ mod tests {
         );
         assert_eq!(expires_in_seconds(&json!({"expires_in": "soon"})), None);
         assert_eq!(expires_in_seconds(&json!({})), None);
+    }
+
+    #[test]
+    fn an_expires_in_too_large_for_a_date_falls_back_to_the_default() {
+        use serde_json::json;
+        let day = DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS;
+        for expires_in in [json!("100000000000000"), json!(i64::MAX)] {
+            let expiry = token_expiry(&json!({ "expires_in": expires_in }), day).unwrap();
+            let lifetime = expiry - Utc::now();
+            assert!(
+                lifetime > Duration::seconds(day - 60) && lifetime <= Duration::seconds(day),
+                "{expires_in}: cached for {lifetime}"
+            );
+        }
+        assert_eq!(
+            token_expiry(&json!({ "expires_in": "100000000000000" }), 0),
+            None
+        );
     }
 
     #[tokio::test]

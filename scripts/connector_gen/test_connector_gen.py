@@ -312,6 +312,12 @@ class NormalizeTest(unittest.TestCase):
         self.assertIs(op["parameters"][0]["required"], True)
         self.assertIs(op["requestBody"]["required"], True)
 
+    def test_a_schema_named_required_is_kept(self):
+        schema = {"type": "object", "properties": {"id": {"type": "string"}}}
+        sliced = cg.slice_spec(spec_with(ok_json({"$ref": "#/components/schemas/required"}), {"required": schema}),
+                               ["op"])
+        self.assertEqual(sliced["components"]["schemas"]["required"]["properties"], schema["properties"])
+
 
 class ConnectionPartsTest(unittest.TestCase):
     """Parameters no step input sets: headers the connection sends
@@ -438,6 +444,9 @@ class MergeTest(unittest.TestCase):
             ((track, ("Ship", "ship", merge_spec("/track", "ship", self.schemas("e")))), "more than one spec"),
             ((track, ("", "ship", merge_spec("/ship", "ship", self.schemas("e")))), "`name`"),
             ((track, ("Track", "ship", merge_spec("/ship", "ship", self.schemas("e")))), "`name`"),
+            # Both would prefix `TrackError`; renaming used to loop forever.
+            ((track, ("track", "ship", merge_spec("/ship", "ship", self.schemas("other")))), "`name`"),
+            ((track, ("__", "ship", merge_spec("/ship", "ship", self.schemas("other")))), "`name`"),
         )
         for specs, fragment in cases:
             with self.assertRaises(SystemExit) as raised:
