@@ -136,9 +136,30 @@ fn work(settings: &serde_json::Value) -> Result<(), String> {
                 let mut framed = (body.len() as u32).to_le_bytes().to_vec();
                 framed.extend(&body);
                 framed.extend(splice);
+                // Deflated where the link is slow: the code and the outcome
+                // shrink to about a fifth, so the call needs fewer round
+                // trips on a fresh connection.
+                let (framed, compressed) = if deflate {
+                    use std::io::Write;
+                    let mut encoder = flate2::write::DeflateEncoder::new(
+                        Vec::with_capacity(framed.len() / 3),
+                        flate2::Compression::fast(),
+                    );
+                    encoder
+                        .write_all(&framed)
+                        .map_err(|error| error.to_string())?;
+                    (
+                        encoder.finish().map_err(|error| error.to_string())?,
+                        "&compressed=deflate",
+                    )
+                } else {
+                    (framed, "")
+                };
                 http::call(
                     "POST",
-                    &format!("/v1/compiles/{id}/outcome?artifact={digest}&encoding=splice"),
+                    &format!(
+                        "/v1/compiles/{id}/outcome?artifact={digest}&encoding=splice{compressed}"
+                    ),
                     Some(framed),
                 )?;
             }

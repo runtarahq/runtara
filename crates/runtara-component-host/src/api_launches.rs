@@ -725,6 +725,7 @@ fn compile_worker_routes(launches: Arc<ApiLaunches>) -> axum::Router {
     struct WithArtifact {
         artifact: Option<String>,
         encoding: Option<String>,
+        compressed: Option<String>,
     }
     async fn outcome(
         State(launches): State<Arc<ApiLaunches>>,
@@ -740,8 +741,26 @@ fn compile_worker_routes(launches: Arc<ApiLaunches>) -> axum::Router {
             Err(_) => return refused(Refusal::BadPart("the outcome is too large")),
         };
         // What it made, in the same call: the outcome's length, the outcome,
-        // then the component, taken whole before the outcome ends the compile.
+        // then the component, taken whole before the outcome ends the compile;
+        // the lot deflated when it says so.
         if let Some(sha256) = with.artifact {
+            match with.compressed.as_deref() {
+                None => {}
+                Some("deflate") => {
+                    use std::io::Read;
+                    /// The most an outcome and what it made inflate to.
+                    const INFLATED_LIMIT: u64 = 72 * 1024 * 1024;
+                    let mut inflated = Vec::with_capacity(body.len() * 4);
+                    let read = flate2::read::DeflateDecoder::new(body.as_slice())
+                        .take(INFLATED_LIMIT + 1)
+                        .read_to_end(&mut inflated);
+                    if read.is_err() || inflated.len() as u64 > INFLATED_LIMIT {
+                        return refused(Refusal::BadPart("the body does not inflate"));
+                    }
+                    body = inflated;
+                }
+                Some(_) => return refused(Refusal::BadPart("not a compression of a hand-back")),
+            }
             let Some(encoding) = crate::compile_worker::Encoding::named(with.encoding.as_deref())
             else {
                 return refused(Refusal::BadPart("not an encoding of a hand-back"));
@@ -2621,6 +2640,57 @@ mod tests {
                 sha(&made)
             ),
             framed(&outcome, &splice),
+            worker.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(posted.status(), 204);
+        let result = done.await.unwrap();
+        assert_eq!(result.outcome, outcome);
+        assert_eq!(result.made, Some(made.clone()));
+
+        // The same, deflated.
+        let (id, done) = launches.submit_compile(
+            &tenant,
+            b"{\"compile\":3}".to_vec(),
+            [(sha(b"stdlib"), dir.path().join("stdlib.wasm"))]
+                .into_iter()
+                .collect(),
+        );
+        call(
+            "GET",
+            "/v1/compiles/next?wait_ms=1000".into(),
+            vec![],
+            worker.clone(),
+        )
+        .await
+        .unwrap();
+        let deflated = {
+            use std::io::Write;
+            let mut encoder =
+                flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(&framed(&outcome, &splice)).unwrap();
+            encoder.finish().unwrap()
+        };
+        let garbled = call(
+            "POST",
+            format!(
+                "/v1/compiles/{id}/outcome?artifact={}&encoding=splice&compressed=deflate",
+                sha(&made)
+            ),
+            b"not deflate".to_vec(),
+            worker.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(garbled.status(), 400);
+        let posted = call(
+            "POST",
+            format!(
+                "/v1/compiles/{id}/outcome?artifact={}&encoding=splice&compressed=deflate",
+                sha(&made)
+            ),
+            deflated,
             worker.clone(),
         )
         .await
