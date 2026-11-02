@@ -381,6 +381,9 @@ pub struct DirectCompilationSettings {
     /// Additional agent-component search dirs (per-tenant workflow-agent
     /// staging) consulted after `components_dir` during composition.
     pub extra_component_dirs: Vec<PathBuf>,
+    /// How workflows reach the stdlib: the mode this process's runner runs
+    /// artifacts in.
+    pub stdlib: runtara_workflows::direct_wasm::DirectStdlibMode,
 }
 
 /// Build direct compilation settings from the process configuration.
@@ -388,6 +391,7 @@ pub fn direct_compilation_settings_from_config() -> DirectCompilationSettings {
     DirectCompilationSettings {
         components_dir: crate::config::direct_wasm_components_dir(),
         extra_component_dirs: Vec::new(),
+        stdlib: crate::compile_executor::workflow_stdlib(),
     }
 }
 
@@ -424,6 +428,7 @@ fn compile_workflow_direct_only(
     source_checksum: String,
     components_dir: Option<PathBuf>,
     extra_component_dirs: Vec<PathBuf>,
+    stdlib: runtara_workflows::direct_wasm::DirectStdlibMode,
 ) -> std::io::Result<NativeCompilationResult> {
     let Some(components_dir) = components_dir else {
         return Err(std::io::Error::new(
@@ -438,6 +443,7 @@ fn compile_workflow_direct_only(
         components_dir,
         extra_component_dirs,
         source_checksum: Some(source_checksum),
+        stdlib: Some(stdlib),
     };
 
     match crate::compile_executor::compile(input.clone(), options) {
@@ -865,6 +871,7 @@ impl CompilationService {
             direct_compilation: DirectCompilationSettings {
                 components_dir: None,
                 extra_component_dirs: Vec::new(),
+                stdlib: crate::compile_executor::workflow_stdlib(),
             },
         }
     }
@@ -1205,6 +1212,7 @@ impl CompilationService {
                 compile_source_checksum,
                 direct_compilation.components_dir,
                 extra_component_dirs,
+                direct_compilation.stdlib,
             )
         })
         .await
@@ -1709,6 +1717,7 @@ impl CompilationService {
             ServiceError::CompilationError(format!("Compilation queue closed: {e}"))
         })?;
         let publishing_tenant = tenant_id.to_string();
+        let stdlib = self.direct_compilation.stdlib;
         let result = tokio::task::spawn_blocking(move || {
             // Where this process compiles: elsewhere, with an executor set.
             if let Some(executor) = crate::compile_executor::executor() {
@@ -1718,27 +1727,30 @@ impl CompilationService {
                         direct_input,
                         &components_dir,
                         &extra_dirs,
+                        stdlib,
                     )
                     .map_err(|error| error.to_string());
             }
-            let mut result = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
-                direct_input,
-                runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
-                // Omit the runtime where the graph allows; the compiler keeps
-                // it for anything that parks or runs under the caller's instance.
-                true,
-            )
-            .map_err(|error| error.to_string())?;
-            runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
-                &mut result,
-                &components_dir,
-                &extra_dirs,
-            )
-            .map_err(|error| error.to_string())?;
-            Ok::<_, String>(runtara_workflows::compile_request::PublishedAgent {
-                wasm_path: result.wasm_path,
-                wasm_size: result.wasm_size,
-                artifact_metadata: result.artifact_metadata,
+            stdlib.scope(|| {
+                let mut result = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+                    direct_input,
+                    runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
+                    // Omit the runtime where the graph allows; the compiler keeps
+                    // it for anything that parks or runs under the caller's instance.
+                    true,
+                )
+                .map_err(|error| error.to_string())?;
+                runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+                    &mut result,
+                    &components_dir,
+                    &extra_dirs,
+                )
+                .map_err(|error| error.to_string())?;
+                Ok::<_, String>(runtara_workflows::compile_request::PublishedAgent {
+                    wasm_path: result.wasm_path,
+                    wasm_size: result.wasm_size,
+                    artifact_metadata: result.artifact_metadata,
+                })
             })
         })
         .await

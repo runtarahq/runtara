@@ -134,6 +134,10 @@ impl Runner for DelegatingRunner {
         "delegating"
     }
 
+    fn links_workflow_stdlib(&self) -> bool {
+        self.inner.links_workflow_stdlib()
+    }
+
     async fn try_launch_detached(&self, options: &LaunchOptions) -> Result<RunnerHandle> {
         let count = self.launched(options);
         let handle = self.inner.try_launch_detached(options).await?;

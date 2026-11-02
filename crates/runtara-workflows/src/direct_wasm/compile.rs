@@ -864,6 +864,13 @@ fn compose_direct_workflow_selected(
         "compose: in-process wac-graph composition complete",
     );
     trusted::pin_trusted_dependencies(&mut composed_wasm, &agent_components, components_dir)?;
+    if !linked {
+        trusted::refuse_linked_agents(
+            agent_components
+                .iter()
+                .map(|agent| (agent.package.as_str(), agent.wasm_path.as_path())),
+        )?;
+    }
     if linked {
         let stdlib = shared_components
             .iter()
@@ -1296,18 +1303,19 @@ fn compile_direct_workflow_selected(
     #[cfg(not(target_os = "wasi"))]
     {
         let span = tracing::Span::current();
-        // A compile in memory stays in memory on its own thread.
+        // A compile in memory stays in memory on its own thread, in its mode.
         let memory = crate::compile_fs::current();
+        let stdlib = super::component::DirectStdlibMode::current();
         let handle = std::thread::Builder::new()
             .name("direct-compile".to_string())
             .stack_size(DIRECT_COMPILE_STACK_SIZE)
             .spawn(move || {
                 let _span = span.entered();
                 let compile = || compile_direct_workflow_inner(input, abi, omit_runtime, selection);
-                match memory {
+                stdlib.scope(|| match memory {
                     Some(memory) => crate::compile_fs::in_memory(memory, compile),
                     None => compile(),
-                }
+                })
             })
             .map_err(DirectCompileError::Io)?;
         match handle.join() {

@@ -690,8 +690,14 @@ pub fn isolation_policy() -> Option<std::sync::Arc<isolation::IsolationPolicy>> 
 
 /// New compilation always uses standard component composition. Legacy runtime
 /// approvals cannot change cache identity or select another compiler backend.
+/// The tag is the one this process's compiles get: in its runner's stdlib
+/// mode, so an artifact built in another mode reads as stale and rebuilds.
 pub fn workflow_lowering_tag() -> String {
-    runtara_workflows::direct_lowering_tag()
+    lowering_tag(crate::compile_executor::workflow_stdlib())
+}
+
+fn lowering_tag(stdlib: runtara_workflows::direct_wasm::DirectStdlibMode) -> String {
+    stdlib.scope(runtara_workflows::direct_lowering_tag)
 }
 
 /// Initialize the global configuration for a unit test, if nothing has yet.
@@ -1128,6 +1134,15 @@ mod tests {
         assert_eq!(actual, runtara_workflows::direct_lowering_tag());
         assert!(actual.contains("agent-composition=standard-v1"));
         assert!(!actual.contains("isolation=v1-"));
+    }
+
+    #[test]
+    fn the_lowering_tag_names_the_stdlib_mode_of_the_runner() {
+        use runtara_workflows::direct_wasm::DirectStdlibMode;
+        // An artifact built linked reads as stale to a server whose runner
+        // links no stdlib, and rebuilds.
+        assert!(lowering_tag(DirectStdlibMode::Fused).contains(",stdlib=fused,"));
+        assert!(lowering_tag(DirectStdlibMode::Linked).contains(",stdlib=linked,"));
     }
 
     /// The admission ceiling exists to bound work the runner will execute, so

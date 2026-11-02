@@ -432,6 +432,7 @@ fn run() -> Result<(), String> {
             extra_component_dirs: args.extra_components_dirs.clone(),
             components_dir,
             source_checksum: Some(source_checksum),
+            stdlib: None,
         },
     )
     .map_err(|e| format!("Compilation failed: {e}"))?;

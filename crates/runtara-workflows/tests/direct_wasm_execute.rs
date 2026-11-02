@@ -1720,6 +1720,7 @@ fn direct_compile_entry_returns_native_result_shape_when_components_available() 
             extra_component_dirs: Vec::new(),
             components_dir,
             source_checksum: Some("source-sha256".to_string()),
+            stdlib: None,
         },
     )
     .expect("direct compile entry succeeds");
@@ -14616,6 +14617,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
                 components_dir: upgraded_components.clone(),
                 extra_component_dirs: vec![staging.clone()],
                 source_checksum: None,
+                stdlib: None,
             },
         )
     };
@@ -14841,6 +14843,7 @@ async fn production_compile_entry_records_installed_trusted_pins() {
                 components_dir: components.clone(),
                 extra_component_dirs: vec![],
                 source_checksum: None,
+                stdlib: None,
             },
         )
         .unwrap()

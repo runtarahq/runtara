@@ -554,6 +554,7 @@ fn production_compile_wrapper_uses_standard_composition_while_legacy_fixture_sta
             components_dir: components,
             extra_component_dirs: vec![],
             source_checksum: None,
+            stdlib: None,
         },
     )
     .unwrap();

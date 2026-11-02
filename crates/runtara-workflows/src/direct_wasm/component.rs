@@ -27,24 +27,37 @@ pub enum DirectStdlibMode {
 }
 
 impl DirectStdlibMode {
-    /// The process's mode: `RUNTARA_DIRECT_STDLIB=linked` or `fused`, else
-    /// linked. This crate's own unit tests default to fused: they pin the
-    /// composed layout's import names, and the integration suites run both.
+    /// The mode of the compile in progress on this thread (see
+    /// [`Self::scope`]), else the process's default:
+    /// `RUNTARA_DIRECT_STDLIB=linked` or `fused`, else linked. This crate's
+    /// own unit tests default to fused: they pin the composed layout's import
+    /// names, and the integration suites run both.
     pub fn current() -> Self {
-        *STDLIB_MODE.get_or_init(|| match std::env::var("RUNTARA_DIRECT_STDLIB").as_deref() {
+        SCOPED
+            .with(std::cell::Cell::get)
+            .unwrap_or_else(|| *STDLIB_MODE.get_or_init(Self::from_env))
+    }
+
+    fn from_env() -> Self {
+        match std::env::var("RUNTARA_DIRECT_STDLIB").as_deref() {
             Ok("fused") => Self::Fused,
             Ok("linked") => Self::Linked,
             _ if cfg!(test) => Self::Fused,
             _ => Self::Linked,
-        })
+        }
     }
 
-    /// Fixes the process's mode to `mode`, for a host whose runtime serves
-    /// only one (a runner that does not link the stdlib needs fused) or a
-    /// compiler that compiles as its request says. Answers the mode in
-    /// force: `mode`, unless the process's mode was already fixed.
-    pub fn install(mode: Self) -> Self {
-        *STDLIB_MODE.get_or_init(|| mode)
+    /// Runs `compile` in this mode: the mode its runner runs artifacts in.
+    /// A runner that links no stdlib into a run needs fused.
+    pub fn scope<R>(self, compile: impl FnOnce() -> R) -> R {
+        struct Restore(Option<DirectStdlibMode>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                SCOPED.with(|scoped| scoped.set(self.0));
+            }
+        }
+        let _restore = Restore(SCOPED.with(|scoped| scoped.replace(Some(self))));
+        compile()
     }
 
     /// The stdlib interface workflow logic imports.
@@ -64,6 +77,10 @@ impl DirectStdlibMode {
 }
 
 static STDLIB_MODE: std::sync::OnceLock<DirectStdlibMode> = std::sync::OnceLock::new();
+
+thread_local! {
+    static SCOPED: std::cell::Cell<Option<DirectStdlibMode>> = const { std::cell::Cell::new(None) };
+}
 
 /// Package of the world direct-emitted workflow logic is encoded against, and
 /// of the logic component in the composition.

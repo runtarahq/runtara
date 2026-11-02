@@ -596,6 +596,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Workflows compile in the stdlib mode their runner runs.** A runner says
+  whether it links the workflow stdlib into a run
+  (`Runner::links_workflow_stdlib`, false unless overridden). The embedded
+  runner does, and the server compiles workflows linked, or as
+  `RUNTARA_DIRECT_STDLIB` says. For a runner that does not, such as one
+  running workflows in VMs that provide only WASI, the server compiles them
+  with the stdlib composed in. The mode is per compile
+  (`DirectWorkflowCompileOptions::stdlib`, `DirectStdlibMode::scope`), and a
+  compile elsewhere takes it from its request, so one compiler serves both.
+  The server's lowering tag names its runner's mode, so a workflow compiled
+  in the other mode reads as stale and is rebuilt, and a workflow-agent
+  staged in it is republished.
+  `CompileExecutor::compile_published_agent` takes the mode, and
+  `DirectStdlibMode::install` is gone. A fused compile refuses a
+  workflow-agent published linked ("republish it"), which it used to compose
+  into an artifact such a runner could not run.
+
 - **The reason a token endpoint refused an OAuth client** (`invalid_scope`,
   `invalid_client`, …) is now in the warning logged when a connection is
   marked as requiring reconnection; it was only in a debug log.
