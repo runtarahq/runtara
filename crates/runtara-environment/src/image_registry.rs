@@ -288,13 +288,29 @@ impl ImageRegistry {
         binary: &[u8],
         artifacts: &dyn ArtifactStore,
     ) -> Result<Digest> {
+        self.register_digested(image, binary, Digest::of(binary), artifacts)
+            .await
+    }
+
+    /// [`register`](Self::register) of `binary` whose digest the caller
+    /// computed (`digest` must be [`Digest::of`] it): an image is hashed
+    /// once on its way in, not by each layer it passes.
+    pub async fn register_digested(
+        &self,
+        image: &Image,
+        binary: &[u8],
+        digest: Digest,
+        artifacts: &dyn ArtifactStore,
+    ) -> Result<Digest> {
         invalidate_image_cache();
-        let digest = Digest::of(binary);
         let mut tx = self.pool.begin().await?;
         lock_artifact(&mut tx, &digest).await?;
-        artifacts.put(binary).await.map_err(|error| {
-            crate::error::Error::Other(format!("store image artifact: {error}"))
-        })?;
+        artifacts
+            .put_digested(binary, &digest)
+            .await
+            .map_err(|error| {
+                crate::error::Error::Other(format!("store image artifact: {error}"))
+            })?;
         sqlx::query(
             r#"
             INSERT INTO images (

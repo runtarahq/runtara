@@ -68,6 +68,30 @@ struct Queues {
     jobs: HashMap<String, Arc<Job>>,
 }
 
+/// How a compile hands back what it made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Encoding {
+    /// The composed component's bytes.
+    Raw,
+    /// Its bytes, deflated.
+    Deflate,
+    /// A splice (`runtara_workflow_api::splice`): its own bytes, and where
+    /// the compile's components lie in it, rebuilt here from those.
+    Splice,
+}
+
+impl Encoding {
+    /// The encoding a hand-back names: none is raw.
+    pub fn named(name: Option<&str>) -> Option<Self> {
+        match name {
+            None => Some(Self::Raw),
+            Some("deflate") => Some(Self::Deflate),
+            Some("splice") => Some(Self::Splice),
+            Some(_) => None,
+        }
+    }
+}
+
 /// Why a worker's call was refused.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refusal {
@@ -224,8 +248,8 @@ impl CompileQueues {
     }
 
     /// Takes `bytes` as part `part` of `parts` of what the compile `id` made,
-    /// whose SHA-256 is `sha256`, deflated when `deflated`: answers whether it
-    /// is now whole.
+    /// whose SHA-256 is `sha256`, in `encoding`: answers whether it is now
+    /// whole.
     #[allow(clippy::too_many_arguments)]
     pub fn hand_back(
         &self,
@@ -235,7 +259,7 @@ impl CompileQueues {
         sha256: &str,
         part: u32,
         parts: u32,
-        deflated: bool,
+        encoding: Encoding,
         bytes: Vec<u8>,
     ) -> Result<bool, Refusal> {
         if parts == 0 || part >= parts {
@@ -263,7 +287,19 @@ impl CompileQueues {
             .into_values()
             .flatten()
             .collect();
-        if deflated {
+        if encoding == Encoding::Splice {
+            // Only the compile's own components, read from where it was
+            // served them, and only their bytes: nothing is parsed.
+            let read = |sha256: &str| {
+                let path = job.components.get(sha256).ok_or(())?;
+                std::fs::read(path).map(Arc::new).map_err(|_| ())
+            };
+            whole =
+                runtara_workflow_api::splice::decode(&whole, read, MADE_LIMIT).map_err(|_| {
+                    Refusal::BadPart("the splice does not rebuild from this compile's components")
+                })?;
+        }
+        if encoding == Encoding::Deflate {
             use std::io::Read;
             let mut inflated = Vec::with_capacity(whole.len() * 3);
             let read = flate2::read::DeflateDecoder::new(whole.as_slice())
@@ -387,7 +423,7 @@ mod tests {
                     &made_sha,
                     1,
                     2,
-                    false,
+                    Encoding::Raw,
                     made[9..].to_vec()
                 )
                 .unwrap()
@@ -401,7 +437,7 @@ mod tests {
                     &made_sha,
                     0,
                     2,
-                    false,
+                    Encoding::Raw,
                     made[..9].to_vec()
                 )
                 .unwrap()
@@ -439,12 +475,30 @@ mod tests {
         let wrong = digest(b"something else");
         assert!(
             queues
-                .hand_back(&id, "acme", "w1", &wrong, 0, 1, false, b"made".to_vec())
+                .hand_back(
+                    &id,
+                    "acme",
+                    "w1",
+                    &wrong,
+                    0,
+                    1,
+                    Encoding::Raw,
+                    b"made".to_vec()
+                )
                 .is_err()
         );
         assert!(
             queues
-                .hand_back(&id, "acme", "w1", &wrong, 3, 1, false, b"made".to_vec())
+                .hand_back(
+                    &id,
+                    "acme",
+                    "w1",
+                    &wrong,
+                    3,
+                    1,
+                    Encoding::Raw,
+                    b"made".to_vec()
+                )
                 .is_err()
         );
         // Deflated parts are taken once they inflate to the component named.
@@ -458,7 +512,16 @@ mod tests {
         };
         assert!(
             queues
-                .hand_back(&id, "acme", "w1", &digest(&made), 0, 1, true, deflated)
+                .hand_back(
+                    &id,
+                    "acme",
+                    "w1",
+                    &digest(&made),
+                    0,
+                    1,
+                    Encoding::Deflate,
+                    deflated
+                )
                 .unwrap()
         );
         queues.cancel(&id);
@@ -467,5 +530,70 @@ mod tests {
             queues.finish(&id, "acme", "w1", b"late".to_vec()),
             Err(Refusal::NotYours)
         );
+    }
+
+    #[tokio::test]
+    async fn a_splice_is_rebuilt_from_the_compiles_own_components_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = vec![3u8; 50_000];
+        let path = dir.path().join("shared.wasm");
+        std::fs::write(&path, &shared).unwrap();
+        let sha = digest(&shared);
+        let queues = CompileQueues::default();
+        let (id, done) = queues.submit(
+            "acme",
+            b"request".to_vec(),
+            BTreeMap::from([(sha.clone(), path)]),
+        );
+        queues
+            .next("acme", "w1", Duration::from_millis(20))
+            .await
+            .unwrap();
+        let made = [b"own bytes ".as_slice(), &shared, b" more own bytes"].concat();
+        let placement = runtara_workflow_api::splice::Placement {
+            sha256: sha.clone(),
+            at: 10,
+            length: shared.len(),
+        };
+        // A component this compile was not given is refused.
+        let stranger = runtara_workflow_api::splice::Placement {
+            sha256: digest(b"not given"),
+            ..placement.clone()
+        };
+        let body = runtara_workflow_api::splice::encode(&made, &[stranger]);
+        assert!(
+            queues
+                .hand_back(
+                    &id,
+                    "acme",
+                    "w1",
+                    &digest(&made),
+                    0,
+                    1,
+                    Encoding::Splice,
+                    body
+                )
+                .is_err()
+        );
+        let body = runtara_workflow_api::splice::encode(&made, &[placement]);
+        assert!(body.len() < 200, "only its own bytes cross");
+        assert!(
+            queues
+                .hand_back(
+                    &id,
+                    "acme",
+                    "w1",
+                    &digest(&made),
+                    0,
+                    1,
+                    Encoding::Splice,
+                    body
+                )
+                .unwrap()
+        );
+        queues
+            .finish(&id, "acme", "w1", b"compiled".to_vec())
+            .unwrap();
+        assert_eq!(done.await.unwrap().made, Some(made));
     }
 }

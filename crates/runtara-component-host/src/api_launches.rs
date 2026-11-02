@@ -706,19 +706,16 @@ fn compile_worker_routes(launches: Arc<ApiLaunches>) -> axum::Router {
         let Some((tenant, worker)) = worker_of(&launches, &request) else {
             return not_a_worker();
         };
+        let Some(encoding) = crate::compile_worker::Encoding::named(part.encoding.as_deref())
+        else {
+            return refused(Refusal::BadPart("not an encoding of a hand-back"));
+        };
         let bytes = match to_bytes(request.into_body(), 4 * 1024 * 1024).await {
             Ok(bytes) => bytes.to_vec(),
             Err(_) => return refused(Refusal::BadPart("the part is too large")),
         };
         match launches.compiles.hand_back(
-            &id,
-            &tenant,
-            &worker,
-            &sha256,
-            part.part,
-            part.parts,
-            part.encoding.as_deref() == Some("deflate"),
-            bytes,
+            &id, &tenant, &worker, &sha256, part.part, part.parts, encoding, bytes,
         ) {
             Ok(whole) => axum::Json(serde_json::json!({"whole": whole})).into_response(),
             Err(refusal) => refused(refusal),

@@ -89,6 +89,11 @@ pub struct CompileRequest {
     pub child_workflows: Vec<RequestChild>,
     /// The agent catalog it compiles against.
     pub agent_catalog: Option<AgentCatalog>,
+    /// The agent catalog by its SHA-256, when it is not inline: the compiler
+    /// fetches it as it fetches a component, so one that compiles one
+    /// request after another fetches it once ([`catalog_by_digest`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_catalog_sha256: Option<String>,
     /// Its slug, for an agent-shaped compile.
     pub agent_slug: Option<String>,
     /// The checksum of its source.
@@ -102,6 +107,11 @@ pub struct CompileRequest {
     /// artifact in. A request without one compiles in the compiler's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdlib: Option<DirectStdlibMode>,
+    /// Whether the outcome may name a file that lies in the composed
+    /// component as it is by where it lies ([`CompileOutcome::files_in_artifact`]),
+    /// rather than carry it again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub files_in_artifact: bool,
 }
 
 /// A child dependency the compile recorded.
@@ -134,6 +144,10 @@ pub struct CompileOutcome {
     pub default_variables: Value,
     /// The trusted built-ins it pins.
     pub trusted_pins: Vec<String>,
+    /// The build directory's files that lie in the composed component as
+    /// they are, by path: their offset and length there.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub files_in_artifact: BTreeMap<String, (u64, u64)>,
 }
 
 /// What a compiler elsewhere posts as its run's outcome.
@@ -295,6 +309,8 @@ pub fn request(
             components,
             extra_components,
             stdlib: Some(options.stdlib.unwrap_or_else(DirectStdlibMode::current)),
+            agent_catalog_sha256: None,
+            files_in_artifact: false,
         },
         paths,
     ))
@@ -342,6 +358,8 @@ pub fn request_published_agent(
             components,
             extra_components,
             stdlib: Some(stdlib),
+            agent_catalog_sha256: None,
+            files_in_artifact: false,
         },
         paths,
     ))
@@ -356,13 +374,54 @@ pub fn compile(
     fetch: impl Fn(&str) -> io::Result<Vec<u8>> + Send + Sync + 'static,
 ) -> Result<(CompileOutcome, Vec<u8>), CompileFailure> {
     let stdlib = request.stdlib.unwrap_or_else(DirectStdlibMode::current);
-    stdlib.scope(|| compile_in_mode(request, fetch))
+    stdlib.scope(|| compile_in_mode(request, fetch, false))
 }
 
-fn compile_in_mode(
+/// [`compile`] with a `fetch` that answers only bytes whose SHA-256 is the
+/// digest asked for, so the compile does not check them again: a compiler
+/// that keeps what it fetched checks each file once, not on every compile.
+pub fn compile_verified(
     request: CompileRequest,
     fetch: impl Fn(&str) -> io::Result<Vec<u8>> + Send + Sync + 'static,
 ) -> Result<(CompileOutcome, Vec<u8>), CompileFailure> {
+    let stdlib = request.stdlib.unwrap_or_else(DirectStdlibMode::current);
+    stdlib.scope(|| compile_in_mode(request, fetch, true))
+}
+
+/// Takes `request`'s inline agent catalog out, to be served as a file by its
+/// SHA-256 ([`CompileRequest::agent_catalog_sha256`]): answers that digest
+/// and the file's bytes, or nothing when the request has no inline catalog.
+pub fn catalog_by_digest(request: &mut CompileRequest) -> io::Result<Option<(String, Vec<u8>)>> {
+    let Some(catalog) = request.agent_catalog.take() else {
+        return Ok(None);
+    };
+    let bytes = serde_json::to_vec(&catalog)?;
+    let digest = sha256_hex(&bytes);
+    request.agent_catalog_sha256 = Some(digest.clone());
+    Ok(Some((digest, bytes)))
+}
+
+fn compile_in_mode(
+    mut request: CompileRequest,
+    fetch: impl Fn(&str) -> io::Result<Vec<u8>> + Send + Sync + 'static,
+    verified: bool,
+) -> Result<(CompileOutcome, Vec<u8>), CompileFailure> {
+    if request.agent_catalog.is_none()
+        && let Some(digest) = request.agent_catalog_sha256.take()
+    {
+        let bytes = fetch(&digest).map_err(failure)?;
+        if !verified && sha256_hex(&bytes) != digest {
+            return Err(failure(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the agent catalog is not the file it was named for",
+            )));
+        }
+        request.agent_catalog = Some(
+            serde_json::from_slice(&bytes)
+                .map_err(|error| failure(io::Error::new(io::ErrorKind::InvalidData, error)))?,
+        );
+    }
+    let by_reference = request.files_in_artifact;
     let mut by_path = BTreeMap::new();
     for (name, digest) in &request.components {
         by_path.insert(Path::new(COMPONENTS).join(name), digest.clone());
@@ -383,7 +442,7 @@ fn compile_in_mode(
                 io::Error::new(io::ErrorKind::NotFound, path.display().to_string())
             })?;
             let bytes = fetch(digest)?;
-            if sha256_hex(&bytes) != *digest {
+            if !verified && sha256_hex(&bytes) != *digest {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("{} is not the file it was named for", path.display()),
@@ -393,7 +452,7 @@ fn compile_in_mode(
         }),
     );
     if request.role == CompileRole::PublishedAgent {
-        return compile_published_agent(request, extra_dirs, memory);
+        return compile_published_agent(request, extra_dirs, memory, by_reference);
     }
     let input = CompilationInput {
         tenant_id: request.tenant_id,
@@ -425,10 +484,11 @@ fn compile_in_mode(
     };
     let result =
         in_memory(memory.clone(), || compile_workflow_direct(input, options)).map_err(failure)?;
-    let (files, wasm) = handed_back(&memory, &result.build_dir)?;
+    let (files, files_in_artifact, wasm) = handed_back(&memory, &result.build_dir, by_reference)?;
     Ok((
         CompileOutcome {
             files,
+            files_in_artifact,
             binary_size: result.binary_size,
             binary_checksum: result.binary_checksum,
             package_size: result.package_size,
@@ -454,6 +514,7 @@ fn compile_published_agent(
     request: CompileRequest,
     extra_dirs: Vec<PathBuf>,
     memory: Arc<MemoryFs>,
+    by_reference: bool,
 ) -> Result<(CompileOutcome, Vec<u8>), CompileFailure> {
     use crate::direct_wasm::{
         DirectCompilationInput, WorkflowRole, compile_direct_workflow_with_abi,
@@ -487,10 +548,11 @@ fn compile_published_agent(
         Ok::<_, DirectCompileError>(result)
     })
     .map_err(|error| failure(crate::compile::direct_compile_error_to_io(error)))?;
-    let (files, wasm) = handed_back(&memory, &result.build_dir)?;
+    let (files, files_in_artifact, wasm) = handed_back(&memory, &result.build_dir, by_reference)?;
     Ok((
         CompileOutcome {
             files,
+            files_in_artifact,
             binary_size: result.wasm_size,
             binary_checksum: result.wasm_checksum,
             package_size: 0,
@@ -507,17 +569,15 @@ fn compile_published_agent(
 fn handed_back(
     memory: &MemoryFs,
     build_dir: &Path,
-) -> Result<(BTreeMap<String, String>, Vec<u8>), CompileFailure> {
-    let mut files = BTreeMap::new();
+    by_reference: bool,
+) -> Result<HandedBack, CompileFailure> {
+    let mut built = BTreeMap::new();
     let mut wasm = None;
     for (relative, bytes) in memory.under(build_dir) {
         if relative == Path::new(WORKFLOW_WASM) {
             wasm = Some(bytes);
         } else {
-            files.insert(
-                relative.to_string_lossy().into_owned(),
-                STANDARD.encode(bytes),
-            );
+            built.insert(relative.to_string_lossy().into_owned(), bytes);
         }
     }
     let wasm = wasm.ok_or_else(|| CompileFailure {
@@ -525,8 +585,40 @@ fn handed_back(
         message: "the compile composed no workflow.wasm".into(),
         stale: None,
     })?;
-    Ok((files, wasm))
+    let mut files = BTreeMap::new();
+    let mut in_artifact = BTreeMap::new();
+    for (relative, bytes) in built {
+        // A file the composed component holds as it is (the workflow's own
+        // logic) goes by where it lies: it would cross twice otherwise.
+        let found = (by_reference && bytes.len() >= IN_ARTIFACT_MIN)
+            .then(|| memchr::memmem::find(&wasm, &bytes))
+            .flatten();
+        match found {
+            Some(offset) => {
+                in_artifact.insert(relative, (offset as u64, bytes.len() as u64));
+            }
+            None => {
+                files.insert(relative, STANDARD.encode(bytes));
+            }
+        }
+    }
+    Ok((files, in_artifact, wasm))
 }
+
+/// A build's files, base64; those the composed component holds, by where;
+/// and the composed component.
+type HandedBack = (
+    BTreeMap<String, String>,
+    BTreeMap<String, (u64, u64)>,
+    Vec<u8>,
+);
+
+/// The most files an outcome names by where they lie in the composed
+/// component: a build has a handful.
+const MAX_FILES_IN_ARTIFACT: usize = 16;
+
+/// The least a file is for the outcome to name it by where it lies.
+const IN_ARTIFACT_MIN: usize = 1024;
 
 fn failure(error: io::Error) -> CompileFailure {
     let stale = error
@@ -709,7 +801,44 @@ fn write_build(
     ));
     let _ = std::fs::remove_dir_all(&build_dir);
     std::fs::create_dir_all(&build_dir)?;
-    for (relative, encoded) in &outcome.files {
+    // A few files, and no more bytes than the component has: naming its
+    // bytes again and again copies nothing more.
+    let named: u64 = outcome
+        .files_in_artifact
+        .values()
+        .map(|&(_, length)| length)
+        .fold(0, u64::saturating_add);
+    if outcome.files_in_artifact.len() > MAX_FILES_IN_ARTIFACT || named > workflow_wasm.len() as u64
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the outcome names more of the composed component than it holds",
+        ));
+    }
+    let in_artifact = outcome
+        .files_in_artifact
+        .iter()
+        .map(|(relative, &(offset, length))| {
+            let bytes = usize::try_from(offset)
+                .ok()
+                .zip(usize::try_from(length).ok())
+                .and_then(|(offset, length)| workflow_wasm.get(offset..offset.checked_add(length)?))
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{relative} is not within the composed component"),
+                    )
+                })?;
+            Ok((relative, std::borrow::Cow::Borrowed(bytes)))
+        });
+    let inline = outcome.files.iter().map(|(relative, encoded)| {
+        STANDARD
+            .decode(encoded)
+            .map(|bytes| (relative, std::borrow::Cow::Owned(bytes)))
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    });
+    for file in inline.chain(in_artifact) {
+        let (relative, bytes) = file?;
         let relative = Path::new(relative);
         // Only paths beneath the build directory.
         if relative.is_absolute()
@@ -722,14 +851,11 @@ fn write_build(
                 format!("{} is not within the build", relative.display()),
             ));
         }
-        let bytes = STANDARD
-            .decode(encoded)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let path = build_dir.join(relative);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, bytes)?;
+        std::fs::write(path, &*bytes)?;
     }
     let binary_path = build_dir.join(WORKFLOW_WASM);
     std::fs::write(&binary_path, workflow_wasm)?;

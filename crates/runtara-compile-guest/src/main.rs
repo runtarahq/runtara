@@ -15,7 +15,7 @@
 //! 4. `POST /v1/run/outcome` (`completed`): a `GuestOutcome`
 //!    (`runtara_workflows::compile_request`).
 //!
-//! Given `{"worker": {"idle_ms", "until_unix_ms", "deflate"}}` as its input instead, it
+//! Given `{"worker": {"idle_ms", "until_unix_ms", "deflate", "splice"}}` as its input instead, it
 //! is its tenant's warm compiler (SYN-930): it takes compiles one after
 //! another from `GET /v1/compiles/next`, the same calls under
 //! `/v1/compiles/{id}/`, fetching each component once for all of them.
@@ -62,7 +62,12 @@ fn run() -> Result<(), String> {
     }
     let request: CompileRequest =
         serde_json::from_value(input).map_err(|error| format!("the request: {error}"))?;
-    let outcome = compile(request, "/v1/artifacts", &Components::default(), false)?;
+    let outcome = compile(
+        request,
+        "/v1/artifacts",
+        &Components::default(),
+        HandBack::default(),
+    )?;
     let body = serde_json::to_vec(&outcome).map_err(|error| error.to_string())?;
     http::call("POST", "/v1/run/outcome", Some(body)).map(|_| ())
 }
@@ -81,6 +86,9 @@ fn work(settings: &serde_json::Value) -> Result<(), String> {
     let idle = std::time::Duration::from_millis(settings["idle_ms"].as_u64().unwrap_or(300_000));
     let until = settings["until_unix_ms"].as_u64().unwrap_or(u64::MAX);
     let deflate = settings["deflate"].as_bool().unwrap_or(false);
+    // A host that rebuilds a splice from the components it served (see
+    // `hand_back`) says so; one that does not is handed back the bytes.
+    let splice = settings["splice"].as_bool().unwrap_or(false);
     let now_ms = || {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -112,7 +120,7 @@ fn work(settings: &serde_json::Value) -> Result<(), String> {
             request,
             &format!("/v1/compiles/{id}/artifacts"),
             &components,
-            deflate,
+            HandBack { deflate, splice },
         )?;
         let body = serde_json::to_vec(&outcome).map_err(|error| error.to_string())?;
         http::call("POST", &format!("/v1/compiles/{id}/outcome"), Some(body))?;
@@ -126,6 +134,15 @@ fn work(settings: &serde_json::Value) -> Result<(), String> {
     }
 }
 
+/// How a compile hands back what it made: deflated, or as a splice of the
+/// components it was given.
+#[cfg(target_os = "wasi")]
+#[derive(Clone, Copy, Default)]
+struct HandBack {
+    deflate: bool,
+    splice: bool,
+}
+
 /// Compiles `request`, fetching each component it reads and `components`
 /// lacks from `artifacts` (`{artifacts}/{sha256}`), and hands the composed
 /// component back there: what it made, or why it failed.
@@ -134,8 +151,20 @@ fn compile(
     request: CompileRequest,
     artifacts: &str,
     components: &Components,
-    deflate: bool,
+    how: HandBack,
 ) -> Result<GuestOutcome, String> {
+    // What a splice may name: this compile's own components.
+    let given: Vec<String> = request
+        .components
+        .values()
+        .chain(
+            request
+                .extra_components
+                .iter()
+                .flat_map(|files| files.values()),
+        )
+        .cloned()
+        .collect();
     let started = std::time::Instant::now();
     let fetching = std::sync::Arc::new(std::sync::Mutex::new((
         0usize,
@@ -145,12 +174,20 @@ fn compile(
     let outcome = {
         let (fetching, components, artifacts) =
             (fetching.clone(), components.clone(), artifacts.to_owned());
-        runtara_workflows::compile_request::compile(request, move |digest| {
+        // Each file is checked against its SHA-256 once, when fetched, and
+        // kept: the compile need not check it again.
+        runtara_workflows::compile_request::compile_verified(request, move |digest| {
             if let Some(bytes) = components.lock().expect("components").get(digest) {
                 return Ok(bytes.clone());
             }
             let at = std::time::Instant::now();
             let bytes = fetch(&artifacts, digest).map_err(std::io::Error::other)?;
+            if sha256_hex(&bytes) != digest {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{digest} is not the file it was named for"),
+                ));
+            }
             let mut fetched = fetching.lock().expect("fetch timings");
             *fetched = (
                 fetched.0 + 1,
@@ -170,15 +207,22 @@ fn compile(
             let handing_back = std::time::Instant::now();
             // Its SHA-256 as the compile computed it: hashing 6 MB again in
             // WASM took much of the hand-back.
-            let workflow_wasm = hand_back(artifacts, &wasm, &outcome.binary_checksum, deflate)?;
+            let placements = if how.splice {
+                placements(&wasm, &given, components)
+            } else {
+                Vec::new()
+            };
+            let (workflow_wasm, sent, encoding) =
+                hand_back(artifacts, &wasm, &outcome.binary_checksum, how, &placements)?;
             // On stderr, which a node keeps as the run's output: where a
             // compile's time went.
             let (files, bytes, fetch_time) = *fetching.lock().expect("fetch timings");
             eprintln!(
-                "runtara-compile-guest: fetched {files} files ({bytes} bytes) in {} ms, compiled in {} ms (fetches included), handed back {} bytes in {} ms, {} ms in all",
+                "runtara-compile-guest: fetched {files} files ({bytes} bytes) in {} ms, compiled in {} ms (fetches included), handed back {} bytes as {sent} ({encoding}, {} components placed) in {} ms, {} ms in all",
                 fetch_time.as_millis(),
                 compiled.as_millis(),
                 wasm.len(),
+                placements.len(),
                 handing_back.elapsed().as_millis(),
                 started.elapsed().as_millis()
             );
@@ -222,14 +266,99 @@ fn fetch(artifacts: &str, digest: &str) -> Result<Vec<u8>, String> {
     }
 }
 
+/// The least of a component worth naming in a splice rather than sending.
+#[cfg(target_os = "wasi")]
+const PLACED_MIN: usize = 64 * 1024;
+
+/// Where each of `given` (this compile's components) that `components` holds
+/// lies in `wasm` as it is. Composition nests each component it was given as
+/// a component section of the composed one, byte for byte, so a walk of its
+/// sections finds them, matching a section to a component of its length.
+#[cfg(target_os = "wasi")]
+fn placements(
+    wasm: &[u8],
+    given: &[String],
+    components: &Components,
+) -> Vec<runtara_workflow_api::splice::Placement> {
+    /// A component section's id.
+    const COMPONENT_SECTION: u8 = 4;
+    let components = components.lock().expect("components");
+    let mut by_length: std::collections::HashMap<usize, Vec<&String>> =
+        std::collections::HashMap::new();
+    for sha256 in given {
+        if let Some(bytes) = components
+            .get(sha256)
+            .filter(|bytes| bytes.len() >= PLACED_MIN)
+        {
+            by_length.entry(bytes.len()).or_default().push(sha256);
+        }
+    }
+    let mut placed = Vec::new();
+    // Past the preamble: the magic and the version and layer.
+    let mut at = 8;
+    while let Some(&id) = wasm.get(at) {
+        let Some((size, payload)) = leb128_u32(wasm, at + 1) else {
+            break;
+        };
+        let Some(end) = payload
+            .checked_add(size as usize)
+            .filter(|end| *end <= wasm.len())
+        else {
+            break;
+        };
+        if id == COMPONENT_SECTION
+            && let Some(sha256) = by_length.get(&(size as usize)).and_then(|candidates| {
+                candidates
+                    .iter()
+                    .find(|sha256| components[sha256.as_str()].as_slice() == &wasm[payload..end])
+            })
+        {
+            placed.push(runtara_workflow_api::splice::Placement {
+                sha256: (*sha256).clone(),
+                at: payload,
+                length: size as usize,
+            });
+        }
+        at = end;
+    }
+    placed
+}
+
+/// The unsigned LEB128 at `at` in `bytes`, and where what follows it starts.
+#[cfg(target_os = "wasi")]
+fn leb128_u32(bytes: &[u8], mut at: usize) -> Option<(u32, usize)> {
+    let mut value: u32 = 0;
+    for shift in (0..35).step_by(7) {
+        let byte = *bytes.get(at)?;
+        at += 1;
+        value |= u32::from(byte & 0x7f).checked_shl(shift)?;
+        if byte & 0x80 == 0 {
+            return Some((value, at));
+        }
+    }
+    None
+}
+
 /// Hands `wasm`, whose SHA-256 is `digest`, back to `artifacts` in parts,
 /// answering its SHA-256 once the host has it whole (checking it is what the
-/// parts make), deflated when `deflate`: a component deflates to about a
-/// third, which pays where the link to the host is slow (SYN-930).
+/// parts make), with how many bytes crossed and as what. With `placements`, as a splice: its own bytes, and where the
+/// components it was given lie in it, which the host has. Else deflated when
+/// `how` says: a component deflates to about a third, which pays where the
+/// link to the host is slow (SYN-930).
 #[cfg(target_os = "wasi")]
-fn hand_back(artifacts: &str, wasm: &[u8], digest: &str, deflate: bool) -> Result<String, String> {
+fn hand_back(
+    artifacts: &str,
+    wasm: &[u8],
+    digest: &str,
+    how: HandBack,
+    placements: &[runtara_workflow_api::splice::Placement],
+) -> Result<(String, usize, &'static str), String> {
     let digest = digest.to_owned();
-    let sent = if deflate {
+    let spliced = !placements.is_empty();
+    let deflate = how.deflate && !spliced;
+    let sent = if spliced {
+        runtara_workflow_api::splice::encode(wasm, placements)
+    } else if deflate {
         use std::io::Write;
         let mut encoder = flate2::write::DeflateEncoder::new(
             Vec::with_capacity(wasm.len() / 2),
@@ -240,7 +369,13 @@ fn hand_back(artifacts: &str, wasm: &[u8], digest: &str, deflate: bool) -> Resul
     } else {
         wasm.to_vec()
     };
-    let encoding = if deflate { "&encoding=deflate" } else { "" };
+    let encoding = if spliced {
+        "&encoding=splice"
+    } else if deflate {
+        "&encoding=deflate"
+    } else {
+        ""
+    };
     let parts: Vec<&[u8]> = sent.chunks(HAND_BACK_PART).collect();
     let mut whole = false;
     for (index, part) in parts.iter().enumerate() {
@@ -259,7 +394,23 @@ fn hand_back(artifacts: &str, wasm: &[u8], digest: &str, deflate: bool) -> Resul
     if !whole {
         return Err("the host did not take the composed component whole".into());
     }
-    Ok(digest)
+    let encoding = if spliced {
+        "splice"
+    } else if deflate {
+        "deflate"
+    } else {
+        "raw"
+    };
+    Ok((digest, sent.len(), encoding))
+}
+
+#[cfg(target_os = "wasi")]
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[cfg(not(target_os = "wasi"))]
