@@ -1423,6 +1423,94 @@ impl HttpConnectionExtractor for ZendeskClientCredentialsExtractor {
 }
 
 // ============================================================================
+// UPS Connection Types
+// ============================================================================
+
+/// The UPS API origin for an environment: `production`, or `sandbox` (UPS's
+/// Customer Integration Environment, which takes the same credentials and
+/// returns test data). Anything else is an error, so credentialed requests can
+/// only ever go to one of the two UPS hosts.
+pub fn ups_base_url(environment: &str) -> Result<&'static str, String> {
+    match environment.trim().to_ascii_lowercase().as_str() {
+        "production" => Ok("https://onlinetools.ups.com"),
+        "sandbox" => Ok("https://wwwcie.ups.com"),
+        _ => Err(format!(
+            "Invalid UPS environment `{}`: use `production` or `sandbox`",
+            environment.trim()
+        )),
+    }
+}
+
+/// Parameters for UPS OAuth2 client-credentials authentication
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "ups_client_credentials",
+    display_name = "UPS (OAuth Client Credentials)",
+    description = "Connect to the UPS APIs with the Client ID and Secret of an app on the UPS Developer Portal",
+    category = "ecommerce",
+    auth_type = "oauth2_client_credentials"
+)]
+pub struct UpsClientCredentialsParams {
+    /// UPS environment
+    #[serde(default = "default_ups_environment")]
+    #[field(
+        display_name = "Environment",
+        description = "production, or sandbox for UPS's test environment (the same app credentials work in both)",
+        default = "production",
+        enum_values = "production,sandbox"
+    )]
+    pub environment: String,
+
+    /// OAuth client identifier
+    #[field(
+        display_name = "Client ID",
+        description = "The Client ID of your app: developer.ups.com → Apps → your app"
+    )]
+    pub client_id: String,
+
+    /// OAuth client secret
+    #[field(
+        display_name = "Client Secret",
+        description = "The Client Secret of the same app",
+        secret
+    )]
+    pub client_secret: String,
+}
+
+fn default_ups_environment() -> String {
+    "production".to_string()
+}
+
+/// HTTP extractor for UPS client-credentials connections. The Bearer token
+/// and UPS's per-request transaction headers are added at request time by the
+/// connection subsystem (`describe_connection_auth`); this extractor only pins
+/// the environment's host.
+pub struct UpsClientCredentialsExtractor;
+
+impl HttpConnectionExtractor for UpsClientCredentialsExtractor {
+    fn integration_id(&self) -> &'static str {
+        "ups_client_credentials"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        let p: UpsClientCredentialsParams =
+            serde_json::from_value(params.clone()).map_err(|e| {
+                format!(
+                    "Invalid ups_client_credentials connection parameters: {}",
+                    e
+                )
+            })?;
+
+        Ok(HttpConnectionConfig {
+            headers: HashMap::new(),
+            query_parameters: HashMap::new(),
+            url_prefix: ups_base_url(&p.environment)?.to_string(),
+            rate_limit_config: None,
+        })
+    }
+}
+
+// ============================================================================
 // MCP (Model Context Protocol) Connection Type
 // ============================================================================
 

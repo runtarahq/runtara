@@ -49,6 +49,7 @@ fn agents() -> Vec<(&'static str, AgentInfo)> {
         ("stripe", runtara_agent_stripe::agent_info()),
         ("text", runtara_agent_text::agent_info()),
         ("transform", runtara_agent_transform::agent_info()),
+        ("ups", runtara_agent_ups::agent_info()),
         ("utils", runtara_agent_utils::agent_info()),
         ("xlsx", runtara_agent_xlsx::agent_info()),
         ("xml", runtara_agent_xml::agent_info()),

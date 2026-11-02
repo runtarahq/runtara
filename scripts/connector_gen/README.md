@@ -179,6 +179,64 @@ of all of them, all optional. Each operation unwraps its own copy of a shared
 `#/components/requestBodies` entry. A listed name that wraps no request body
 is an error.
 
+**The vendor publishes several specs** for one API, one per product, as UPS
+does. List them under `specs:` instead of `spec:` and `operations:`, each
+with a `name`, its own pin and its own operations:
+
+```yaml
+specs:
+  - name: Tracking
+    url: https://raw.githubusercontent.com/UPS-API/api-documentation/main/Tracking.yaml
+    sha256: e4eb800e…
+    operations:
+      - getSingleTrackResponseUsingGET
+  - name: Shipping
+    url: https://raw.githubusercontent.com/UPS-API/api-documentation/main/Shipping.yaml
+    sha256: d84b53e5…
+    operations:
+      - Shipment
+```
+
+`fetch` slices each spec and merges the slices into one `spec.slice.json`.
+The specs must list the same `servers`, and no path and method may be in two
+of them. A schema that two specs define differently under one generated name
+gets the spec's name in front in each of them (`ErrorResponse` becomes
+`TrackingErrorResponse` and `ShippingErrorResponse`); one they define the same
+way is kept once. A `body_envelopes`, `connection_headers` or
+`pinned_path_parameters` name has to match in one of the specs.
+
+**The connection sends a header** every operation declares, such as UPS's
+`transId` (unique per request) and `transactionSrc`. List it, and it is no
+step input; the connection type's auth arm sends it instead:
+
+```yaml
+connection_headers:
+  - transId
+  - transactionSrc
+```
+
+**The API version is a path parameter**, such as UPS's
+`/shipments/{version}/ship`. Pin it, and `fetch` writes the spec's default into
+the path (`/shipments/v2409/ship`, the version the generated types describe)
+and drops the input. A pinned parameter without a default is an error.
+
+```yaml
+pinned_path_parameters:
+  - version
+```
+
+**The spec requires a field the API does not.** UPS's label recovery spec
+requires `TrackingNumbers` and `ReferenceValues`, while the API needs one of
+several keys. Name the schema (as it is in `spec.slice.json`) and the fields;
+they become optional inputs:
+
+```yaml
+optional_fields:
+  LabelRecoveryRequest:
+    - TrackingNumbers
+    - ReferenceValues
+```
+
 **The agent accepts several connection types** for the same API (an OAuth
 client and an API token, say): list them all.
 
@@ -256,9 +314,13 @@ crates/agents/runtara-agent-<id>/
   differently (`EmailCCObject` → `EmailCcObject`), so `fetch` renames such
   schemas in the slice to the generated spelling.
 - `fetch` also rewrites what openapi-generator would render wrongly: examples
-  given as `$ref`s to `#/components/examples` are inlined, and
+  given as `$ref`s to `#/components/examples` are inlined,
   `additionalProperties: true` beside declared fields is dropped (`__extra`
-  keeps undeclared fields anyway).
+  keeps undeclared fields anyway), a `required` written on a field instead of
+  a list on its object is dropped, and a one-word `title` naming an inline
+  object is written in the generated struct's spelling (`POD` → `Pod`).
+- Tabs after a value (`default: <tab>`) are valid YAML 1.2 that PyYAML cannot
+  read; `fetch` drops trailing whitespace before parsing.
 - `fetch` marks operations with `x-runtara-*` vendor extensions (side effects,
   summaries, which capability carries the agent's module attributes) because
   the templates cannot compute them. An operation with several tags keeps its

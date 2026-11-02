@@ -28,5 +28,6 @@ pub static CONNECTION_TYPES: &[&ConnectionTypeMeta] = &[
     &crate::extractors::connection_types::__CONNECTION_META_StripeApiKeyParams,
     &crate::extractors::connection_types::__CONNECTION_META_PipedriveApiTokenParams,
     &crate::extractors::connection_types::__CONNECTION_META_ZendeskClientCredentialsParams,
+    &crate::extractors::connection_types::__CONNECTION_META_UpsClientCredentialsParams,
     &crate::extractors::connection_types::__CONNECTION_META_McpConnectionParams,
 ];

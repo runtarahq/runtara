@@ -1,6 +1,8 @@
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use reqwest::Client;
-use runtara_agents::extractors::connection_types::{ZENDESK_DEFAULT_SCOPE, zendesk_base_url};
+use runtara_agents::extractors::connection_types::{
+    ZENDESK_DEFAULT_SCOPE, ups_base_url, zendesk_base_url,
+};
 use runtara_agents::registry::find_connection_type;
 use runtara_dsl::agent_meta::{OAuthConfig, TokenEndpointAuth};
 use serde_json::Value;
@@ -227,6 +229,20 @@ fn describe_connection_auth(
             azure_signing: None,
             deferred_auth: describe_zendesk_client_credentials_auth(connection_id, params),
         },
+        // UPS: the environment picks the host (an unknown one leaves no base URL,
+        // so a credentialed request fails closed at the proxy's pin step). Every
+        // request carries the transaction headers UPS asks for: an id unique to
+        // the request and the calling application.
+        "ups_client_credentials" => {
+            headers.insert("transId".into(), uuid::Uuid::new_v4().simple().to_string());
+            headers.insert("transactionSrc".into(), UPS_TRANSACTION_SRC.into());
+            ConnectionAuthDescriptor {
+                base_url: ups_environment_url(params),
+                aws_signing: None,
+                azure_signing: None,
+                deferred_auth: describe_ups_client_credentials_auth(connection_id, params),
+            }
+        }
         "slack_bot" => {
             if let Some(token) = params["bot_token"].as_str() {
                 headers.insert("Authorization".into(), format!("Bearer {}", token));
@@ -497,6 +513,41 @@ fn describe_zendesk_client_credentials_auth(
             "expires_in": DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
         })),
         basic_auth: None,
+        default_ttl_seconds: DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
+    })
+}
+
+/// UPS's `transactionSrc` header: the application making the request.
+const UPS_TRANSACTION_SRC: &str = "runtara";
+
+fn ups_environment_url(params: &Value) -> Option<String> {
+    let environment = params["environment"].as_str().unwrap_or("production");
+    ups_base_url(environment).ok().map(str::to_string)
+}
+
+/// UPS mints client-credentials tokens on the environment's own host from a
+/// form body, with the app's credentials in a Basic header.
+fn describe_ups_client_credentials_auth(
+    connection_id: &str,
+    params: &Value,
+) -> Option<DeferredAuth> {
+    let base_url = ups_environment_url(params)?;
+    let client_id = params["client_id"].as_str()?;
+    let client_secret = params["client_secret"].as_str()?;
+
+    Some(DeferredAuth::OAuth2ClientCredentials {
+        cache_key: token_cache::build_token_cache_key(
+            connection_id,
+            &["ups_client_credentials", &base_url, client_id],
+        ),
+        token_url: format!("{base_url}/security/v1/oauth/token"),
+        header_name: "Authorization".to_string(),
+        header_value_prefix: Some("Bearer ".to_string()),
+        request_body: TokenRequestBody::FormUrlEncoded(vec![(
+            "grant_type".to_string(),
+            "client_credentials".to_string(),
+        )]),
+        basic_auth: Some((client_id.to_string(), client_secret.to_string())),
         default_ttl_seconds: DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
     })
 }
@@ -1280,6 +1331,72 @@ mod tests {
             "conn-1",
             "zendesk_client_credentials",
             &json!({ "subdomain": "evil.com#", "client_id": "c", "client_secret": "s" }),
+            &mut headers,
+        );
+        assert_eq!(descriptor.base_url, None);
+        assert!(descriptor.deferred_auth.is_none());
+    }
+
+    #[test]
+    fn ups_client_credentials_mint_on_the_environments_host() {
+        for (environment, host) in [
+            (Some("sandbox"), "https://wwwcie.ups.com"),
+            (Some("production"), "https://onlinetools.ups.com"),
+            (None, "https://onlinetools.ups.com"),
+        ] {
+            let mut params = json!({ "client_id": "cid", "client_secret": "csec" });
+            if let Some(environment) = environment {
+                params["environment"] = json!(environment);
+            }
+            let mut headers = HashMap::new();
+            let descriptor =
+                describe_connection_auth("conn-1", "ups_client_credentials", &params, &mut headers);
+            assert_eq!(descriptor.base_url.as_deref(), Some(host));
+            match descriptor.deferred_auth {
+                Some(DeferredAuth::OAuth2ClientCredentials {
+                    token_url,
+                    header_name,
+                    header_value_prefix,
+                    request_body: TokenRequestBody::FormUrlEncoded(fields),
+                    basic_auth,
+                    ..
+                }) => {
+                    assert_eq!(token_url, format!("{host}/security/v1/oauth/token"));
+                    assert_eq!(header_name, "Authorization");
+                    assert_eq!(header_value_prefix.as_deref(), Some("Bearer "));
+                    // The credentials go in the Basic header, not the form.
+                    assert_eq!(
+                        fields,
+                        [("grant_type".to_string(), "client_credentials".to_string())]
+                    );
+                    assert_eq!(basic_auth, Some(("cid".to_string(), "csec".to_string())));
+                }
+                _ => panic!("expected a form client-credentials token request"),
+            }
+        }
+    }
+
+    #[test]
+    fn ups_requests_carry_a_fresh_transaction_id() {
+        let params = json!({ "environment": "sandbox", "client_id": "c", "client_secret": "s" });
+        let mut first = HashMap::new();
+        describe_connection_auth("conn-1", "ups_client_credentials", &params, &mut first);
+        let mut second = HashMap::new();
+        describe_connection_auth("conn-1", "ups_client_credentials", &params, &mut second);
+        let id = &first["transId"];
+        assert_eq!(id.len(), 32, "{id}");
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "{id}");
+        assert_ne!(id, &second["transId"]);
+        assert_eq!(first["transactionSrc"], "runtara");
+    }
+
+    #[test]
+    fn ups_unknown_environment_leaves_no_destination() {
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "ups_client_credentials",
+            &json!({ "environment": "evil.com", "client_id": "c", "client_secret": "s" }),
             &mut headers,
         );
         assert_eq!(descriptor.base_url, None);

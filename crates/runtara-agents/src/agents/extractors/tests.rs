@@ -703,3 +703,73 @@ fn test_zendesk_connection_type_is_registered() {
     .unwrap();
     assert_eq!(params.scope, connection_types::ZENDESK_DEFAULT_SCOPE);
 }
+
+// ============================================================================
+// UPS Extractor Tests
+// ============================================================================
+
+#[test]
+fn test_ups_base_url_has_one_host_per_environment() {
+    use connection_types::ups_base_url;
+    assert_eq!(
+        ups_base_url("production"),
+        Ok("https://onlinetools.ups.com")
+    );
+    assert_eq!(ups_base_url(" Sandbox "), Ok("https://wwwcie.ups.com"));
+    for input in ["", "cie", "https://wwwcie.ups.com", "evil.com"] {
+        assert!(ups_base_url(input).is_err(), "{input:?} was accepted");
+    }
+}
+
+#[test]
+fn test_ups_client_credentials_extractor_pins_the_environment() {
+    for (environment, host) in [
+        (json!("sandbox"), "https://wwwcie.ups.com"),
+        (json!("production"), "https://onlinetools.ups.com"),
+        (Value::Null, "https://onlinetools.ups.com"),
+    ] {
+        let mut params = json!({ "client_id": "cid", "client_secret": "secret" });
+        if !environment.is_null() {
+            params["environment"] = environment;
+        }
+        let config = extract_http_config("ups_client_credentials", &params, None)
+            .expect("Should extract config");
+        // The Bearer token and transaction headers are added at request time.
+        assert!(config.headers.is_empty());
+        assert_eq!(config.url_prefix, host);
+    }
+}
+
+#[test]
+fn test_ups_extractor_rejects_an_unknown_environment() {
+    let err = extract_http_config(
+        "ups_client_credentials",
+        &json!({ "environment": "evil.com", "client_id": "c", "client_secret": "s" }),
+        None,
+    )
+    .expect_err("an unknown environment must be rejected");
+    assert!(err.contains("Invalid UPS environment"), "{err}");
+}
+
+#[test]
+fn test_ups_connection_type_is_registered() {
+    assert!(get_http_extractor_ids().contains(&"ups_client_credentials"));
+    let meta = crate::registry::find_connection_type("ups_client_credentials")
+        .expect("ups_client_credentials is in the static registry");
+    let secret = meta
+        .fields
+        .iter()
+        .find(|f| f.name == "client_secret")
+        .unwrap();
+    assert!(secret.is_secret);
+    let environment = meta
+        .fields
+        .iter()
+        .find(|f| f.name == "environment")
+        .unwrap();
+    assert_eq!(environment.default_value, Some("production"));
+    assert_eq!(
+        environment.enum_values,
+        Some(&["production", "sandbox"][..])
+    );
+}

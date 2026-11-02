@@ -63,6 +63,7 @@ static HTTP_EXTRACTORS: &[&dyn HttpConnectionExtractor] = &[
     &connection_types::StripeExtractor,
     &connection_types::PipedriveExtractor,
     &connection_types::ZendeskClientCredentialsExtractor,
+    &connection_types::UpsClientCredentialsExtractor,
     &connection_types::McpExtractor,
 ];
 
