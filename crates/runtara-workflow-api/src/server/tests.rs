@@ -12,6 +12,8 @@ use crate::Wake;
 struct FakeRun {
     finished: bool,
     fenced: bool,
+    /// The launch paused the run itself.
+    released: bool,
     outcomes: Vec<PostedOutcome>,
     deadline: Option<u64>,
     checkpoints: HashMap<String, Vec<u8>>,
@@ -42,6 +44,8 @@ impl WorkflowApiBackend for FakeBackend {
         let run = self.run.lock().unwrap();
         Ok(if run.fenced {
             LaunchState::Fenced
+        } else if run.released {
+            LaunchState::Released
         } else if run.finished {
             LaunchState::Finished
         } else {
@@ -395,6 +399,25 @@ async fn a_fenced_launch_is_refused_everywhere() {
         assert_eq!(error_code(&body), "fenced");
     }
     assert!(backend.run.lock().unwrap().outcomes.is_empty());
+}
+
+/// A launch that paused its run itself is served only its outcome post.
+#[tokio::test]
+async fn a_launch_that_released_its_run_may_only_post_its_outcome() {
+    let backend = Arc::new(FakeBackend::default());
+    backend.run.lock().unwrap().released = true;
+    let app = app(backend.clone());
+    let (status, _, body) =
+        send(&app, request("GET", "/v1/run").body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error_code(&body), "fenced");
+    let (status, _, _) = send(
+        &app,
+        outcome("suspended", "k1", r#"{"wakes":[{"onResume":true}]}"#),
+    )
+    .await;
+    assert!(status.is_success(), "{status}");
+    assert_eq!(backend.run.lock().unwrap().outcomes.len(), 1);
 }
 
 #[tokio::test]
