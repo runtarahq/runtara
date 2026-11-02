@@ -21,7 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `wwwcie.ups.com`), refuses any other environment, sends the `transId`
   (fresh per request) and `transactionSrc` headers UPS asks for, and is
   limited by default to 5 requests/s with a burst of 10, as UPS does not
-  publish its limits.
+  publish its limits. A request that is not a read and gets no answer or a
+  5xx fails with `UPS_OUTCOME_UNKNOWN` instead of being retried: UPS has no
+  idempotency key, and sending a shipment again could buy a second label.
 
 - **The connector generator takes an API the vendor splits into several
   specs.** A `connector.yaml` can list `specs:`, each with its own pin and

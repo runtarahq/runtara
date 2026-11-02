@@ -73,6 +73,56 @@ fn status_codes_map_to_error_categories() {
 }
 
 #[test]
+fn a_write_whose_outcome_is_unknown_is_not_retried() {
+    // UPS has no idempotency key: a shipment sent again could buy a second label.
+    for (method, status) in [("POST", 500), ("POST", 503), ("DELETE", 502)] {
+        let err = kit::decode::<Value>(
+            &response(status, "busy", &[]),
+            method,
+            "/api/shipments/v2409/ship",
+            "UPS",
+        )
+        .unwrap_err();
+        assert_eq!(
+            (err.code.as_str(), err.category),
+            ("UPS_OUTCOME_UNKNOWN", "permanent"),
+            "{method} {status}"
+        );
+        assert!(
+            err.message.contains("check before sending it again"),
+            "{}",
+            err.message
+        );
+    }
+    let err = kit::network_error("POST", "/api/shipments/v2409/ship", "UPS", "timed out");
+    assert_eq!(
+        (err.code.as_str(), err.category),
+        ("UPS_OUTCOME_UNKNOWN", "permanent")
+    );
+}
+
+#[test]
+fn reads_and_refused_writes_are_still_retried() {
+    let err = kit::network_error("GET", "/api/track/v1/details/1Z", "UPS", "timed out");
+    assert_eq!(
+        (err.code.as_str(), err.category),
+        ("UPS_NETWORK_ERROR", "transient")
+    );
+    // A 429 means UPS refused the request, so nothing was created.
+    let err = kit::decode::<Value>(
+        &response(429, "", &[]),
+        "POST",
+        "/api/shipments/v2409/ship",
+        "UPS",
+    )
+    .unwrap_err();
+    assert_eq!(
+        (err.code.as_str(), err.category),
+        ("UPS_RATE_LIMITED", "transient")
+    );
+}
+
+#[test]
 fn retry_hint_prefers_the_hosts_milliseconds() {
     let both = response(429, "", &[("retry-after-ms", "1500"), ("retry-after", "1")]);
     assert_eq!(
