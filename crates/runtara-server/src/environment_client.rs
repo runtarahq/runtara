@@ -841,21 +841,19 @@ impl EnvironmentClient {
             })?;
 
         // Checksum before anything is written, so a corrupted upload never
-        // reaches the registry.
-        if let Some(ref expected) = options.sha256 {
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(&binary);
-            let actual = format!("{:x}", hasher.finalize());
-            if &actual != expected {
-                return Err(EnvironmentError::InvalidInput(format!(
-                    "Checksum mismatch: expected {}, got {}",
-                    expected, actual
-                )));
-            }
+        // reaches the registry: once, for every check on the way in.
+        let digest = runtara_artifact_store::Digest::of(&binary);
+        if let Some(ref expected) = options.sha256
+            && digest.as_str() != expected
+        {
+            return Err(EnvironmentError::InvalidInput(format!(
+                "Checksum mismatch: expected {}, got {}",
+                expected,
+                digest.as_str()
+            )));
         }
 
-        let image_id = handlers::handle_store_image(
+        let image_id = handlers::handle_store_image_digested(
             &self.state,
             handlers::StoreImageParams {
                 tenant_id: options.tenant_id,
@@ -864,6 +862,7 @@ impl EnvironmentClient {
                 metadata: options.metadata,
             },
             &binary,
+            digest,
         )
         .await
         .map_err(|e| match e {

@@ -13,7 +13,9 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use runtara_workflows::compile_request::{apply, apply_failure, compile, request};
+use runtara_workflows::compile_request::{
+    apply, apply_failure, catalog_by_digest, compile, compile_verified, request,
+};
 use runtara_workflows::{CompilationInput, DirectWorkflowCompileOptions, compile_workflow_direct};
 
 fn components_dir() -> PathBuf {
@@ -114,6 +116,93 @@ fn a_compile_elsewhere_makes_what_one_in_process_does() {
         fetched > 0 && fetched < all,
         "only what it read: {fetched} of {all}"
     );
+}
+
+#[test]
+fn a_compile_given_its_catalog_by_digest_naming_files_the_artifact_holds_makes_the_same_build() {
+    let temp = tempfile::tempdir().unwrap();
+    let extra = temp.path().join("staged");
+    let local = compile_workflow_direct(
+        input(agent_graph()),
+        options(temp.path().join("local"), extra.clone()),
+    )
+    .expect("in process");
+
+    let remote_options = options(temp.path().join("remote"), extra);
+    let (mut req, mut paths) = request(&input(agent_graph()), &remote_options).expect("request");
+    let inline = serde_json::to_vec(&req).unwrap().len();
+    let (digest, catalog) = catalog_by_digest(&mut req)
+        .unwrap()
+        .expect("an inline catalog");
+    let catalog_path = temp.path().join("catalog.json");
+    std::fs::write(&catalog_path, &catalog).unwrap();
+    paths.insert(digest.clone(), catalog_path);
+    req.files_in_artifact = true;
+    let wire = serde_json::to_vec(&req).unwrap();
+    assert!(
+        wire.len() * 4 < inline,
+        "the catalog was most of the request: {} of {inline} bytes left",
+        wire.len()
+    );
+    let req = serde_json::from_slice(&wire).unwrap();
+    // A fetch that checks what it answers, as a warm compiler's does.
+    let (outcome, wasm) = compile_verified(req, move |digest| {
+        let bytes = std::fs::read(&paths[digest])?;
+        assert_eq!(sha256(&bytes), digest);
+        Ok(bytes)
+    })
+    .expect("compiled elsewhere");
+    assert!(
+        outcome
+            .files_in_artifact
+            .contains_key("workflow-logic.wasm")
+    );
+    assert!(!outcome.files.contains_key("workflow-logic.wasm"));
+    let outcome = serde_json::from_slice(&serde_json::to_vec(&outcome).unwrap()).unwrap();
+    let remote = apply(outcome, &wasm, "remote", 3, &remote_options).expect("applied");
+
+    assert_eq!(remote.binary_checksum, local.binary_checksum);
+    for file in [
+        "manifest.json",
+        "artifact-metadata.json",
+        "workflow-logic.wasm",
+    ] {
+        assert_eq!(
+            std::fs::read(remote.build_dir.join(file)).unwrap(),
+            std::fs::read(local.build_dir.join(file)).unwrap(),
+            "{file}"
+        );
+    }
+}
+
+#[test]
+fn an_outcome_naming_bytes_outside_the_artifact_is_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let remote_options = options(temp.path().join("remote"), temp.path().join("staged"));
+    let (mut req, paths) = request(&input(agent_graph()), &remote_options).expect("request");
+    req.files_in_artifact = true;
+    let (mut outcome, wasm) =
+        compile(req, move |digest| std::fs::read(&paths[digest])).expect("compiled elsewhere");
+    let logic = outcome
+        .files_in_artifact
+        .get_mut("workflow-logic.wasm")
+        .unwrap();
+    logic.0 = wasm.len() as u64 - logic.1 + 1;
+    let error = apply(outcome, &wasm, "remote", 3, &remote_options).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("not within the composed component"),
+        "{error}"
+    );
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[test]

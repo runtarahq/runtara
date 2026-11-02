@@ -22,6 +22,7 @@ mod run;
 #[cfg(feature = "server")]
 pub mod server;
 mod signals;
+pub mod splice;
 mod tasks;
 mod wake;
 

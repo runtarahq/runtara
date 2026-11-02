@@ -4674,6 +4674,7 @@ name = "runtara-compile-guest"
 version = "10.0.0"
 dependencies = [
  "flate2",
+ "memchr",
  "runtara-workflow-api",
  "runtara-workflows",
  "serde_json",
@@ -5107,6 +5108,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "getrandom 0.3.4",
+ "memchr",
  "minijinja",
  "reqwest 0.12.28",
  "runtara-agent-suspension",

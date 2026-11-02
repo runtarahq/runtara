@@ -2599,11 +2599,22 @@ pub async fn handle_store_image(
     params: StoreImageParams,
     binary: &[u8],
 ) -> std::result::Result<String, StoreImageError> {
-    use sha2::{Digest, Sha256};
+    let digest = runtara_artifact_store::Digest::of(binary);
+    handle_store_image_digested(state, params, binary, digest).await
+}
 
+/// [`handle_store_image`] of `binary` whose digest the caller computed
+/// (`digest` must be [`runtara_artifact_store::Digest::of`] it), so it is
+/// hashed once on its way in.
+pub async fn handle_store_image_digested(
+    state: &EnvironmentHandlerState,
+    params: StoreImageParams,
+    binary: &[u8],
+    digest: runtara_artifact_store::Digest,
+) -> std::result::Result<String, StoreImageError> {
     // Every image records the checksum of its exact bytes, which durable
     // preparation compares to what it reads before running them.
-    let actual = format!("{:x}", Sha256::digest(binary));
+    let actual = digest.as_str().to_owned();
     let recorded = params
         .metadata
         .as_ref()
@@ -2635,7 +2646,7 @@ pub async fn handle_store_image(
     let image = builder.build();
 
     if let Err(e) = image_registry
-        .register(&image, binary, state.artifacts.as_ref())
+        .register_digested(&image, binary, digest, state.artifacts.as_ref())
         .await
     {
         return Err(StoreImageError::Register(format!(
