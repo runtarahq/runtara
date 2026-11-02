@@ -618,6 +618,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A warm compiler whose host says `together` posts a splice it hands back with its outcome, in one call (`POST /v1/compiles/{id}/outcome?artifact=&encoding=splice`, the outcome's length, the outcome, then the splice), rather than as a call of its own: over a link to its host each call is a connection and a handshake.
+
 - A compile elsewhere moves less. A warm compiler checks each file it fetches against its SHA-256 once, when fetched, not on every compile (`compile_request::compile_verified`). Its host may serve the agent catalog as a file named by its SHA-256 (`CompileRequest::agent_catalog_sha256`, `compile_request::catalog_by_digest`), which a warm compiler fetches once rather than with every request, of which it was most. The outcome may name a file the composed component holds as it is (the workflow's logic) by where it lies (`CompileRequest::files_in_artifact`, `CompileOutcome::files_in_artifact`), which `apply` takes from the component, bounds-checked. And a warm compiler whose host says `splice` hands back a splice (`runtara_workflow_api::splice`): the composed component's own bytes, and where each component it was given lies in it, which the host rebuilds from the files it served that compile, copying bytes, then checks against the SHA-256 as before. A composed workflow holds the shared components byte for byte, so about 2 % of it crosses. Registering an image hashes it once on its way in (`handlers::handle_store_image_digested`, `ImageRegistry::register_digested`) rather than in each layer.
 
 - **Workflows compile in the stdlib mode their runner runs.** A runner says

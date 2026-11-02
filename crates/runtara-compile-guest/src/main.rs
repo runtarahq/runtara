@@ -15,7 +15,7 @@
 //! 4. `POST /v1/run/outcome` (`completed`): a `GuestOutcome`
 //!    (`runtara_workflows::compile_request`).
 //!
-//! Given `{"worker": {"idle_ms", "until_unix_ms", "deflate", "splice"}}` as its input instead, it
+//! Given `{"worker": {"idle_ms", "until_unix_ms", "deflate", "splice", "together"}}` as its input instead, it
 //! is its tenant's warm compiler (SYN-930): it takes compiles one after
 //! another from `GET /v1/compiles/next`, the same calls under
 //! `/v1/compiles/{id}/`, fetching each component once for all of them.
@@ -62,7 +62,7 @@ fn run() -> Result<(), String> {
     }
     let request: CompileRequest =
         serde_json::from_value(input).map_err(|error| format!("the request: {error}"))?;
-    let outcome = compile(
+    let (outcome, _) = compile(
         request,
         "/v1/artifacts",
         &Components::default(),
@@ -89,6 +89,8 @@ fn work(settings: &serde_json::Value) -> Result<(), String> {
     // A host that rebuilds a splice from the components it served (see
     // `hand_back`) says so; one that does not is handed back the bytes.
     let splice = settings["splice"].as_bool().unwrap_or(false);
+    // A host that takes a splice with the outcome says so: one call, not two.
+    let together = settings["together"].as_bool().unwrap_or(false);
     let now_ms = || {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -116,14 +118,34 @@ fn work(settings: &serde_json::Value) -> Result<(), String> {
         let request: CompileRequest = serde_json::from_value(next["request"].clone())
             .map_err(|error| format!("the request: {error}"))?;
         let (_, waited) = http::take_timings();
-        let outcome = compile(
+        let (outcome, held) = compile(
             request,
             &format!("/v1/compiles/{id}/artifacts"),
             &components,
-            HandBack { deflate, splice },
+            HandBack {
+                deflate,
+                splice,
+                together,
+            },
         )?;
         let body = serde_json::to_vec(&outcome).map_err(|error| error.to_string())?;
-        http::call("POST", &format!("/v1/compiles/{id}/outcome"), Some(body))?;
+        match held {
+            // The splice and the outcome, framed: the outcome's length, the
+            // outcome, then the splice.
+            Some((digest, splice)) => {
+                let mut framed = (body.len() as u32).to_le_bytes().to_vec();
+                framed.extend(&body);
+                framed.extend(splice);
+                http::call(
+                    "POST",
+                    &format!("/v1/compiles/{id}/outcome?artifact={digest}&encoding=splice"),
+                    Some(framed),
+                )?;
+            }
+            None => {
+                http::call("POST", &format!("/v1/compiles/{id}/outcome"), Some(body))?;
+            }
+        }
         let (calls, took) = http::take_timings();
         eprintln!(
             "runtara-compile-guest: compile {id}: waited {} ms for it, {calls} calls in {} ms",
@@ -141,18 +163,26 @@ fn work(settings: &serde_json::Value) -> Result<(), String> {
 struct HandBack {
     deflate: bool,
     splice: bool,
+    /// The host takes a splice with the outcome, in one call.
+    together: bool,
 }
+
+/// A splice held back to go with the outcome: its component's SHA-256, and
+/// the splice.
+#[cfg(target_os = "wasi")]
+type Held = Option<(String, Vec<u8>)>;
 
 /// Compiles `request`, fetching each component it reads and `components`
 /// lacks from `artifacts` (`{artifacts}/{sha256}`), and hands the composed
-/// component back there: what it made, or why it failed.
+/// component back there: what it made, or why it failed. A splice the host
+/// takes with the outcome is held back for it instead.
 #[cfg(target_os = "wasi")]
 fn compile(
     request: CompileRequest,
     artifacts: &str,
     components: &Components,
     how: HandBack,
-) -> Result<GuestOutcome, String> {
+) -> Result<(GuestOutcome, Held), String> {
     // What a splice may name: this compile's own components.
     let given: Vec<String> = request
         .components
@@ -212,7 +242,7 @@ fn compile(
             } else {
                 Vec::new()
             };
-            let (workflow_wasm, sent, encoding) =
+            let (workflow_wasm, sent, encoding, held) =
                 hand_back(artifacts, &wasm, &outcome.binary_checksum, how, &placements)?;
             // On stderr, which a node keeps as the run's output: where a
             // compile's time went.
@@ -226,12 +256,15 @@ fn compile(
                 handing_back.elapsed().as_millis(),
                 started.elapsed().as_millis()
             );
-            GuestOutcome::Compiled {
-                outcome: Box::new(outcome),
-                workflow_wasm,
-            }
+            (
+                GuestOutcome::Compiled {
+                    outcome: Box::new(outcome),
+                    workflow_wasm,
+                },
+                held,
+            )
         }
-        Err(failure) => GuestOutcome::Failed(failure),
+        Err(failure) => (GuestOutcome::Failed(failure), None),
     })
 }
 
@@ -352,7 +385,7 @@ fn hand_back(
     digest: &str,
     how: HandBack,
     placements: &[runtara_workflow_api::splice::Placement],
-) -> Result<(String, usize, &'static str), String> {
+) -> Result<(String, usize, &'static str, Held), String> {
     let digest = digest.to_owned();
     let spliced = !placements.is_empty();
     let deflate = how.deflate && !spliced;
@@ -369,6 +402,17 @@ fn hand_back(
     } else {
         wasm.to_vec()
     };
+    // A splice is a small part of what it rebuilds: with the outcome, it
+    // costs no call of its own.
+    if spliced && how.together && sent.len() <= HAND_BACK_PART {
+        let len = sent.len();
+        return Ok((
+            digest.clone(),
+            len,
+            "splice, with the outcome",
+            Some((digest, sent)),
+        ));
+    }
     let encoding = if spliced {
         "&encoding=splice"
     } else if deflate {
@@ -401,7 +445,7 @@ fn hand_back(
     } else {
         "raw"
     };
-    Ok((digest, sent.len(), encoding))
+    Ok((digest, sent.len(), encoding, None))
 }
 
 #[cfg(target_os = "wasi")]
