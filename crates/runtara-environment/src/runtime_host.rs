@@ -62,6 +62,9 @@ pub struct PersistenceRuntimeHost {
     cancelled: AtomicBool,
     /// A durable write was refused because another execution holds the run.
     superseded: AtomicBool,
+    /// Set once this execution acknowledged a pause at a checkpoint: the
+    /// acknowledgement suspends the run and so releases its lease.
+    paused_itself: AtomicBool,
     /// Signal-poll rate limiter state.
     last_signal_poll: std::sync::Mutex<Option<Instant>>,
     signal_poll_interval: Duration,
@@ -108,6 +111,7 @@ impl PersistenceRuntimeHost {
 
             cancelled: AtomicBool::new(false),
             superseded: AtomicBool::new(false),
+            paused_itself: AtomicBool::new(false),
             last_signal_poll: std::sync::Mutex::new(None),
             signal_poll_interval: DEFAULT_SIGNAL_POLL_INTERVAL,
             sleep_interrupted: AtomicBool::new(false),
@@ -526,19 +530,44 @@ impl RuntimeHost for PersistenceRuntimeHost {
             return true;
         };
         // A failed read is not proof of loss: the terminal write still fences.
-        let holds = match fences
+        let (holds, released_itself) = match fences
             .get_invocation_lease(&owner.tenant_id, &owner.instance_id)
             .await
         {
-            Ok(Some(state)) => state.active && state.lease == *owner,
-            Ok(None) => false,
-            Err(_) => true,
+            Ok(Some(state)) => (
+                state.active && state.lease == *owner,
+                state.lease == *owner && self.paused_itself.load(Ordering::SeqCst),
+            ),
+            Ok(None) => (false, false),
+            Err(_) => (true, false),
         };
-        if !holds {
+        // Its own pause released the lease: it no longer holds the run, but
+        // nothing superseded it (see `paused_by_itself`).
+        if !holds && !released_itself {
             tracing::warn!(instance_id = %self.instance_id, "Execution no longer holds the run");
             self.superseded.store(true, Ordering::SeqCst);
         }
         holds
+    }
+
+    async fn paused_by_itself(&self) -> bool {
+        if !self.paused_itself.load(Ordering::SeqCst) || self.superseded.load(Ordering::SeqCst) {
+            return false;
+        }
+        let (Some(owner), Some(fences)) = (
+            self.root_lease.get(),
+            self.state.persistence.invocation_fences(),
+        ) else {
+            return false;
+        };
+        // The lease it released, not one a later launch claimed (a claim
+        // bumps its epoch).
+        matches!(
+            fences
+                .get_invocation_lease(&owner.tenant_id, &owner.instance_id)
+                .await,
+            Ok(Some(state)) if state.lease == *owner
+        )
     }
 
     fn in_process_wait(&self) -> Option<Box<dyn std::any::Any + Send>> {
@@ -765,6 +794,9 @@ impl RuntimeHost for PersistenceRuntimeHost {
         };
         if !self.ack_signal(kind, &command_id).await? {
             return Ok(false);
+        }
+        if kind == SignalType::SignalPause {
+            self.paused_itself.store(true, Ordering::SeqCst);
         }
         if runtara_core::lifecycle::execution_action(kind.into())
             == runtara_core::lifecycle::ExecutionAction::Stop
@@ -1479,6 +1511,35 @@ mod tests {
         );
         // A pause is not a cancel.
         assert!(!host.is_cancelled().await.unwrap());
+    }
+
+    /// Acknowledging a pause releases the run's lease: the launch no longer
+    /// holds the run, yet it paused the run itself and may post the
+    /// suspension the pause asked for, until another launch claims the run.
+    #[tokio::test]
+    async fn a_launch_that_acknowledged_a_pause_paused_its_run_itself() {
+        let (persistence, host, id) = setup().await;
+        host.bind_root_lease(claim_root(&persistence, &id, "runner-a").await)
+            .unwrap();
+        assert!(!host.paused_by_itself().await);
+        persistence
+            .insert_signal(id.as_str(), CoreSignalType::Pause, b"")
+            .await
+            .unwrap();
+        assert!(host.check_signals().await.unwrap(), "pause handled");
+        assert!(host.paused_by_itself().await);
+        assert!(!host.holds_run().await, "the pause released the lease");
+        assert!(
+            host.paused_by_itself().await,
+            "losing the lease to its own pause does not supersede it"
+        );
+        // Resumed: running again, the next launch claims the run.
+        persistence
+            .update_instance_status(&id, CoreInstanceStatus::Running, None)
+            .await
+            .unwrap();
+        claim_root(&persistence, &id, "runner-b").await;
+        assert!(!host.paused_by_itself().await);
     }
 
     #[tokio::test]

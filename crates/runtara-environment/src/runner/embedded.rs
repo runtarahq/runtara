@@ -1705,6 +1705,14 @@ where
         {
             warn!(instance_id, %error, "Parked cancellation deferred to scheduler recovery");
         }
+        // So may a pause: it pauses the parked run now (decision D4), not
+        // at the scheduler's next recovery pass.
+        if let Err(error) = persistence
+            .pause_suspended_instances(Some(&instance_id), 1)
+            .await
+        {
+            warn!(instance_id, %error, "Parked pause deferred to scheduler recovery");
+        }
     } else {
         record_unacknowledged_cancel_exit(
             &persistence,

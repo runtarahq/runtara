@@ -242,6 +242,13 @@ pub trait RuntimeHost: Send + Sync {
     async fn holds_run(&self) -> bool {
         true
     }
+    /// Whether this execution released the run itself, acknowledging a pause
+    /// at a checkpoint, and nothing has claimed the run since: it may still
+    /// post the suspension the pause asked for, which waits only for resume
+    /// and writes nothing durable.
+    async fn paused_by_itself(&self) -> bool {
+        false
+    }
     /// Emit a custom event (`kind` becomes the event subtype).
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String>;
     /// Whether step-level debug instrumentation is enabled for this run.

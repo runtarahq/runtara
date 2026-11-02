@@ -522,6 +522,26 @@ pub struct LaunchRepository {
     metrics: Option<crate::pipeline_metrics::PipelineMetrics>,
 }
 
+/// A resume is the latest request: a pause still pending, one that missed the
+/// run's park (the run was still running, or locked by its park), is spent
+/// with it. Left pending, the resumed launch would apply it through its own
+/// lease at its first checkpoint, and pause the run again. A pause after the
+/// resume still wins; a cancel is never touched. Called with the instance row
+/// locked, as the pause's own delivery locks it before its command.
+async fn spend_pending_pause(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    instance_id: &str,
+) -> Result<(), LaunchQueueError> {
+    sqlx::query(
+        "UPDATE pending_signals SET acknowledged_at = NOW() \
+         WHERE instance_id = $1 AND signal_type = 'pause' AND acknowledged_at IS NULL",
+    )
+    .bind(instance_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 /// The caller owns the launch row. Lock the root before deciding whether a
 /// pause invalidated this wake or resume; queue cleanup must not fail a paused
 /// execution.
@@ -916,6 +936,7 @@ impl LaunchRepository {
                     // Existing would lose the user's resume to the pause guard.
                     sqlx::query("UPDATE instances SET wake_reason='manual_resume', sleep_until=NULL WHERE instance_id=$1")
                         .bind(&request.instance_id).execute(&mut *tx).await?;
+                    spend_pending_pause(&mut tx, &request.instance_id).await?;
                 }
                 tx.commit().await?;
                 return Ok(EnqueueOutcome::Existing(existing.try_into()?));
@@ -1020,6 +1041,9 @@ impl LaunchRepository {
                         .bind(reason)
                         .execute(&mut *tx)
                         .await?;
+                }
+                if request.kind == LaunchKind::Resume {
+                    spend_pending_pause(&mut tx, &request.instance_id).await?;
                 }
                 tx.commit().await?;
                 return Ok(EnqueueOutcome::Enqueued(
