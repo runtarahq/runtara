@@ -4674,7 +4674,6 @@ name = "runtara-compile-guest"
 version = "10.0.0"
 dependencies = [
  "flate2",
- "memchr",
  "runtara-workflow-api",
  "runtara-workflows",
  "serde_json",

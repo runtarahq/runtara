@@ -270,39 +270,72 @@ fn fetch(artifacts: &str, digest: &str) -> Result<Vec<u8>, String> {
 const PLACED_MIN: usize = 64 * 1024;
 
 /// Where each of `given` (this compile's components) that `components` holds
-/// lies in `wasm` as it is: composition copies a component byte for byte.
+/// lies in `wasm` as it is. Composition nests each component it was given as
+/// a component section of the composed one, byte for byte, so a walk of its
+/// sections finds them, matching a section to a component of its length.
 #[cfg(target_os = "wasi")]
 fn placements(
     wasm: &[u8],
     given: &[String],
     components: &Components,
 ) -> Vec<runtara_workflow_api::splice::Placement> {
+    /// A component section's id.
+    const COMPONENT_SECTION: u8 = 4;
     let components = components.lock().expect("components");
-    let mut placed: Vec<runtara_workflow_api::splice::Placement> = given
-        .iter()
-        .filter_map(|sha256| {
-            let bytes = components
-                .get(sha256)
-                .filter(|bytes| bytes.len() >= PLACED_MIN)?;
-            let at = memchr::memmem::find(wasm, bytes)?;
-            Some(runtara_workflow_api::splice::Placement {
-                sha256: sha256.clone(),
-                at,
-                length: bytes.len(),
-            })
-        })
-        .collect();
-    placed.sort_by_key(|placement| placement.at);
-    // One component inside another is named once, by the outer.
-    let mut end = 0;
-    placed.retain(|placement| {
-        let keep = placement.at >= end;
-        if keep {
-            end = placement.at + placement.length;
+    let mut by_length: std::collections::HashMap<usize, Vec<&String>> =
+        std::collections::HashMap::new();
+    for sha256 in given {
+        if let Some(bytes) = components
+            .get(sha256)
+            .filter(|bytes| bytes.len() >= PLACED_MIN)
+        {
+            by_length.entry(bytes.len()).or_default().push(sha256);
         }
-        keep
-    });
+    }
+    let mut placed = Vec::new();
+    // Past the preamble: the magic and the version and layer.
+    let mut at = 8;
+    while let Some(&id) = wasm.get(at) {
+        let Some((size, payload)) = leb128_u32(wasm, at + 1) else {
+            break;
+        };
+        let Some(end) = payload
+            .checked_add(size as usize)
+            .filter(|end| *end <= wasm.len())
+        else {
+            break;
+        };
+        if id == COMPONENT_SECTION
+            && let Some(sha256) = by_length.get(&(size as usize)).and_then(|candidates| {
+                candidates
+                    .iter()
+                    .find(|sha256| components[sha256.as_str()].as_slice() == &wasm[payload..end])
+            })
+        {
+            placed.push(runtara_workflow_api::splice::Placement {
+                sha256: (*sha256).clone(),
+                at: payload,
+                length: size as usize,
+            });
+        }
+        at = end;
+    }
     placed
+}
+
+/// The unsigned LEB128 at `at` in `bytes`, and where what follows it starts.
+#[cfg(target_os = "wasi")]
+fn leb128_u32(bytes: &[u8], mut at: usize) -> Option<(u32, usize)> {
+    let mut value: u32 = 0;
+    for shift in (0..35).step_by(7) {
+        let byte = *bytes.get(at)?;
+        at += 1;
+        value |= u32::from(byte & 0x7f).checked_shl(shift)?;
+        if byte & 0x80 == 0 {
+            return Some((value, at));
+        }
+    }
+    None
 }
 
 /// Hands `wasm`, whose SHA-256 is `digest`, back to `artifacts` in parts,
