@@ -1041,6 +1041,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pause still pending (a pause after the resume still wins, and a cancel is
   never touched), and a pause that missed a park is applied as soon as the
   park commits, not at the scheduler's next recovery pass.
+  A launch that pauses its run itself, acknowledging a pause at a
+  checkpoint, may still post the suspension the pause asks for (one that
+  waits only for resume) until another launch claims the run. That
+  acknowledgement releases its lease, and its suspension used to be refused
+  as from a superseded launch, which logged the run as failed. The workflow
+  API serves such a launch (`LaunchState::Released`) its outcome post and
+  nothing else.
 
 - **A Switch case output or `default` that references a value now gets that
   value.** These references were resolved by a walker of their own that split

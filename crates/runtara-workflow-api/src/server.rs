@@ -41,6 +41,10 @@ pub enum LaunchState {
     Finished,
     /// The binding's lease epoch is older than the run's current lease.
     Fenced,
+    /// The launch paused the run itself, acknowledging a pause at a
+    /// checkpoint, and nothing has claimed the run since: only its outcome,
+    /// the suspension the pause asked for, is still taken.
+    Released,
 }
 
 pub use crate::PostedOutcome;
@@ -1090,6 +1094,8 @@ async fn guard_launch(
         Err(error) => return error_response(&error),
     };
     let is_run_read = request.method() == Method::GET && request.uri().path() == "/v1/run";
+    let is_outcome_post =
+        request.method() == Method::POST && request.uri().path() == "/v1/run/outcome";
     let fenced = || {
         error_response(&ApiError::new(
             ErrorCode::Fenced,
@@ -1116,7 +1122,8 @@ async fn guard_launch(
             ErrorCode::Finished,
             "the run already posted its outcome",
         )),
-        Ok(LaunchState::Fenced) => fenced(),
+        Ok(LaunchState::Released) if is_outcome_post => next.run(request).await,
+        Ok(LaunchState::Fenced | LaunchState::Released) => fenced(),
         Err(error) => error_response(&error),
     }
 }

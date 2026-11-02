@@ -1282,6 +1282,10 @@ impl WorkflowApiBackend for Backend {
         // SQL or a child run is fenced too. The lease is read again at most
         // every LEASE_RECHECK.
         if let Some(runtime) = runtime {
+            // One that paused the run itself has only its suspension to post.
+            if runtime.paused_by_itself().await {
+                return Ok(LaunchState::Released);
+            }
             let due = {
                 let mut checked = slot
                     .lease_checked
@@ -1416,13 +1420,29 @@ impl WorkflowApiBackend for Backend {
     ) -> Result<(), ApiError> {
         let slot = self.0.slot(binding).ok_or_else(not_serving)?;
         // A launch that lost the run must not be told its outcome was taken.
-        if let Some(runtime) = slot.runtime.upgrade()
-            && !runtime.holds_run().await
-        {
-            return Err(ApiError::new(
-                ErrorCode::Fenced,
-                "this launch no longer holds the run's lease",
-            ));
+        // One that paused the run itself still posts the suspension the pause
+        // asked for, which waits only for resume; nothing else.
+        if let Some(runtime) = slot.runtime.upgrade() {
+            let holds = if runtime.paused_by_itself().await {
+                // Only a suspension that waits for resume alone.
+                matches!(
+                    &outcome,
+                    PostedOutcome::Suspended(suspension)
+                        if suspension.wakes.iter().all(|wake| matches!(wake, runtara_workflow_api::Wake::OnResume))
+                ) && slot
+                    .pending_waits
+                    .lock()
+                    .expect("pending waits poisoned")
+                    .is_empty()
+            } else {
+                runtime.holds_run().await
+            };
+            if !holds {
+                return Err(ApiError::new(
+                    ErrorCode::Fenced,
+                    "this launch no longer holds the run's lease",
+                ));
+            }
         }
         let mut outcome = outcome;
         if let PostedOutcome::Suspended(suspension) = &mut outcome {
@@ -2845,6 +2865,7 @@ mod tests {
     /// counting how often it is read and the events appended.
     struct Lease {
         holds: std::sync::atomic::AtomicBool,
+        paused: std::sync::atomic::AtomicBool,
         reads: std::sync::atomic::AtomicUsize,
         events: std::sync::atomic::AtomicUsize,
     }
@@ -2853,6 +2874,7 @@ mod tests {
         fn new(holds: bool) -> Self {
             Self {
                 holds: holds.into(),
+                paused: false.into(),
                 reads: 0.into(),
                 events: 0.into(),
             }
@@ -2864,6 +2886,9 @@ mod tests {
         async fn holds_run(&self) -> bool {
             self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.holds.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        async fn paused_by_itself(&self) -> bool {
+            self.paused.load(std::sync::atomic::Ordering::SeqCst)
         }
         fn instance_id(&self) -> Result<String, String> {
             unreachable!()
@@ -3004,6 +3029,54 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::Fenced, "{error:?}");
         assert_eq!(launches.finish("launch-1"), None);
+    }
+
+    /// A launch that paused its run itself released the run's lease with the
+    /// pause. It still posts the suspension the pause asked for, waiting only
+    /// for resume, and nothing else: any other call or outcome is fenced.
+    #[tokio::test]
+    async fn a_launch_that_paused_its_run_posts_only_its_suspension() {
+        use runtara_workflow_api::{Suspension, Wake};
+        let launches = Arc::new(ApiLaunches::default());
+        let backend = Backend(launches.clone());
+        let lease = Arc::new(Lease::new(false));
+        lease
+            .paused
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let runtime: Arc<dyn RuntimeHost> = lease.clone();
+        launches
+            .begin(
+                binding(1),
+                info(),
+                Vec::new(),
+                Arc::downgrade(&runtime),
+                controls(),
+            )
+            .unwrap();
+        assert_eq!(
+            backend.launch_state(&binding(1)).await.unwrap(),
+            LaunchState::Released
+        );
+        for refused in [
+            PostedOutcome::Completed(b"out".to_vec()),
+            PostedOutcome::Suspended(Suspension {
+                wakes: vec![Wake::OnResume, Wake::At(1)],
+            }),
+        ] {
+            let error = backend
+                .post_outcome(&binding(1), refused)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::Fenced, "{error:?}");
+        }
+        let suspension = PostedOutcome::Suspended(Suspension {
+            wakes: vec![Wake::OnResume],
+        });
+        backend
+            .post_outcome(&binding(1), suspension.clone())
+            .await
+            .unwrap();
+        assert_eq!(launches.finish("launch-1"), Some(suspension));
     }
 
     /// A launch whose lease was revoked is fenced on its next call, whatever
