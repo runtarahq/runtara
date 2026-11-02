@@ -15,6 +15,12 @@ pub const WAKES: &str = "runtara-wakes";
 pub const PENDING_SIGNAL: &str = "runtara-pending-signal";
 /// JSON announcement of a pending custom signal, piggybacked on checkpoints.
 pub const CUSTOM_SIGNAL: &str = "runtara-custom-signal";
+/// `none` on a `404` from `GET /v1/checkpoints/{id}` when the run has no
+/// checkpoint at all: every other lookup misses too, until the run writes one.
+pub const CHECKPOINTS: &str = "runtara-checkpoints";
+/// `none` beside [`CHECKPOINTS`] when no lifecycle signal was pending as the
+/// lookup was answered.
+pub const LIFECYCLE: &str = "runtara-lifecycle";
 /// JSON metadata of a delivered lifecycle signal, whose body is its payload.
 pub const SIGNAL: &str = "runtara-signal";
 /// JSON metadata of an outbound HTTP request.

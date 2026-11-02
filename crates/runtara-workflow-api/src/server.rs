@@ -134,6 +134,13 @@ pub trait WorkflowApiBackend: Send + Sync + 'static {
         let _ = (binding, id, attempt, error);
         Err(unsupported_service("retry attempts"))
     }
+    /// Whether the run has any checkpoint at all: `None` where the backend
+    /// cannot tell. A run with none is told so when a lookup misses, so it
+    /// need not look up the rest (a fresh launch has nothing to find).
+    async fn has_checkpoints(&self, binding: &Binding) -> Result<Option<bool>, ApiError> {
+        let _ = binding;
+        Ok(None)
+    }
     /// The pending lifecycle command, without acknowledging it.
     async fn poll_lifecycle_signal(
         &self,

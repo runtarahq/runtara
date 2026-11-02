@@ -75,10 +75,21 @@ pub(super) async fn get_checkpoint(
     request: Request,
 ) -> Result<Response, Failure> {
     let binding = binding_of(&request)?;
-    match state.backend.get_checkpoint(&binding, &id).await? {
-        Some(body) => Ok(octets(body, StatusCode::OK)),
-        None => Err(ApiError::new(ErrorCode::NotFound, "no such checkpoint").into()),
+    if let Some(body) = state.backend.get_checkpoint(&binding, &id).await? {
+        return Ok(octets(body, StatusCode::OK));
     }
+    let mut response =
+        Failure::from(ApiError::new(ErrorCode::NotFound, "no such checkpoint")).into_response();
+    // A run with no checkpoint at all (a fresh launch) is told so, and
+    // whether a lifecycle signal is pending, so it need not ask again.
+    if state.backend.has_checkpoints(&binding).await? == Some(false) {
+        let fresh = response.headers_mut();
+        fresh.insert(headers::CHECKPOINTS, HeaderValue::from_static("none"));
+        if let Ok(None) = state.backend.poll_lifecycle_signal(&binding).await {
+            fresh.insert(headers::LIFECYCLE, HeaderValue::from_static("none"));
+        }
+    }
+    Ok(response)
 }
 
 pub(super) async fn put_checkpoint(
