@@ -4200,6 +4200,7 @@ dependencies = [
  "runtara-agent-teams",
  "runtara-agent-text",
  "runtara-agent-transform",
+ "runtara-agent-ups",
  "runtara-agent-utils",
  "runtara-agent-xlsx",
  "runtara-agent-xml",
@@ -4562,6 +4563,18 @@ dependencies = [
  "url",
  "urlencoding",
  "zeroize",
+]
+
+[[package]]
+name = "runtara-agent-ups"
+version = "10.0.0"
+dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.58.0",
 ]
 
 [[package]]

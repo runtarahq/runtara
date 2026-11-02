@@ -138,6 +138,12 @@
     "fnv1a64": "608b4e5db01474c4"
   },
   {
+    "integrationId": "ups_client_credentials",
+    "fieldCount": 3,
+    "serializedBytes": 1250,
+    "fnv1a64": "24f2b23d6e481f2e"
+  },
+  {
     "integrationId": "zendesk_client_credentials",
     "fieldCount": 4,
     "serializedBytes": 1513,

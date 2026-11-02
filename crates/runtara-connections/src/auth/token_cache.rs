@@ -476,8 +476,7 @@ async fn parse_token_response(
     // The (possibly rotated) refresh token, when the provider returns one.
     let refresh_token = body["refresh_token"].as_str().map(|s| s.to_string());
 
-    let expires_at = body["expires_in"]
-        .as_i64()
+    let expires_at = expires_in_seconds(&body)
         .map(|ttl| Utc::now() + Duration::seconds(ttl))
         .or_else(|| {
             if default_ttl_seconds > 0 {
@@ -492,6 +491,16 @@ async fn parse_token_response(
         expires_at,
         refresh_token,
     })
+}
+
+/// The token's lifetime in seconds: `expires_in` as a number, or as a numeric
+/// string (UPS sends `"14399"`; read as a number only, its four-hour token
+/// would stay cached for the default lifetime).
+fn expires_in_seconds(body: &Value) -> Option<i64> {
+    let value = &body["expires_in"];
+    value
+        .as_i64()
+        .or_else(|| value.as_str()?.trim().parse().ok())
 }
 
 pub(crate) fn token_is_fresh(expires_at: Option<DateTime<Utc>>) -> bool {
@@ -780,6 +789,47 @@ mod tests {
         assert_eq!(resolved.header_value, "Bearer existing-token");
         // Fresh fallback → no refresh happened → nothing to persist.
         assert!(resolved.rotated.is_none());
+    }
+
+    #[test]
+    fn expires_in_is_read_as_a_number_or_a_numeric_string() {
+        use serde_json::json;
+        assert_eq!(expires_in_seconds(&json!({"expires_in": 3600})), Some(3600));
+        assert_eq!(
+            expires_in_seconds(&json!({"expires_in": "14399"})),
+            Some(14399)
+        );
+        assert_eq!(expires_in_seconds(&json!({"expires_in": "soon"})), None);
+        assert_eq!(expires_in_seconds(&json!({})), None);
+    }
+
+    #[tokio::test]
+    async fn a_string_expires_in_sets_the_cached_tokens_expiry() {
+        let _loopback = crate::net::test_allowlist::allow("127.0.0.1");
+        // UPS's token response.
+        let url = mock_token_endpoint(
+            "200 OK",
+            r#"{"token_type":"Bearer","access_token":"ups-token","expires_in":"14399","status":"approved"}"#,
+        )
+        .await;
+        let cache_key = key("conn-ups", "string-expires-in");
+        let resolved = resolve_deferred_auth(
+            &Client::new(),
+            client_credentials_auth(cache_key.clone(), url),
+            &None,
+            "tenant-1",
+            "conn-ups",
+            "ups_client_credentials",
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved.header_value, "Bearer ups-token");
+        let expires_at = token_cache().get(&cache_key).unwrap().expires_at.unwrap();
+        let lifetime = expires_at - Utc::now();
+        assert!(
+            lifetime > Duration::hours(3) && lifetime <= Duration::seconds(14399),
+            "cached for {lifetime}"
+        );
     }
 
     /// One-shot mock token endpoint returning a canned HTTP response.

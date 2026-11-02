@@ -60,7 +60,7 @@ Written by hand for each new agent:
 
 | What | Where |
 | -- | -- |
-| `connector.yaml`: agent id, name, description, `integration_id` (one connection type or a list), error prefix, spec URL and sha256, operations, label overrides, body envelopes | the crate |
+| `connector.yaml`: agent id, name, description, `integration_id` (one connection type or a list), error prefix, spec URL and sha256 (or several specs, as UPS publishes them), operations, label overrides, body envelopes, headers the connection sends, pinned path parameters | the crate |
 | `Cargo.toml`, `src/lib.rs`, `src/kit.rs` (copied from `runtara-agent-pipedrive`) | the crate |
 | Tests: response examples round-trip, metadata lists the capabilities and inputs, inputs build the expected requests | `tests/*.rs` in the crate (`runtara-agent-zendesk` shows envelopes and pagination) |
 | Registration: path dependency and `agents()` entry | `crates/runtara-agent-bundle-emit/Cargo.toml`, `src/main.rs` |

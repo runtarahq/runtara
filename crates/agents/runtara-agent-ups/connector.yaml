@@ -1,0 +1,44 @@
+# Input to scripts/connector_gen/connector_gen.py; see its README.md.
+agent:
+  id: ups
+  name: UPS
+  description: UPS — track packages, create shipments and labels, void shipments and recover labels.
+  integration_id: ups_client_credentials
+  error_prefix: UPS
+# UPS publishes one spec per API product.
+specs:
+  - name: Tracking
+    url: https://raw.githubusercontent.com/UPS-API/api-documentation/main/Tracking.yaml
+    sha256: e4eb800e6deaaaaa492ff67ef882585ba0098fcd974b28dbe14641b471258893
+    operations:
+      - getSingleTrackResponseUsingGET
+  - name: Shipping
+    url: https://raw.githubusercontent.com/UPS-API/api-documentation/main/Shipping.yaml
+    sha256: d84b53e5cb058fa767001cf0566cc10cb0c0c34dcbddb2b31fc7c790e4c57079
+    operations:
+      - Shipment
+      - VoidShipment
+      - LabelRecovery
+# The ups_client_credentials connection sends a fresh transId and the
+# transactionSrc with every request.
+connection_headers:
+  - transId
+  - transactionSrc
+# The API version the generated types describe (v2409, v1, …).
+pinned_path_parameters:
+  - version
+# UPS wraps request bodies: {"ShipmentRequest": {...}}. Their fields become inputs.
+body_envelopes:
+  - ShipmentRequest
+  - LabelRecoveryRequest
+# The spec requires both, but label recovery needs only one of TrackingNumber,
+# MailInnovationsTrackingNumber or ReferenceValues (TrackingNumbers is for
+# Roadie labels), as the fields' own descriptions say.
+optional_fields:
+  LabelRecoveryRequest:
+    - TrackingNumbers
+    - ReferenceValues
+labels:
+  additionaladdressvalidation: Additional Address Validation
+  shipmentidentificationnumber: Shipment Identification Number
+  trackingnumber: Tracking Number

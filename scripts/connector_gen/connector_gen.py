@@ -5,7 +5,7 @@ Every generated agent crate carries a `connector.yaml` (see README.md). Commands
 where CRATE is an agent crate directory such as
 `crates/agents/runtara-agent-pipedrive`:
 
-    fetch CRATE       download the spec, verify its sha256, and write
+    fetch CRATE       download the spec (or specs), verify each sha256, and write
                       `spec.slice.json` plus `tests/fixtures/<operationId>.json`
     generate CRATE    render `src/generated.rs` from `spec.slice.json`
     check CRATE...    fail when `src/generated.rs`, the fixtures or the operation
@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -61,6 +62,19 @@ def load_config(crate: Path) -> dict:
         return yaml.safe_load(f)
 
 
+def spec_sources(config: dict) -> list:
+    """The specs a connector is generated from, each with its operations: the
+    `specs:` list (an API the vendor publishes as several specs, one per
+    product), or the single `spec:` with the top-level `operations:`."""
+    if "specs" in config:
+        return config["specs"]
+    return [{**config["spec"], "operations": config["operations"]}]
+
+
+def operation_ids(config: dict) -> list:
+    return [op for source in spec_sources(config) for op in source["operations"]]
+
+
 # ---------------------------------------------------------------------------
 # fetch
 # ---------------------------------------------------------------------------
@@ -95,8 +109,15 @@ def stringify_keys(node):
     return node
 
 
+# YAML 1.2 allows a tab as separating whitespace, so a vendor's `default: <tab>`
+# is valid, but PyYAML cannot even scan it. Trailing whitespace means nothing.
+TRAILING_TABS = re.compile(r"[ \t]*\t[ \t]*(?=\r?$)", re.MULTILINE)
+
+
 def load_spec(raw) -> dict:
-    return stringify_keys(yaml.load(raw, Loader=SpecLoader))
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8-sig")
+    return stringify_keys(yaml.load(TRAILING_TABS.sub("", raw), Loader=SpecLoader))
 
 
 def walk_schema(node, visit):
@@ -158,6 +179,10 @@ def clean_text(text: str) -> str:
 
 def is_scalar(schema: dict) -> bool:
     return schema.get("type") not in ("object", "array") and "properties" not in schema
+
+
+def is_object(schema: dict) -> bool:
+    return schema.get("type") == "object" or "properties" in schema
 
 
 def check_parameter(spec: dict, name: str, parameter: dict) -> list:
@@ -329,6 +354,52 @@ def check_operation(spec: dict, path: str, method: str, op: dict, item: dict, en
     return used - {None}
 
 
+def drop_connection_headers(spec: dict, op: dict, item: dict, names: list) -> set:
+    """Header parameters the connection sends (`connection_headers`, UPS's
+    `transId`) are not step inputs. Returns the names dropped."""
+    dropped = set()
+    for owner in (item, op):
+        if "parameters" not in owner:
+            continue
+        kept = []
+        for parameter in owner["parameters"]:
+            resolved = deref(spec, parameter)
+            if resolved.get("in") == "header" and resolved.get("name") in names:
+                dropped.add(resolved["name"])
+            else:
+                kept.append(parameter)
+        owner["parameters"] = kept
+    return dropped
+
+
+def is_pinned(spec: dict, parameter: dict, names: set) -> bool:
+    resolved = deref(spec, parameter)
+    return resolved.get("in") == "path" and resolved.get("name") in names
+
+
+def pin_path_parameters(spec: dict, path: str, op: dict, item: dict, names: list) -> tuple:
+    """A path parameter listed in `pinned_path_parameters` is fixed to the
+    spec's own default: UPS's `/shipments/{version}/ship` with `version`
+    defaulting to `v2409` becomes `/shipments/v2409/ship`, the API version the
+    generated types describe, and is no step input. Returns the path and the
+    names pinned."""
+    values = {}
+    # Operation parameters override path-level ones of the same name.
+    for owner in (item, op):
+        for parameter in owner.get("parameters") or []:
+            if is_pinned(spec, parameter, names):
+                resolved = deref(spec, parameter)
+                default = deref(spec, resolved.get("schema") or {}).get("default")
+                if default is None:
+                    sys.exit(f"{op['operationId']}: pinned path parameter `{resolved['name']}` has no default")
+                values[resolved["name"]] = str(default)
+    for name, value in values.items():
+        path = path.replace("{" + name + "}", urllib.parse.quote(value, safe=""))
+    if "parameters" in op:
+        op["parameters"] = [p for p in op["parameters"] if not is_pinned(spec, p, set(values))]
+    return path, set(values)
+
+
 def inline_refs(sliced: dict, spec: dict) -> None:
     """Replace two kinds of `$ref` with the schema they point to:
 
@@ -417,6 +488,19 @@ def normalize_schemas(sliced: dict) -> None:
         # lose the model type; every output struct keeps undeclared fields anyway.
         if node.get("properties") and node.get("additionalProperties") in (True, {}):
             del node["additionalProperties"]
+        # A schema's `required` lists field names; one written on the field itself
+        # (UPS's `required: SecurePINType`) fails the generator's spec validation.
+        # Parameters, request bodies and headers have a boolean `required` of their own.
+        if "required" in node and not isinstance(node["required"], list) and not node.keys() & {"in", "content", "schema"}:
+            del node["required"]
+        # An inline object is named after a one-word `title`: the generator spells
+        # the struct `Pod` but types the field with the raw `POD` (UPS's proof of
+        # delivery), so the title is written as the struct name. A title with
+        # spaces is a label, not a name (see `describe_field`).
+        title = node.get("title")
+        if (isinstance(title, str) and " " not in title.strip() and is_object(node)
+                and rust_model_name(title) != model_name(title)):
+            node["title"] = rust_model_name(title)
         for key in ("description", "summary", "title"):
             if isinstance(node.get(key), str):
                 node[key] = clean_text(node[key])
@@ -446,6 +530,11 @@ def rename_schemas(sliced: dict, model_names: dict) -> None:
         if new in schemas:
             sys.exit(f"schema `{old}` is generated as `{new}`, which the spec also defines; "
                      f"rename it with `model_names: {{{old}: <OtherName>}}` in connector.yaml")
+    rename_refs(sliced, renames)
+
+
+def rename_refs(sliced: dict, renames: dict) -> None:
+    """Rename schemas, and every `$ref` to them."""
     if not renames:
         return
 
@@ -463,6 +552,7 @@ def rename_schemas(sliced: dict, model_names: dict) -> None:
                 visit(value)
 
     visit(sliced)
+    schemas = sliced["components"].get("schemas", {})
     sliced["components"]["schemas"] = {renames.get(name, name): schema for name, schema in schemas.items()}
 
 
@@ -478,16 +568,82 @@ def check_names(sliced: dict, operation_ids: list, model_names: dict) -> None:
             )
 
 
-def slice_spec(spec: dict, operation_ids: list, model_names: dict = None, body_envelopes: list = ()) -> dict:
+# The `connector.yaml` lists whose names must each match part of an operation,
+# and what `fetch` says about a name that matches nothing.
+NAME_LISTS = {
+    "body_envelopes": "wrap no request body",
+    "connection_headers": "are no header parameter",
+    "pinned_path_parameters": "are no path parameter",
+}
+
+
+def check_used(options: dict, used: dict) -> None:
+    """A listed name that matched nothing is a typo or a stale entry."""
+    for key, what in NAME_LISTS.items():
+        unused = set(options.get(key) or ()) - used.get(key, set())
+        if unused:
+            sys.exit(f"{key} {sorted(unused)} {what} of the listed operations")
+
+
+def slice_spec(spec: dict, operation_ids: list, model_names: dict = None, body_envelopes: list = (),
+               connection_headers: list = (), pinned_path_parameters: list = ()) -> dict:
     """Keep the listed operations and every component they reference.
 
     openapi-generator's FILTER normalizer drops unlisted operations but still
     renders every model in the spec, so the slice is what keeps the generated
     file to the selected surface.
     """
+    options = {"body_envelopes": body_envelopes, "connection_headers": connection_headers,
+               "pinned_path_parameters": pinned_path_parameters}
+    sliced, used = slice_one(spec, operation_ids, operation_ids[0], model_names or {}, **options)
+    check_used(options, used)
+    return sliced
+
+
+def slice_specs(specs: list, config: dict) -> dict:
+    """The slice of every `spec_sources` entry, paired here with its loaded spec,
+    merged into one when there are several."""
+    options = {key: config.get(key) or [] for key in NAME_LISTS}
+    model_names = config.get("model_names") or {}
+    first = specs[0][0]["operations"][0]
+    slices, used = [], {}
+    for source, spec in specs:
+        sliced, found = slice_one(spec, source["operations"], first, model_names, **options)
+        for key, names in found.items():
+            used.setdefault(key, set()).update(names)
+        slices.append((source.get("name"), sliced))
+    # A name only needs to match in one of the specs.
+    check_used(options, used)
+    if len(slices) == 1:
+        sliced = slices[0][1]
+    else:
+        sliced = merge_slices(slices)
+        check_names(sliced, [op for source, _ in specs for op in source["operations"]], model_names)
+    make_optional(sliced, config.get("optional_fields") or {})
+    return sliced
+
+
+def make_optional(sliced: dict, fields: dict) -> None:
+    """`optional_fields`: schema name -> fields the vendor's spec requires but its
+    API does not (UPS's label recovery needs one of several keys; its spec
+    requires all of them)."""
+    schemas = sliced["components"].get("schemas", {})
+    for schema, names in fields.items():
+        required = schemas.get(schema, {}).get("required") or []
+        stale = [name for name in names if name not in required]
+        if stale:
+            sys.exit(f"optional_fields: `{schema}` in spec.slice.json does not require {stale}")
+        schemas[schema]["required"] = [name for name in required if name not in names]
+        if not schemas[schema]["required"]:
+            del schemas[schema]["required"]
+
+
+def slice_one(spec: dict, operation_ids: list, first: str, model_names: dict, body_envelopes=(),
+              connection_headers=(), pinned_path_parameters=()) -> tuple:
+    """The slice of one spec, and the listed names (`NAME_LISTS`) it used.
+    `first` is the operation that carries the agent's module attributes."""
     if "openapi" not in spec:
         sys.exit("only OpenAPI 3.x specs are supported (Swagger 2.0 needs converting first)")
-    model_names = model_names or {}
 
     wanted = set(operation_ids)
     paths = {}
@@ -498,21 +654,34 @@ def slice_spec(spec: dict, operation_ids: list, model_names: dict = None, body_e
                 kept["parameters"] = item["parameters"]
             paths[path] = kept
 
-    found, used_envelopes = set(), set()
+    found, used = set(), {key: set() for key in NAME_LISTS}
+    sliced_paths = {}
     for path, item in paths.items():
+        targets = []
         for method, op in item.items():
             if method not in HTTP_METHODS:
                 continue
             found.add(op["operationId"])
-            used_envelopes |= check_operation(spec, path, method, op, item, body_envelopes)
-            if op["operationId"] == operation_ids[0]:
+            used["connection_headers"] |= drop_connection_headers(spec, op, item, connection_headers)
+            used["body_envelopes"] |= check_operation(spec, path, method, op, item, body_envelopes)
+            target, pinned = pin_path_parameters(spec, path, op, item, pinned_path_parameters)
+            used["pinned_path_parameters"] |= pinned
+            if op["operationId"] == first:
                 op["x-runtara-first"] = True
+            entry = sliced_paths.setdefault(target, {})
+            if method in entry:
+                sys.exit(f"{op['operationId']}: pinned, it is `{method.upper()} {target}` like another operation")
+            entry[method] = op
+            targets.append((target, pinned))
+        if "parameters" in item:
+            for target, pinned in targets:
+                sliced_paths[target]["parameters"] = [
+                    p for p in item["parameters"] if not is_pinned(spec, p, pinned)
+                ]
+    paths = sliced_paths
     missing = wanted - found
     if missing:
         sys.exit(f"operations not found in the spec: {sorted(missing)}")
-    unused = set(body_envelopes) - used_envelopes
-    if unused:
-        sys.exit(f"body_envelopes {sorted(unused)} wrap no request body of the listed operations")
 
     pending, seen = set(), set()
     refs_in(paths, pending)
@@ -537,7 +706,61 @@ def slice_spec(spec: dict, operation_ids: list, model_names: dict = None, body_e
     normalize_schemas(sliced)
     rename_schemas(sliced, model_names)
     check_names(sliced, operation_ids, model_names)
-    return sliced
+    return sliced, used
+
+
+def canonical(value) -> str:
+    return json.dumps(value, sort_keys=True)
+
+
+def merge_slices(slices: list) -> dict:
+    """One slice from the slices of several specs of the same API, each paired
+    with its `specs:` name. Paths are unioned. Two specs that define a schema
+    differently under one generated name (UPS's Tracking and Shipping both
+    define `ErrorResponse`) each get it renamed `<spec name><Schema>`
+    (`TrackingErrorResponse`); a schema they define identically is kept once."""
+    names = [name for name, _ in slices]
+    if not all(names) or len(set(names)) != len(names):
+        sys.exit("each entry of `specs` needs a `name` of its own")
+    if len({canonical(sliced.get("servers")) for _, sliced in slices}) > 1:
+        sys.exit("the specs list different `servers`; the generated requests share one base path")
+
+    # Until no generated name clashes: renaming a schema changes the schemas
+    # that refer to it, which may then differ between the specs too.
+    while True:
+        defined = {}
+        for name, sliced in slices:
+            for schema, value in sliced["components"].get("schemas", {}).items():
+                defined.setdefault(model_name(schema), {})[name] = (schema, canonical(value))
+        clashes = {generated: by_spec for generated, by_spec in defined.items() if len(set(by_spec.values())) > 1}
+        if not clashes:
+            break
+        for name, sliced in slices:
+            renames = {
+                by_spec[name][0]: rust_model_name(f"{name}_{generated}")
+                for generated, by_spec in clashes.items() if name in by_spec
+            }
+            for old, new in renames.items():
+                if new in defined:
+                    sys.exit(f"schema `{old}` of `{name}` would be renamed `{new}`, which a spec already defines")
+            rename_refs(sliced, renames)
+
+    merged = {key: slices[0][1][key] for key in ("openapi", "info", "servers", "security") if key in slices[0][1]}
+    merged["paths"], merged["components"] = {}, {}
+    for name, sliced in slices:
+        for path, item in sliced["paths"].items():
+            target = merged["paths"].setdefault(path, {})
+            for key, value in item.items():
+                if key in target and (key in HTTP_METHODS or canonical(target[key]) != canonical(value)):
+                    sys.exit(f"`{path}` has `{key}` in more than one spec")
+                target[key] = value
+        for kind, entries in sliced["components"].items():
+            for entry, value in entries.items():
+                kept = merged["components"].setdefault(kind, {}).setdefault(entry, value)
+                # The templates do not render security schemes; the first spec's stay.
+                if kind != "securitySchemes" and canonical(kept) != canonical(value):
+                    sys.exit(f"`#/components/{kind}/{entry}` differs between the specs")
+    return merged
 
 
 # Words generated labels spell in their usual form rather than capitalized.
@@ -654,9 +877,8 @@ def write_json(path: Path, value) -> None:
         f.write("\n")
 
 
-def fetch(crate: Path) -> None:
-    config = load_config(crate)
-    source = config["spec"]
+def download(source: dict) -> bytes:
+    """The spec at `source["url"]`, refused unless it matches the pinned sha256."""
     # Some vendor CDNs (Zendesk's) refuse urllib's default `Python-urllib` agent.
     request = urllib.request.Request(source["url"], headers={"User-Agent": "runtara-connector-gen"})
     with urllib.request.urlopen(request) as response:
@@ -667,11 +889,12 @@ def fetch(crate: Path) -> None:
             f"{source['url']} changed: sha256 is {digest}, connector.yaml pins {source['sha256']}.\n"
             "Review the vendor's change, update the pin, then fetch again."
         )
+    return raw
 
-    sliced = slice_spec(
-        load_spec(raw), config["operations"], config.get("model_names") or {},
-        config.get("body_envelopes") or [],
-    )
+
+def fetch(crate: Path) -> None:
+    config = load_config(crate)
+    sliced = slice_specs([(source, load_spec(download(source))) for source in spec_sources(config)], config)
     describe_fields(sliced, config.get("labels") or {})
     write_json(crate / "spec.slice.json", sliced)
     fixtures = crate / "tests" / "fixtures"
@@ -679,7 +902,7 @@ def fetch(crate: Path) -> None:
         stale.unlink()
     for operation_id, example in response_examples(sliced).items():
         write_json(fixtures / f"{operation_id}.json", example)
-    print(f"{crate / 'spec.slice.json'}: {len(config['operations'])} operations")
+    print(f"{crate / 'spec.slice.json'}: {len(operation_ids(config))} operations")
 
 
 # ---------------------------------------------------------------------------
@@ -780,7 +1003,7 @@ def drift(crate: Path) -> list:
     sliced = json.loads((crate / "spec.slice.json").read_text())
     problems = []
 
-    listed = set(config["operations"])
+    listed = set(operation_ids(config))
     sliced_ops = {
         op["operationId"]
         for item in sliced["paths"].values()

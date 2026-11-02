@@ -13,6 +13,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **UPS agent, generated from UPS's Tracking and Shipping specs.** Four
+  capabilities: track a package, create a shipment and its label, void a
+  shipment, and recover a label. The new `ups_client_credentials` connection
+  type mints a Bearer token from the Client ID and Secret of a UPS Developer
+  Portal app, in `production` or `sandbox` (UPS's test environment, on
+  `wwwcie.ups.com`), refuses any other environment, sends the `transId`
+  (fresh per request) and `transactionSrc` headers UPS asks for, and is
+  limited by default to 5 requests/s with a burst of 10, as UPS does not
+  publish its limits.
+
+- **The connector generator takes an API the vendor splits into several
+  specs.** A `connector.yaml` can list `specs:`, each with its own pin and
+  operations, merged into one agent (a schema two specs define differently
+  gets the spec's name in front). It can also name `connection_headers` (sent
+  by the connection type, so not step inputs), `pinned_path_parameters` (the
+  spec's default written into the path, such as UPS's API version) and
+  `optional_fields` (fields the spec requires but the API does not). `fetch`
+  now reads tabs after a value, a `required` written on a field, and inline
+  objects named by a one-word title with runs of capitals (`POD`).
+
 - **Zendesk agent, generated from Zendesk's Support API spec.** Nineteen
   capabilities over tickets (list, show, create, update — which also adds
   comments — delete), ticket comments and fields, search and search export,
@@ -1047,6 +1067,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is off or any row fails.
 
 ### Fixed
+
+- **An OAuth token whose `expires_in` is a string expires on time.** The
+  token cache read only a number, so a provider sending `"14399"` (UPS) had
+  its token cached for the 24-hour default, past its real lifetime. A numeric
+  string is now read as the lifetime.
 
 - **A resume right after a pause no longer leaves the run paused.** A pause
   that arrived while a waiting run was parking stayed pending: the run was

@@ -75,6 +75,11 @@ class LoadSpecTest(unittest.TestCase):
     def test_bare_equals_sign_is_a_string(self):
         self.assertEqual(cg.load_spec(b"example:\n  - change: =\n"), {"example": [{"change": "="}]})
 
+    def test_tabs_after_a_value_are_whitespace(self):
+        # UPS's Tracking spec: `default: <tab><tab>` on a CRLF line.
+        spec = cg.load_spec(b"a:\r\n  default: \t\t  \r\n  b: x\t\r\n  c: \"keep\tinside\"\r\n")
+        self.assertEqual(spec, {"a": {"default": None, "b": "x", "c": "keep\tinside"}})
+
 
 class HumanizeTest(unittest.TestCase):
     def test_splits_words_and_keeps_acronyms(self):
@@ -292,6 +297,152 @@ class NormalizeTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as raised:
             cg.slice_spec(spec_with(json_body({"type": "object"})), ["op"], body_envelopes=["tikcet"])
         self.assertIn("tikcet", str(raised.exception))
+
+    def test_required_written_on_a_field_is_dropped(self):
+        # UPS's Shipping spec: `required: SecurePINType` on the field itself.
+        pin = {"type": "object", "required": ["type"], "properties": {"type": {"type": "string", "required": "type"}}}
+        header = {"in": "header", "name": "X-Id", "required": True, "schema": {"type": "string"}}
+        body = json_body({"$ref": "#/components/schemas/Pin"})
+        body["requestBody"]["required"] = True
+        sliced = cg.slice_spec(spec_with({"parameters": [header], **body}, {"Pin": pin}), ["op"])
+        kept = sliced["components"]["schemas"]["Pin"]
+        self.assertEqual(kept["required"], ["type"])
+        self.assertNotIn("required", kept["properties"]["type"])
+        op = operation(sliced, "op")
+        self.assertIs(op["parameters"][0]["required"], True)
+        self.assertIs(op["requestBody"]["required"], True)
+
+
+class ConnectionPartsTest(unittest.TestCase):
+    """Parameters no step input sets: headers the connection sends
+    (`connection_headers`) and path parameters pinned to the spec's default
+    (`pinned_path_parameters`)."""
+
+    @staticmethod
+    def spec() -> dict:
+        version = {"in": "path", "name": "version", "required": True,
+                   "schema": {"type": "string", "default": "v2409"}}
+        trans_id = {"in": "header", "name": "transId", "required": True, "schema": {"type": "string"}}
+        shipment = {"in": "path", "name": "id", "required": True, "schema": {"type": "string"}}
+        return {"openapi": "3.0.1", "info": {"title": "t", "version": "1"}, "paths": {
+            "/shipments/{version}/void/{id}": {"parameters": [version], "delete": {
+                "operationId": "void", "parameters": [trans_id, shipment],
+                "responses": {"204": {"description": "ok"}}}},
+        }}
+
+    def test_they_are_no_inputs(self):
+        sliced = cg.slice_spec(self.spec(), ["void"], connection_headers=["transId"],
+                               pinned_path_parameters=["version"])
+        self.assertEqual(list(sliced["paths"]), ["/shipments/v2409/void/{id}"])
+        item = sliced["paths"]["/shipments/v2409/void/{id}"]
+        self.assertEqual(item["parameters"], [])
+        self.assertEqual([p["name"] for p in item["delete"]["parameters"]], ["id"])
+
+    def test_pinned_parameter_needs_a_default(self):
+        spec = self.spec()
+        del spec["paths"]["/shipments/{version}/void/{id}"]["parameters"][0]["schema"]["default"]
+        with self.assertRaises(SystemExit) as raised:
+            cg.slice_spec(spec, ["void"], pinned_path_parameters=["version"])
+        self.assertIn("no default", str(raised.exception))
+
+    def test_unmatched_names_fail(self):
+        for kwargs, name in (({"connection_headers": ["transID"]}, "transID"),
+                             ({"connection_headers": ["id"]}, "id"),
+                             ({"pinned_path_parameters": ["transId"]}, "transId")):
+            with self.assertRaises(SystemExit) as raised:
+                cg.slice_spec(self.spec(), ["void"], **kwargs)
+            self.assertIn(f"['{name}']", str(raised.exception))
+
+
+def merge_spec(path: str, op_id: str, schemas: dict, root: str = "Reply", servers=("https://example.com/api",),
+               parameters=()) -> dict:
+    return {"openapi": "3.0.1", "info": {"title": op_id, "version": "1"},
+            "servers": [{"url": url} for url in servers],
+            "paths": {path: {"get": {"operationId": op_id, "parameters": list(parameters),
+                                     **ok_json({"$ref": f"#/components/schemas/{root}"})}}},
+            "components": {"schemas": schemas}}
+
+
+def merge(*specs, **config) -> dict:
+    """`slice_specs` over `(name, operationId, spec)` triples."""
+    return cg.slice_specs([({"name": name, "operations": [op_id]}, spec) for name, op_id, spec in specs], config)
+
+
+class MergeTest(unittest.TestCase):
+    """A connector generated from several specs of one API (`specs:`)."""
+
+    @staticmethod
+    def schemas(error_description: str) -> dict:
+        return {
+            "Reply": {"type": "object", "properties": {"holder": {"$ref": "#/components/schemas/Holder"},
+                                                       "shared": {"$ref": "#/components/schemas/Shared"}}},
+            "Holder": {"type": "object", "properties": {"error": {"$ref": "#/components/schemas/Error"}}},
+            "Shared": {"type": "object", "properties": {"id": {"type": "string"}}},
+            "Error": {"type": "object", "description": error_description,
+                      "properties": {"code": {"type": "string"}}},
+        }
+
+    def test_a_schema_the_specs_define_differently_gets_the_spec_name(self):
+        merged = merge(("Track", "track", merge_spec("/track", "track", self.schemas("Tracking's"))),
+                       ("Ship", "ship", merge_spec("/ship", "ship", self.schemas("Shipping's"))))
+        schemas = merged["components"]["schemas"]
+        # `Error` differs; `Holder` and `Reply` only through what they refer to;
+        # `Shared` is the same in both and kept once.
+        self.assertEqual(sorted(schemas), ["Shared", "ShipError", "ShipHolder", "ShipReply",
+                                           "TrackError", "TrackHolder", "TrackReply"])
+        self.assertEqual(schemas["TrackHolder"]["properties"]["error"], {"$ref": "#/components/schemas/TrackError"})
+        self.assertEqual(schemas["ShipReply"]["properties"]["shared"], {"$ref": "#/components/schemas/Shared"})
+        response = operation(merged, "ship")["responses"]["200"]["content"]["application/json"]["schema"]
+        self.assertEqual(response, {"$ref": "#/components/schemas/ShipReply"})
+        self.assertEqual(sorted(merged["paths"]), ["/ship", "/track"])
+
+    def test_one_name_spelled_two_ways_is_renamed(self):
+        reply = {"type": "object", "properties": {"id": {"type": "string"}}}
+        merged = merge(("Track", "track", merge_spec("/track", "track", {"Reply": reply})),
+                       ("Ship", "ship", merge_spec("/ship", "ship", {"reply": reply}, root="reply")))
+        self.assertEqual(sorted(merged["components"]["schemas"]), ["ShipReply", "TrackReply"])
+
+    def test_first_operation_is_the_first_of_the_first_spec(self):
+        merged = merge(("Track", "track", merge_spec("/track", "track", self.schemas("e"))),
+                       ("Ship", "ship", merge_spec("/ship", "ship", self.schemas("e"))))
+        self.assertTrue(operation(merged, "track")["x-runtara-first"])
+        self.assertNotIn("x-runtara-first", operation(merged, "ship"))
+
+    def test_a_listed_name_needs_to_match_in_one_spec_only(self):
+        def specs():
+            trans_id = {"in": "header", "name": "transId", "schema": {"type": "string"}}
+            return (("Track", "track", merge_spec("/track", "track", self.schemas("e"), parameters=[trans_id])),
+                    ("Ship", "ship", merge_spec("/ship", "ship", self.schemas("e"))))
+
+        merged = merge(*specs(), connection_headers=["transId"])
+        self.assertEqual(operation(merged, "track")["parameters"], [])
+        with self.assertRaises(SystemExit) as raised:
+            merge(*specs(), connection_headers=["transId", "transactionSrc"])
+        self.assertIn("['transactionSrc']", str(raised.exception))
+
+    def test_optional_fields_drop_what_the_spec_wrongly_requires(self):
+        reply = {"type": "object", "required": ["id", "code", "name"],
+                 "properties": {"id": {"type": "string"}, "code": {"type": "string"}, "name": {"type": "string"}}}
+        specs = (("Track", "track", merge_spec("/track", "track", {"Reply": reply})),)
+        merged = merge(*specs, optional_fields={"Reply": ["code", "name"]})
+        self.assertEqual(merged["components"]["schemas"]["Reply"]["required"], ["id"])
+        with self.assertRaises(SystemExit) as raised:
+            merge(("Track", "track", merge_spec("/track", "track", {"Reply": reply})), optional_fields={"Reply": ["note"]})
+        self.assertIn("['note']", str(raised.exception))
+
+    def test_refusals(self):
+        track = ("Track", "track", merge_spec("/track", "track", self.schemas("e")))
+        cases = (
+            ((track, ("Ship", "ship", merge_spec("/ship", "ship", self.schemas("e"),
+                                                 servers=("https://other.example.com",)))), "servers"),
+            ((track, ("Ship", "ship", merge_spec("/track", "ship", self.schemas("e")))), "more than one spec"),
+            ((track, ("", "ship", merge_spec("/ship", "ship", self.schemas("e")))), "`name`"),
+            ((track, ("Track", "ship", merge_spec("/ship", "ship", self.schemas("e")))), "`name`"),
+        )
+        for specs, fragment in cases:
+            with self.assertRaises(SystemExit) as raised:
+                merge(*specs)
+            self.assertIn(fragment, str(raised.exception))
 
 
 class RefusalTest(unittest.TestCase):
@@ -512,6 +663,48 @@ class ModelNameRenderTest(unittest.TestCase):
         referenced = re.findall(r"pub f\d+: Option<(\w+)>", text)
         self.assertEqual(len(referenced), len(self.NAMES))
         self.assertEqual([name for name in referenced if name not in structs], [])
+
+    def test_inline_object_named_by_its_title(self):
+        # UPS's proof of delivery: an inline object titled `POD`.
+        holder = {"type": "object", "properties": {
+            f"f{i}": {"type": "object", "title": name, "properties": {"id": {"type": "string"}}}
+            for i, name in enumerate(["POD", "HTMLBody", "Proof of Delivery"])}}
+        spec = spec_with(ok_json({"$ref": "#/components/schemas/Holder"}), {"Holder": holder}, method="get")
+        with tempfile.TemporaryDirectory() as tmp:
+            sliced = write_crate(Path(tmp), spec, ["op"])
+            text = cg.render(Path(tmp))
+        fields = sliced["components"]["schemas"]["Holder"]["properties"]
+        # A title with spaces stays the field's label.
+        self.assertEqual(fields["f2"]["x-runtara-label"], "Proof of Delivery")
+        structs = set(re.findall(r"pub struct (\w+)", text))
+        referenced = re.findall(r"pub f\d+: Option<(\w+)>", text)
+        self.assertEqual(len(referenced), 3)
+        self.assertEqual([name for name in referenced if name not in structs], [])
+
+
+@unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
+class MergeRenderTest(unittest.TestCase):
+    """Rendered with the real generator: the renamed schemas of a merged slice
+    are the structs its fields and capabilities refer to."""
+
+    def test_renamed_schemas_are_the_generated_structs(self):
+        specs = [("Track", "track", merge_spec("/track", "track", MergeTest.schemas("Tracking's"))),
+                 ("Ship", "ship", merge_spec("/ship", "ship", MergeTest.schemas("Shipping's")))]
+        with tempfile.TemporaryDirectory() as tmp:
+            crate = Path(tmp)
+            (crate / "connector.yaml").write_text(yaml.safe_dump({
+                "agent": {"id": "sample", "name": "Sample", "description": "Sample.",
+                          "integration_id": "sample_token", "error_prefix": "SAMPLE"},
+                "specs": [{"name": name, "url": "unused", "sha256": "unused", "operations": [op_id]}
+                          for name, op_id, _ in specs],
+            }))
+            cg.write_json(crate / "spec.slice.json", merge(*specs))
+            self.assertEqual(cg.drift(crate), [])
+            text = cg.render(crate)
+        structs = set(re.findall(r"pub struct (\w+)", text))
+        self.assertLessEqual({"TrackReply", "ShipReply", "TrackError", "ShipError", "Shared"}, structs)
+        self.assertIn("pub error: Option<TrackError>,", text)
+        self.assertIn("pub async fn ship(input: ShipInput) -> Result<ShipReply, AgentError>", text)
 
 
 @unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
