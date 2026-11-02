@@ -212,16 +212,17 @@ fn compile(
             } else {
                 Vec::new()
             };
-            let workflow_wasm =
+            let (workflow_wasm, sent, encoding) =
                 hand_back(artifacts, &wasm, &outcome.binary_checksum, how, &placements)?;
             // On stderr, which a node keeps as the run's output: where a
             // compile's time went.
             let (files, bytes, fetch_time) = *fetching.lock().expect("fetch timings");
             eprintln!(
-                "runtara-compile-guest: fetched {files} files ({bytes} bytes) in {} ms, compiled in {} ms (fetches included), handed back {} bytes in {} ms, {} ms in all",
+                "runtara-compile-guest: fetched {files} files ({bytes} bytes) in {} ms, compiled in {} ms (fetches included), handed back {} bytes as {sent} ({encoding}, {} components placed) in {} ms, {} ms in all",
                 fetch_time.as_millis(),
                 compiled.as_millis(),
                 wasm.len(),
+                placements.len(),
                 handing_back.elapsed().as_millis(),
                 started.elapsed().as_millis()
             );
@@ -340,7 +341,7 @@ fn leb128_u32(bytes: &[u8], mut at: usize) -> Option<(u32, usize)> {
 
 /// Hands `wasm`, whose SHA-256 is `digest`, back to `artifacts` in parts,
 /// answering its SHA-256 once the host has it whole (checking it is what the
-/// parts make). With `placements`, as a splice: its own bytes, and where the
+/// parts make), with how many bytes crossed and as what. With `placements`, as a splice: its own bytes, and where the
 /// components it was given lie in it, which the host has. Else deflated when
 /// `how` says: a component deflates to about a third, which pays where the
 /// link to the host is slow (SYN-930).
@@ -351,7 +352,7 @@ fn hand_back(
     digest: &str,
     how: HandBack,
     placements: &[runtara_workflow_api::splice::Placement],
-) -> Result<String, String> {
+) -> Result<(String, usize, &'static str), String> {
     let digest = digest.to_owned();
     let spliced = !placements.is_empty();
     let deflate = how.deflate && !spliced;
@@ -393,7 +394,14 @@ fn hand_back(
     if !whole {
         return Err("the host did not take the composed component whole".into());
     }
-    Ok(digest)
+    let encoding = if spliced {
+        "splice"
+    } else if deflate {
+        "deflate"
+    } else {
+        "raw"
+    };
+    Ok((digest, sent.len(), encoding))
 }
 
 #[cfg(target_os = "wasi")]
