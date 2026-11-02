@@ -192,7 +192,12 @@ async fn write_atomically(path: &FsPath, bytes: &[u8]) -> Result<(), ArtifactErr
 #[async_trait]
 impl ArtifactStore for ObjectArtifactStore {
     async fn put(&self, bytes: &[u8]) -> Result<Digest, ArtifactError> {
-        let digest = Digest::of(bytes);
+        self.put_digested(bytes, &Digest::of(bytes)).await
+    }
+
+    async fn put_digested(&self, bytes: &[u8], digest: &Digest) -> Result<Digest, ArtifactError> {
+        debug_assert_eq!(Digest::of(bytes), *digest);
+        let digest = digest.clone();
         let path = Self::blob(&digest);
         if !self.present(&path).await? {
             // An object store's put is atomic: readers see all of it or none.

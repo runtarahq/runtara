@@ -142,6 +142,14 @@ pub trait ArtifactStore: Send + Sync {
     /// already stored is a no-op, and a reader never sees a partial artifact.
     async fn put(&self, bytes: &[u8]) -> Result<Digest, ArtifactError>;
 
+    /// [`put`](Self::put) of bytes whose digest the caller computed: `digest`
+    /// must be [`Digest::of`] them. A store that takes it does not hash them
+    /// again; by default this hashes them as `put` does.
+    async fn put_digested(&self, bytes: &[u8], digest: &Digest) -> Result<Digest, ArtifactError> {
+        let _ = digest;
+        self.put(bytes).await
+    }
+
     /// Whether the artifact is stored.
     async fn exists(&self, digest: &Digest) -> Result<bool, ArtifactError>;
 
@@ -260,7 +268,12 @@ async fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), ArtifactError
 #[async_trait]
 impl ArtifactStore for FilesystemArtifactStore {
     async fn put(&self, bytes: &[u8]) -> Result<Digest, ArtifactError> {
-        let digest = Digest::of(bytes);
+        self.put_digested(bytes, &Digest::of(bytes)).await
+    }
+
+    async fn put_digested(&self, bytes: &[u8], digest: &Digest) -> Result<Digest, ArtifactError> {
+        debug_assert_eq!(Digest::of(bytes), *digest);
+        let digest = digest.clone();
         let path = self.blob(&digest);
         if tokio::fs::try_exists(&path).await? {
             // Stored again: young again, so collection leaves it until the
@@ -648,6 +661,19 @@ mod tests {
             store.get_manifest("agents/http/1.json").await,
             Err(ArtifactError::MissingContent { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn a_put_given_its_digest_stores_what_a_put_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FilesystemArtifactStore::new(dir.path());
+        let bytes = b"a workflow image".to_vec();
+        let digest = Digest::of(&bytes);
+        assert_eq!(store.put_digested(&bytes, &digest).await.unwrap(), digest);
+        assert_eq!(store.get(&digest).await.unwrap(), Some(bytes.clone()));
+        // Stored again, either way: the same artifact.
+        assert_eq!(store.put(&bytes).await.unwrap(), digest);
+        assert_eq!(store.put_digested(&bytes, &digest).await.unwrap(), digest);
     }
 
     #[tokio::test]

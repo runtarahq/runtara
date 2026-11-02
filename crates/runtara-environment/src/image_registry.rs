@@ -305,9 +305,12 @@ impl ImageRegistry {
         invalidate_image_cache();
         let mut tx = self.pool.begin().await?;
         lock_artifact(&mut tx, &digest).await?;
-        artifacts.put(binary).await.map_err(|error| {
-            crate::error::Error::Other(format!("store image artifact: {error}"))
-        })?;
+        artifacts
+            .put_digested(binary, &digest)
+            .await
+            .map_err(|error| {
+                crate::error::Error::Other(format!("store image artifact: {error}"))
+            })?;
         sqlx::query(
             r#"
             INSERT INTO images (
