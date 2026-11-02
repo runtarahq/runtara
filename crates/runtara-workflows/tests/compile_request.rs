@@ -176,23 +176,36 @@ fn a_compile_given_its_catalog_by_digest_naming_files_the_artifact_holds_makes_t
 }
 
 #[test]
-fn an_outcome_naming_bytes_outside_the_artifact_is_refused() {
+fn an_outcome_naming_bytes_outside_the_artifact_or_more_than_it_holds_is_refused() {
     let temp = tempfile::tempdir().unwrap();
     let remote_options = options(temp.path().join("remote"), temp.path().join("staged"));
     let (mut req, paths) = request(&input(agent_graph()), &remote_options).expect("request");
     req.files_in_artifact = true;
     let (mut outcome, wasm) =
         compile(req, move |digest| std::fs::read(&paths[digest])).expect("compiled elsewhere");
-    let logic = outcome
+    let mut beyond = outcome.clone();
+    let logic = beyond
         .files_in_artifact
         .get_mut("workflow-logic.wasm")
         .unwrap();
     logic.0 = wasm.len() as u64 - logic.1 + 1;
-    let error = apply(outcome, &wasm, "remote", 3, &remote_options).unwrap_err();
+    let error = apply(beyond, &wasm, "remote", 3, &remote_options).unwrap_err();
     assert!(
         error
             .to_string()
             .contains("not within the composed component"),
+        "{error}"
+    );
+    // Naming the whole component again and again is refused before a byte
+    // is copied.
+    for name in ["a", "b"] {
+        outcome
+            .files_in_artifact
+            .insert(name.into(), (0, wasm.len() as u64));
+    }
+    let error = apply(outcome, &wasm, "remote", 3, &remote_options).unwrap_err();
+    assert!(
+        error.to_string().contains("more of the composed component"),
         "{error}"
     );
 }

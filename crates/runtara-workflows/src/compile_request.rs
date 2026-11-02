@@ -613,6 +613,10 @@ type HandedBack = (
     Vec<u8>,
 );
 
+/// The most files an outcome names by where they lie in the composed
+/// component: a build has a handful.
+const MAX_FILES_IN_ARTIFACT: usize = 16;
+
 /// The least a file is for the outcome to name it by where it lies.
 const IN_ARTIFACT_MIN: usize = 1024;
 
@@ -797,6 +801,20 @@ fn write_build(
     ));
     let _ = std::fs::remove_dir_all(&build_dir);
     std::fs::create_dir_all(&build_dir)?;
+    // A few files, and no more bytes than the component has: naming its
+    // bytes again and again copies nothing more.
+    let named: u64 = outcome
+        .files_in_artifact
+        .values()
+        .map(|&(_, length)| length)
+        .fold(0, u64::saturating_add);
+    if outcome.files_in_artifact.len() > MAX_FILES_IN_ARTIFACT || named > workflow_wasm.len() as u64
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the outcome names more of the composed component than it holds",
+        ));
+    }
     let in_artifact = outcome
         .files_in_artifact
         .iter()
@@ -811,12 +829,12 @@ fn write_build(
                         format!("{relative} is not within the composed component"),
                     )
                 })?;
-            Ok((relative, bytes.to_vec()))
+            Ok((relative, std::borrow::Cow::Borrowed(bytes)))
         });
     let inline = outcome.files.iter().map(|(relative, encoded)| {
         STANDARD
             .decode(encoded)
-            .map(|bytes| (relative, bytes))
+            .map(|bytes| (relative, std::borrow::Cow::Owned(bytes)))
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     });
     for file in inline.chain(in_artifact) {
@@ -837,7 +855,7 @@ fn write_build(
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, bytes)?;
+        std::fs::write(path, &*bytes)?;
     }
     let binary_path = build_dir.join(WORKFLOW_WASM);
     std::fs::write(&binary_path, workflow_wasm)?;
