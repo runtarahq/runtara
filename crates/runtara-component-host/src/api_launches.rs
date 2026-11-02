@@ -721,18 +721,49 @@ fn compile_worker_routes(launches: Arc<ApiLaunches>) -> axum::Router {
             Err(refusal) => refused(refusal),
         }
     }
+    #[derive(serde::Deserialize)]
+    struct WithArtifact {
+        artifact: Option<String>,
+        encoding: Option<String>,
+    }
     async fn outcome(
         State(launches): State<Arc<ApiLaunches>>,
         Path(id): Path<String>,
+        Query(with): Query<WithArtifact>,
         request: Request,
     ) -> Response {
         let Some((tenant, worker)) = worker_of(&launches, &request) else {
             return not_a_worker();
         };
-        let body = match to_bytes(request.into_body(), 4 * 1024 * 1024).await {
+        let mut body = match to_bytes(request.into_body(), 4 * 1024 * 1024).await {
             Ok(body) => body.to_vec(),
             Err(_) => return refused(Refusal::BadPart("the outcome is too large")),
         };
+        // What it made, in the same call: the outcome's length, the outcome,
+        // then the component, taken whole before the outcome ends the compile.
+        if let Some(sha256) = with.artifact {
+            let Some(encoding) = crate::compile_worker::Encoding::named(with.encoding.as_deref())
+            else {
+                return refused(Refusal::BadPart("not an encoding of a hand-back"));
+            };
+            let Some(len) = body
+                .get(..4)
+                .map(|len| u32::from_le_bytes(len.try_into().unwrap()) as usize)
+                .filter(|len| 4 + len <= body.len())
+            else {
+                return refused(Refusal::BadPart("not an outcome and what it made"));
+            };
+            let made = body.split_off(4 + len);
+            body.drain(..4);
+            match launches
+                .compiles
+                .hand_back(&id, &tenant, &worker, &sha256, 0, 1, encoding, made)
+            {
+                Ok(true) => {}
+                Ok(false) => return refused(Refusal::BadPart("what it made is not whole")),
+                Err(refusal) => return refused(refusal),
+            }
+        }
         match launches.compiles.finish(&id, &tenant, &worker, body) {
             Ok(()) => StatusCode::NO_CONTENT.into_response(),
             Err(refusal) => refused(refusal),
@@ -2537,6 +2568,67 @@ mod tests {
         let result = done.await.unwrap();
         assert_eq!(result.outcome, b"{\"compiled\":true}");
         assert_eq!(result.made.as_deref(), Some(made.as_slice()));
+
+        // What it made, as a splice, with the outcome in one call.
+        let (id, done) = launches.submit_compile(
+            &tenant,
+            b"{\"compile\":2}".to_vec(),
+            [(sha(b"stdlib"), dir.path().join("stdlib.wasm"))]
+                .into_iter()
+                .collect(),
+        );
+        call(
+            "GET",
+            "/v1/compiles/next?wait_ms=1000".into(),
+            vec![],
+            worker.clone(),
+        )
+        .await
+        .unwrap();
+        let made = b"own stdlib own".to_vec();
+        let splice = runtara_workflow_api::splice::encode(
+            &made,
+            &[runtara_workflow_api::splice::Placement {
+                sha256: sha(b"stdlib"),
+                at: 4,
+                length: 6,
+            }],
+        );
+        let outcome = b"{\"compiled\":2}".to_vec();
+        let framed = |outcome: &[u8], made: &[u8]| {
+            let mut framed = (outcome.len() as u32).to_le_bytes().to_vec();
+            framed.extend(outcome);
+            framed.extend(made);
+            framed
+        };
+        // One that does not rebuild to the component it names ends nothing.
+        let wrong = call(
+            "POST",
+            format!(
+                "/v1/compiles/{id}/outcome?artifact={}&encoding=splice",
+                sha(b"something else")
+            ),
+            framed(&outcome, &splice),
+            worker.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(wrong.status(), 400);
+        let posted = call(
+            "POST",
+            format!(
+                "/v1/compiles/{id}/outcome?artifact={}&encoding=splice",
+                sha(&made)
+            ),
+            framed(&outcome, &splice),
+            worker.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(posted.status(), 204);
+        let result = done.await.unwrap();
+        assert_eq!(result.outcome, outcome);
+        assert_eq!(result.made, Some(made));
         // A warm compiler reaches nothing but its compiles.
         let denied = call("GET", "/v1/connections".into(), vec![], worker.clone())
             .await
