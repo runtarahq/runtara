@@ -7,6 +7,7 @@
 mod common;
 pub mod embedded;
 pub mod mock;
+pub mod provider;
 mod traits;
 
 pub use common::WorkflowRunnerConfig;
@@ -15,6 +16,7 @@ pub use embedded::{
     publish_terminal, run_launch_lifecycle,
 };
 pub use mock::MockRunner;
+pub use provider::{Provider, ProviderEnd, ProviderRunner, RunChannel};
 pub use traits::*;
 
 /// Build the workflow runner: the in-process embedded wasmtime engine,

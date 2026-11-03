@@ -44,6 +44,8 @@ struct Entry {
     launch_id: String,
     binding: Binding,
     gate: watch::Sender<StartGate>,
+    /// When the credential was first presented: the run's start.
+    first_used: Option<std::time::Instant>,
 }
 
 /// The credentials of the launches currently served over the run channel,
@@ -75,6 +77,7 @@ impl RunCredentials {
                 launch_id: binding.launch_id.clone(),
                 binding,
                 gate: watch::Sender::new(StartGate::Pending),
+                first_used: None,
             },
         );
         credential
@@ -124,8 +127,21 @@ impl RunCredentials {
         self.by_digest
             .lock()
             .expect("run credentials poisoned")
-            .get(&digest(credential))
-            .map(|entry| (entry.binding.clone(), entry.gate.subscribe()))
+            .get_mut(&digest(credential))
+            .map(|entry| {
+                entry.first_used.get_or_insert_with(std::time::Instant::now);
+                (entry.binding.clone(), entry.gate.subscribe())
+            })
+    }
+
+    /// When `launch_id`'s credential was first presented.
+    pub fn first_used(&self, launch_id: &str) -> Option<std::time::Instant> {
+        self.by_digest
+            .lock()
+            .expect("run credentials poisoned")
+            .values()
+            .find(|entry| entry.launch_id == launch_id)
+            .and_then(|entry| entry.first_used)
     }
 
     /// The binding a request's credential names, once its launch's start is
@@ -262,6 +278,7 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(!waiting.is_finished());
+        assert!(credentials.first_used("launch-1").is_some());
         assert!(credentials.open("launch-1"));
         assert_eq!(
             waiting.await.unwrap(),

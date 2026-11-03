@@ -81,6 +81,9 @@ pub struct LaunchSlot {
     lease_checked: Mutex<Option<std::time::Instant>>,
     /// What this launch may still append through `POST /v1/events`.
     events: Mutex<crate::event_budget::EventBudget>,
+    /// Woken when the launch posts its outcome: its runner waits on this
+    /// rather than polling for the outcome.
+    posted: tokio::sync::Notify,
 }
 
 /// A compile launch's components, which it may fetch by SHA-256, and the
@@ -235,6 +238,7 @@ impl ApiLaunches {
                 events: Mutex::new(crate::event_budget::EventBudget::new(
                     std::time::Instant::now(),
                 )),
+                posted: tokio::sync::Notify::new(),
             }),
         );
         Ok(())
@@ -309,6 +313,7 @@ impl ApiLaunches {
                 events: Mutex::new(crate::event_budget::EventBudget::new(
                     std::time::Instant::now(),
                 )),
+                posted: tokio::sync::Notify::new(),
             }),
         );
         Ok(())
@@ -523,6 +528,41 @@ impl ApiLaunches {
                 .expect("workflow API outcome poisoned")
                 .is_some()
         })
+    }
+
+    /// Returns once `launch_id` has posted its outcome, or no longer serves.
+    /// The run's end, for a runner whose guest runs elsewhere: it waits on
+    /// this, not on its provider.
+    pub async fn outcome_posted(&self, launch_id: &str) {
+        loop {
+            let Some(slot) = self
+                .slots
+                .lock()
+                .expect("workflow API launches poisoned")
+                .get(launch_id)
+                .cloned()
+            else {
+                return;
+            };
+            let notified = slot.posted.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if slot
+                .outcome
+                .lock()
+                .expect("workflow API outcome poisoned")
+                .is_some()
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// When `launch_id`'s runner first used its run channel credential: the
+    /// run's start, as far as its launch knows. `None` before.
+    pub fn first_used(&self, launch_id: &str) -> Option<std::time::Instant> {
+        self.credentials.first_used(launch_id)
     }
 
     /// The fault that ends `launch_id` as trapped, if one was recorded.
@@ -1550,6 +1590,8 @@ impl WorkflowApiBackend for Backend {
             ));
         }
         *posted = Some(outcome);
+        drop(posted);
+        slot.posted.notify_waiters();
         Ok(())
     }
 
@@ -3067,6 +3109,13 @@ mod tests {
             String::from_utf8_lossy(&detail)
         );
         assert!(launches.posted("launch-1"));
+        assert!(launches.first_used("launch-1").is_some());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            launches.outcome_posted("launch-1"),
+        )
+        .await
+        .expect("the posted outcome wakes its runner");
         match launches.finish("launch-1") {
             Some(PostedOutcome::Failed(error)) => assert_eq!(error.code, "GUEST_KILLED"),
             other => panic!("unexpected outcome {other:?}"),
