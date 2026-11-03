@@ -1721,6 +1721,16 @@ impl ExecutionOutbox {
         let mut tx = self.pool.begin().await?;
         let request_ids = sqlx::query_as::<_, (Uuid, Option<String>)>(
             r#"
+            -- Start from the in-flight requests past their deadline (an
+            -- index range, normally empty), not from every outbox row: the
+            -- outbox keeps delivered rows, so driving from it cost a lookup
+            -- per request ever made on each sweep.
+            WITH due AS MATERIALIZED (
+                SELECT request_id, state
+                FROM execution_requests
+                WHERE state IN ('queued', 'delivered', 'launching')
+                  AND deadline_at <= NOW()
+            )
             UPDATE execution_outbox AS o
             SET state = 'expired',
                 lease_owner = NULL,
@@ -1729,9 +1739,8 @@ impl ExecutionOutbox {
                                   THEN 'launch_deadline_not_compiled'
                                   ELSE 'execution_outbox_deadline_exceeded' END,
                 updated_at = NOW()
-            FROM execution_requests AS r
+            FROM due AS r
             WHERE o.request_id = r.request_id
-              AND r.deadline_at <= NOW()
               AND (
                     (r.state = 'queued' AND o.state IN ('pending', 'leased'))
                  OR (r.state = 'delivered' AND o.state = 'delivered')
