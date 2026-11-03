@@ -282,11 +282,12 @@ mod transport {
     }
 }
 
-/// What a fresh launch's guest knows without asking. Told on a missed lookup
-/// that its run had no checkpoint at all, it knows every lookup of one it has
-/// not written since misses too, and that a lifecycle poll right after that
-/// answer finds none pending. Any other kind of call ends both, as the server
-/// may then have written state of its own.
+/// What a fresh launch's guest knows without asking. Told with its input or
+/// on a missed lookup that its run had no checkpoint at all, it knows every
+/// lookup of one it has not written since misses too, and that a lifecycle
+/// poll right after that answer finds none pending. Appending events leaves
+/// both standing, as an event only records what the run did. Any other kind of
+/// call ends both, as the server may then have written state of its own.
 mod known {
     use std::collections::BTreeSet;
     use std::sync::Mutex;
@@ -351,13 +352,15 @@ mod known {
     }
 
     /// Whether `method` `path` leaves what is known standing: a write of a
-    /// checkpoint by its key, or a lifecycle poll.
+    /// checkpoint by its key, a lifecycle poll, or appended events.
     pub(crate) fn keeps(method: &str, path: &str) -> bool {
         let checkpoint_write = method == "PUT"
             && path
                 .strip_prefix("/v1/checkpoints/")
                 .is_some_and(|key| !key.is_empty() && !key.contains('/'));
-        checkpoint_write || (method == "GET" && path == "/v1/signals/lifecycle")
+        checkpoint_write
+            || (method == "GET" && path == "/v1/signals/lifecycle")
+            || (method == "POST" && path == "/v1/events")
     }
 }
 
@@ -387,9 +390,15 @@ pub async fn run_info() -> Result<RunInfo, Error> {
         .map_err(|error| Error::Transport(format!("run info: {error}")))
 }
 
-/// `GET /v1/run/input`: the raw `{data, variables}` input envelope.
+/// `GET /v1/run/input`: the raw `{data, variables}` input envelope. A fresh
+/// launch is told with it that its run has no checkpoint.
 pub async fn input() -> Result<Vec<u8>, Error> {
-    Ok(call("GET", "/v1/run/input", &[], None).await?.body)
+    use runtara_workflow_api::headers::{CHECKPOINTS, LIFECYCLE};
+    let response = call("GET", "/v1/run/input", &[], None).await?;
+    if response.header(CHECKPOINTS) == Some("none") {
+        known::told_fresh(response.header(LIFECYCLE) == Some("none"));
+    }
+    Ok(response.body)
 }
 
 /// `POST /v1/run/outcome`. Call it once, then return from `run`.
@@ -1103,12 +1112,12 @@ mod known_tests {
         known::wrote("step");
         assert!(!known::absent("step"));
         assert!(known::absent("other"));
-        // A checkpoint write and a lifecycle poll leave that standing.
+        // A checkpoint write, a lifecycle poll and events leave that standing.
         assert!(known::keeps("PUT", "/v1/checkpoints/step"));
         assert!(known::keeps("GET", "/v1/signals/lifecycle"));
+        assert!(known::keeps("POST", "/v1/events"));
         // Any other call may have the server write state: forgotten.
         assert!(!known::keeps("POST", "/v1/checkpoints/step/retry-attempts"));
-        assert!(!known::keeps("POST", "/v1/events"));
         assert!(!known::keeps("GET", "/v1/checkpoints/step"));
         known::forget();
         assert!(!known::absent("other"));

@@ -623,6 +623,25 @@ async fn checkpoints_keep_the_first_committed_state() {
 }
 
 #[tokio::test]
+async fn a_fresh_run_is_told_with_its_input_that_it_has_no_checkpoint() {
+    let backend = Arc::new(FakeBackend::default());
+    let app = app(backend.clone());
+    let input = || request("GET", "/v1/run/input").body(Body::empty()).unwrap();
+
+    let (status, headers, _) = send(&app, input()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[headers::CHECKPOINTS], "none");
+    assert_eq!(headers[headers::LIFECYCLE], "none");
+
+    // A run with a checkpoint (a resumed one) is told nothing.
+    send(&app, write("PUT", "/v1/checkpoints/step", "k1", "s")).await;
+    let (status, headers, _) = send(&app, input()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!headers.contains_key(headers::CHECKPOINTS));
+    assert!(!headers.contains_key(headers::LIFECYCLE));
+}
+
+#[tokio::test]
 async fn a_missed_lookup_tells_a_run_without_checkpoints_so() {
     let backend = Arc::new(FakeBackend::default());
     let app = app(backend.clone());
