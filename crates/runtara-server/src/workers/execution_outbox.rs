@@ -2304,13 +2304,24 @@ impl ExecutionOutboxRelay {
         }
     }
 
+    /// One full pass: expire overdue requests, recover expired launch
+    /// claims, then claim and deliver a batch.
     pub async fn run_once(&self) -> Result<RelayRunStats, ExecutionOutboxError> {
         let expired = self.outbox.expire_due().await?;
         let recovered = self.outbox.recover_expired_launch_claims().await?;
+        let mut stats = self.deliver_once().await?;
+        stats.expired = expired;
+        stats.recovered = recovered;
+        Ok(stats)
+    }
+
+    /// Claim and deliver one batch, without the expiry and recovery sweeps.
+    /// A wake runs only this: those sweeps join the outbox with every
+    /// request, and nothing a new request does makes them due sooner, so
+    /// they stay on the backstop poll.
+    pub async fn deliver_once(&self) -> Result<RelayRunStats, ExecutionOutboxError> {
         let claimed = self.outbox.claim_batch(&self.worker_id).await?;
         let mut stats = RelayRunStats {
-            expired,
-            recovered,
             claimed: claimed.len(),
             ..RelayRunStats::default()
         };
@@ -2424,22 +2435,29 @@ impl ExecutionOutboxRelay {
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
-            tokio::select! {
-                _ = wake.notified() => {}
-                _ = interval.tick() => {}
+            let swept = tokio::select! {
+                _ = wake.notified() => false,
+                _ = interval.tick() => true,
                 _ = wait_for_shutdown(&shutdown) => {
                     info!(worker_id = %self.worker_id, "Execution outbox relay stopping on shutdown");
                     return;
                 }
-            }
+            };
             if shutdown.is_shutting_down() {
                 info!(worker_id = %self.worker_id, "Execution outbox relay stopping on shutdown");
                 return;
             }
             // A full batch may have left more rows claimable: pass again at
-            // once rather than waiting for the next wake or tick.
+            // once rather than waiting for the next wake or tick. Only the
+            // backstop tick sweeps expiries and recoveries.
+            let mut sweep = swept;
             loop {
-                match self.run_once().await {
+                let pass = if std::mem::take(&mut sweep) {
+                    self.run_once().await
+                } else {
+                    self.deliver_once().await
+                };
+                match pass {
                     Ok(stats) => {
                         if stats.claimed > 0 || stats.expired > 0 || stats.recovered > 0 {
                             debug!(?stats, "Execution outbox relay pass completed");
