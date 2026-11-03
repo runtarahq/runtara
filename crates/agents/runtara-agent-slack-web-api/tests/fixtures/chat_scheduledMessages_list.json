@@ -1,0 +1,15 @@
+{
+  "ok": true,
+  "response_metadata": {
+    "next_cursor": ""
+  },
+  "scheduled_messages": [
+    {
+      "channel_id": "C1H9RESGL",
+      "date_created": 1551891734,
+      "id": 1298393284,
+      "post_at": 1551991428,
+      "text": "Here's a message for you in the future"
+    }
+  ]
+}

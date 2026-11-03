@@ -1,0 +1,20 @@
+{
+  "channel": "C1H9RESGL",
+  "message": {
+    "attachments": [
+      {
+        "fallback": "This is an attachment's fallback",
+        "id": 1,
+        "text": "This is an attachment"
+      }
+    ],
+    "bot_id": "B19LU7CSY",
+    "subtype": "bot_message",
+    "text": "Here's a message for you in the future",
+    "type": "delayed_message",
+    "username": "ecto1"
+  },
+  "ok": true,
+  "post_at": "1562180400",
+  "scheduled_message_id": "Q1298393284"
+}

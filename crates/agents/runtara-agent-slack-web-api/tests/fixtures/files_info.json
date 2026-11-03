@@ -1,0 +1,69 @@
+{
+  "comments": [],
+  "file": {
+    "channels": [
+      "C0T8SE4AU"
+    ],
+    "comments_count": 0,
+    "created": 1531763342,
+    "deanimate_gif": "https://.../tedair_deanimate_gif.png",
+    "display_as_bot": false,
+    "editable": false,
+    "external_type": "",
+    "filetype": "gif",
+    "groups": [],
+    "has_rich_preview": false,
+    "id": "F0S43PZDF",
+    "image_exif_rotation": 1,
+    "ims": [],
+    "is_external": false,
+    "is_public": true,
+    "is_starred": false,
+    "mimetype": "image/gif",
+    "mode": "hosted",
+    "name": "tedair.gif",
+    "original_h": 226,
+    "original_w": 176,
+    "permalink": "https://.../tedair.gif",
+    "permalink_public": "https://.../...",
+    "pjpeg": "https://.../tedair_pjpeg.jpg",
+    "pretty_type": "GIF",
+    "public_url_shared": false,
+    "shares": {
+      "public": {
+        "C0T8SE4AU": [
+          {
+            "channel_name": "file-under",
+            "latest_reply": "1531763348.000001",
+            "reply_count": 1,
+            "reply_users": [
+              "U061F7AUR"
+            ],
+            "reply_users_count": 1,
+            "team_id": "T061EG9R6",
+            "thread_ts": "1531763273.000015",
+            "ts": "1531763348.000001"
+          }
+        ]
+      }
+    },
+    "size": 137531,
+    "thumb_160": "https://.../tedair_=_160.png",
+    "thumb_360": "https://.../tedair_360.png",
+    "thumb_360_gif": "https://.../tedair_360.gif",
+    "thumb_360_h": 226,
+    "thumb_360_w": 176,
+    "thumb_64": "https://.../tedair_64.png",
+    "thumb_80": "https://.../tedair_80.png",
+    "timestamp": 1531763342,
+    "title": "tedair.gif",
+    "url_private": "https://.../tedair.gif",
+    "url_private_download": "https://.../tedair.gif",
+    "user": "U061F7AUR",
+    "username": ""
+  },
+  "ok": true,
+  "response_metadata": {
+    "next_cursor": "dGVhbTpDMUg5UkVTR0w="
+  }
+}

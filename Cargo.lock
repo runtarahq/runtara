@@ -4195,6 +4195,7 @@ dependencies = [
  "runtara-agent-sharepoint",
  "runtara-agent-shopify",
  "runtara-agent-slack",
+ "runtara-agent-slack-web-api",
  "runtara-agent-sqs",
  "runtara-agent-stripe",
  "runtara-agent-teams",
@@ -4475,6 +4476,18 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "wit-bindgen 0.58.0",
+]
+
+[[package]]
+name = "runtara-agent-slack-web-api"
+version = "10.0.0"
+dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
+ "runtara-http",
+ "serde",
+ "serde_json",
  "wit-bindgen 0.58.0",
 ]
 
