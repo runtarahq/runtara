@@ -749,6 +749,16 @@ impl RuntimeHost for PersistenceRuntimeHost {
         Ok(response.found.then_some(response.state))
     }
 
+    async fn has_checkpoints(&self) -> Result<Option<bool>, String> {
+        let count = self
+            .state
+            .persistence
+            .count_checkpoints(&self.instance_id, None, None, None)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(Some(count > 0))
+    }
+
     async fn checkpoint(
         &self,
         checkpoint_id: String,

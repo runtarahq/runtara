@@ -288,6 +288,11 @@ pub trait RuntimeHost: Send + Sync {
     }
     /// Read-only checkpoint lookup.
     async fn get_checkpoint(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String>;
+    /// Whether the instance has any checkpoint at all, where the runtime can
+    /// tell: a run with none is told so on a missed lookup.
+    async fn has_checkpoints(&self) -> Result<Option<bool>, String> {
+        Ok(None)
+    }
     /// Combined save/load checkpoint (see core `handle_checkpoint`).
     async fn checkpoint(
         &self,

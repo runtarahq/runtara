@@ -282,6 +282,85 @@ mod transport {
     }
 }
 
+/// What a fresh launch's guest knows without asking. Told on a missed lookup
+/// that its run had no checkpoint at all, it knows every lookup of one it has
+/// not written since misses too, and that a lifecycle poll right after that
+/// answer finds none pending. Any other kind of call ends both, as the server
+/// may then have written state of its own.
+mod known {
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    /// How long the lifecycle answer of a missed lookup stands for a poll.
+    const SIGNALS_CLEAR_FOR: Duration = Duration::from_millis(250);
+
+    struct Known {
+        fresh: bool,
+        written: BTreeSet<String>,
+        signals_clear: Option<Instant>,
+    }
+
+    static KNOWN: Mutex<Known> = Mutex::new(Known {
+        fresh: false,
+        written: BTreeSet::new(),
+        signals_clear: None,
+    });
+
+    fn with<T>(f: impl FnOnce(&mut Known) -> T) -> T {
+        f(&mut KNOWN.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// The run has no checkpoint `id`, without asking.
+    pub(crate) fn absent(id: &str) -> bool {
+        with(|known| known.fresh && !known.written.contains(id))
+    }
+
+    /// The server said the run has no checkpoint, and whether no lifecycle
+    /// signal was pending.
+    pub(crate) fn told_fresh(signals_clear: bool) {
+        with(|known| {
+            known.fresh = true;
+            known.signals_clear = signals_clear.then(Instant::now);
+        })
+    }
+
+    pub(crate) fn wrote(id: &str) {
+        with(|known| {
+            known.written.insert(id.to_owned());
+        })
+    }
+
+    /// No lifecycle signal is pending, as told just now; answers once.
+    pub(crate) fn signals_clear() -> bool {
+        with(|known| {
+            known
+                .signals_clear
+                .take()
+                .is_some_and(|at| at.elapsed() < SIGNALS_CLEAR_FOR)
+        })
+    }
+
+    /// A call other than a checkpoint write or a lifecycle poll.
+    pub(crate) fn forget() {
+        with(|known| {
+            known.fresh = false;
+            known.written.clear();
+            known.signals_clear = None;
+        })
+    }
+
+    /// Whether `method` `path` leaves what is known standing: a write of a
+    /// checkpoint by its key, or a lifecycle poll.
+    pub(crate) fn keeps(method: &str, path: &str) -> bool {
+        let checkpoint_write = method == "PUT"
+            && path
+                .strip_prefix("/v1/checkpoints/")
+                .is_some_and(|key| !key.is_empty() && !key.contains('/'));
+        checkpoint_write || (method == "GET" && path == "/v1/signals/lifecycle")
+    }
+}
+
 /// Send one workflow API request. Writes get an `Idempotency-Key`.
 pub async fn call(
     method: &str,
@@ -289,6 +368,9 @@ pub async fn call(
     headers: &[(&str, &str)],
     body: Option<Vec<u8>>,
 ) -> Result<Response, Error> {
+    if !known::keeps(method, path) {
+        known::forget();
+    }
     if method == "GET" {
         return transport::call(method, path, headers, body).await;
     }
@@ -362,9 +444,18 @@ fn header_json<T: serde::de::DeserializeOwned>(response: &Response, name: &str) 
     serde_json::from_str(response.header(name)?).ok()
 }
 
-/// `GET /v1/checkpoints/{id}`: the committed state, if any.
+/// `GET /v1/checkpoints/{id}`: the committed state, if any. A run the server
+/// said has no checkpoint (a fresh launch) asks only about those it wrote.
 pub async fn get_checkpoint(id: &str) -> Result<Option<Vec<u8>>, Error> {
-    match call("GET", &key_path("/v1/checkpoints", id), &[], None).await {
+    use runtara_workflow_api::headers::{CHECKPOINTS, LIFECYCLE};
+    if known::absent(id) {
+        return Ok(None);
+    }
+    let response = transport::raw("GET", &key_path("/v1/checkpoints", id), &[], None).await?;
+    if response.status == 404 && response.header(CHECKPOINTS) == Some("none") {
+        known::told_fresh(response.header(LIFECYCLE) == Some("none"));
+    }
+    match response.into_result() {
         Ok(response) => Ok(Some(response.body)),
         Err(Error::Api(error)) if error.code == ErrorCode::NotFound => Ok(None),
         Err(error) => Err(error),
@@ -373,6 +464,7 @@ pub async fn get_checkpoint(id: &str) -> Result<Option<Vec<u8>>, Error> {
 
 /// `PUT /v1/checkpoints/{id}`: commit `state`; the first committed state wins.
 pub async fn checkpoint(id: &str, state: Vec<u8>) -> Result<CheckpointWritten, Error> {
+    known::wrote(id);
     let response = call("PUT", &key_path("/v1/checkpoints", id), &[], Some(state)).await?;
     Ok(CheckpointWritten {
         stored: response.status == 201,
@@ -401,6 +493,9 @@ pub async fn record_retry_attempt(
 
 /// `GET /v1/signals/lifecycle`: the pending lifecycle command, unacknowledged.
 pub async fn poll_lifecycle_signal() -> Result<Option<LifecycleSignal>, Error> {
+    if known::signals_clear() {
+        return Ok(None);
+    }
     let response = call("GET", "/v1/signals/lifecycle", &[], None).await?;
     if response.status == 204 {
         return Ok(None);
@@ -726,6 +821,9 @@ async fn call_raw(
     headers: &[(&str, &str)],
     body: Option<Vec<u8>>,
 ) -> Result<Response, Error> {
+    if !known::keeps(method, path) {
+        known::forget();
+    }
     let key = next_idempotency_key();
     let mut all = vec![(runtara_workflow_api::headers::IDEMPOTENCY_KEY, key.as_str())];
     all.extend_from_slice(headers);
@@ -985,4 +1083,38 @@ pub async fn breakpoint(wait_ms: u64) -> Result<bool, Error> {
     )
     .await?;
     Ok(response.status == 200)
+}
+
+#[cfg(test)]
+mod known_tests {
+    use super::known;
+
+    #[test]
+    fn a_fresh_run_knows_lookups_miss_until_it_writes_or_calls_otherwise() {
+        known::forget();
+        assert!(!known::absent("step"));
+        known::told_fresh(true);
+        assert!(known::absent("step"));
+        assert!(known::absent("step::attempt::1"));
+        // A poll right after the answer finds none pending, once.
+        assert!(known::signals_clear());
+        assert!(!known::signals_clear());
+        // What it wrote, it asks about.
+        known::wrote("step");
+        assert!(!known::absent("step"));
+        assert!(known::absent("other"));
+        // A checkpoint write and a lifecycle poll leave that standing.
+        assert!(known::keeps("PUT", "/v1/checkpoints/step"));
+        assert!(known::keeps("GET", "/v1/signals/lifecycle"));
+        // Any other call may have the server write state: forgotten.
+        assert!(!known::keeps("POST", "/v1/checkpoints/step/retry-attempts"));
+        assert!(!known::keeps("POST", "/v1/events"));
+        assert!(!known::keeps("GET", "/v1/checkpoints/step"));
+        known::forget();
+        assert!(!known::absent("other"));
+        // Told no lifecycle answer, a poll asks.
+        known::told_fresh(false);
+        assert!(!known::signals_clear());
+        known::forget();
+    }
 }

@@ -95,6 +95,10 @@ impl WorkflowApiBackend for FakeBackend {
         Ok(self.run.lock().unwrap().checkpoints.get(id).cloned())
     }
 
+    async fn has_checkpoints(&self, _: &Binding) -> Result<Option<bool>, ApiError> {
+        Ok(Some(!self.run.lock().unwrap().checkpoints.is_empty()))
+    }
+
     async fn put_checkpoint(
         &self,
         _: &Binding,
@@ -616,6 +620,37 @@ async fn checkpoints_keep_the_first_committed_state() {
 
     let (status, _, _) = send(&app, write("PUT", &path, "c3", "")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_missed_lookup_tells_a_run_without_checkpoints_so() {
+    let backend = Arc::new(FakeBackend::default());
+    let app = app(backend.clone());
+    let get = |path: &str| request("GET", path).body(Body::empty()).unwrap();
+
+    // A fresh run: no checkpoint and no lifecycle signal pending.
+    let (status, headers, _) = send(&app, get("/v1/checkpoints/step")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(headers[headers::CHECKPOINTS], "none");
+    assert_eq!(headers[headers::LIFECYCLE], "none");
+
+    // A pending lifecycle signal is not answered for.
+    backend.run.lock().unwrap().signal = Some(LifecycleSignal {
+        signal_type: "pause".into(),
+        command_id: "cmd-1".into(),
+        payload: Vec::new(),
+        checkpoint_id: None,
+    });
+    let (_, headers, _) = send(&app, get("/v1/checkpoints/step")).await;
+    assert_eq!(headers[headers::CHECKPOINTS], "none");
+    assert!(!headers.contains_key(headers::LIFECYCLE));
+
+    // Once the run has a checkpoint, a miss says nothing more.
+    send(&app, write("PUT", "/v1/checkpoints/step", "k1", "s")).await;
+    let (status, headers, _) = send(&app, get("/v1/checkpoints/other")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(!headers.contains_key(headers::CHECKPOINTS));
+    assert!(!headers.contains_key(headers::LIFECYCLE));
 }
 
 #[tokio::test]

@@ -1597,6 +1597,13 @@ impl WorkflowApiBackend for Backend {
             .map_err(host_error)
     }
 
+    async fn has_checkpoints(&self, binding: &Binding) -> Result<Option<bool>, ApiError> {
+        self.runtime(binding)?
+            .has_checkpoints()
+            .await
+            .map_err(host_error)
+    }
+
     async fn poll_lifecycle_signal(
         &self,
         binding: &Binding,
