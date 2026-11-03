@@ -2945,7 +2945,10 @@ pub async fn start_with(
         ))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
-        .layer(from_fn(middleware::http_metrics::http_metrics_middleware));
+        .layer(from_fn(middleware::http_metrics::http_metrics_middleware))
+        // Outermost: credential headers are marked sensitive before any
+        // layer or handler can log them.
+        .layer(middleware::sensitive_headers::layer());
 
     // Get port/host from environment variables or use defaults
     let port = std::env::var("SERVER_PORT")

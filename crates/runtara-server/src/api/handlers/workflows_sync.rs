@@ -56,7 +56,8 @@ use crate::workers::execution_engine::{ExecutionEngine, SyncRequest};
     ),
     tag = "Event Capture"
 )]
-#[instrument(skip(engine, pool, body), fields(workflow_id = %workflow_id))]
+// Headers and URI are the caller's (credentials, signed query strings): never span fields.
+#[instrument(skip(engine, pool, body, headers, uri), fields(workflow_id = %workflow_id))]
 #[allow(clippy::too_many_arguments)]
 pub async fn capture_http_event_sync(
     Path(workflow_id): Path<String>,
