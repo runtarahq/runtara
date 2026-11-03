@@ -1169,6 +1169,8 @@ async fn get_run_input(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
     );
+    // A fresh launch learns it has no checkpoint before its first lookup.
+    runtime::tell_fresh(&state, &binding, &mut response).await;
     Ok(response)
 }
 

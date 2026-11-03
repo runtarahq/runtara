@@ -80,16 +80,25 @@ pub(super) async fn get_checkpoint(
     }
     let mut response =
         Failure::from(ApiError::new(ErrorCode::NotFound, "no such checkpoint")).into_response();
-    // A run with no checkpoint at all (a fresh launch) is told so, and
-    // whether a lifecycle signal is pending, so it need not ask again.
-    if state.backend.has_checkpoints(&binding).await? == Some(false) {
+    tell_fresh(&state, &binding, &mut response).await;
+    Ok(response)
+}
+
+/// A run with no checkpoint at all (a fresh launch) is told so, and whether a
+/// lifecycle signal is pending, so it need not ask again. A backend that cannot
+/// tell says nothing: the run then asks.
+pub(super) async fn tell_fresh(
+    state: &WorkflowApiState,
+    binding: &crate::Binding,
+    response: &mut Response,
+) {
+    if let Ok(Some(false)) = state.backend.has_checkpoints(binding).await {
         let fresh = response.headers_mut();
         fresh.insert(headers::CHECKPOINTS, HeaderValue::from_static("none"));
-        if let Ok(None) = state.backend.poll_lifecycle_signal(&binding).await {
+        if let Ok(None) = state.backend.poll_lifecycle_signal(binding).await {
             fresh.insert(headers::LIFECYCLE, HeaderValue::from_static("none"));
         }
     }
-    Ok(response)
 }
 
 pub(super) async fn put_checkpoint(
