@@ -1,0 +1,76 @@
+# Input to scripts/connector_gen/connector_gen.py; see its README.md.
+agent:
+  id: slack-web-api
+  name: Slack Web API
+  description: Slack Web API — messages, conversations, users, reactions, files and pins.
+  integration_id: slack_bot
+  error_prefix: SLACK
+# Slack's only official spec (Swagger 2.0; the repository was archived in 2021),
+# pinned to its last commit.
+spec:
+  url: https://raw.githubusercontent.com/slackapi/slack-api-specs/bc08db49/web-api/slack_web_openapi_v2.json
+  sha256: 742a5c977180a829df8767cf57bc417d99b3713583aee83741efb9c08ca731e7
+# Every method takes the token as a parameter; the connection sends it as a
+# Bearer header instead.
+connection_parameters:
+  - token
+# Message timestamps are ids ("1712345678.000100"); the spec types some as
+# numbers, which would drop their trailing zeros. The rest keep the types of
+# Slack's form-encoded API, where everything is a string; sent as JSON, Block
+# Kit is an array, flags booleans and times numbers.
+input_types:
+  ts: string
+  thread_ts: string
+  latest: string
+  oldest: string
+  blocks:
+    type: array
+    items: {type: object}
+    description: Block Kit blocks, a JSON array (https://api.slack.com/block-kit).
+  attachments:
+    type: array
+    items: {type: object}
+    description: Legacy secondary attachments, a JSON array.
+  as_user: boolean
+  link_names: boolean
+  post_at:
+    type: integer
+    format: int64
+# The spec's shared `ok: true` schema is titled "default success response".
+labels:
+  ok: OK
+operations:
+  - chat_postMessage
+  - chat_update
+  - chat_delete
+  - chat_postEphemeral
+  - chat_scheduleMessage
+  - chat_scheduledMessages_list
+  - chat_deleteScheduledMessage
+  - chat_getPermalink
+  - conversations_list
+  - conversations_info
+  - conversations_history
+  - conversations_replies
+  - conversations_members
+  - conversations_create
+  - conversations_invite
+  - conversations_kick
+  - conversations_join
+  - conversations_open
+  - conversations_rename
+  - conversations_setTopic
+  - conversations_setPurpose
+  - conversations_archive
+  - users_list
+  - users_info
+  - users_lookupByEmail
+  - reactions_add
+  - reactions_remove
+  - reactions_get
+  - files_info
+  - files_list
+  - files_delete
+  - pins_add
+  - pins_remove
+  - auth_test

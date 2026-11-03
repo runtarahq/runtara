@@ -1,0 +1,41 @@
+{
+  "channel": {
+    "created": 1449252889,
+    "creator": "U061F7AUR",
+    "id": "C061EG9SL",
+    "is_archived": false,
+    "is_channel": true,
+    "is_ext_shared": false,
+    "is_general": true,
+    "is_group": false,
+    "is_im": false,
+    "is_member": true,
+    "is_mpim": false,
+    "is_org_shared": false,
+    "is_pending_ext_shared": false,
+    "is_private": false,
+    "is_shared": false,
+    "name": "general",
+    "name_normalized": "general",
+    "pending_shared": [],
+    "previous_names": [],
+    "purpose": {
+      "creator": "",
+      "last_set": 0,
+      "value": "For widget discussion"
+    },
+    "topic": {
+      "creator": "",
+      "last_set": 0,
+      "value": "Which widget do you worry about?"
+    },
+    "unlinked": 0
+  },
+  "ok": true,
+  "response_metadata": {
+    "warnings": [
+      "already_in_channel"
+    ]
+  },
+  "warning": "already_in_channel"
+}

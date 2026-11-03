@@ -8,15 +8,16 @@ Written for people and coding assistants alike; the rules in
 
 | The service has… | Do this |
 | -- | -- |
-| An official OpenAPI 3 spec | [Generate the agent](#generated-agent) with `scripts/connector_gen` |
+| An official OpenAPI 3 or Swagger 2.0 spec | [Generate the agent](#generated-agent) with `scripts/connector_gen` |
 | No usable spec, or behaviour the spec cannot express | Write the agent by hand; `crates/agents/runtara-agent-stripe` is the reference |
 | A plain HTTP API nobody needs typed capabilities for | Add only a [connection type](#connection-type); the generic `http` agent can then call the service with it |
 
-The generator does not support Swagger 2.0 specs yet, and `fetch` refuses
-operations it cannot send correctly: form-encoded or multipart request bodies,
-object query parameters without declared scalar fields or in a style other
-than `deepObject` or exploded `form`, and required cookie parameters. Such an operation needs a hand-written capability,
-or the generic `http` agent.
+`fetch` refuses operations the generator cannot send correctly: form-encoded or
+multipart request bodies (a Swagger 2.0 operation that also `consumes` JSON is
+sent JSON), object query parameters without declared scalar fields or in a
+style other than `deepObject` or exploded `form`, array query parameters in a
+style other than `form`, and required cookie parameters. Such an operation
+needs a hand-written capability, or the generic `http` agent.
 
 ## For coding assistants
 
@@ -60,7 +61,7 @@ Written by hand for each new agent:
 
 | What | Where |
 | -- | -- |
-| `connector.yaml`: agent id, name, description, `integration_id` (one connection type or a list), error prefix, spec URL and sha256 (or several specs, as UPS publishes them), operations, label overrides, body envelopes, headers the connection sends, pinned path parameters | the crate |
+| `connector.yaml`: agent id, name, description, `integration_id` (one connection type or a list), error prefix, spec URL and sha256 (or several specs, as UPS publishes them), operations, label overrides, body envelopes, headers and credential parameters the connection sends, pinned path parameters, input types the spec gets wrong | the crate |
 | `Cargo.toml`, `src/lib.rs`, `src/kit.rs` (copied from `runtara-agent-pipedrive`) | the crate |
 | Tests: response examples round-trip, metadata lists the capabilities and inputs, inputs build the expected requests | `tests/*.rs` in the crate (`runtara-agent-zendesk` shows envelopes and pagination) |
 | Registration: path dependency and `agents()` entry | `crates/runtara-agent-bundle-emit/Cargo.toml`, `src/main.rs` |

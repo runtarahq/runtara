@@ -1,0 +1,41 @@
+{
+  "ok": true,
+  "user": {
+    "color": "9f69e7",
+    "deleted": false,
+    "has_2fa": false,
+    "id": "W012A3CDE",
+    "is_admin": true,
+    "is_app_user": false,
+    "is_bot": false,
+    "is_owner": false,
+    "is_primary_owner": false,
+    "is_restricted": false,
+    "is_ultra_restricted": false,
+    "name": "spengler",
+    "profile": {
+      "avatar_hash": "ge3b51ca72de",
+      "display_name": "spengler",
+      "display_name_normalized": "spengler",
+      "email": "spengler@ghostbusters.example.com",
+      "image_192": "https://.../avatar/e3b51ca72dee4ef87916ae2b9240df50.jpg",
+      "image_24": "https://.../avatar/e3b51ca72dee4ef87916ae2b9240df50.jpg",
+      "image_32": "https://.../avatar/e3b51ca72dee4ef87916ae2b9240df50.jpg",
+      "image_48": "https://.../avatar/e3b51ca72dee4ef87916ae2b9240df50.jpg",
+      "image_512": "https://.../avatar/e3b51ca72dee4ef87916ae2b9240df50.jpg",
+      "image_72": "https://.../avatar/e3b51ca72dee4ef87916ae2b9240df50.jpg",
+      "image_original": "https://.../avatar/e3b51ca72dee4ef87916ae2b9240df50.jpg",
+      "real_name": "Egon Spengler",
+      "real_name_normalized": "Egon Spengler",
+      "status_emoji": ":books:",
+      "status_text": "Print is dead",
+      "team": "T012AB3C4"
+    },
+    "real_name": "Egon Spengler",
+    "team_id": "T012AB3C4",
+    "tz": "America/Los_Angeles",
+    "tz_label": "Pacific Daylight Time",
+    "tz_offset": -25200,
+    "updated": 1502138686
+  }
+}

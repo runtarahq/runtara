@@ -56,6 +56,11 @@ RESERVED_TYPE_NAMES = {
 # Keys whose values are data (payload examples, defaults, enum values), not schema.
 DATA_KEYS = ("example", "examples", "default", "enum")
 
+# Keys whose values map names to schemas (`properties`) or status codes to
+# responses (`responses`), whatever the names are: a response coded `default`
+# is an error response, not data.
+NAME_MAPS = ("properties", "responses")
+
 
 def load_config(crate: Path) -> dict:
     with open(crate / "connector.yaml") as f:
@@ -120,16 +125,234 @@ def load_spec(raw) -> dict:
     return stringify_keys(yaml.load(TRAILING_TABS.sub("", raw), Loader=SpecLoader))
 
 
+# ---------------------------------------------------------------------------
+# Swagger 2.0
+# ---------------------------------------------------------------------------
+
+# Where Swagger 2.0 keeps what OpenAPI 3 keeps under `components`.
+SWAGGER_REFS = {
+    "#/definitions/": "#/components/schemas/",
+    "#/parameters/": "#/components/parameters/",
+    "#/responses/": "#/components/responses/",
+}
+
+# The keys of a Swagger 2.0 parameter (or items object) that describe its
+# value: OpenAPI 3 moves them into the parameter's `schema`.
+PARAMETER_SCHEMA_KEYS = (
+    "type", "format", "items", "enum", "default", "maximum", "minimum", "exclusiveMaximum",
+    "exclusiveMinimum", "maxLength", "minLength", "pattern", "maxItems", "minItems",
+    "uniqueItems", "multipleOf",
+)
+
+OAUTH2_FLOWS = {
+    "implicit": "implicit", "password": "password",
+    "application": "clientCredentials", "accessCode": "authorizationCode",
+}
+
+
+def is_swagger2(spec: dict) -> bool:
+    return str(spec.get("swagger", "")).startswith("2.")
+
+
+def convert_swagger2(spec: dict) -> dict:
+    """The OpenAPI 3.0 form of a Swagger 2.0 spec (Slack publishes only one).
+
+    `formData` parameters become a request body offered in every media type
+    the operation `consumes`, so an API that also takes JSON keeps it (and
+    `check_operation` refuses an operation that takes form bodies only)."""
+    spec = copy.deepcopy(spec)
+    rewrite_swagger_refs(spec)
+    converted = {"openapi": "3.0.3", "info": spec.get("info") or {}}
+    if spec.get("host") or spec.get("basePath"):
+        schemes = spec.get("schemes") or ["https"]
+        scheme = "https" if "https" in schemes else schemes[0]
+        host = f"{scheme}://{spec['host']}" if spec.get("host") else ""
+        converted["servers"] = [{"url": host + (spec.get("basePath") or "").rstrip("/")}]
+    consumes, produces = spec.get("consumes"), spec.get("produces")
+    shared_parameters = spec.get("parameters") or {}
+    shared_responses = spec.get("responses") or {}
+
+    paths = {}
+    for path, item in (spec.get("paths") or {}).items():
+        shared = [deref_swagger(spec, p) for p in item.get("parameters") or []]
+        paths[path] = {}
+        for method, op in item.items():
+            if method not in HTTP_METHODS:
+                continue
+            paths[path][method] = convert_operation(spec, op, shared, consumes, produces)
+    converted["paths"] = paths
+
+    components = {}
+    if spec.get("definitions"):
+        components["schemas"] = spec["definitions"]
+    plain = {name: p for name, p in shared_parameters.items() if p.get("in") not in ("body", "formData")}
+    if plain:
+        components["parameters"] = {name: convert_parameter(p) for name, p in plain.items()}
+    if shared_responses:
+        components["responses"] = {name: convert_response(r, produces or ["application/json"])
+                                   for name, r in shared_responses.items()}
+    if spec.get("securityDefinitions"):
+        components["securitySchemes"] = {
+            name: convert_security_scheme(scheme) for name, scheme in spec["securityDefinitions"].items()}
+    converted["components"] = components
+    for key in ("security", "tags", "externalDocs"):
+        if key in spec:
+            converted[key] = spec[key]
+    convert_schemas(converted)
+    return converted
+
+
+def rewrite_swagger_refs(node) -> None:
+    """`#/definitions/Deal` -> `#/components/schemas/Deal`, and so on, outside data."""
+    if isinstance(node, list):
+        for value in node:
+            rewrite_swagger_refs(value)
+    elif isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str):
+            for old, new in SWAGGER_REFS.items():
+                if ref.startswith(old):
+                    node["$ref"] = new + ref[len(old):]
+        for key, value in node.items():
+            if key in NAME_MAPS and isinstance(value, dict):
+                rewrite_swagger_refs(list(value.values()))
+            elif key not in DATA_KEYS:
+                rewrite_swagger_refs(value)
+
+
+def deref_swagger(spec: dict, node: dict) -> dict:
+    """A parameter or response `$ref`, already rewritten to `#/components/…`,
+    read from where Swagger 2.0 keeps it."""
+    ref = node.get("$ref")
+    if not isinstance(ref, str):
+        return node
+    for old, new in SWAGGER_REFS.items():
+        if ref.startswith(new):
+            return resolve(spec, old + ref[len(new):])
+    return node
+
+
+def convert_operation(spec: dict, source: dict, shared: list, consumes, produces) -> dict:
+    op = {key: value for key, value in source.items()
+          if key not in ("consumes", "produces", "schemes", "parameters")}
+    consumes = source.get("consumes") or consumes
+    produces = source.get("produces") or produces or ["application/json"]
+    parameters = {(p["name"], p["in"]): p for p in shared}
+    # An operation's own parameter overrides a path-level one of the same name and location.
+    for parameter in source.get("parameters") or []:
+        parameter = deref_swagger(spec, parameter)
+        parameters[(parameter["name"], parameter["in"])] = parameter
+
+    plain, form, body = [], [], None
+    for parameter in parameters.values():
+        if parameter["in"] == "body":
+            body = parameter
+        elif parameter["in"] == "formData":
+            form.append(parameter)
+        else:
+            plain.append(convert_parameter(parameter))
+    if plain:
+        op["parameters"] = plain
+    if body is not None:
+        op["requestBody"] = {
+            **({"description": body["description"]} if body.get("description") else {}),
+            "content": {media: {"schema": body.get("schema") or {}} for media in consumes or ["application/json"]},
+            **({"required": True} if body.get("required") else {}),
+        }
+    elif form:
+        files = any(p.get("type") == "file" for p in form)
+        media_types = consumes or ["multipart/form-data" if files else "application/x-www-form-urlencoded"]
+        schema = {"type": "object", "properties": {p["name"]: parameter_schema(p, described=True) for p in form}}
+        required = [p["name"] for p in form if p.get("required")]
+        if required:
+            schema["required"] = required
+        op["requestBody"] = {
+            "content": {media: {"schema": copy.deepcopy(schema)} for media in media_types},
+            **({"required": True} if required else {}),
+        }
+    op["responses"] = {
+        code: convert_response(deref_swagger(spec, response), produces)
+        for code, response in (op.get("responses") or {}).items()
+    }
+    return op
+
+
+def parameter_schema(parameter: dict, described: bool = False) -> dict:
+    """The schema of a Swagger 2.0 parameter or items object."""
+    schema = {key: copy.deepcopy(parameter[key]) for key in PARAMETER_SCHEMA_KEYS if key in parameter}
+    if isinstance(schema.get("items"), dict):
+        schema["items"] = parameter_schema(schema["items"])
+    if schema.get("type") == "file":
+        schema = {"type": "string", "format": "binary"}
+    if described and parameter.get("description"):
+        schema["description"] = parameter["description"]
+    return schema
+
+
+def convert_parameter(parameter: dict) -> dict:
+    converted = {key: parameter[key] for key in ("name", "in", "description", "required") if key in parameter}
+    converted["schema"] = parameter_schema(parameter)
+    if converted["schema"].get("type") == "array" and parameter["in"] == "query":
+        # Swagger 2.0 sends arrays comma-separated unless told otherwise.
+        style = {"csv": ("form", False), "multi": ("form", True), "ssv": ("spaceDelimited", False),
+                 "pipes": ("pipeDelimited", False)}.get(parameter.get("collectionFormat", "csv"))
+        if style is None:
+            sys.exit(f"parameter `{parameter['name']}`: collectionFormat "
+                     f"`{parameter['collectionFormat']}` has no OpenAPI 3 equivalent")
+        converted["style"], converted["explode"] = style
+    return converted
+
+
+def convert_response(response: dict, produces: list) -> dict:
+    converted = {"description": response.get("description") or ""}
+    if "schema" in response:
+        converted["content"] = {media: {"schema": copy.deepcopy(response["schema"])} for media in produces}
+    for media, example in (response.get("examples") or {}).items():
+        converted.setdefault("content", {}).setdefault(media, {})["example"] = example
+    if response.get("headers"):
+        converted["headers"] = {
+            name: {**({"description": h["description"]} if h.get("description") else {}),
+                   "schema": parameter_schema(h)}
+            for name, h in response["headers"].items()
+        }
+    return converted
+
+
+def convert_security_scheme(scheme: dict) -> dict:
+    if scheme.get("type") == "basic":
+        return {"type": "http", "scheme": "basic", **{k: v for k, v in scheme.items() if k == "description"}}
+    if scheme.get("type") != "oauth2":
+        return scheme
+    flow = {key: scheme[key] for key in ("authorizationUrl", "tokenUrl") if key in scheme}
+    flow["scopes"] = scheme.get("scopes") or {}
+    return {"type": "oauth2", **{k: v for k, v in scheme.items() if k == "description"},
+            "flows": {OAUTH2_FLOWS.get(scheme.get("flow"), scheme.get("flow")): flow}}
+
+
+def convert_schemas(spec: dict) -> None:
+    """Schema keywords Swagger 2.0 spells differently: `x-nullable`, `type:
+    file` and a string `discriminator`."""
+    def visit(node):
+        if "x-nullable" in node:
+            node["nullable"] = bool(node.pop("x-nullable"))
+        if node.get("type") == "file":
+            node["type"], node["format"] = "string", "binary"
+        if isinstance(node.get("discriminator"), str):
+            node["discriminator"] = {"propertyName": node["discriminator"]}
+
+    walk_schema(spec, visit)
+
+
 def walk_schema(node, visit):
     """Call `visit` on every mapping under `node`, skipping data such as examples.
-    A `properties` map is walked as name -> schema, whatever the names are."""
+    A `properties` or `responses` map is walked whatever its names are."""
     if isinstance(node, list):
         for value in node:
             walk_schema(value, visit)
     elif isinstance(node, dict):
         visit(node)
         for key, value in node.items():
-            if key == "properties" and isinstance(value, dict):
+            if key in NAME_MAPS and isinstance(value, dict):
                 for prop in value.values():
                     walk_schema(prop, visit)
             elif key not in DATA_KEYS:
@@ -195,6 +418,10 @@ def check_parameter(spec: dict, name: str, parameter: dict) -> list:
         print(f"note: {name}: dropped optional cookie parameter `{resolved['name']}`")
         return []
     schema = deref(spec, resolved.get("schema") or {})
+    if resolved.get("in") == "query" and schema.get("type") == "array" and resolved.get("style", "form") != "form":
+        # The templates send an array repeated or comma-separated, nothing else.
+        sys.exit(f"{name}: array query parameter `{resolved['name']}` with style `{resolved['style']}` "
+                 "is not supported")
     if resolved.get("in") == "query" and (
         resolved.get("style") == "deepObject" or schema.get("type") == "object"
     ):
@@ -354,9 +581,11 @@ def check_operation(spec: dict, path: str, method: str, op: dict, item: dict, en
     return used - {None}
 
 
-def drop_connection_headers(spec: dict, op: dict, item: dict, names: list) -> set:
-    """Header parameters the connection sends (`connection_headers`, UPS's
-    `transId`) are not step inputs. Returns the names dropped."""
+def drop_connection_parameters(spec: dict, op: dict, item: dict, names: list, locations: tuple) -> set:
+    """Parameters the connection supplies are not step inputs: headers it sends
+    (`connection_headers`, UPS's `transId`), and header or query parameters
+    carrying its credential (`connection_parameters`, Slack's `token`).
+    Returns the names dropped."""
     dropped = set()
     for owner in (item, op):
         if "parameters" not in owner:
@@ -364,7 +593,7 @@ def drop_connection_headers(spec: dict, op: dict, item: dict, names: list) -> se
         kept = []
         for parameter in owner["parameters"]:
             resolved = deref(spec, parameter)
-            if resolved.get("in") == "header" and resolved.get("name") in names:
+            if resolved.get("in") in locations and resolved.get("name") in names:
                 dropped.add(resolved["name"])
             else:
                 kept.append(parameter)
@@ -436,7 +665,7 @@ def inline_refs(sliced: dict, spec: dict) -> None:
             return replace({**copy.deepcopy(schema), **siblings}, expanding=expanding + (ref,))
         return {
             key: replace(value, properties=True, expanding=expanding)
-            if key == "properties" and isinstance(value, dict)
+            if key in NAME_MAPS and isinstance(value, dict)
             else value if key in DATA_KEYS
             else replace(value, expanding=expanding)
             for key, value in node.items()
@@ -479,8 +708,57 @@ def inline_example_refs(sliced: dict, spec: dict) -> None:
     walk_schema(sliced, visit)
 
 
+# The keywords that apply to one JSON type only.
+TYPE_KEYWORDS = {
+    "array": ("items", "minItems", "maxItems", "uniqueItems"),
+    "object": ("properties", "required", "additionalProperties", "minProperties", "maxProperties"),
+    "string": ("pattern", "minLength", "maxLength"),
+}
+
+
 def normalize_schemas(sliced: dict) -> None:
     def visit(node):
+        # JSON Schema's list forms, which OpenAPI 3.0 does not have: Slack's
+        # `type: [string, "null"]` means a nullable string, and `items: [A, B]`
+        # one of A or B. The type list goes first, so that the `items` of an
+        # `array` it names stay that array's.
+        if isinstance(node.get("type"), list):
+            listed = node.pop("type")
+            types = [t for t in listed if t != "null"]
+            if len(types) < len(listed):
+                node["nullable"] = True
+            if len(types) == 1:
+                node["type"] = types[0]
+            elif types:
+                # Each alternative takes the keywords of its own type along
+                # (`items` goes with `array`, `properties` with `object`).
+                node["anyOf"] = [
+                    {"type": t, **{key: node[key] for key in TYPE_KEYWORDS.get(t, ()) if key in node}}
+                    for t in types
+                ]
+                for key in {key for t in types for key in TYPE_KEYWORDS.get(t, ())}:
+                    node.pop(key, None)
+        if isinstance(node.get("items"), list):
+            alternatives = node.pop("items")
+            if node.get("type") == "array":
+                node["items"] = {"anyOf": alternatives}
+            else:
+                node["anyOf"] = alternatives
+        # `type: "null"` alone (a field Slack always sends as null), or as one
+        # alternative of a union, is OpenAPI 3.0's `nullable`.
+        if node.get("type") == "null":
+            del node["type"]
+            node["nullable"] = True
+        for key in ("anyOf", "oneOf"):
+            if isinstance(node.get(key), list):
+                kept = [s for s in node[key] if not (isinstance(s, dict) and s.get("type") == "null")]
+                if len(kept) < len(node[key]):
+                    node["nullable"] = True
+                    if kept:
+                        node[key] = kept
+                    else:
+                        # Only ever null: an empty `anyOf` is no valid schema.
+                        del node[key]
         # Plain `integer` would become i32; vendor ids and amounts outgrow it.
         if node.get("type") == "integer" and "format" not in node:
             node["format"] = "int64"
@@ -499,9 +777,18 @@ def normalize_schemas(sliced: dict) -> None:
         # delivery), so the title is written as the struct name. A title with
         # spaces is a label, not a name (see `describe_field`).
         title = node.get("title")
-        if (isinstance(title, str) and " " not in title.strip() and is_object(node)
-                and rust_model_name(title) != model_name(title)):
-            node["title"] = rust_model_name(title)
+        if isinstance(title, str) and is_object(node) and rust_model_name(title) != model_name(title):
+            if " " in title.strip():
+                # A phrase names the inline object too (Slack's "Conversation IM
+                # Channel object"): its words are respelled the generator's way,
+                # and the phrase as written stays the field's label.
+                node["x-runtara-title"] = title
+                node["title"] = " ".join(
+                    word if rust_model_name(word) == model_name(word) else rust_model_name(word)
+                    for word in title.split(" ")
+                )
+            else:
+                node["title"] = rust_model_name(title)
         for key in ("description", "summary", "title"):
             if isinstance(node.get(key), str):
                 node[key] = clean_text(node[key])
@@ -574,6 +861,7 @@ def check_names(sliced: dict, operation_ids: list, model_names: dict) -> None:
 NAME_LISTS = {
     "body_envelopes": "wrap no request body",
     "connection_headers": "are no header parameter",
+    "connection_parameters": "are no header or query parameter",
     "pinned_path_parameters": "are no path parameter",
 }
 
@@ -587,7 +875,8 @@ def check_used(options: dict, used: dict) -> None:
 
 
 def slice_spec(spec: dict, operation_ids: list, model_names: dict = None, body_envelopes: list = (),
-               connection_headers: list = (), pinned_path_parameters: list = ()) -> dict:
+               connection_headers: list = (), connection_parameters: list = (),
+               pinned_path_parameters: list = ()) -> dict:
     """Keep the listed operations and every component they reference.
 
     openapi-generator's FILTER normalizer drops unlisted operations but still
@@ -595,6 +884,7 @@ def slice_spec(spec: dict, operation_ids: list, model_names: dict = None, body_e
     file to the selected surface.
     """
     options = {"body_envelopes": body_envelopes, "connection_headers": connection_headers,
+               "connection_parameters": connection_parameters,
                "pinned_path_parameters": pinned_path_parameters}
     sliced, used = slice_one(spec, operation_ids, operation_ids[0], model_names or {}, **options)
     check_used(options, used)
@@ -621,7 +911,48 @@ def slice_specs(specs: list, config: dict) -> dict:
         sliced = merge_slices(slices)
         check_names(sliced, [op for source, _ in specs for op in source["operations"]], model_names)
     make_optional(sliced, config.get("optional_fields") or {})
+    retype_inputs(sliced, config.get("input_types") or {})
     return sliced
+
+
+# What a retyped input keeps of the schema the vendor gave it.
+RETYPE_KEPT = ("description", "title", "deprecated", "nullable", "readOnly", "writeOnly")
+
+
+def retype_inputs(sliced: dict, types: dict) -> None:
+    """`input_types`: input name -> the type (`string`) or schema the vendor's
+    spec should have given it, applied to the parameters and request-body
+    fields of every listed operation. Slack's spec types message timestamps
+    (`ts`) as numbers, which would send `1712345678.000100` as
+    `1712345678.0001`, another message's id. The field keeps its description
+    unless the schema gives one."""
+    if not types:
+        return
+
+    def retyped(schema: dict, name: str) -> dict:
+        new = types[name]
+        new = copy.deepcopy(new) if isinstance(new, dict) else {"type": new}
+        return {**{key: schema[key] for key in RETYPE_KEPT if key in schema}, **new}
+
+    used = set()
+    for item in sliced["paths"].values():
+        owners = [item] + [op for method, op in item.items() if method in HTTP_METHODS]
+        for owner in owners:
+            for parameter in owner.get("parameters") or []:
+                parameter = deref(sliced, parameter)
+                if parameter.get("name") in types and parameter.get("in") in ("path", "query", "header"):
+                    parameter["schema"] = retyped(deref(sliced, parameter.get("schema") or {}), parameter["name"])
+                    used.add(parameter["name"])
+        for method, op in item.items():
+            body = deref(sliced, op.get("requestBody")) if method in HTTP_METHODS else None
+            for media in (body or {}).get("content", {}).values():
+                properties = deref(sliced, media.get("schema") or {}).get("properties") or {}
+                for name in properties.keys() & types.keys():
+                    properties[name] = retyped(deref(sliced, properties[name]), name)
+                    used.add(name)
+    unused = set(types) - used
+    if unused:
+        sys.exit(f"input_types {sorted(unused)} are no input of the listed operations")
 
 
 def make_optional(sliced: dict, fields: dict) -> None:
@@ -640,11 +971,13 @@ def make_optional(sliced: dict, fields: dict) -> None:
 
 
 def slice_one(spec: dict, operation_ids: list, first: str, model_names: dict, body_envelopes=(),
-              connection_headers=(), pinned_path_parameters=()) -> tuple:
+              connection_headers=(), connection_parameters=(), pinned_path_parameters=()) -> tuple:
     """The slice of one spec, and the listed names (`NAME_LISTS`) it used.
     `first` is the operation that carries the agent's module attributes."""
+    if is_swagger2(spec):
+        spec = convert_swagger2(spec)
     if "openapi" not in spec:
-        sys.exit("only OpenAPI 3.x specs are supported (Swagger 2.0 needs converting first)")
+        sys.exit("only OpenAPI 3.x and Swagger 2.0 specs are supported")
 
     wanted = set(operation_ids)
     paths = {}
@@ -663,7 +996,10 @@ def slice_one(spec: dict, operation_ids: list, first: str, model_names: dict, bo
             if method not in HTTP_METHODS:
                 continue
             found.add(op["operationId"])
-            used["connection_headers"] |= drop_connection_headers(spec, op, item, connection_headers)
+            used["connection_headers"] |= drop_connection_parameters(
+                spec, op, item, connection_headers, ("header",))
+            used["connection_parameters"] |= drop_connection_parameters(
+                spec, op, item, connection_parameters, ("header", "query"))
             used["body_envelopes"] |= check_operation(spec, path, method, op, item, body_envelopes)
             target, pinned = pin_path_parameters(spec, path, op, item, pinned_path_parameters)
             used["pinned_path_parameters"] |= pinned
@@ -809,7 +1145,7 @@ def describe_field(target: dict, name: str, schema: dict, labels: dict, required
     but only when it reads as a phrase (one-word titles name models); then the
     humanized field name. Required fields get no default: the metadata would
     then call them optional while the step still has to send them."""
-    title = schema.get("title")
+    title = schema.get("x-runtara-title", schema.get("title"))
     if name in labels:
         label = labels[name]
     elif isinstance(title, str) and " " in title.strip():
@@ -843,16 +1179,22 @@ def describe_fields(node, labels: dict) -> None:
     properties = node.get("properties")
     if isinstance(properties, dict):
         required = node.get("required") if isinstance(node.get("required"), list) else []
-        for name, prop in properties.items():
+        for name, prop in list(properties.items()):
             if not isinstance(prop, dict):
                 continue
-            # OpenAPI 3.0 ignores keys next to a $ref, so such a field keeps its raw name.
-            if "$ref" not in prop:
-                describe_field(prop, name, prop, labels, name in required)
+            if "$ref" in prop:
+                # openapi-generator drops keys beside a `$ref` (OpenAPI 3.0 ignores
+                # them), label included; `allOf` of the one `$ref` is the same type
+                # and keeps them.
+                prop = properties[name] = {"allOf": [{"$ref": prop["$ref"]}],
+                                           **{key: value for key, value in prop.items() if key != "$ref"}}
+            describe_field(prop, name, prop, labels, name in required)
             describe_fields(prop, labels)
     for key, value in node.items():
         # `properties` maps names to schemas and was walked above; the rest is data.
-        if key not in ("properties",) + DATA_KEYS:
+        if key == "responses" and isinstance(value, dict):
+            describe_fields(list(value.values()), labels)
+        elif key not in ("properties",) + DATA_KEYS:
             describe_fields(value, labels)
 
 

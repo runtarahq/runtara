@@ -44,7 +44,12 @@
             "x-runtara-label": "Gmt Time"
           },
           "location": {
-            "$ref": "#/components/schemas/Location"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Location"
+              }
+            ],
+            "x-runtara-label": "Location"
           },
           "logicalScan": {
             "description": "This indicates whether shipment event is physical or logical event. Valid values: 'true' for logical event. 'false' for physical event",
@@ -52,7 +57,12 @@
             "x-runtara-label": "Logical Scan"
           },
           "status": {
-            "$ref": "#/components/schemas/Status"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Status"
+              }
+            ],
+            "x-runtara-label": "Status"
           },
           "time": {
             "description": "The time of the activity. Format: HHMMSS (24 hr)",
@@ -378,7 +388,12 @@
         "maximum": 1,
         "properties": {
           "Address": {
-            "$ref": "#/components/schemas/CreditCard_Address"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CreditCard_Address"
+              }
+            ],
+            "x-runtara-label": "Address"
           },
           "ExpirationDate": {
             "description": "Format is MMYYYY where MM is the 2 digit month and YYYY is the 4 digit year.  Valid month values are 01-12 and valid year values are Present Year - (Present Year + 10 years)",
@@ -511,7 +526,12 @@
             "x-runtara-label": "Insurance Charges"
           },
           "OtherCharges": {
-            "$ref": "#/components/schemas/LtlOtherCharges"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LtlOtherCharges"
+              }
+            ],
+            "x-runtara-label": "Other Charges"
           }
         },
         "type": "object",
@@ -525,7 +545,12 @@
         "minimum": 1,
         "properties": {
           "HandlingUnits": {
-            "$ref": "#/components/schemas/LtlHandlingUnits"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LtlHandlingUnits"
+              }
+            ],
+            "x-runtara-label": "Handling Units"
           },
           "NumberOfIdenticalUnits": {
             "description": "Number of identical units in the package/ltl.",
@@ -537,7 +562,12 @@
             "x-runtara-label": "Number Of Identical Units"
           },
           "ReferenceNumber": {
-            "$ref": "#/components/schemas/LtlReferenceNumber"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LtlReferenceNumber"
+              }
+            ],
+            "x-runtara-label": "Reference Number"
           }
         },
         "required": [
@@ -576,10 +606,20 @@
             "x-runtara-label": "Description"
           },
           "EEIInformation": {
-            "$ref": "#/components/schemas/ProductEeiInformation"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ProductEeiInformation"
+              }
+            ],
+            "x-runtara-label": "EEI Information"
           },
           "ExcludeFromForm": {
-            "$ref": "#/components/schemas/Product_ExcludeFromForm"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Product_ExcludeFromForm"
+              }
+            ],
+            "x-runtara-label": "Exclude From Form"
           },
           "ExportType": {
             "description": "Code indicating Domestic: Exports that have been produced, manufactured, or grown in the United States or Puerto Rico. This includes imported merchandise which has been enhanced in value or changed from the form in which imported by further manufacture or processing in the United States or Puerto Rico. Foreign: Merchandise that has entered the United States and is being exported again in the same condition as when imported.   Applies to EEI forms only. Required for EEI form.  Valid values:  D: Domestic; F: Foreign.",
@@ -612,7 +652,12 @@
             "x-runtara-label": "Net Cost Code"
           },
           "NetCostDateRange": {
-            "$ref": "#/components/schemas/Product_NetCostDateRange"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Product_NetCostDateRange"
+              }
+            ],
+            "x-runtara-label": "Net Cost Date Range"
           },
           "NumberOfPackagesPerCommodity": {
             "description": "The total number of packages, cartons, or containers for the commodity.  Applicable for CO and is required. Should be numeric. Valid characters are 0 -9.",
@@ -631,7 +676,12 @@
             "x-runtara-label": "Number Of Units"
           },
           "PackingListInfo": {
-            "$ref": "#/components/schemas/Product_PackingListInfo"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Product_PackingListInfo"
+              }
+            ],
+            "x-runtara-label": "Packing List Info"
           },
           "PreferenceCriteria": {
             "description": "Indicates the criterion (A through F) for each good described in the Description of Goods field if applicable. \n\nThe rules of origin are contained in Chapter Four and Annex 401. \n\nAdditional rules are described in Annex 703.2 (certain agricultural goods), Annex 300-B, Appendix 6 (certain textile goods) and Annex 308.1 (certain automatic data processing goods and their parts).  Applies to USMCA only.",
@@ -658,7 +708,12 @@
             "x-runtara-label": "Product Number"
           },
           "ProductWeight": {
-            "$ref": "#/components/schemas/Product_ProductWeight"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Product_ProductWeight"
+              }
+            ],
+            "x-runtara-label": "Product Weight"
           },
           "SEDTotalValue": {
             "description": "This amount will always be USD.  Applies to EEI forms only. Required for EEI form. Valid characters are 0-9 and \\'.\\' (Decimal point). Limit to 2 digit after the decimal. The maximum length of the field is 15 including \\'.\\' and can hold up to 2 decimal places.\n\nNote: This value is calculated based on the Product/Unit/Value and /Product/Unit/Number (Number of Units * Price per Unit). If the total value is incorrect it will be replaced by the actual calculated total value.\n",
@@ -669,7 +724,12 @@
             "x-runtara-label": "SED Total Value"
           },
           "ScheduleB": {
-            "$ref": "#/components/schemas/Product_ScheduleB"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Product_ScheduleB"
+              }
+            ],
+            "x-runtara-label": "Schedule B"
           },
           "TaxesPaid": {
             "description": "Invoice Commodity Level Tax Collected Code for each shipment commodity line.Taxes paid Indicator is only applicable for shipments to Singapore. [TaxesPaid = 0 - No on Report], [TaxesPaid = 1 -Yes on Report], [TaxesPaid = empty - null on Report], [If TaxesPaid is not passed in input request = null on Report]",
@@ -758,7 +818,12 @@
         "maximum": 1,
         "properties": {
           "UnitOfMeasurement": {
-            "$ref": "#/components/schemas/Cn22ContentWeightUnitOfMeasurement"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Cn22ContentWeightUnitOfMeasurement"
+              }
+            ],
+            "x-runtara-label": "Unit Of Measurement"
           },
           "Weight": {
             "description": "Total weight of the content. Pounds and Ounces are allowed up to 2 decimals.  Required if the CN22 form container is present.",
@@ -870,10 +935,20 @@
             "x-runtara-label": "CN22 Content Total Value"
           },
           "CN22ContentWeight": {
-            "$ref": "#/components/schemas/Cn22ContentCn22ContentWeight"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Cn22ContentCn22ContentWeight"
+              }
+            ],
+            "x-runtara-label": "CN22 Content Weight"
           },
           "DDSReferenceNumber": {
-            "$ref": "#/components/schemas/Cn22ContentCn22DdsReferenceNumber"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Cn22ContentCn22DdsReferenceNumber"
+              }
+            ],
+            "x-runtara-label": "DDS Reference Number"
           }
         },
         "required": [
@@ -929,7 +1004,12 @@
             "x-runtara-label": "Graphic Image"
           },
           "ImageFormat": {
-            "$ref": "#/components/schemas/CodTurnInPageImageImageFormat"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CodTurnInPageImageImageFormat"
+              }
+            ],
+            "x-runtara-label": "Image Format"
           }
         },
         "required": [
@@ -1018,7 +1098,12 @@
         "maximum": 1,
         "properties": {
           "Address": {
-            "$ref": "#/components/schemas/ForwardAgent_Address"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ForwardAgent_Address"
+              }
+            ],
+            "x-runtara-label": "Address"
           },
           "CompanyName": {
             "description": "Company Name or the Individual name of the Forwarding agent.  Applicable for EEI form only.",
@@ -1052,7 +1137,12 @@
         "maximum": 1,
         "properties": {
           "Address": {
-            "$ref": "#/components/schemas/IntermediateConsignee_Address"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/IntermediateConsignee_Address"
+              }
+            ],
+            "x-runtara-label": "Address"
           },
           "CompanyName": {
             "description": "Company Name or the Individual name of the Intermediate consignee.  Applicable for EEI form only.",
@@ -1077,7 +1167,12 @@
         "maximum": 1,
         "properties": {
           "Address": {
-            "$ref": "#/components/schemas/Producer_Address"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Producer_Address"
+              }
+            ],
+            "x-runtara-label": "Address"
           },
           "AttentionName": {
             "description": "Contact name at the Producer location.  Applies to USMCA.",
@@ -1112,7 +1207,12 @@
             "x-runtara-label": "Option"
           },
           "Phone": {
-            "$ref": "#/components/schemas/Producer_Phone"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Producer_Phone"
+              }
+            ],
+            "x-runtara-label": "Phone"
           },
           "TaxIdentificationNumber": {
             "description": "Tax ID of the Producer.  Applies to USMCA. Only applicable when producer option is empty or not present",
@@ -1141,7 +1241,12 @@
             "x-runtara-label": "Account Number"
           },
           "Address": {
-            "$ref": "#/components/schemas/SoldTo_Address"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SoldTo_Address"
+              }
+            ],
+            "x-runtara-label": "Address"
           },
           "AttentionName": {
             "description": "Sold to contact name.",
@@ -1176,7 +1281,12 @@
             "x-runtara-label": "Option"
           },
           "Phone": {
-            "$ref": "#/components/schemas/SoldTo_Phone"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SoldTo_Phone"
+              }
+            ],
+            "x-runtara-label": "Phone"
           },
           "TaxIdentificationNumber": {
             "deprecated": true,
@@ -1203,7 +1313,12 @@
         "maximum": 1,
         "properties": {
           "Address": {
-            "$ref": "#/components/schemas/UltimateConsignee_Address"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/UltimateConsignee_Address"
+              }
+            ],
+            "x-runtara-label": "Address"
           },
           "CompanyName": {
             "description": "Company Name or the Individual name of the Ultimate consignee.  Applicable for EEI form only.",
@@ -1214,7 +1329,12 @@
             "x-runtara-label": "Company Name"
           },
           "UltimateConsigneeType": {
-            "$ref": "#/components/schemas/UltimateConsignee_UltimateConsigneeType"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/UltimateConsignee_UltimateConsigneeType"
+              }
+            ],
+            "x-runtara-label": "Ultimate Consignee Type"
           }
         },
         "required": [
@@ -1386,7 +1506,12 @@
         "description": "Container with all information related to the delivery of the package. Populated only when the package is delivered.",
         "properties": {
           "deliveryPhoto": {
-            "$ref": "#/components/schemas/DeliveryPhoto"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryPhoto"
+              }
+            ],
+            "x-runtara-label": "Delivery Photo"
           },
           "location": {
             "description": "The location where the package was dropped off. For example: 'Front Door'",
@@ -1416,7 +1541,12 @@
             "x-runtara-label": "Received By"
           },
           "signature": {
-            "$ref": "#/components/schemas/Signature"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Signature"
+              }
+            ],
+            "x-runtara-label": "Signature"
           }
         },
         "title": "DeliveryInformation",
@@ -1579,7 +1709,12 @@
         "maximum": 1,
         "properties": {
           "UnitOfMeasurement": {
-            "$ref": "#/components/schemas/DryIceWeight_UnitOfMeasurement"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DryIceWeight_UnitOfMeasurement"
+              }
+            ],
+            "x-runtara-label": "Unit Of Measurement"
           },
           "Weight": {
             "description": "Dry Ice Weight.  Cannot be more than package weight. Should be more than 0.0. Valid characters are 0-9 and \".\" (Decimal point). Limit to 1 digit after the decimal. The maximum length of the field is 5 including \".\" and can hold up to 1 decimal place.",
@@ -1654,7 +1789,12 @@
         "maximum": 1,
         "properties": {
           "POA": {
-            "$ref": "#/components/schemas/UpsFiledPoa"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/UpsFiledPoa"
+              }
+            ],
+            "x-runtara-label": "POA"
           }
         },
         "required": [
@@ -1722,7 +1862,12 @@
             "x-runtara-label": "USML Category Code"
           },
           "UnitOfMeasurement": {
-            "$ref": "#/components/schemas/DdtcInformationUnitOfMeasurement"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DdtcInformationUnitOfMeasurement"
+              }
+            ],
+            "x-runtara-label": "Unit Of Measurement"
           }
         },
         "type": "object",
@@ -1813,7 +1958,12 @@
             "x-runtara-label": "Graphic Image"
           },
           "ImageFormat": {
-            "$ref": "#/components/schemas/Image_ImageFormat"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Image_ImageFormat"
+              }
+            ],
+            "x-runtara-label": "Image Format"
           }
         },
         "required": [
@@ -1896,7 +2046,12 @@
         "maximum": 1,
         "properties": {
           "UnitOfMeasurement": {
-            "$ref": "#/components/schemas/AdjustedHeight_UnitOfMeasurement"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AdjustedHeight_UnitOfMeasurement"
+              }
+            ],
+            "x-runtara-label": "Unit Of Measurement"
           },
           "Value": {
             "description": "Adjusted height value.",
@@ -1921,7 +2076,12 @@
         "maximum": 1,
         "properties": {
           "Dimensions": {
-            "$ref": "#/components/schemas/HandlingUnits_Dimensions"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/HandlingUnits_Dimensions"
+              }
+            ],
+            "x-runtara-label": "Dimensions"
           },
           "Quantity": {
             "description": "Handling Unit Quantity for Density based rating.",
@@ -1932,7 +2092,12 @@
             "x-runtara-label": "Quantity"
           },
           "Type": {
-            "$ref": "#/components/schemas/HandlingUnits_Type"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/HandlingUnits_Type"
+              }
+            ],
+            "x-runtara-label": "Type"
           }
         },
         "required": [
@@ -1950,7 +2115,12 @@
         "maximum": 1,
         "properties": {
           "AdjustedHeight": {
-            "$ref": "#/components/schemas/FreightDensityInfo_AdjustedHeight"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/FreightDensityInfo_AdjustedHeight"
+              }
+            ],
+            "x-runtara-label": "Adjusted Height"
           },
           "AdjustedHeightIndicator": {
             "description": "The presence of the AdjustedHeightIndicator indicates that allow the height reduction adjustment for density based rate request.",
@@ -2060,10 +2230,20 @@
         "maximum": 1,
         "properties": {
           "AdjustedHeight": {
-            "$ref": "#/components/schemas/HandlingUnits_AdjustedHeight"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/HandlingUnits_AdjustedHeight"
+              }
+            ],
+            "x-runtara-label": "Adjusted Height"
           },
           "Dimensions": {
-            "$ref": "#/components/schemas/HandlingUnits_Dimensions"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/HandlingUnits_Dimensions"
+              }
+            ],
+            "x-runtara-label": "Dimensions"
           },
           "Quantity": {
             "description": "Handling Unit Quantity for Density based rating.",
@@ -2074,7 +2254,12 @@
             "x-runtara-label": "Quantity"
           },
           "Type": {
-            "$ref": "#/components/schemas/HandlingUnits_Type"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/HandlingUnits_Type"
+              }
+            ],
+            "x-runtara-label": "Type"
           }
         },
         "required": [
@@ -2092,7 +2277,12 @@
         "maximum": 1,
         "properties": {
           "DiscountAmount": {
-            "$ref": "#/components/schemas/TransportationCharges_DiscountAmount"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TransportationCharges_DiscountAmount"
+              }
+            ],
+            "x-runtara-label": "Discount Amount"
           },
           "DiscountPercentage": {
             "description": "It indicates the shipment level discount percentage for transportation charges.",
@@ -2103,10 +2293,20 @@
             "x-runtara-label": "Discount Percentage"
           },
           "GrossCharge": {
-            "$ref": "#/components/schemas/TransportationCharges_GrossCharge"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TransportationCharges_GrossCharge"
+              }
+            ],
+            "x-runtara-label": "Gross Charge"
           },
           "NetCharge": {
-            "$ref": "#/components/schemas/TransportationCharges_NetCharge"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TransportationCharges_NetCharge"
+              }
+            ],
+            "x-runtara-label": "Net Charge"
           }
         },
         "required": [
@@ -2151,7 +2351,12 @@
         "maximum": 1,
         "properties": {
           "UnitOfMeasurement": {
-            "$ref": "#/components/schemas/AdjustedHeight_UnitOfMeasurement"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AdjustedHeight_UnitOfMeasurement"
+              }
+            ],
+            "x-runtara-label": "Unit Of Measurement"
           },
           "Value": {
             "description": "Adjusted Height value for the handling unit.  Height Adjustment is done only when Handling unit type is SKD = Skid or PLT = Pallet.",
@@ -2192,7 +2397,12 @@
             "x-runtara-label": "Length"
           },
           "UnitOfMeasurement": {
-            "$ref": "#/components/schemas/HandlingUnits_UnitOfMeasurement"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/HandlingUnits_UnitOfMeasurement"
+              }
+            ],
+            "x-runtara-label": "Unit Of Measurement"
           },
           "Width": {
             "description": "The width of the line item used to determine dimensional weight.",
@@ -2283,7 +2493,12 @@
             "x-runtara-label": "Graphic Image"
           },
           "ImageFormat": {
-            "$ref": "#/components/schemas/HighValueReport_Image_ImageFormat"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/HighValueReport_Image_ImageFormat"
+              }
+            ],
+            "x-runtara-label": "Image Format"
           }
         },
         "required": [
@@ -2521,10 +2736,20 @@
             "x-runtara-label": "E Mail Address"
           },
           "ShipperFiled": {
-            "$ref": "#/components/schemas/EeiFilingOptionShipperFiled"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/EeiFilingOptionShipperFiled"
+              }
+            ],
+            "x-runtara-label": "Shipper Filed"
           },
           "UPSFiled": {
-            "$ref": "#/components/schemas/EeiFilingOptionUpsFiled"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/EeiFilingOptionUpsFiled"
+              }
+            ],
+            "x-runtara-label": "UPS Filed"
           }
         },
         "required": [
@@ -2540,7 +2765,12 @@
         "maximum": 1,
         "properties": {
           "LanguageForUPSPremiumCare": {
-            "$ref": "#/components/schemas/UpsPremiumCareFormLanguageForUpsPremiumCare"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/UpsPremiumCareFormLanguageForUpsPremiumCare"
+              }
+            ],
+            "x-runtara-label": "Language For UPS Premium Care"
           },
           "NumOfCopies": {
             "description": "Number of Copies of UPS Premium Care Form.  Valid value is 02.",
@@ -2620,19 +2850,44 @@
         "maximum": 1,
         "properties": {
           "ForwardAgent": {
-            "$ref": "#/components/schemas/Contacts_ForwardAgent"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Contacts_ForwardAgent"
+              }
+            ],
+            "x-runtara-label": "Forward Agent"
           },
           "IntermediateConsignee": {
-            "$ref": "#/components/schemas/Contacts_IntermediateConsignee"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Contacts_IntermediateConsignee"
+              }
+            ],
+            "x-runtara-label": "Intermediate Consignee"
           },
           "Producer": {
-            "$ref": "#/components/schemas/Contacts_Producer"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Contacts_Producer"
+              }
+            ],
+            "x-runtara-label": "Producer"
           },
           "SoldTo": {
-            "$ref": "#/components/schemas/Contacts_SoldTo"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Contacts_SoldTo"
+              }
+            ],
+            "x-runtara-label": "Sold To"
           },
           "UltimateConsignee": {
-            "$ref": "#/components/schemas/Contacts_UltimateConsignee"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Contacts_UltimateConsignee"
+              }
+            ],
+            "x-runtara-label": "Ultimate Consignee"
           }
         },
         "type": "object",
@@ -2746,7 +3001,12 @@
             "x-runtara-label": "Commodity Code"
           },
           "DDSReferenceNumber": {
-            "$ref": "#/components/schemas/ProductDdsReferenceNumber"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ProductDdsReferenceNumber"
+              }
+            ],
+            "x-runtara-label": "DDS Reference Number"
           },
           "Description": {
             "description": "Description of the product.  Applies to all International Forms. Optional for Partial Invoice. Must be present at least once and can occur for a maximum of 3 times.",
@@ -2760,10 +3020,20 @@
             "x-runtara-label": "Description"
           },
           "EEIInformation": {
-            "$ref": "#/components/schemas/ProductEeiInformation"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ProductEeiInformation"
+              }
+            ],
+            "x-runtara-label": "EEI Information"
           },
           "ExcludeFromForm": {
-            "$ref": "#/components/schemas/Product_ExcludeFromForm"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Product_ExcludeFromForm"
+              }
+            ],
+            "x-runtara-label": "Exclude From Form"
           },
           "ExportType": {
             "description": "Code indicating Domestic: Exports that have been produced, manufactured, or grown in the United States or Puerto Rico. This includes imported merchandise which has been enhanced in value or changed from the form in which imported by further manufacture or processing in the United States or Puerto Rico. Foreign: Merchandise that has entered the United States and is being exported again in the same condition as when imported.   Applies to EEI forms only. Required for EEI form.  Valid values:  D: Domestic; F: Foreign.",
@@ -2796,7 +3066,12 @@
             "x-runtara-label": "Net Cost Code"
           },
           "NetCostDateRange": {
-            "$ref": "#/components/schemas/Product_NetCostDateRange"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Product_NetCostDateRange"
+              }
+            ],
+            "x-runtara-label": "Net Cost Date Range"
           },
           "NumberOfPackagesPerCommodity": {
             "description": "The total number of packages, cartons, or containers for the commodity.  Applicable for CO and is required. Should be numeric. Valid characters are 0 -9.",
@@ -2815,7 +3090,12 @@
             "x-runtara-label": "Origin Country Code"
           },
           "PackingListInfo": {
-            "$ref": "#/components/schemas/Product_PackingListInfo"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Product_PackingListInfo"
+              }
+            ],
+            "x-runtara-label": "Packing List Info"
           },
           "PartNumber": {
             "description": "The part number or reference number for the product contained in the invoice line, as indicated on the customs invoice.  Applies to Invoice and Partial Invoice. Required for Invoice forms and optional for Partial Invoice.",
@@ -2858,7 +3138,12 @@
             "x-runtara-label": "Product Identifier Exempt Indicator"
           },
           "ProductWeight": {
-            "$ref": "#/components/schemas/Product_ProductWeight"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Product_ProductWeight"
+              }
+            ],
+            "x-runtara-label": "Product Weight"
           },
           "SEDTotalValue": {
             "description": "This amount will always be USD.  Applies to EEI forms only. Required for EEI form. Valid characters are 0-9 and \\'.\\' (Decimal point). Limit to 2 digit after the decimal. The maximum length of the field is 15 including \\'.\\' and can hold up to 2 decimal places.\n\nNote: This value is calculated based on the Product/Unit/Value and /Product/Unit/Number (Number of Units * Price per Unit). If the total value is incorrect it will be replaced by the actual calculated total value.\n",
@@ -2869,7 +3154,12 @@
             "x-runtara-label": "SED Total Value"
           },
           "ScheduleB": {
-            "$ref": "#/components/schemas/Product_ScheduleB"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Product_ScheduleB"
+              }
+            ],
+            "x-runtara-label": "Schedule B"
           },
           "TaxesPaid": {
             "description": "Invoice Commodity Level Tax Collected Code for each shipment commodity line.Taxes paid Indicator is only applicable for shipments to Singapore. [TaxesPaid = 0 - No on Report], [TaxesPaid = 1 -Yes on Report], [TaxesPaid = empty - null on Report], [If TaxesPaid is not passed in input request = null on Report]",
@@ -2877,7 +3167,12 @@
             "x-runtara-label": "Taxes Paid"
           },
           "Unit": {
-            "$ref": "#/components/schemas/Product_Unit"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Product_Unit"
+              }
+            ],
+            "x-runtara-label": "Unit"
           },
           "VehicleID": {
             "description": "Includes the following information for used self-propelled vehicles as defined in Customs regulations 19 CFR 192.1: The unique Vehicle Identification Number (VIN) in the proper format. Or The Product Identification Number (PIN) for those used self-propelled vehicles for which there are no VINs.  Or the Vehicle Title Number.  Applies to EEI forms only.",
@@ -2986,10 +3281,20 @@
         "maximum": 1,
         "properties": {
           "LabelDelivery": {
-            "$ref": "#/components/schemas/LabelRecoveryRequest_LabelDelivery"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelRecoveryRequest_LabelDelivery"
+              }
+            ],
+            "x-runtara-label": "Label Delivery"
           },
           "LabelSpecification": {
-            "$ref": "#/components/schemas/LabelRecoveryRequest_LabelSpecification"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelRecoveryRequest_LabelSpecification"
+              }
+            ],
+            "x-runtara-label": "Label Specification"
           },
           "Locale": {
             "description": "Represents 5 character ISO Locale that allows the user to request Reference Number Code on Label, Label instructions, Receipt instructions (if available for given tracking number) and High Value Report (if available for given tracking number) in desired language. \nLocale is specified by the combination of language code and country or territory code - 2 character language code and 2 character country code seperated by an underscore ('_') character. Example - de_DE. Please refer to Appendix for supported values for Locale.  Either Translate container or Locale element can be present in a given request. Both can't be requested together in same request.",
@@ -3008,10 +3313,20 @@
             "x-runtara-label": "Mail Innovations Tracking Number"
           },
           "ReferenceValues": {
-            "$ref": "#/components/schemas/LabelRecoveryRequest_ReferenceValues"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelRecoveryRequest_ReferenceValues"
+              }
+            ],
+            "x-runtara-label": "Reference Values"
           },
           "Request": {
-            "$ref": "#/components/schemas/LabelRecoveryRequest_Request"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelRecoveryRequest_Request"
+              }
+            ],
+            "x-runtara-label": "Request"
           },
           "TrackingNumber": {
             "description": "Small Package Tracking Number. Required if Mail Innovations Tracking Number or ReferenceNumber/Value and ShipperNumber is not provided.  If only TrackingNumber is provided, the request will be treated as Small Package Shipment. Label Recovery will return label for Small Package Tracking Number.\nIf both, TrackingNumber and MailInnovationsTrackingNumber are provided, the request will be treated as Dual Mail Innovations Return Shipment. Label Recovery will return two labels one each for - Small Package Tracking Number and Mail Innovations Return Tracking Number.",
@@ -3033,10 +3348,20 @@
             "x-runtara-label": "Tracking Numbers"
           },
           "Translate": {
-            "$ref": "#/components/schemas/LabelRecoveryRequest_Translate"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelRecoveryRequest_Translate"
+              }
+            ],
+            "x-runtara-label": "Translate"
           },
           "UPSPremiumCareForm": {
-            "$ref": "#/components/schemas/LabelRecoveryRequestUpsPremiumCareForm"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelRecoveryRequestUpsPremiumCareForm"
+              }
+            ],
+            "x-runtara-label": "UPS Premium Care Form"
           }
         },
         "required": [
@@ -3112,10 +3437,20 @@
             "x-runtara-label": "HTTP User Agent"
           },
           "LabelImageFormat": {
-            "$ref": "#/components/schemas/LabelRecovery_LabelSpecification_LabelImageFormat"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelRecovery_LabelSpecification_LabelImageFormat"
+              }
+            ],
+            "x-runtara-label": "Label Image Format"
           },
           "LabelStockSize": {
-            "$ref": "#/components/schemas/LabelRecovery_LabelSpecification_LabelStockSize"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelRecovery_LabelSpecification_LabelStockSize"
+              }
+            ],
+            "x-runtara-label": "Label Stock Size"
           }
         },
         "type": "object",
@@ -3128,7 +3463,12 @@
         "maximum": 1,
         "properties": {
           "ReferenceNumber": {
-            "$ref": "#/components/schemas/ReferenceValues_ReferenceNumber"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ReferenceValues_ReferenceNumber"
+              }
+            ],
+            "x-runtara-label": "Reference Number"
           },
           "ShipperNumber": {
             "description": "Required if ReferenceNumber/Value is populated. Shipper's six digit account number. Must be six alphanumeric characters. Must be associated with the Internet account used to login.",
@@ -3163,7 +3503,12 @@
             "x-runtara-label": "Sub Version"
           },
           "TransactionReference": {
-            "$ref": "#/components/schemas/LrRequestTransactionReference"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LrRequestTransactionReference"
+              }
+            ],
+            "x-runtara-label": "Transaction Reference"
           }
         },
         "type": "object",
@@ -3215,13 +3560,28 @@
         "maximum": 1,
         "properties": {
           "CODTurnInPage": {
-            "$ref": "#/components/schemas/LabelRecoveryResponseCodTurnInPage"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelRecoveryResponseCodTurnInPage"
+              }
+            ],
+            "x-runtara-label": "COD Turn In Page"
           },
           "Form": {
-            "$ref": "#/components/schemas/LabelRecoveryResponse_Form"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelRecoveryResponse_Form"
+              }
+            ],
+            "x-runtara-label": "Form"
           },
           "HighValueReport": {
-            "$ref": "#/components/schemas/LabelRecoveryResponse_HighValueReport"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelRecoveryResponse_HighValueReport"
+              }
+            ],
+            "x-runtara-label": "High Value Report"
           },
           "LabelResults": {
             "items": {
@@ -3231,7 +3591,12 @@
             "x-runtara-label": "Label Results"
           },
           "Response": {
-            "$ref": "#/components/schemas/LabelRecoveryResponse_Response"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelRecoveryResponse_Response"
+              }
+            ],
+            "x-runtara-label": "Response"
           },
           "ShipmentIdentificationNumber": {
             "description": "Tracking number of the leading package in the shipment",
@@ -3263,7 +3628,12 @@
         "maximum": 1,
         "properties": {
           "Image": {
-            "$ref": "#/components/schemas/LrcodTurnInPageImage"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LrcodTurnInPageImage"
+              }
+            ],
+            "x-runtara-label": "Image"
           }
         },
         "required": [
@@ -3279,7 +3649,12 @@
         "maximum": 1,
         "properties": {
           "Image": {
-            "$ref": "#/components/schemas/LabelRecovery_Form_Image"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelRecovery_Form_Image"
+              }
+            ],
+            "x-runtara-label": "Image"
           }
         },
         "required": [
@@ -3295,7 +3670,12 @@
         "maximum": 1,
         "properties": {
           "Image": {
-            "$ref": "#/components/schemas/HighValueReport_Image"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/HighValueReport_Image"
+              }
+            ],
+            "x-runtara-label": "Image"
           }
         },
         "required": [
@@ -3311,13 +3691,28 @@
         "maximum": 1,
         "properties": {
           "Form": {
-            "$ref": "#/components/schemas/LabelResults_Form"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelResults_Form"
+              }
+            ],
+            "x-runtara-label": "Form"
           },
           "LabelImage": {
-            "$ref": "#/components/schemas/LabelResults_LabelImage"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelResults_LabelImage"
+              }
+            ],
+            "x-runtara-label": "Label Image"
           },
           "MailInnovationsLabelImage": {
-            "$ref": "#/components/schemas/LabelResults_MailInnovationsLabelImage"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelResults_MailInnovationsLabelImage"
+              }
+            ],
+            "x-runtara-label": "Mail Innovations Label Image"
           },
           "MailInnovationsTrackingNumber": {
             "description": "Mail Innovations Tracking Number.  Applicable for Single Mail Innovations Returns and Dual Mail Innovations Returns shipment. Returned only if MailInnovationsTrackingNumber is provided in request.",
@@ -3328,7 +3723,12 @@
             "x-runtara-label": "Mail Innovations Tracking Number"
           },
           "Receipt": {
-            "$ref": "#/components/schemas/LabelResults_Receipt"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelResults_Receipt"
+              }
+            ],
+            "x-runtara-label": "Receipt"
           },
           "TrackingNumber": {
             "description": "Package Tracking number.  Package 1Z number. Returned only if TrackingNumber or Combination of Reference Number and Shipper Number present in request.",
@@ -3356,10 +3756,20 @@
             "x-runtara-label": "Alert"
           },
           "ResponseStatus": {
-            "$ref": "#/components/schemas/LrResponseResponseStatus"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LrResponseResponseStatus"
+              }
+            ],
+            "x-runtara-label": "Response Status"
           },
           "TransactionReference": {
-            "$ref": "#/components/schemas/LrResponseTransactionReference"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LrResponseTransactionReference"
+              }
+            ],
+            "x-runtara-label": "Transaction Reference"
           }
         },
         "required": [
@@ -3391,7 +3801,12 @@
             "x-runtara-label": "Destination Postal Code"
           },
           "PickupDateRange": {
-            "$ref": "#/components/schemas/TrackingCandidate_PickupDateRange"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TrackingCandidate_PickupDateRange"
+              }
+            ],
+            "x-runtara-label": "Pickup Date Range"
           },
           "TrackingNumber": {
             "description": "Packaging Tracking Number  Only supported for the web small package shipment so only supported 18 digit",
@@ -3421,7 +3836,12 @@
             "x-runtara-label": "Graphic Image"
           },
           "ImageFormat": {
-            "$ref": "#/components/schemas/LabelRecovery_Image_ImageFormat"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelRecovery_Image_ImageFormat"
+              }
+            ],
+            "x-runtara-label": "Image Format"
           }
         },
         "required": [
@@ -3526,7 +3946,12 @@
         "maximum": 1,
         "properties": {
           "Image": {
-            "$ref": "#/components/schemas/LrFormImage"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LrFormImage"
+              }
+            ],
+            "x-runtara-label": "Image"
           }
         },
         "required": [
@@ -3560,7 +3985,12 @@
             "x-runtara-label": "International Signature Graphic Image"
           },
           "LabelImageFormat": {
-            "$ref": "#/components/schemas/LabelImage_LabelImageFormat"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelImage_LabelImageFormat"
+              }
+            ],
+            "x-runtara-label": "Label Image Format"
           },
           "PDF417": {
             "description": "PDF-417 is a two-dimensional barcode, which can store up to about 1,800 printable ASCII characters or 1,100 binary characters per symbol. The symbol is rectangular. \n\nThe PDF417 image will be returned when the shipment is trans-border and the service option is one of the following: Standard Express, Saver Express Plus. The image is Base 64 encoded and only returned for GIF image format.",
@@ -3607,7 +4037,12 @@
             "x-runtara-label": "International Signature Graphic Image"
           },
           "LabelImageFormat": {
-            "$ref": "#/components/schemas/MailInnovationsLabelImage_LabelImageFormat"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/MailInnovationsLabelImage_LabelImageFormat"
+              }
+            ],
+            "x-runtara-label": "Label Image Format"
           },
           "PDF417": {
             "description": "PDF-417 is a two-dimensional barcode, which can store up to about 1,800 printable ASCII characters or 1,100 binary characters per symbol. The symbol is rectangular. The PDF417 image will be returned when the shipment is trans-border and the service option is one of the following: Standard, Express Saver or Express Plus.  The image is Base 64 encoded and only returned for GIF image format",
@@ -3642,7 +4077,12 @@
             "x-runtara-label": "HTML Image"
           },
           "Image": {
-            "$ref": "#/components/schemas/Receipt_Image"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Receipt_Image"
+              }
+            ],
+            "x-runtara-label": "Image"
           },
           "URL": {
             "description": "Receipt's url  Applicable for following types of shipments:\nPrint/Electronic Return Label\nPrint/Electronic Import Control Label",
@@ -3749,7 +4189,12 @@
         "maximum": 1,
         "properties": {
           "LabelRecoveryResponse": {
-            "$ref": "#/components/schemas/LabelRecoveryResponse"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelRecoveryResponse"
+              }
+            ],
+            "x-runtara-label": "Label Recovery Response"
           }
         },
         "required": [
@@ -3763,7 +4208,12 @@
       "Location": {
         "properties": {
           "address": {
-            "$ref": "#/components/schemas/Address"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Address"
+              }
+            ],
+            "x-runtara-label": "Address"
           },
           "slic": {
             "description": "Site Location Indicator Code (SLIC)",
@@ -3816,7 +4266,12 @@
             "x-runtara-label": "Graphic Image"
           },
           "ImageFormat": {
-            "$ref": "#/components/schemas/Image_ImageFormat"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Image_ImageFormat"
+              }
+            ],
+            "x-runtara-label": "Image Format"
           }
         },
         "required": [
@@ -3905,7 +4360,12 @@
             "x-runtara-label": "Graphic Image"
           },
           "ImageFormat": {
-            "$ref": "#/components/schemas/LrCodTurnInPageImageImageFormat"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LrCodTurnInPageImageImageFormat"
+              }
+            ],
+            "x-runtara-label": "Image Format"
           }
         },
         "required": [
@@ -3976,7 +4436,12 @@
         "maximum": 1,
         "properties": {
           "Dimensions": {
-            "$ref": "#/components/schemas/LtlDimensions"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LtlDimensions"
+              }
+            ],
+            "x-runtara-label": "Dimensions"
           },
           "FreightClass": {
             "description": "Freight class of the handling unit.\n\nValid values are:\n\n- 50 = over 50 lbs - Fits on standard shrink-wrapped 4X4 pallet, very durable\n- 55 = 35-50 pounds - Bricks, cement, mortar, hardwood flooring\n- 60 = 30-35 pounds - Car accessories & car parts\n- 65 = 22.5-30 pounds - Car accessories & car parts, bottled beverages, books in boxes\n- 70 = 15 to 22.5 pounds - Car accessories & car parts, food items, automobile engines\n- 77.5 = 13.5 to 15 pounds - Tires, bathroom fixtures\n- 85 =\t12-13.5 pounds - Crated machinery, cast iron stoves\n- 92.5 = 10.5-12 pounds - Computers, monitors, refrigerators\n- 100 =\t9-10.5 pounds - Boat covers, car covers, canvas, wine cases, caskets\n- 110 =\t8-9 pounds - Cabinets, framed artwork, table saw\n- 125 =\t7-8 pounds - Small Household appliances\n- 150 =\t6-7 pounds - Auto sheet metal parts, bookcases\n- 175 =\t5-6 pounds - Clothing, couches stuffed furniture\n- 200 =\t4-5 pounds - Auto sheet metal parts, aircraft parts, aluminum table, packaged mattresses\n- 250 =\t3-4 pounds - Bamboo furniture, mattress and box spring, plasma TV\n- 300 =\t2-3 pounds - Wood cabinets, tables, chairs setup, model boats\n- 400 =\t1-2 pounds - Deer antlers\n- 500 =\tLess than 1 lbs - Bags of gold dust, ping pong balls\n",
@@ -4006,7 +4471,12 @@
             "x-runtara-label": "Freight Class"
           },
           "PackageWeight": {
-            "$ref": "#/components/schemas/LtlPackageWeightType"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LtlPackageWeightType"
+              }
+            ],
+            "x-runtara-label": "Package Weight"
           },
           "Quantity": {
             "description": "Quantity of handling units.",
@@ -4172,7 +4642,12 @@
         "maximum": 1,
         "properties": {
           "Address": {
-            "$ref": "#/components/schemas/TradeDirect_Address"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TradeDirect_Address"
+              }
+            ],
+            "x-runtara-label": "Address"
           },
           "AttentionName": {
             "description": "Master Pickup Contact Name.",
@@ -4200,7 +4675,12 @@
             "x-runtara-label": "Name"
           },
           "Phone": {
-            "$ref": "#/components/schemas/TradeDirect_Phone"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TradeDirect_Phone"
+              }
+            ],
+            "x-runtara-label": "Phone"
           }
         },
         "required": [
@@ -4226,7 +4706,12 @@
             "x-runtara-label": "Account Number"
           },
           "Address": {
-            "$ref": "#/components/schemas/TradeDirect_Address"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TradeDirect_Address"
+              }
+            ],
+            "x-runtara-label": "Address"
           },
           "AttentionName": {
             "description": "Master Sold to Contact Name.",
@@ -4263,7 +4748,12 @@
             "x-runtara-label": "Option"
           },
           "Phone": {
-            "$ref": "#/components/schemas/TradeDirect_Phone"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TradeDirect_Phone"
+              }
+            ],
+            "x-runtara-label": "Phone"
           },
           "TaxIdentificationNumber": {
             "deprecated": true,
@@ -4374,7 +4864,12 @@
             "x-runtara-label": "State"
           },
           "subMilestone": {
-            "$ref": "#/components/schemas/SubMilestone"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SubMilestone"
+              }
+            ],
+            "x-runtara-label": "Sub Milestone"
           }
         },
         "title": "Milestones",
@@ -4786,7 +5281,12 @@
       "Package": {
         "properties": {
           "accessPointInformation": {
-            "$ref": "#/components/schemas/AccessPointInformation"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AccessPointInformation"
+              }
+            ],
+            "x-runtara-label": "Access Point Information"
           },
           "activity": {
             "items": {
@@ -4831,7 +5331,12 @@
             "x-runtara-label": "Alternate Tracking Number"
           },
           "currentStatus": {
-            "$ref": "#/components/schemas/Status"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Status"
+              }
+            ],
+            "x-runtara-label": "Current Status"
           },
           "deliveryDate": {
             "items": {
@@ -4841,13 +5346,28 @@
             "x-runtara-label": "Delivery Date"
           },
           "deliveryInformation": {
-            "$ref": "#/components/schemas/DeliveryInformation"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryInformation"
+              }
+            ],
+            "x-runtara-label": "Delivery Information"
           },
           "deliveryTime": {
-            "$ref": "#/components/schemas/DeliveryTime"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryTime"
+              }
+            ],
+            "x-runtara-label": "Delivery Time"
           },
           "dimension": {
-            "$ref": "#/components/schemas/Dimension"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Dimension"
+              }
+            ],
+            "x-runtara-label": "Dimension"
           },
           "isSmartPackage": {
             "description": "Indicator of whether the package is a smart package",
@@ -4892,7 +5412,12 @@
             "x-runtara-label": "Reference Number"
           },
           "service": {
-            "$ref": "#/components/schemas/Service"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Service"
+              }
+            ],
+            "x-runtara-label": "Service"
           },
           "statusCode": {
             "type": "string",
@@ -4923,7 +5448,12 @@
             "x-runtara-label": "Ucix Status"
           },
           "weight": {
-            "$ref": "#/components/schemas/Weight"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Weight"
+              }
+            ],
+            "x-runtara-label": "Weight"
           }
         },
         "title": "Package",
@@ -4933,7 +5463,12 @@
         "description": "The container array that has all the addresses associated with the package, such as the ship from (shipper), ship to (consignee), and delivery addresses",
         "properties": {
           "address": {
-            "$ref": "#/components/schemas/Address"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Address"
+              }
+            ],
+            "x-runtara-label": "Address"
           },
           "attentionName": {
             "description": "The specific name of an individual associated with the address segment.",
@@ -5085,7 +5620,12 @@
             "x-runtara-label": "Form Group ID Name"
           },
           "Image": {
-            "$ref": "#/components/schemas/Form_Image"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Form_Image"
+              }
+            ],
+            "x-runtara-label": "Image"
           }
         },
         "type": "object",
@@ -5263,7 +5803,12 @@
             "x-runtara-label": "HTML Image"
           },
           "ImageFormat": {
-            "$ref": "#/components/schemas/ShippingLabel_ImageFormat"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShippingLabel_ImageFormat"
+              }
+            ],
+            "x-runtara-label": "Image Format"
           },
           "InternationalSignatureGraphicImage": {
             "description": "Base 64 encoded graphic image of the Warsaw text and signature box. EPL2, ZPL and SPL labels. The image will be returned for non-US based shipments. One image will be given per shipment and it will be in the first PackageResults container.",
@@ -5298,7 +5843,12 @@
             "x-runtara-label": "Graphic Image"
           },
           "ImageFormat": {
-            "$ref": "#/components/schemas/ShippingReceipt_ImageFormat"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShippingReceipt_ImageFormat"
+              }
+            ],
+            "x-runtara-label": "Image Format"
           }
         },
         "required": [
@@ -5366,7 +5916,12 @@
         "maximum": 1,
         "properties": {
           "CODAmount": {
-            "$ref": "#/components/schemas/PackageServiceOptionsCodCodAmount"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PackageServiceOptionsCodCodAmount"
+              }
+            ],
+            "x-runtara-label": "COD Amount"
           },
           "CODFundsCode": {
             "description": "For valid values refer to: Rating and Shipping COD Supported Countries or Territories in the Appendix.",
@@ -5437,7 +5992,12 @@
             "x-runtara-label": "Monetary Value"
           },
           "Type": {
-            "$ref": "#/components/schemas/DeclaredValue_Type"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DeclaredValue_Type"
+              }
+            ],
+            "x-runtara-label": "Type"
           }
         },
         "required": [
@@ -5483,7 +6043,12 @@
         "maximum": 1,
         "properties": {
           "DryIceWeight": {
-            "$ref": "#/components/schemas/DryIce_DryIceWeight"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DryIce_DryIceWeight"
+              }
+            ],
+            "x-runtara-label": "Dry Ice Weight"
           },
           "MedicalUseIndicator": {
             "description": "Presence/Absence Indicator. Any value inside is ignored. Relevant only in CFR regulation set. If present it is used to designate the dry Ice is for any medical use and rates are adjusted for DryIce weight more than 2.5 Kgs or 5.7 Lbs.",
@@ -5805,7 +6370,12 @@
         "maximum": 1,
         "properties": {
           "EMail": {
-            "$ref": "#/components/schemas/PackageServiceOptions_Notification_EMail"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PackageServiceOptions_Notification_EMail"
+              }
+            ],
+            "x-runtara-label": "E Mail"
           },
           "NotificationCode": {
             "description": "Notification Code.  Valid values:\n3 - Receiver Return Notification\n6 - QV Email Notification\n7 - QV Exception Notification\n8 - QV Delivery Notification \nFor Mail Innovations forward shipments, QV Email Notifications are allowed for First Class, Priority Mail, and Expedited Mail Innovation services.",
@@ -5976,7 +6546,12 @@
             "x-runtara-label": "Freight Class"
           },
           "NMFC": {
-            "$ref": "#/components/schemas/CommodityNmfc"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CommodityNmfc"
+              }
+            ],
+            "x-runtara-label": "NMFC"
           }
         },
         "required": [
@@ -5992,7 +6567,12 @@
         "maximum": 1,
         "properties": {
           "UnitOfMeasurement": {
-            "$ref": "#/components/schemas/DimWeight_UnitOfMeasurement"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DimWeight_UnitOfMeasurement"
+              }
+            ],
+            "x-runtara-label": "Unit Of Measurement"
           },
           "Weight": {
             "description": "Actual package weight.  Weight accepted for letters/envelopes.",
@@ -6029,7 +6609,12 @@
             "x-runtara-label": "Length"
           },
           "UnitOfMeasurement": {
-            "$ref": "#/components/schemas/Dimensions_UnitOfMeasurement"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Dimensions_UnitOfMeasurement"
+              }
+            ],
+            "x-runtara-label": "Unit Of Measurement"
           },
           "Width": {
             "description": "Package width.",
@@ -6094,10 +6679,20 @@
         "maximum": 1,
         "properties": {
           "AccessPointCOD": {
-            "$ref": "#/components/schemas/PackageServiceOptionsAccessPointCod"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PackageServiceOptionsAccessPointCod"
+              }
+            ],
+            "x-runtara-label": "Access Point COD"
           },
           "COD": {
-            "$ref": "#/components/schemas/PackageServiceOptionsCod"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PackageServiceOptionsCod"
+              }
+            ],
+            "x-runtara-label": "COD"
           },
           "ClinicalTrialsID": {
             "description": "Unique identifier for clinical trials",
@@ -6108,13 +6703,28 @@
             "x-runtara-label": "Clinical Trials ID"
           },
           "DeclaredValue": {
-            "$ref": "#/components/schemas/PackageServiceOptions_DeclaredValue"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PackageServiceOptions_DeclaredValue"
+              }
+            ],
+            "x-runtara-label": "Declared Value"
           },
           "DeliveryConfirmation": {
-            "$ref": "#/components/schemas/PackageServiceOptions_DeliveryConfirmation"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PackageServiceOptions_DeliveryConfirmation"
+              }
+            ],
+            "x-runtara-label": "Delivery Confirmation"
           },
           "DryIce": {
-            "$ref": "#/components/schemas/PackageServiceOptions_DryIce"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PackageServiceOptions_DryIce"
+              }
+            ],
+            "x-runtara-label": "Dry Ice"
           },
           "HazMat": {
             "items": {
@@ -6131,10 +6741,20 @@
             "x-runtara-label": "Haz Mat Type Code"
           },
           "Healthcare": {
-            "$ref": "#/components/schemas/PackageServiceOptions_Healthcare"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PackageServiceOptions_Healthcare"
+              }
+            ],
+            "x-runtara-label": "Healthcare"
           },
           "Notification": {
-            "$ref": "#/components/schemas/PackageServiceOptions_Notification"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PackageServiceOptions_Notification"
+              }
+            ],
+            "x-runtara-label": "Notification"
           },
           "PackageIdentifier": {
             "description": "Identifies the package containing Dangerous Goods.  Required for Hazmat shipment if SubVersion is greater than or equal to 1701.",
@@ -6179,7 +6799,12 @@
         "maximum": 1,
         "properties": {
           "UnitOfMeasurement": {
-            "$ref": "#/components/schemas/PackageWeight_UnitOfMeasurement"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PackageWeight_UnitOfMeasurement"
+              }
+            ],
+            "x-runtara-label": "Unit Of Measurement"
           },
           "Weight": {
             "description": "Packages weight. Weight accepted for letters/envelopes.  Only average package weight is required for Ground Freight Pricing Shipment.",
@@ -6377,13 +7002,28 @@
         "maximum": 1,
         "properties": {
           "BillReceiver": {
-            "$ref": "#/components/schemas/ShipmentCharge_BillReceiver"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentCharge_BillReceiver"
+              }
+            ],
+            "x-runtara-label": "Bill Receiver"
           },
           "BillShipper": {
-            "$ref": "#/components/schemas/ShipmentCharge_BillShipper"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentCharge_BillShipper"
+              }
+            ],
+            "x-runtara-label": "Bill Shipper"
           },
           "BillThirdParty": {
-            "$ref": "#/components/schemas/ShipmentCharge_BillThirdParty"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentCharge_BillThirdParty"
+              }
+            ],
+            "x-runtara-label": "Bill Third Party"
           },
           "ConsigneeBilledIndicator": {
             "description": "Consignee Billing payment option indicator. The presence indicates consignee billing option is selected. The absence indicates one of the other payment options is selected.  This is an empty tag, any value inside is ignored. This element or its sibling element, BillShipper, BillReceiver or BillThirdParty, must be present but no more than one can be present. This billing option is valid for a shipment charge type of Transportation only. Only applies to US/PR and PR/US shipment origins and destination.\n\nThis payment method allows you to bill the charges for a specified shipment to a consignee who has agreed to pay the charges. All shipping charges are billed to the consignees UPS account number including the following accessorials: Additional Handling, Delivery Area Surcharges, Delivery Change Requests, Early AM Premium, Early AM Out of Territory, Fuel Surcharge, Hazardous Material Surcharges, Large Package Surcharge, Over Max Limits, and Saturday Delivery.\n\nDeclared Value, Delivery Confirmation, On Call Pickup, Remote Area Surcharge, Saturday Pickup of Delivery fees are not passed to the consignee. These charges are billed to the shippers UPS account number.",
@@ -6621,7 +7261,12 @@
         "maximum": 1,
         "properties": {
           "DDTCInformation": {
-            "$ref": "#/components/schemas/EeiInformationDdtcInformation"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/EeiInformationDdtcInformation"
+              }
+            ],
+            "x-runtara-label": "DDTC Information"
           },
           "ExportInformation": {
             "description": "Required for EEI form id it is a SDL product. Valid values: LC, LV, SS,MS, GS, DP, HR, UG, IC, SC, DD, HH, SR, TE,TL, IS, CR, GP, RJ, TP, IP, IR, DB, CH, RS, OS  Applies to EEI form only. Required if EEIFilingOption code 3 specified for EEI form.",
@@ -6632,7 +7277,12 @@
             "x-runtara-label": "Export Information"
           },
           "License": {
-            "$ref": "#/components/schemas/EeiInformationLicense"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/EeiInformationLicense"
+              }
+            ],
+            "x-runtara-label": "License"
           }
         },
         "type": "object",
@@ -6748,7 +7398,12 @@
         "maximum": 1,
         "properties": {
           "UnitOfMeasurement": {
-            "$ref": "#/components/schemas/ProductWeight_UnitOfMeasurement"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ProductWeight_UnitOfMeasurement"
+              }
+            ],
+            "x-runtara-label": "Unit Of Measurement"
           },
           "Weight": {
             "description": "Weight of Product.  Applies to CO and EEI forms only. Valid characters are 0-9 and '.' (Decimal point). Limit to 1 digit after the decimal. The maximum length of the field is 5 including '.' and can hold up to 1 decimal place.",
@@ -6822,7 +7477,12 @@
             "x-runtara-label": "Number"
           },
           "UnitOfMeasurement": {
-            "$ref": "#/components/schemas/Unit_UnitOfMeasurement"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Unit_UnitOfMeasurement"
+              }
+            ],
+            "x-runtara-label": "Unit Of Measurement"
           },
           "Value": {
             "description": "Monetary amount used to specify the worth or price of the commodity. Amount should be greater than zero.  Applies to Invoice and Partial Invoice form. Required for Invoice forms and optional for Partial Invoice. Amount should be greater than zero.  Valid characters are 0-9 and. (Decimal point). Limit to 6 digits after the decimal. The maximum length of the field is 19 including '.' and can hold up to 6 decimal places.(#####.######, ######.#####, #######.####, ########.###, #########.##,##########.#,############). The value of this product  and the other products should be such that the invoice line total which is the sum of ( number*values) of all products should not exceed 9999999999999999.99",
@@ -6883,7 +7543,12 @@
             "x-runtara-label": "Graphic Image"
           },
           "ImageFormat": {
-            "$ref": "#/components/schemas/Receipt_Image_ImageFormat"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Receipt_Image_ImageFormat"
+              }
+            ],
+            "x-runtara-label": "Image Format"
           }
         },
         "required": [
@@ -6987,7 +7652,12 @@
       "Response": {
         "properties": {
           "response": {
-            "$ref": "#/components/schemas/TrackingErrorResponse"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TrackingErrorResponse"
+              }
+            ],
+            "x-runtara-label": "Response"
           }
         },
         "title": "Response",
@@ -7281,7 +7951,12 @@
         "maximum": 1,
         "properties": {
           "ShipmentResponse": {
-            "$ref": "#/components/schemas/ShipmentResponse"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentResponse"
+              }
+            ],
+            "x-runtara-label": "Shipment Response"
           }
         },
         "required": [
@@ -7441,7 +8116,12 @@
             "x-runtara-label": "Account Number"
           },
           "Address": {
-            "$ref": "#/components/schemas/BillReceiver_Address"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/BillReceiver_Address"
+              }
+            ],
+            "x-runtara-label": "Address"
           }
         },
         "required": [
@@ -7476,7 +8156,12 @@
             }
           },
           "CreditCard": {
-            "$ref": "#/components/schemas/BillShipper_CreditCard"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/BillShipper_CreditCard"
+              }
+            ],
+            "x-runtara-label": "Credit Card"
           }
         },
         "type": "object"
@@ -7494,7 +8179,12 @@
             "x-runtara-label": "Account Number"
           },
           "Address": {
-            "$ref": "#/components/schemas/BillThirdParty_Address"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/BillThirdParty_Address"
+              }
+            ],
+            "x-runtara-label": "Address"
           },
           "CertifiedElectronicMail": {
             "description": "Posta Elettronica Certificata (PEC) which is the recipient code for the customers certified electronic mail value.",
@@ -7823,10 +8513,20 @@
             "x-runtara-label": "Account Number"
           },
           "Address": {
-            "$ref": "#/components/schemas/FrsPaymentInformationAddress"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/FrsPaymentInformationAddress"
+              }
+            ],
+            "x-runtara-label": "Address"
           },
           "Type": {
-            "$ref": "#/components/schemas/FrsPaymentInformationType"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/FrsPaymentInformationType"
+              }
+            ],
+            "x-runtara-label": "Type"
           }
         },
         "required": [
@@ -7843,16 +8543,36 @@
         "maximum": 1,
         "properties": {
           "LabelSpecification": {
-            "$ref": "#/components/schemas/ShipmentRequest_LabelSpecification"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentRequest_LabelSpecification"
+              }
+            ],
+            "x-runtara-label": "Label Specification"
           },
           "ReceiptSpecification": {
-            "$ref": "#/components/schemas/ShipmentRequest_ReceiptSpecification"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentRequest_ReceiptSpecification"
+              }
+            ],
+            "x-runtara-label": "Receipt Specification"
           },
           "Request": {
-            "$ref": "#/components/schemas/ShipmentRequest_Request"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentRequest_Request"
+              }
+            ],
+            "x-runtara-label": "Request"
           },
           "Shipment": {
-            "$ref": "#/components/schemas/ShipmentRequest_Shipment"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentRequest_Shipment"
+              }
+            ],
+            "x-runtara-label": "Shipment"
           }
         },
         "required": [
@@ -7892,10 +8612,20 @@
             "x-runtara-label": "Instruction"
           },
           "LabelImageFormat": {
-            "$ref": "#/components/schemas/LabelSpecification_LabelImageFormat"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelSpecification_LabelImageFormat"
+              }
+            ],
+            "x-runtara-label": "Label Image Format"
           },
           "LabelStockSize": {
-            "$ref": "#/components/schemas/LabelSpecification_LabelStockSize"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelSpecification_LabelStockSize"
+              }
+            ],
+            "x-runtara-label": "Label Stock Size"
           }
         },
         "required": [
@@ -7912,7 +8642,12 @@
         "maximum": 1,
         "properties": {
           "ImageFormat": {
-            "$ref": "#/components/schemas/ReceiptSpecification_ImageFormat"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ReceiptSpecification_ImageFormat"
+              }
+            ],
+            "x-runtara-label": "Image Format"
           }
         },
         "required": [
@@ -7944,7 +8679,12 @@
             "x-runtara-label": "Sub Version"
           },
           "TransactionReference": {
-            "$ref": "#/components/schemas/Request_TransactionReference"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Request_TransactionReference"
+              }
+            ],
+            "x-runtara-label": "Transaction Reference"
           }
         },
         "required": [
@@ -7960,7 +8700,12 @@
         "maximum": 1,
         "properties": {
           "AlternateDeliveryAddress": {
-            "$ref": "#/components/schemas/Shipment_AlternateDeliveryAddress"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Shipment_AlternateDeliveryAddress"
+              }
+            ],
+            "x-runtara-label": "Alternate Delivery Address"
           },
           "ConsigneeType": {
             "description": "Shipment Value for ConsigneeType. 01 = Business 02 = Consumer/Individual  NA = Not Applicable.\nRequired for EU Inbound Shipments.",
@@ -7985,7 +8730,12 @@
             "x-runtara-label": "Cost Center Barcode Indicator"
           },
           "DGSignatoryInfo": {
-            "$ref": "#/components/schemas/ShipmentDgSignatoryInfo"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentDgSignatoryInfo"
+              }
+            ],
+            "x-runtara-label": "DG Signatory Info"
           },
           "Description": {
             "description": "The Description of Goods for the shipment. Applies to international and domestic shipments. \n\nProvide a detailed description of items being shipped for documents and non-documents. \n\nExamples: \"annual reports\" and \"9 mm steel screws\".  Required if all of the listed conditions are true: \nShipFrom and ShipTo countries or territories are not the same; The packaging type is not UPS Letter; The ShipFrom and or ShipTo countries or territories are not in the European Union or the ShipFrom and ShipTo countries or territories are both in the European Union and the shipments service type is not UPS Standard. \n\nThe Description of Goods field is required for all UAE shipments, including Import, Export, and Domestic shipments. This requirement applies to both Document and Non‑Document shipments.",
@@ -8002,13 +8752,28 @@
             "x-runtara-label": "Documents Only Indicator"
           },
           "FRSPaymentInformation": {
-            "$ref": "#/components/schemas/ShipmentFrsPaymentInformation"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentFrsPaymentInformation"
+              }
+            ],
+            "x-runtara-label": "FRS Payment Information"
           },
           "FreightShipmentInformation": {
-            "$ref": "#/components/schemas/Shipment_FreightShipmentInformation"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Shipment_FreightShipmentInformation"
+              }
+            ],
+            "x-runtara-label": "Freight Shipment Information"
           },
           "GlobalTaxInformation": {
-            "$ref": "#/components/schemas/Shipment_GlobalTaxInformation"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Shipment_GlobalTaxInformation"
+              }
+            ],
+            "x-runtara-label": "Global Tax Information"
           },
           "GoodsNotInFreeCirculationIndicator": {
             "description": "Goods Not In Free Circulation indicator.  This is an empty tag, any value inside is ignored. This indicator is invalid for a package type of UPS Letter and DocumentsOnly.",
@@ -8025,7 +8790,12 @@
             "x-runtara-label": "Healthcare Identifier"
           },
           "InvoiceLineTotal": {
-            "$ref": "#/components/schemas/Shipment_InvoiceLineTotal"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Shipment_InvoiceLineTotal"
+              }
+            ],
+            "x-runtara-label": "Invoice Line Total"
           },
           "IrregularIndicator": {
             "description": "Mail classification defined by the USPS.   Valid values: \n1 = Balloon\n2 = Oversize\n3 = Not Applicable",
@@ -8116,10 +8886,20 @@
             "x-runtara-label": "Package ID Barcode Indicator"
           },
           "PaymentInformation": {
-            "$ref": "#/components/schemas/Shipment_PaymentInformation"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Shipment_PaymentInformation"
+              }
+            ],
+            "x-runtara-label": "Payment Information"
           },
           "PromotionalDiscountInformation": {
-            "$ref": "#/components/schemas/Shipment_PromotionalDiscountInformation"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Shipment_PromotionalDiscountInformation"
+              }
+            ],
+            "x-runtara-label": "Promotional Discount Information"
           },
           "QuoteID": {
             "description": "This field is used to pass the Quote ID generated from the Global Checkout API. This is mandatory to validate your Global Checkout Guaranteed Landed Cost.",
@@ -8143,16 +8923,36 @@
             "x-runtara-label": "Reference Number"
           },
           "ReturnService": {
-            "$ref": "#/components/schemas/Shipment_ReturnService"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Shipment_ReturnService"
+              }
+            ],
+            "x-runtara-label": "Return Service"
           },
           "Service": {
-            "$ref": "#/components/schemas/Shipment_Service"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Shipment_Service"
+              }
+            ],
+            "x-runtara-label": "Service"
           },
           "ShipFrom": {
-            "$ref": "#/components/schemas/Shipment_ShipFrom"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Shipment_ShipFrom"
+              }
+            ],
+            "x-runtara-label": "Ship From"
           },
           "ShipTo": {
-            "$ref": "#/components/schemas/Shipment_ShipTo"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Shipment_ShipTo"
+              }
+            ],
+            "x-runtara-label": "Ship To"
           },
           "ShipmentDate": {
             "description": "User can send up to 7 days in the future with current date as day zero. Format: YYYYMMDD",
@@ -8170,7 +8970,12 @@
             "x-runtara-label": "Shipment Indication Type"
           },
           "ShipmentRatingOptions": {
-            "$ref": "#/components/schemas/Shipment_ShipmentRatingOptions"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Shipment_ShipmentRatingOptions"
+              }
+            ],
+            "x-runtara-label": "Shipment Rating Options"
           },
           "ShipmentRiskEnteringEU": {
             "description": "Code that identifies the risk of the Shipment entering the European Union (EU). \n Values: 01 = AT RISK of Entering the EU \n 02 = NOT AT RISK of Entering the EU \n 03 = RISK UNKNOWN of Entering the EU",
@@ -8181,7 +8986,12 @@
             "x-runtara-label": "Shipment Risk Entering EU"
           },
           "ShipmentServiceOptions": {
-            "$ref": "#/components/schemas/Shipment_ShipmentServiceOptions"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Shipment_ShipmentServiceOptions"
+              }
+            ],
+            "x-runtara-label": "Shipment Service Options"
           },
           "ShipmentValueThresholdCode": {
             "description": "Shipment Value Threshold Code. 01 = Shipment value is below or equals to threshold value\n02 = Shipment value is above threshold value.     NA = Not Applicable",
@@ -8192,7 +9002,12 @@
             "x-runtara-label": "Shipment Value Threshold Code"
           },
           "Shipper": {
-            "$ref": "#/components/schemas/Shipment_Shipper"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Shipment_Shipper"
+              }
+            ],
+            "x-runtara-label": "Shipper"
           },
           "ShipperType": {
             "description": "Shipment Value for ShipperType. 01 = Business 02 = Consumer/Individual  NA = Not Applicable.\nRequired for EU Inbound Shipments.",
@@ -8217,7 +9032,12 @@
             "x-runtara-label": "Tax Information Indicator"
           },
           "TradeDirect": {
-            "$ref": "#/components/schemas/Shipment_TradeDirect"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Shipment_TradeDirect"
+              }
+            ],
+            "x-runtara-label": "Trade Direct"
           },
           "USPSEndorsement": {
             "description": "USPS Endorsement.\nValid values: \n1 = Return Service Requested \n2 = Forwarding Service Requested \n3 = Address Service Requested \n4 = Change Service Requested and \n5 = No Service Selected. \nNote: For International Mail Innovations shipments use No Service Selected. International Mail Innovations shipments are applicable for Priority Mail Innovations and Mail Innovations Economy Mail Innovations services only.  Required for Mail Innovations forward shipments.",
@@ -8228,7 +9048,12 @@
             "x-runtara-label": "USPS Endorsement"
           },
           "WorldEase": {
-            "$ref": "#/components/schemas/Shipment_WorldEase"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Shipment_WorldEase"
+              }
+            ],
+            "x-runtara-label": "World Ease"
           }
         },
         "required": [
@@ -8247,10 +9072,20 @@
         "maximum": 1,
         "properties": {
           "Response": {
-            "$ref": "#/components/schemas/ShipmentResponse_Response"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentResponse_Response"
+              }
+            ],
+            "x-runtara-label": "Response"
           },
           "ShipmentResults": {
-            "$ref": "#/components/schemas/ShipmentResponse_ShipmentResults"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentResponse_ShipmentResults"
+              }
+            ],
+            "x-runtara-label": "Shipment Results"
           }
         },
         "required": [
@@ -8275,10 +9110,20 @@
             "x-runtara-label": "Alert"
           },
           "ResponseStatus": {
-            "$ref": "#/components/schemas/Response_ResponseStatus"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Response_ResponseStatus"
+              }
+            ],
+            "x-runtara-label": "Response Status"
           },
           "TransactionReference": {
-            "$ref": "#/components/schemas/Response_TransactionReference"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Response_TransactionReference"
+              }
+            ],
+            "x-runtara-label": "Transaction Reference"
           }
         },
         "required": [
@@ -8313,10 +9158,20 @@
             "x-runtara-label": "Billable Weight Calculation Method"
           },
           "BillingWeight": {
-            "$ref": "#/components/schemas/ShipmentResults_BillingWeight"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentResults_BillingWeight"
+              }
+            ],
+            "x-runtara-label": "Billing Weight"
           },
           "CODTurnInPage": {
-            "$ref": "#/components/schemas/ShipmentResultsCodTurnInPage"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentResultsCodTurnInPage"
+              }
+            ],
+            "x-runtara-label": "COD Turn In Page"
           },
           "ControlLogReceipt": {
             "description": "Container for the High Value reports when forward shipments have declared value between $999 and $50,000 USD. \\nTwo copies of high value report needs to be pointed out.\n\n**NOTE:** For versions >= v2409, this element will always be returned as an array. For requests using versions < v2409, this element will be returned as an array if there is more than one object and a single object if there is only 1.\n",
@@ -8343,10 +9198,20 @@
             "x-runtara-label": "Disclaimer"
           },
           "FRSShipmentData": {
-            "$ref": "#/components/schemas/ShipmentResultsFrsShipmentData"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentResultsFrsShipmentData"
+              }
+            ],
+            "x-runtara-label": "FRS Shipment Data"
           },
           "Form": {
-            "$ref": "#/components/schemas/ShipmentResults_Form"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentResults_Form"
+              }
+            ],
+            "x-runtara-label": "Form"
           },
           "GCCN": {
             "description": "Global Consolidation Carton Number",
@@ -8354,7 +9219,12 @@
             "x-runtara-label": "GCCN"
           },
           "HighValueReport": {
-            "$ref": "#/components/schemas/ShipmentResults_HighValueReport"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentResults_HighValueReport"
+              }
+            ],
+            "x-runtara-label": "High Value Report"
           },
           "LabelURL": {
             "description": "URL will point to a page wherein label, receipt and other documents, if applicable, such as HighValueReport, CustomsInvoice and ImportControl instructions can be requested. LabelURL is returned only if the LabelLinksIndicator is requested for following shipments:\nPrint/Electronic ImportControl shipment\nPrint/Electronic Return shipment. \nForward shipment except for Mail Innovations Forward.",
@@ -8396,7 +9266,12 @@
             "x-runtara-label": "Message"
           },
           "NegotiatedRateCharges": {
-            "$ref": "#/components/schemas/ShipmentResults_NegotiatedRateCharges"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentResults_NegotiatedRateCharges"
+              }
+            ],
+            "x-runtara-label": "Negotiated Rate Charges"
           },
           "PackageResults": {
             "description": "Returned Package Information.\n\n**NOTE:** For versions >= v2403, this element will always be returned as an array. For requests using versions < v2403, this element will be returned as an array if there is more than one object and a single object if there is only 1.\n",
@@ -8407,7 +9282,12 @@
             "x-runtara-label": "Package Results"
           },
           "PalletLabel": {
-            "$ref": "#/components/schemas/ShipmentResults_PalletLabel"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentResults_PalletLabel"
+              }
+            ],
+            "x-runtara-label": "Pallet Label"
           },
           "RatingMethod": {
             "description": "RatingMethod is to indicate whether the Shipment was rated as shipment level or package level. This information will be returned only if RatingMethodRequestedIndicator is present in the request.  Valid values:\n01 = Shipment level\n02 = Package level",
@@ -8429,7 +9309,12 @@
             "x-runtara-label": "Roar Rated Indicator"
           },
           "ShipmentCharges": {
-            "$ref": "#/components/schemas/ShipmentResults_ShipmentCharges"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentResults_ShipmentCharges"
+              }
+            ],
+            "x-runtara-label": "Shipment Charges"
           },
           "ShipmentIdentificationNumber": {
             "description": "Returned UPS shipment ID number.1Z Number of the first package in the shipment.",
@@ -8466,7 +9351,12 @@
         "maximum": 1,
         "properties": {
           "Image": {
-            "$ref": "#/components/schemas/CodTurnInPageImage"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CodTurnInPageImage"
+              }
+            ],
+            "x-runtara-label": "Image"
           }
         },
         "required": [
@@ -8482,7 +9372,12 @@
         "maximum": 1,
         "properties": {
           "FreightDensityRate": {
-            "$ref": "#/components/schemas/FrsShipmentDataFreightDensityRate"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/FrsShipmentDataFreightDensityRate"
+              }
+            ],
+            "x-runtara-label": "Freight Density Rate"
           },
           "HandlingUnits": {
             "description": "Handling Unit for Density based rating container.\n\n**NOTE:** For versions >= v2403, this element will always be returned as an array. For requests using versions < v2403, this element will be returned as an array if there is more than one object and a single object if there is only 1.\n",
@@ -8493,7 +9388,12 @@
             "x-runtara-label": "Handling Units"
           },
           "TransportationCharges": {
-            "$ref": "#/components/schemas/FrsShipmentDataTransportationCharges"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/FrsShipmentDataTransportationCharges"
+              }
+            ],
+            "x-runtara-label": "Transportation Charges"
           }
         },
         "required": [
@@ -8509,7 +9409,12 @@
         "maximum": 1,
         "properties": {
           "UnitOfMeasurement": {
-            "$ref": "#/components/schemas/BillingWeight_UnitOfMeasurement"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/BillingWeight_UnitOfMeasurement"
+              }
+            ],
+            "x-runtara-label": "Unit Of Measurement"
           },
           "Weight": {
             "description": "Billing weight. Higher of the actual shipment weight versus the shipment dimensional weight.  When using a negotiated divisor different from the published UPS divisor (139 for inches and 5,000 for cm), the weight returned is based on the published divisor. Rates, however, are based on the negotiated divisor.",
@@ -8539,7 +9444,12 @@
             "x-runtara-label": "Graphic Image"
           },
           "ImageFormat": {
-            "$ref": "#/components/schemas/ControlLogReceipt_ImageFormat"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ControlLogReceipt_ImageFormat"
+              }
+            ],
+            "x-runtara-label": "Image Format"
           }
         },
         "required": [
@@ -8614,7 +9524,12 @@
             "x-runtara-label": "Form Group ID Name"
           },
           "Image": {
-            "$ref": "#/components/schemas/ShipmentResults_Form_Image"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentResults_Form_Image"
+              }
+            ],
+            "x-runtara-label": "Image"
           }
         },
         "type": "object",
@@ -8633,7 +9548,12 @@
             "x-runtara-label": "Graphic Image"
           },
           "ImageFormat": {
-            "$ref": "#/components/schemas/ShipmentResults_Image_ImageFormat"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentResults_Image_ImageFormat"
+              }
+            ],
+            "x-runtara-label": "Image Format"
           }
         },
         "required": [
@@ -8650,7 +9570,12 @@
         "maximum": 1,
         "properties": {
           "Image": {
-            "$ref": "#/components/schemas/HighValueReport_Image"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/HighValueReport_Image"
+              }
+            ],
+            "x-runtara-label": "Image"
           }
         },
         "required": [
@@ -8718,10 +9643,20 @@
             "x-runtara-label": "Tax Charges"
           },
           "TotalCharge": {
-            "$ref": "#/components/schemas/NegotiatedRateCharges_TotalCharge"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/NegotiatedRateCharges_TotalCharge"
+              }
+            ],
+            "x-runtara-label": "Total Charge"
           },
           "TotalChargesWithTaxes": {
-            "$ref": "#/components/schemas/NegotiatedRateCharges_TotalChargesWithTaxes"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/NegotiatedRateCharges_TotalChargesWithTaxes"
+              }
+            ],
+            "x-runtara-label": "Total Charges With Taxes"
           }
         },
         "type": "object",
@@ -8741,7 +9676,12 @@
             "x-runtara-label": "Accessorial"
           },
           "BaseServiceCharge": {
-            "$ref": "#/components/schemas/PackageResults_BaseServiceCharge"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PackageResults_BaseServiceCharge"
+              }
+            ],
+            "x-runtara-label": "Base Service Charge"
           },
           "CN22Number": {
             "description": "USPS defined CN22 ID number format varies based on destination country or territory. \nNot applicable as of Jan 2015. \nMail Innovations shipments US to VI, PR, and GU are not considered international.",
@@ -8750,7 +9690,12 @@
             "x-runtara-label": "CN22 Number"
           },
           "Form": {
-            "$ref": "#/components/schemas/PackageResults_Form"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PackageResults_Form"
+              }
+            ],
+            "x-runtara-label": "Form"
           },
           "ItemizedCharges": {
             "description": "Itemized Charges are returned only when the subversion element is present and greater than or equal to 1607. Package level itemized charges are only returned for US domestic movements.\n\n**NOTE:** For versions >= v2403, this element will always be returned as an array. For requests using versions < v2403, this element will be returned as an array if there is more than one object and a single object if there is only 1.\n",
@@ -8761,7 +9706,12 @@
             "x-runtara-label": "Itemized Charges"
           },
           "NegotiatedCharges": {
-            "$ref": "#/components/schemas/PackageResults_NegotiatedCharges"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PackageResults_NegotiatedCharges"
+              }
+            ],
+            "x-runtara-label": "Negotiated Charges"
           },
           "RateModifier": {
             "description": "Returned Package Information.\n\n**NOTE:** For versions >= v2403, this element will always be returned as an array. For requests using versions < v2403, this element will be returned as an array if there is more than one object and a single object if there is only 1.\n",
@@ -8772,16 +9722,36 @@
             "x-runtara-label": "Rate Modifier"
           },
           "ServiceOptionsCharges": {
-            "$ref": "#/components/schemas/PackageResults_ServiceOptionsCharges"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PackageResults_ServiceOptionsCharges"
+              }
+            ],
+            "x-runtara-label": "Service Options Charges"
           },
           "ShippingLabel": {
-            "$ref": "#/components/schemas/PackageResults_ShippingLabel"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PackageResults_ShippingLabel"
+              }
+            ],
+            "x-runtara-label": "Shipping Label"
           },
           "ShippingReceipt": {
-            "$ref": "#/components/schemas/PackageResults_ShippingReceipt"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PackageResults_ShippingReceipt"
+              }
+            ],
+            "x-runtara-label": "Shipping Receipt"
           },
           "SimpleRate": {
-            "$ref": "#/components/schemas/PackageResults_SimpleRate"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PackageResults_SimpleRate"
+              }
+            ],
+            "x-runtara-label": "Simple Rate"
           },
           "TrackingNumber": {
             "description": "Package 1Z number.  \nFor Mail Innovations shipments, please use the USPSPICNumber when tracking packages (a non-1Z number Mail Manifest Id is returned).",
@@ -8824,7 +9794,12 @@
         "maximum": 1,
         "properties": {
           "BaseServiceCharge": {
-            "$ref": "#/components/schemas/ShipmentCharges_BaseServiceCharge"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentCharges_BaseServiceCharge"
+              }
+            ],
+            "x-runtara-label": "Base Service Charge"
           },
           "ItemizedCharges": {
             "description": "Itemized Charges are returned only when the Subversion element is present and greater than or equal to 1601.\n\n**NOTE:** For versions >= v2403, this element will always be returned as an array. For requests using versions < v2403, this element will be returned as an array if there is more than one object and a single object if there is only 1.\n",
@@ -8843,7 +9818,12 @@
             "x-runtara-label": "Rate Chart"
           },
           "ServiceOptionsCharges": {
-            "$ref": "#/components/schemas/ShipmentCharges_ServiceOptionsCharges"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentCharges_ServiceOptionsCharges"
+              }
+            ],
+            "x-runtara-label": "Service Options Charges"
           },
           "TaxCharges": {
             "description": "TaxCharges container are returned only when TaxInformationIndicator is present in request and when Negotiated Rates are not applicable. TaxCharges container contains Tax information for a given shipment.\n\n**NOTE:** For versions >= v2403, this element will always be returned as an array. For requests using versions < v2403, this element will be returned as an array if there is more than one object and a single object if there is only 1.\n",
@@ -8854,13 +9834,28 @@
             "x-runtara-label": "Tax Charges"
           },
           "TotalCharges": {
-            "$ref": "#/components/schemas/ShipmentCharges_TotalCharges"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentCharges_TotalCharges"
+              }
+            ],
+            "x-runtara-label": "Total Charges"
           },
           "TotalChargesWithTaxes": {
-            "$ref": "#/components/schemas/ShipmentCharges_TotalChargesWithTaxes"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentCharges_TotalChargesWithTaxes"
+              }
+            ],
+            "x-runtara-label": "Total Charges With Taxes"
           },
           "TransportationCharges": {
-            "$ref": "#/components/schemas/ShipmentCharges_TransportationCharges"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentCharges_TransportationCharges"
+              }
+            ],
+            "x-runtara-label": "Transportation Charges"
           }
         },
         "required": [
@@ -8908,7 +9903,12 @@
         "maximum": 1,
         "properties": {
           "CODAmount": {
-            "$ref": "#/components/schemas/CodCodAmount"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CodCodAmount"
+              }
+            ],
+            "x-runtara-label": "COD Amount"
           },
           "CODFundsCode": {
             "description": "For valid values refer to: Rating and Shipping COD Supported Countries or Territories in the Appendix.",
@@ -8968,10 +9968,20 @@
             "x-runtara-label": "Additional Document Indicator"
           },
           "BlanketPeriod": {
-            "$ref": "#/components/schemas/InternationalForms_BlanketPeriod"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/InternationalForms_BlanketPeriod"
+              }
+            ],
+            "x-runtara-label": "Blanket Period"
           },
           "CN22Form": {
-            "$ref": "#/components/schemas/InternationalFormsCn22Form"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/InternationalFormsCn22Form"
+              }
+            ],
+            "x-runtara-label": "CN22 Form"
           },
           "CarrierID": {
             "description": "The four-character Standard Carrier Alpha Code (SCAC) for vessel, rail, and truck shipments. For air shipment, enter the two or three character International Air Transport Association (IATA) code.  Applies to EEI forms only. No Validations.",
@@ -8990,7 +10000,12 @@
             "x-runtara-label": "Comments"
           },
           "Contacts": {
-            "$ref": "#/components/schemas/InternationalForms_Contacts"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/InternationalForms_Contacts"
+              }
+            ],
+            "x-runtara-label": "Contacts"
           },
           "ContainerizedIndicator": {
             "description": "If present indicates that the goods are containerized. This applies to vessel shipments only.  Applies to EEI forms only.",
@@ -9015,10 +10030,20 @@
             "x-runtara-label": "Declaration Statement"
           },
           "Discount": {
-            "$ref": "#/components/schemas/InternationalForms_Discount"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/InternationalForms_Discount"
+              }
+            ],
+            "x-runtara-label": "Discount"
           },
           "EEIFilingOption": {
-            "$ref": "#/components/schemas/InternationalFormsEeiFilingOption"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/InternationalFormsEeiFilingOption"
+              }
+            ],
+            "x-runtara-label": "EEI Filing Option"
           },
           "EntryNumber": {
             "description": "The Import Entry Number when the export transaction is used as proof of export for import transactions (examples: In Bond, Temporary Import Bond or Drawbacks).  Applies to EEI forms only. Conditionally Required for EEI forms when In bond code value is other than 70 (Not In Bond)",
@@ -9064,7 +10089,12 @@
             "x-runtara-label": "Form Type"
           },
           "FreightCharges": {
-            "$ref": "#/components/schemas/InternationalForms_FreightCharges"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/InternationalForms_FreightCharges"
+              }
+            ],
+            "x-runtara-label": "Freight Charges"
           },
           "HazardousMaterialsIndicator": {
             "description": "This is an empty tag. Presence of the indicator for EEI form means shipment contains hazardous material.",
@@ -9081,7 +10111,12 @@
             "x-runtara-label": "In Bond Code"
           },
           "InsuranceCharges": {
-            "$ref": "#/components/schemas/InternationalForms_InsuranceCharges"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/InternationalForms_InsuranceCharges"
+              }
+            ],
+            "x-runtara-label": "Insurance Charges"
           },
           "InvoiceDate": {
             "description": "Date when the Invoice is created. Ideally this is the same as the ship date.  Applies to Invoice and Partial Invoice forms only. Required for Invoice forms and optional for Partial Invoice. Required for Invoice form for forward shipments. For shipment with return service, the user input will be ignored, and the field will be blank on the invoice. Format is yyyyMMdd.",
@@ -9116,7 +10151,12 @@
             "x-runtara-label": "Mode Of Transport"
           },
           "OtherCharges": {
-            "$ref": "#/components/schemas/InternationalForms_OtherCharges"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/InternationalForms_OtherCharges"
+              }
+            ],
+            "x-runtara-label": "Other Charges"
           },
           "OverridePaperlessIndicator": {
             "description": "The application will automatically provide a copy of the invoice or USMCA with each response regardless of whether the user has enabled Paperless account. The user now has the option to print or ignore the copy provided.",
@@ -9211,10 +10251,20 @@
             "x-runtara-label": "Terms Of Shipment"
           },
           "UPSPremiumCareForm": {
-            "$ref": "#/components/schemas/InternationalFormsUpsPremiumCareForm"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/InternationalFormsUpsPremiumCareForm"
+              }
+            ],
+            "x-runtara-label": "UPS Premium Care Form"
           },
           "UserCreatedForm": {
-            "$ref": "#/components/schemas/InternationalForms_UserCreatedForm"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/InternationalForms_UserCreatedForm"
+              }
+            ],
+            "x-runtara-label": "User Created Form"
           }
         },
         "required": [
@@ -9231,7 +10281,12 @@
         "maximum": 1,
         "properties": {
           "EMail": {
-            "$ref": "#/components/schemas/LabelDelivery_EMail"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LabelDelivery_EMail"
+              }
+            ],
+            "x-runtara-label": "E Mail"
           },
           "LabelLinksIndicator": {
             "description": "Indicates the Label and Receipt URLs are to be returned in the XML response.",
@@ -9279,10 +10334,20 @@
         "maximum": 1,
         "properties": {
           "EMail": {
-            "$ref": "#/components/schemas/Notification_EMail"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Notification_EMail"
+              }
+            ],
+            "x-runtara-label": "E Mail"
           },
           "Locale": {
-            "$ref": "#/components/schemas/Notification_Locale"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Notification_Locale"
+              }
+            ],
+            "x-runtara-label": "Locale"
           },
           "NotificationCode": {
             "description": "The type of notification requested.\n\nNote:\n- QVN Exception notification and return notification are not applicable to GFP.\n- QV In-transit and Return Notifications are only valid for ImportControl and Return shipment.\n- QV In-transit Notification is allowed for return shipments only.\n- QV Ship Notification is allowed for forward moving shipments only.\n\nValid values:\n- 5 - QV In-transit Notification\n- 6 - QV Ship Notification\n- 7 - QV Exception Notification\n- 8 - QV Delivery Notification\n- 2 - Return Notification or Label Creation Notification\n- 012 - Alternate Delivery Location Notification\n- 013 - UAP Shipper Notification.",
@@ -9293,10 +10358,20 @@
             "x-runtara-label": "Notification Code"
           },
           "TextMessage": {
-            "$ref": "#/components/schemas/Notification_TextMessage"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Notification_TextMessage"
+              }
+            ],
+            "x-runtara-label": "Text Message"
           },
           "VoiceMessage": {
-            "$ref": "#/components/schemas/Notification_VoiceMessage"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Notification_VoiceMessage"
+              }
+            ],
+            "x-runtara-label": "Voice Message"
           }
         },
         "required": [
@@ -9312,16 +10387,36 @@
         "description": "This container is used for providing Pre-Alert Notifications to the consignee for UPS Exchange movements and Pack & Collect shipments.",
         "properties": {
           "EMailMessage": {
-            "$ref": "#/components/schemas/PreAlertNotification_EMailMessage"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PreAlertNotification_EMailMessage"
+              }
+            ],
+            "x-runtara-label": "E Mail Message"
           },
           "Locale": {
-            "$ref": "#/components/schemas/PreAlertNotification_Locale"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PreAlertNotification_Locale"
+              }
+            ],
+            "x-runtara-label": "Locale"
           },
           "TextMessage": {
-            "$ref": "#/components/schemas/PreAlertNotification_TextMessage"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PreAlertNotification_TextMessage"
+              }
+            ],
+            "x-runtara-label": "Text Message"
           },
           "VoiceMessage": {
-            "$ref": "#/components/schemas/PreAlertNotification_VoiceMessage"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PreAlertNotification_VoiceMessage"
+              }
+            ],
+            "x-runtara-label": "Voice Message"
           }
         },
         "required": [
@@ -9442,7 +10537,12 @@
         "maximum": 1,
         "properties": {
           "Address": {
-            "$ref": "#/components/schemas/AlternateDeliveryAddress_Address"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AlternateDeliveryAddress_Address"
+              }
+            ],
+            "x-runtara-label": "Address"
           },
           "AttentionName": {
             "description": "Attention Name.",
@@ -9490,7 +10590,12 @@
             "x-runtara-label": "Density Eligible Indicator"
           },
           "FreightDensityInfo": {
-            "$ref": "#/components/schemas/FreightShipmentInformation_FreightDensityInfo"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/FreightShipmentInformation_FreightDensityInfo"
+              }
+            ],
+            "x-runtara-label": "Freight Density Info"
           }
         },
         "type": "object",
@@ -9580,7 +10685,12 @@
             "x-runtara-label": "Additional Handling Indicator"
           },
           "Commodity": {
-            "$ref": "#/components/schemas/Package_Commodity"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Package_Commodity"
+              }
+            ],
+            "x-runtara-label": "Commodity"
           },
           "Description": {
             "description": "Merchandise description of package.  Required for shipment with return service.",
@@ -9591,13 +10701,28 @@
             "x-runtara-label": "Description"
           },
           "DimWeight": {
-            "$ref": "#/components/schemas/Package_DimWeight"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Package_DimWeight"
+              }
+            ],
+            "x-runtara-label": "Dim Weight"
           },
           "Dimensions": {
-            "$ref": "#/components/schemas/Package_Dimensions"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Package_Dimensions"
+              }
+            ],
+            "x-runtara-label": "Dimensions"
           },
           "HazMatPackageInformation": {
-            "$ref": "#/components/schemas/Package_HazMatPackageInformation"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Package_HazMatPackageInformation"
+              }
+            ],
+            "x-runtara-label": "Haz Mat Package Information"
           },
           "LargePackageIndicator": {
             "description": "Presence of the indicator mentions that the package is Large Package.\n\nThis is an empty tag, any value inside is ignored.",
@@ -9626,13 +10751,28 @@
             "x-runtara-label": "Oversize Indicator"
           },
           "PackageServiceOptions": {
-            "$ref": "#/components/schemas/Package_PackageServiceOptions"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Package_PackageServiceOptions"
+              }
+            ],
+            "x-runtara-label": "Package Service Options"
           },
           "PackageWeight": {
-            "$ref": "#/components/schemas/Package_PackageWeight"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Package_PackageWeight"
+              }
+            ],
+            "x-runtara-label": "Package Weight"
           },
           "Packaging": {
-            "$ref": "#/components/schemas/Package_Packaging"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Package_Packaging"
+              }
+            ],
+            "x-runtara-label": "Packaging"
           },
           "PalletDescription": {
             "description": "Description of articles & special marks. Applicable for Air Freight only",
@@ -9651,10 +10791,20 @@
             "x-runtara-label": "Reference Number"
           },
           "SimpleRate": {
-            "$ref": "#/components/schemas/Package_SimpleRate"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Package_SimpleRate"
+              }
+            ],
+            "x-runtara-label": "Simple Rate"
           },
           "UPSPremier": {
-            "$ref": "#/components/schemas/PackageUpsPremier"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PackageUpsPremier"
+              }
+            ],
+            "x-runtara-label": "UPS Premier"
           },
           "UnitPrice": {
             "description": "Unit price of the commodity. Applicable for Air Freight only  Limit to 2 digit after the decimal. The maximum length of the field is 12 including '.' and can hold up to 2 decimal place. (e.g. 999999999.99)",
@@ -9828,7 +10978,12 @@
         "maximum": 1,
         "properties": {
           "Address": {
-            "$ref": "#/components/schemas/ShipFrom_Address"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipFrom_Address"
+              }
+            ],
+            "x-runtara-label": "Address"
           },
           "AttentionName": {
             "description": "The ship from Attention name. \n35 characters are accepted, but for return Shipment only 30 characters will be printed on the label.  Required if ShipFrom tag is in the XML and Invoice or CO International forms is requested. If not present, will default to the Shipper Attention Name.",
@@ -9863,10 +11018,20 @@
             "x-runtara-label": "Name"
           },
           "Phone": {
-            "$ref": "#/components/schemas/ShipFrom_Phone"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipFrom_Phone"
+              }
+            ],
+            "x-runtara-label": "Phone"
           },
           "TaxIDType": {
-            "$ref": "#/components/schemas/ShipFromTaxIdType"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipFromTaxIdType"
+              }
+            ],
+            "x-runtara-label": "Tax ID Type"
           },
           "TaxIdentificationNumber": {
             "deprecated": true,
@@ -9878,7 +11043,12 @@
             "x-runtara-label": "Tax Identification Number"
           },
           "VendorInfo": {
-            "$ref": "#/components/schemas/ShipFrom_VendorInfo"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipFrom_VendorInfo"
+              }
+            ],
+            "x-runtara-label": "Vendor Info"
           }
         },
         "required": [
@@ -9895,7 +11065,12 @@
         "maximum": 1,
         "properties": {
           "Address": {
-            "$ref": "#/components/schemas/ShipTo_Address"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipTo_Address"
+              }
+            ],
+            "x-runtara-label": "Address"
           },
           "AttentionName": {
             "description": "Contact name at the consignee's location.  Required for: UPS Next Day Air® Early service, and when ShipTo country or territory is different than ShipFrom country or territory.\n\nRequired if Invoice International form is requested.\n",
@@ -9946,7 +11121,12 @@
             "x-runtara-label": "Name"
           },
           "Phone": {
-            "$ref": "#/components/schemas/ShipTo_Phone"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipTo_Phone"
+              }
+            ],
+            "x-runtara-label": "Phone"
           },
           "TaxIdentificationNumber": {
             "deprecated": true,
@@ -10041,10 +11221,20 @@
         "maximum": 1,
         "properties": {
           "AccessPointCOD": {
-            "$ref": "#/components/schemas/ShipmentServiceOptionsAccessPointCod"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentServiceOptionsAccessPointCod"
+              }
+            ],
+            "x-runtara-label": "Access Point COD"
           },
           "COD": {
-            "$ref": "#/components/schemas/ShipmentServiceOptionsCod"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentServiceOptionsCod"
+              }
+            ],
+            "x-runtara-label": "COD"
           },
           "CommercialInvoiceRemovalIndicator": {
             "description": "CommercialInvoiceRemovalIndicator allows a shipper to dictate UPS to remove the Commercial Invoice from the user's shipment before the shipment is delivered to the ultimate consignee.",
@@ -10059,7 +11249,12 @@
             "x-runtara-label": "Deliver To Addressee Only Indicator"
           },
           "DeliveryConfirmation": {
-            "$ref": "#/components/schemas/ShipmentServiceOptions_DeliveryConfirmation"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentServiceOptions_DeliveryConfirmation"
+              }
+            ],
+            "x-runtara-label": "Delivery Confirmation"
           },
           "DirectDeliveryOnlyIndicator": {
             "description": "Presence/Absence Indicator. Any value inside is ignored. Direct Delivery Only (DDO) accessorial in a request would ensure that delivery is made only to the ship to address on the shipping label. This accessorial is not valid with Shipment Indication Type \"01 - Hold For Pickup At UPS Access Point\" and \"02 - UPS Access Point™ Delivery\".",
@@ -10108,7 +11303,12 @@
             "x-runtara-label": "Inside Delivery"
           },
           "InternationalForms": {
-            "$ref": "#/components/schemas/ShipmentServiceOptions_InternationalForms"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentServiceOptions_InternationalForms"
+              }
+            ],
+            "x-runtara-label": "International Forms"
           },
           "ItemDisposal": {
             "description": "Presence/Absence indicator. True if present; false otherwise. Any value is ignored. If present, indicates that the customer would like items disposed.  Shippers account needs to have a valid contract for Heavy Goods Service.",
@@ -10117,10 +11317,20 @@
             "x-runtara-label": "Item Disposal"
           },
           "LabelDelivery": {
-            "$ref": "#/components/schemas/ShipmentServiceOptions_LabelDelivery"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentServiceOptions_LabelDelivery"
+              }
+            ],
+            "x-runtara-label": "Label Delivery"
           },
           "LabelMethod": {
-            "$ref": "#/components/schemas/ShipmentServiceOptions_LabelMethod"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentServiceOptions_LabelMethod"
+              }
+            ],
+            "x-runtara-label": "Label Method"
           },
           "LiftGateForDeliveryIndicator": {
             "description": "Lift Gate For Delivery indicator. The empty tag means indicator is present.  Lift Gate for Delivery is not allowed with Hold For Pickup for a UPS Worldwide Express Freight and UPS Worldwide Express Freight Midday shipment. \n\nWhen both Hold for Pickup and Drop Off At UPS Facility are selected, neither of the Lift Gate accessorial (Pick Up or Delivery) are allowed for a UPS Worldwide Express Freight and UPS Worldwide Express Freight Midday shipment. \n\nThis accessorial is only valid for UPS Worldwide Express Freight and UPS Worldwide Express Freight Midday Shipment.",
@@ -10150,7 +11360,12 @@
             "x-runtara-label": "Pre Alert Notification"
           },
           "RestrictedArticles": {
-            "$ref": "#/components/schemas/ShipmentServiceOptions_RestrictedArticles"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentServiceOptions_RestrictedArticles"
+              }
+            ],
+            "x-runtara-label": "Restricted Articles"
           },
           "ReturnOfDocumentIndicator": {
             "description": "The flag indicates the ReturnOfDocument accessorial has been requested.  Valid for Poland to Poland forward shipment only.",
@@ -10183,7 +11398,12 @@
             "x-runtara-label": "UP Scarbonneutral Indicator"
           },
           "VerifiedDelivery": {
-            "$ref": "#/components/schemas/ShipmentServiceOptions_VerifiedDelivery"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ShipmentServiceOptions_VerifiedDelivery"
+              }
+            ],
+            "x-runtara-label": "Verified Delivery"
           }
         },
         "type": "object",
@@ -10196,7 +11416,12 @@
         "maximum": 1,
         "properties": {
           "Address": {
-            "$ref": "#/components/schemas/Shipper_Address"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Shipper_Address"
+              }
+            ],
+            "x-runtara-label": "Address"
           },
           "AttentionName": {
             "description": "Shippers Attention Name. \n\nFor forward Shipment 35 characters are accepted, but only 30 characters will be printed on the label.  Required if destination is international. Required if Invoice and CO International forms are requested and the ShipFrom address is not present.",
@@ -10239,7 +11464,12 @@
             "x-runtara-label": "Name"
           },
           "Phone": {
-            "$ref": "#/components/schemas/Shipper_Phone"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Shipper_Phone"
+              }
+            ],
+            "x-runtara-label": "Phone"
           },
           "ShipperNumber": {
             "description": "Shipper's six digit alphanumeric account number.\n\nMust be associated with the UserId specified in the AccessRequest XML. \n\nThe account must be a valid UPS account number that is active. \n\nFor US, PR and CA accounts, the account must be either a daily pickup account, an occasional account, or a customer B.I.N account. \n\nDrop Shipper accounts are valid for return service shipments only if the account is Trade Direct (TD) enabled. \n\nAll other accounts must be either a daily pickup account or an occasional account.",
@@ -10274,7 +11504,12 @@
         "maximum": 1,
         "properties": {
           "Child": {
-            "$ref": "#/components/schemas/TradeDirect_Child"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TradeDirect_Child"
+              }
+            ],
+            "x-runtara-label": "Child"
           },
           "CurrencyCode": {
             "description": "The currency code for the shipment as per ISO 4217.",
@@ -10289,7 +11524,12 @@
             "x-runtara-label": "General Description Of Goods"
           },
           "Master": {
-            "$ref": "#/components/schemas/TradeDirect_Master"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TradeDirect_Master"
+              }
+            ],
+            "x-runtara-label": "Master"
           },
           "ShipmentType": {
             "description": "Consolidated shipment types.\n\nValid values:\n- TRADEDIRECTAIR =  TradeDirect Air - consolidation, custom clearance, deconsolidation and delivery to multiple addresses \n                    within destination country, with Airport-to-door or door-to-door.\n                    \n- TRADEDIRECTOCEAN = TradeDirect Ocean - consolidation, ocean transportation, customs clearance, deconsolidation and delivery \n                     to multiple addresses within a destination country, with port-to-door and door-to-door service from shipper to consignee. Available from more than 70 ports.\n                     \n- TRADEDIRECTCROSSBORDER = TradeDirect CrossBoarder - consolidation, customs clearance, deconsolidation and delivery to multiple addresses\n                           within the destination country, with door-to-door service across North American borders.                \n",
@@ -10371,8 +11611,13 @@
             "description": "Container for port of entry details",
             "properties": {
               "Address": {
-                "$ref": "#/components/schemas/AddressPoe",
-                "description": "Address of the POE. For Master/Child Shipment"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/AddressPoe"
+                  }
+                ],
+                "description": "Address of the POE. For Master/Child Shipment",
+                "x-runtara-label": "Address"
               },
               "ClearancePortCode": {
                 "description": "Port code",
@@ -10510,7 +11755,12 @@
       "ShippingErrorResponse": {
         "properties": {
           "response": {
-            "$ref": "#/components/schemas/CommonErrorResponse"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CommonErrorResponse"
+              }
+            ],
+            "x-runtara-label": "Response"
           }
         },
         "type": "object"
@@ -10769,7 +12019,12 @@
       "TrackApiResponse": {
         "properties": {
           "trackResponse": {
-            "$ref": "#/components/schemas/TrackResponse"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TrackResponse"
+              }
+            ],
+            "x-runtara-label": "Track Response"
           }
         },
         "title": "TrackApiResponse",
@@ -10898,13 +12153,28 @@
             "x-runtara-label": "Haz Mat Indicator"
           },
           "LtlCharges": {
-            "$ref": "#/components/schemas/ChildLtlCharges"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChildLtlCharges"
+              }
+            ],
+            "x-runtara-label": "Ltl Charges"
           },
           "LtlPackage": {
-            "$ref": "#/components/schemas/ChildLtlPackage"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChildLtlPackage"
+              }
+            ],
+            "x-runtara-label": "Ltl Package"
           },
           "Product": {
-            "$ref": "#/components/schemas/Child_Product"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Child_Product"
+              }
+            ],
+            "x-runtara-label": "Product"
           },
           "Type": {
             "description": "The type of shipment.\n\n Valid values:\n \n- LTL \n- SMALLPACKAGE \n- MI\n",
@@ -10941,13 +12211,28 @@
         "maximum": 1,
         "properties": {
           "NotificationBeforeDelivery": {
-            "$ref": "#/components/schemas/TradeDirect_NotificationBeforeDelivery"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TradeDirect_NotificationBeforeDelivery"
+              }
+            ],
+            "x-runtara-label": "Notification Before Delivery"
           },
           "Pickup": {
-            "$ref": "#/components/schemas/Master_Pickup"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Master_Pickup"
+              }
+            ],
+            "x-runtara-label": "Pickup"
           },
           "SoldTo": {
-            "$ref": "#/components/schemas/Master_SoldTo"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Master_SoldTo"
+              }
+            ],
+            "x-runtara-label": "Sold To"
           },
           "SoldToSameAsShipTo": {
             "description": "If Present indicates the Sold to and Ship To are the same.",
@@ -10956,7 +12241,12 @@
             "x-runtara-label": "Sold To Same As Ship To"
           },
           "TradeComplianceDetails": {
-            "$ref": "#/components/schemas/Master_TradeComplianceDetails"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Master_TradeComplianceDetails"
+              }
+            ],
+            "x-runtara-label": "Trade Compliance Details"
           },
           "UomType": {
             "description": "The type of measurement used for the shipment. Imperial(lbs, in) & Metric(kgs, cm)\n\nValid values are:\n\n- Imperial\t= This system of measurement uses units such as pounds (lbs) for weight and inches (in) for length.\n\n- Metric = This system of measurement uses units such as kilograms (kgs) for weight and centimeters (cm) for length.\n",
@@ -11046,7 +12336,12 @@
             "x-runtara-label": "Name"
           },
           "Phone": {
-            "$ref": "#/components/schemas/TradeDirect_Phone"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TradeDirect_Phone"
+              }
+            ],
+            "x-runtara-label": "Phone"
           },
           "RequestType": {
             "description": "The type of notification request.\n\nValid values are:\n\n- 001 = QV Ship Notification\n- 002 = QV Delivery Notification\n- 003 = QV Exception Notification\n",
@@ -11456,10 +12751,20 @@
             "x-runtara-label": "Package Level Results"
           },
           "Response": {
-            "$ref": "#/components/schemas/VoidShipmentResponse_Response"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/VoidShipmentResponse_Response"
+              }
+            ],
+            "x-runtara-label": "Response"
           },
           "SummaryResult": {
-            "$ref": "#/components/schemas/VoidShipmentResponse_SummaryResult"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/VoidShipmentResponse_SummaryResult"
+              }
+            ],
+            "x-runtara-label": "Summary Result"
           }
         },
         "required": [
@@ -11475,7 +12780,12 @@
         "maximum": 1,
         "properties": {
           "Status": {
-            "$ref": "#/components/schemas/PackageLevelResults_Status"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PackageLevelResults_Status"
+              }
+            ],
+            "x-runtara-label": "Status"
           },
           "TrackingNumber": {
             "description": "The package's identification number",
@@ -11500,13 +12810,28 @@
         "maximum": 1,
         "properties": {
           "Alert": {
-            "$ref": "#/components/schemas/Response_Alert"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Response_Alert"
+              }
+            ],
+            "x-runtara-label": "Alert"
           },
           "ResponseStatus": {
-            "$ref": "#/components/schemas/VoidResponse_ResponseStatus"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/VoidResponse_ResponseStatus"
+              }
+            ],
+            "x-runtara-label": "Response Status"
           },
           "TransactionReference": {
-            "$ref": "#/components/schemas/VoidResponse_TransactionReference"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/VoidResponse_TransactionReference"
+              }
+            ],
+            "x-runtara-label": "Transaction Reference"
           }
         },
         "required": [
@@ -11522,7 +12847,12 @@
         "maximum": 1,
         "properties": {
           "Status": {
-            "$ref": "#/components/schemas/SummaryResult_Status"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SummaryResult_Status"
+              }
+            ],
+            "x-runtara-label": "Status"
           }
         },
         "required": [
@@ -11538,7 +12868,12 @@
         "maximum": 1,
         "properties": {
           "VoidShipmentResponse": {
-            "$ref": "#/components/schemas/VoidShipmentResponse"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/VoidShipmentResponse"
+              }
+            ],
+            "x-runtara-label": "Void Shipment Response"
           }
         },
         "required": [

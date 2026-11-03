@@ -202,8 +202,9 @@ The specs must list the same `servers`, and no path and method may be in two
 of them. A schema that two specs define differently under one generated name
 gets the spec's name in front in each of them (`ErrorResponse` becomes
 `TrackingErrorResponse` and `ShippingErrorResponse`); one they define the same
-way is kept once. A `body_envelopes`, `connection_headers` or
-`pinned_path_parameters` name has to match in one of the specs.
+way is kept once. A `body_envelopes`, `connection_headers`,
+`connection_parameters` or `pinned_path_parameters` name has to match in one
+of the specs.
 
 **The connection sends a header** every operation declares, such as UPS's
 `transId` (unique per request) and `transactionSrc`. List it, and it is no
@@ -213,6 +214,16 @@ step input; the connection type's auth arm sends it instead:
 connection_headers:
   - transId
   - transactionSrc
+```
+
+**Every operation takes the credential as a parameter**, as Slack's `token`
+is a header on its POST methods and a query parameter on its GET ones. List it,
+and it is no step input in either place; the connection sends the credential
+its own way (Slack's as a Bearer header):
+
+```yaml
+connection_parameters:
+  - token
 ```
 
 **The API version is a path parameter**, such as UPS's
@@ -235,6 +246,19 @@ optional_fields:
   LabelRecoveryRequest:
     - TrackingNumbers
     - ReferenceValues
+```
+
+**The spec types an input wrongly.** Slack's spec types some message
+timestamps (`ts`) as numbers; sent as one, `1712345678.000100` becomes
+`1712345678.0001`, another message's id. Give the input name the type (or the
+whole schema) it should have; it applies to that parameter or request-body
+field in every listed operation, keeping its description unless the schema
+gives one. A name no listed operation takes is an error.
+
+```yaml
+input_types:
+  ts: string
+  thread_ts: string
 ```
 
 **The agent accepts several connection types** for the same API (an OAuth
@@ -299,9 +323,9 @@ crates/agents/runtara-agent-<id>/
   `fetch` in this order: the `labels:` override in `connector.yaml`; the
   vendor's `title` when it is a phrase (one-word titles name models); the field
   name humanized (`person_id`, `personId` → "Person ID", with known acronyms
-  such as ID, URL, HTML, VAT kept upper-case). A field that is a bare `$ref`
-  keeps its raw name unless overridden, because OpenAPI 3.0 ignores keys next to
-  a `$ref`. Scalar `example`s become the field's placeholder and scalar
+  such as ID, URL, HTML, VAT kept upper-case). openapi-generator drops keys
+  beside a `$ref`, so `fetch` writes a field that is a bare `$ref` as `allOf`
+  of that one `$ref`: the same type, with its label. Scalar `example`s become the field's placeholder and scalar
   `default`s the default value of optional inputs. Descriptions, summaries and
   the agent's name are printed as written; an operation without a summary is
   named after its operationId.
@@ -319,8 +343,24 @@ crates/agents/runtara-agent-<id>/
   keeps undeclared fields anyway), a `required` written on a field instead of
   a list on its object is dropped, and a one-word `title` naming an inline
   object is written in the generated struct's spelling (`POD` → `Pod`).
+  A title with spaces names the inline object too; a word in it spelled with a
+  run of capitals is respelled the same way (Slack's "Conversation IM Channel
+  object" → "Conversation Im Channel object"), and the phrase as written stays
+  the field's label.
+- JSON Schema forms OpenAPI 3.0 lacks are rewritten by `fetch`: `items: [A, B]`
+  (Slack's "A or B") becomes `anyOf: [A, B]`, `type: [string, "null"]` a
+  nullable string, a list of several types an `anyOf` (each alternative with
+  the keywords of its type, `items` with `array`), and `type: "null"`, alone
+  or as an alternative, `nullable`.
 - Tabs after a value (`default: <tab>`) are valid YAML 1.2 that PyYAML cannot
   read; `fetch` drops trailing whitespace before parsing.
+- A Swagger 2.0 spec (Slack's) is converted to OpenAPI 3 before it is sliced:
+  `host`, `basePath` and `schemes` become `servers`; `definitions` become
+  `components.schemas`; a `body` parameter becomes the request body; `formData`
+  parameters become an object request body offered in every media type the
+  operation `consumes`, so an API that also takes JSON is sent JSON; an array
+  query parameter is comma-separated unless `collectionFormat: multi`; and a
+  response's `schema` and `examples` become its `content`.
 - `fetch` marks operations with `x-runtara-*` vendor extensions (side effects,
   summaries, which capability carries the agent's module attributes) because
   the templates cannot compute them. An operation with several tags keeps its
@@ -329,11 +369,14 @@ crates/agents/runtara-agent-<id>/
 
 ## Limits
 
-- OpenAPI 3 only; convert Swagger 2.0 specs first.
+- OpenAPI 3.0 and Swagger 2.0 only (3.1 features such as `type: "null"` are
+  rewritten where listed above).
 - `fetch` refuses, naming the operation, what the templates cannot send yet:
   request bodies that are not JSON (form-encoded, multipart), object query
   parameters without declared scalar fields or in a style other than
-  `deepObject` or exploded `form`, and required cookie parameters.
+  `deepObject` or exploded `form`, array query parameters in a style other than
+  `form`, and required cookie parameters. A Swagger 2.0 operation that
+  `consumes` only form data is such a form body.
 - An input typed by a schema (a ticket's `comment`, say) is described to the
   step editor as `any`, without its fields.
 - Hand-written extra capabilities cannot be added to a generated agent yet.

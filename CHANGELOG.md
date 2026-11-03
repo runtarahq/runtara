@@ -13,6 +13,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Slack Web API agent, generated from Slack's spec.** Thirty-four
+  capabilities on the existing `slack_bot` connection: messages (post, post
+  ephemeral, update, delete, schedule, list and delete scheduled messages,
+  permalink), conversations (list, info, history, replies, members, create,
+  invite, kick, join, open, rename, set topic and purpose, archive), users
+  (list, info, look up by email), reactions (add, remove, get), files (info,
+  list, delete), pins (add, remove) and `auth.test`. Slack answers a failed
+  call with `200 OK` and `"ok": false`; such an answer is an error carrying
+  Slack's code (`channel_not_found`, …) and its explanation (which block of
+  `invalid_blocks` is wrong), transient for `ratelimited` and Slack being
+  unavailable, `SLACK_UNAUTHORIZED` for a bad token or a missing scope, and
+  `SLACK_OUTCOME_UNKNOWN`, not retried, for a write Slack may have partly
+  carried out (`internal_error`, `fatal_error`), so a message is not posted
+  twice. Block Kit `blocks` and `attachments` are JSON arrays, as in the
+  hand-written `slack` agent (send a message, react, upload and download
+  files), which is unchanged.
+
+- **The connector generator reads Swagger 2.0 specs**, as Slack publishes its
+  only one: `fetch` converts them to OpenAPI 3 (form parameters become a body
+  sent as JSON when the operation also takes JSON) and rewrites JSON Schema
+  forms OpenAPI 3.0 lacks (`items: [A, B]`, a list of types, `type: "null"`).
+  A `connector.yaml` can list `connection_parameters` (a credential the spec
+  takes as a header or query parameter, such as Slack's `token`) and
+  `input_types` (inputs the spec types wrongly, such as Slack's message
+  timestamps). Error responses coded `default` are now sliced with their
+  schemas, an inline object named by a phrase with runs of capitals compiles,
+  an array query parameter in a style the templates cannot send is refused,
+  and a field that refers to a schema (`$ref`) gets a humanized label instead
+  of its raw name (`bot_id` is "Bot ID"; the UPS agent's labels change so).
+
 - **UPS agent, generated from UPS's Tracking and Shipping specs.** Four
   capabilities: track a package, create a shipment and its label, void a
   shipment, and recover a label. The new `ups_client_credentials` connection

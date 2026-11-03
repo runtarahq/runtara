@@ -7,6 +7,7 @@ repository's rustfmt; they are skipped when the generator is not installed.
     python scripts/connector_gen/test_connector_gen.py
 """
 
+import copy
 import json
 import re
 import sys
@@ -312,6 +313,66 @@ class NormalizeTest(unittest.TestCase):
         self.assertIs(op["parameters"][0]["required"], True)
         self.assertIs(op["requestBody"]["required"], True)
 
+    def test_json_schema_list_forms_become_openapi_3(self):
+        # Slack's spec: `items: [A, B]` for "A or B", `type: [T, "null"]`, `type: "null"`.
+        reply = {"type": "object", "properties": {
+            "either": {"items": [{"$ref": "#/components/schemas/A"}, {"type": "null"}]},
+            "list": {"type": "array", "items": [{"type": "string"}, {"type": "integer"}]},
+            "maybe": {"type": ["string", "null"]},
+            "fields": {"type": ["object", "null", "array"], "items": {"type": "object"}},
+            "never": {"type": "null"},
+        }}
+        a = {"type": "object", "properties": {"id": {"type": "string"}}}
+        sliced = cg.slice_spec(spec_with(ok_json({"$ref": "#/components/schemas/Reply"}), {"Reply": reply, "A": a}),
+                               ["op"])
+        fields = sliced["components"]["schemas"]["Reply"]["properties"]
+        self.assertEqual(fields["either"], {"anyOf": [{"$ref": "#/components/schemas/A"}], "nullable": True})
+        self.assertIn("A", sliced["components"]["schemas"])
+        self.assertEqual(fields["list"], {"type": "array", "items": {
+            "anyOf": [{"type": "string"}, {"type": "integer", "format": "int64"}]}})
+        self.assertEqual(fields["maybe"], {"type": "string", "nullable": True})
+        # Each alternative keeps the keywords of its own type.
+        self.assertEqual(fields["fields"], {"nullable": True, "anyOf": [
+            {"type": "object"}, {"type": "array", "items": {"type": "object"}}]})
+        self.assertEqual(fields["never"], {"nullable": True})
+
+    def test_items_listed_beside_a_type_list_stay_the_arrays(self):
+        a, b = {"$ref": "#/components/schemas/A"}, {"$ref": "#/components/schemas/B"}
+        cases = (
+            ({"type": ["array", "null"], "items": [a, b]},
+             {"type": "array", "nullable": True, "items": {"anyOf": [a, b]}}),
+            ({"type": ["array", "object"], "items": [a, b]},
+             {"anyOf": [{"type": "array", "items": {"anyOf": [a, b]}}, {"type": "object"}]}),
+            # Only ever null: no empty `anyOf`, which is no valid schema.
+            ({"anyOf": [{"type": "null"}]}, {"nullable": True}),
+            ({"items": [{"type": "null"}]}, {"nullable": True}),
+        )
+        for schema, expected in cases:
+            spec = {"components": {"schemas": {"X": copy.deepcopy(schema)}}}
+            cg.normalize_schemas(spec)
+            self.assertEqual(spec["components"]["schemas"]["X"], expected, schema)
+
+    def test_a_phrase_naming_an_inline_object_is_spelled_as_its_struct(self):
+        # The generator names the struct `ConversationImChannel`; the phrase stays the label.
+        holder = {"type": "object", "properties": {"channel": {
+            "type": "object", "title": "Conversation IM Channel", "properties": {"id": {"type": "string"}}}}}
+        sliced = cg.slice_spec(spec_with(ok_json({"$ref": "#/components/schemas/Holder"}), {"Holder": holder}),
+                               ["op"])
+        cg.describe_fields(sliced, {})
+        channel = sliced["components"]["schemas"]["Holder"]["properties"]["channel"]
+        self.assertEqual(channel["title"], "Conversation Im Channel")
+        self.assertEqual(channel["x-runtara-label"], "Conversation IM Channel")
+
+    def test_default_response_is_a_response_not_data(self):
+        error = {"type": "object", "properties": {"ok": {"$ref": "#/components/schemas/False"}}}
+        op = {"responses": {"200": {"description": "ok"}, "default": {"description": "error", "content": {
+            "application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}}}
+        sliced = cg.slice_spec(spec_with(op, {"Error": error, "False": {"type": "boolean", "enum": [False]}}),
+                               ["op"])
+        # The error schema is kept, and the enum it refers to inlined.
+        self.assertEqual(sliced["components"]["schemas"]["Error"]["properties"]["ok"],
+                         {"type": "boolean", "enum": [False]})
+
     def test_a_schema_named_required_is_kept(self):
         schema = {"type": "object", "properties": {"id": {"type": "string"}}}
         sliced = cg.slice_spec(spec_with(ok_json({"$ref": "#/components/schemas/required"}), {"required": schema}),
@@ -354,10 +415,194 @@ class ConnectionPartsTest(unittest.TestCase):
     def test_unmatched_names_fail(self):
         for kwargs, name in (({"connection_headers": ["transID"]}, "transID"),
                              ({"connection_headers": ["id"]}, "id"),
+                             ({"connection_parameters": ["id"]}, "id"),
                              ({"pinned_path_parameters": ["transId"]}, "transId")):
             with self.assertRaises(SystemExit) as raised:
                 cg.slice_spec(self.spec(), ["void"], **kwargs)
             self.assertIn(f"['{name}']", str(raised.exception))
+
+    def test_credential_parameters_are_no_inputs_in_a_header_or_the_query(self):
+        # Slack's `token`: a header on its POST methods, a query parameter on its GET ones.
+        def token(where):
+            return {"in": where, "name": "token", "required": True, "schema": {"type": "string"}}
+
+        channel = {"in": "query", "name": "channel", "schema": {"type": "string"}}
+        spec = {"openapi": "3.0.1", "info": {"title": "t", "version": "1"}, "paths": {
+            "/chat.postMessage": {"post": {"operationId": "post", "parameters": [token("header")],
+                                           "responses": {"200": {"description": "ok"}}}},
+            "/conversations.history": {"get": {"operationId": "history", "parameters": [token("query"), channel],
+                                               "responses": {"200": {"description": "ok"}}}},
+        }}
+        sliced = cg.slice_spec(spec, ["post", "history"], connection_parameters=["token"])
+        self.assertEqual(operation(sliced, "post")["parameters"], [])
+        self.assertEqual([p["name"] for p in operation(sliced, "history")["parameters"]], ["channel"])
+        # `connection_headers` stays header-only.
+        with self.assertRaises(SystemExit):
+            cg.slice_spec(self.spec(), ["void"], connection_headers=["id"])
+
+
+class InputTypesTest(unittest.TestCase):
+    """`input_types` retypes the inputs a vendor's spec types wrongly."""
+
+    @staticmethod
+    def spec() -> dict:
+        ts = {"in": "query", "name": "ts", "description": "Message timestamp.", "schema": {"type": "number"}}
+        body = json_body({"type": "object", "properties": {
+            "ts": {"type": "number", "description": "Message to delete."}, "channel": {"type": "string"}}})
+        return {"openapi": "3.0.1", "info": {"title": "t", "version": "1"}, "paths": {
+            "/replies": {"get": {"operationId": "replies", "parameters": [ts],
+                                 "responses": {"200": {"description": "ok"}}}},
+            "/delete": {"post": {"operationId": "delete", **body, "responses": {"200": {"description": "ok"}}}},
+        }}
+
+    def slice(self, input_types: dict) -> dict:
+        return cg.slice_specs([({"operations": ["replies", "delete"]}, self.spec())], {"input_types": input_types})
+
+    def test_parameters_and_body_fields_are_retyped(self):
+        sliced = self.slice({"ts": "string"})
+        self.assertEqual(operation(sliced, "replies")["parameters"][0]["schema"],
+                         {"type": "string"})
+        body = operation(sliced, "delete")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(body["properties"]["ts"], {"type": "string", "description": "Message to delete."})
+        self.assertEqual(body["properties"]["channel"], {"type": "string"})
+
+    def test_a_schema_replaces_the_type(self):
+        sliced = self.slice({"ts": {"type": "array", "items": {"type": "string"}}})
+        self.assertEqual(operation(sliced, "replies")["parameters"][0]["schema"],
+                         {"type": "array", "items": {"type": "string"}})
+
+    def test_a_schema_with_a_description_replaces_the_vendors(self):
+        sliced = self.slice({"ts": {"type": "string", "description": "Message ID."}})
+        body = operation(sliced, "delete")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(body["properties"]["ts"], {"type": "string", "description": "Message ID."})
+
+    def test_a_name_no_input_has_fails(self):
+        with self.assertRaises(SystemExit) as raised:
+            self.slice({"ts": "string", "thread_ts": "string"})
+        self.assertIn("['thread_ts']", str(raised.exception))
+
+
+class Swagger2Test(unittest.TestCase):
+    """A Swagger 2.0 spec is converted to OpenAPI 3 before it is sliced."""
+
+    @staticmethod
+    def spec() -> dict:
+        token = {"in": "header", "name": "token", "type": "string", "required": True}
+        return {
+            "swagger": "2.0", "info": {"title": "Slack Web API", "version": "1.7.0"},
+            "host": "slack.com", "basePath": "/api", "schemes": ["https"],
+            "securityDefinitions": {"slackAuth": {"type": "oauth2", "flow": "accessCode",
+                                                  "authorizationUrl": "https://slack.com/oauth/authorize",
+                                                  "tokenUrl": "https://slack.com/api/oauth.access",
+                                                  "scopes": {"chat:write": "chat:write"}}},
+            "paths": {
+                "/chat.postMessage": {"post": {
+                    "operationId": "post",
+                    "consumes": ["application/x-www-form-urlencoded", "application/json"],
+                    "produces": ["application/json"],
+                    "parameters": [
+                        token,
+                        {"in": "formData", "name": "channel", "type": "string", "required": True,
+                         "description": "Channel to send to."},
+                        {"in": "formData", "name": "unfurl_links", "type": "boolean"},
+                    ],
+                    "responses": {
+                        "200": {"description": "ok", "schema": {"$ref": "#/definitions/Posted"},
+                                "examples": {"application/json": {"ok": True, "ts": "1712345678.000100"}}},
+                        "default": {"description": "error", "schema": {"$ref": "#/definitions/Error"}},
+                    },
+                }},
+                "/conversations.history": {"get": {
+                    "operationId": "history",
+                    "parameters": [
+                        {"in": "query", "name": "channel", "type": "string"},
+                        {"in": "query", "name": "types", "type": "array", "items": {"type": "string"}},
+                        {"in": "query", "name": "ids", "type": "array", "items": {"type": "integer"},
+                         "collectionFormat": "multi"},
+                    ],
+                    "responses": {"200": {"description": "ok", "schema": {"type": "object"}}},
+                }},
+                "/files.remote.add": {"post": {
+                    "operationId": "formOnly",
+                    "consumes": ["application/x-www-form-urlencoded"],
+                    "parameters": [{"in": "formData", "name": "title", "type": "string"}],
+                    "responses": {"200": {"description": "ok"}},
+                }},
+                "/items": {"put": {
+                    "operationId": "put",
+                    "parameters": [{"in": "body", "name": "item", "required": True,
+                                    "schema": {"$ref": "#/definitions/Posted"}}],
+                    "responses": {"204": {"description": "ok"}},
+                }},
+            },
+            "definitions": {
+                "Posted": {"type": "object", "properties": {
+                    "ok": {"type": "boolean"}, "ts": {"type": "string", "x-nullable": True}}},
+                "Error": {"type": "object", "properties": {"error": {"type": "string"}}},
+            },
+        }
+
+    def test_servers_components_and_security(self):
+        converted = cg.convert_swagger2(self.spec())
+        self.assertEqual(converted["openapi"], "3.0.3")
+        self.assertEqual(converted["servers"], [{"url": "https://slack.com/api"}])
+        self.assertEqual(sorted(converted["components"]["schemas"]), ["Error", "Posted"])
+        self.assertEqual(converted["components"]["schemas"]["Posted"]["properties"]["ts"],
+                         {"type": "string", "nullable": True})
+        self.assertEqual(converted["components"]["securitySchemes"]["slackAuth"]["flows"]["authorizationCode"]
+                         ["tokenUrl"], "https://slack.com/api/oauth.access")
+
+    def test_form_parameters_become_a_body_in_every_media_type(self):
+        post = cg.convert_swagger2(self.spec())["paths"]["/chat.postMessage"]["post"]
+        self.assertEqual([p["name"] for p in post["parameters"]], ["token"])
+        self.assertEqual(post["parameters"][0]["schema"], {"type": "string"})
+        schema = {"type": "object", "required": ["channel"], "properties": {
+            "channel": {"type": "string", "description": "Channel to send to."},
+            "unfurl_links": {"type": "boolean"}}}
+        self.assertEqual(post["requestBody"], {"required": True, "content": {
+            "application/x-www-form-urlencoded": {"schema": schema}, "application/json": {"schema": schema}}})
+        self.assertEqual(post["responses"]["200"]["content"]["application/json"], {
+            "schema": {"$ref": "#/components/schemas/Posted"},
+            "example": {"ok": True, "ts": "1712345678.000100"}})
+        self.assertEqual(post["responses"]["default"]["content"]["application/json"]["schema"],
+                         {"$ref": "#/components/schemas/Error"})
+
+    def test_body_parameter_and_query_arrays(self):
+        converted = cg.convert_swagger2(self.spec())
+        put = converted["paths"]["/items"]["put"]
+        self.assertEqual(put["requestBody"], {"required": True, "content": {
+            "application/json": {"schema": {"$ref": "#/components/schemas/Posted"}}}})
+        channel, types, ids = converted["paths"]["/conversations.history"]["get"]["parameters"]
+        # Swagger 2.0 sends arrays comma-separated unless `collectionFormat: multi`.
+        self.assertEqual((types["style"], types["explode"]), ("form", False))
+        self.assertEqual((ids["style"], ids["explode"]), ("form", True))
+        self.assertNotIn("style", channel)
+
+    def test_slices_like_an_openapi_3_spec(self):
+        sliced = cg.slice_spec(self.spec(), ["post", "history"], connection_parameters=["token"])
+        self.assertEqual(sliced["servers"], [{"url": "https://slack.com/api"}])
+        post = operation(sliced, "post")
+        self.assertEqual(post["parameters"], [])
+        # The JSON alternative of the form body is kept.
+        self.assertEqual(list(post["requestBody"]["content"]), ["application/json"])
+        self.assertEqual(sorted(sliced["components"]["schemas"]), ["Error", "Posted"])
+        self.assertEqual(cg.response_examples(sliced), {"post": {"ok": True, "ts": "1712345678.000100"}})
+
+    def test_form_only_operations_are_refused(self):
+        with self.assertRaises(SystemExit) as raised:
+            cg.slice_spec(self.spec(), ["formOnly"])
+        self.assertIn("only JSON bodies", str(raised.exception))
+
+    def test_collection_formats_without_an_openapi_3_form(self):
+        spec = self.spec()
+        spec["paths"]["/conversations.history"]["get"]["parameters"][1]["collectionFormat"] = "tsv"
+        with self.assertRaises(SystemExit) as raised:
+            cg.convert_swagger2(spec)
+        self.assertIn("tsv", str(raised.exception))
+        spec["paths"]["/conversations.history"]["get"]["parameters"][1]["collectionFormat"] = "pipes"
+        with self.assertRaises(SystemExit) as raised:
+            cg.slice_spec(spec, ["history"])
+        self.assertIn("pipeDelimited", str(raised.exception))
 
 
 def merge_spec(path: str, op_id: str, schemas: dict, root: str = "Reply", servers=("https://example.com/api",),
@@ -531,6 +776,18 @@ class DescribeFieldsTest(unittest.TestCase):
         # A required field gets no default: the metadata would call it optional.
         self.assertNotIn("x-runtara-default", limit)
 
+    def test_a_bare_ref_field_is_labelled_through_all_of(self):
+        # openapi-generator drops a label written beside a `$ref`.
+        schema = {"type": "object", "properties": {
+            "bot_id": {"$ref": "#/components/schemas/defs_bot_id", "description": "The bot."},
+            "ok": {"$ref": "#/components/schemas/defs_ok"},
+        }}
+        cg.describe_fields(schema, {"ok": "OK"})
+        self.assertEqual(schema["properties"]["bot_id"], {
+            "allOf": [{"$ref": "#/components/schemas/defs_bot_id"}],
+            "description": "The bot.", "x-runtara-label": "Bot ID"})
+        self.assertEqual(schema["properties"]["ok"]["x-runtara-label"], "OK")
+
     def test_property_named_properties_is_a_field_not_a_map(self):
         sliced = cg.slice_spec(sample_spec(), ["listItems"])
         cg.describe_fields(sliced, {})
@@ -673,21 +930,50 @@ class ModelNameRenderTest(unittest.TestCase):
         self.assertEqual(len(referenced), len(self.NAMES))
         self.assertEqual([name for name in referenced if name not in structs], [])
 
-    def test_inline_object_named_by_its_title(self):
-        # UPS's proof of delivery: an inline object titled `POD`.
+    def test_a_ref_field_keeps_its_type_and_gets_its_label(self):
+        targets = {
+            "Bot": {"type": "object", "properties": {"id": {"type": "string"}}},
+            "Ids": {"type": "array", "items": {"type": "string"}},
+            "Counts": {"type": "object", "additionalProperties": {"type": "integer"}},
+            "Either": {"anyOf": [{"type": "string"}, {"$ref": "#/components/schemas/Bot"}]},
+            "channel_id": {"type": "string", "pattern": "^C[A-Z0-9]+$"},
+        }
         holder = {"type": "object", "properties": {
-            f"f{i}": {"type": "object", "title": name, "properties": {"id": {"type": "string"}}}
-            for i, name in enumerate(["POD", "HTMLBody", "Proof of Delivery"])}}
+            name.lower(): {"$ref": f"#/components/schemas/{name}"} for name in targets}}
+        op = {**ok_json({"$ref": "#/components/schemas/Holder"}), **json_body(copy.deepcopy(holder))}
+        spec = spec_with(op, {**targets, "Holder": holder})
+        with tempfile.TemporaryDirectory() as tmp:
+            write_crate(Path(tmp), spec, ["op"])
+            text = cg.render(Path(tmp))
+        for struct in ("Holder", "OpInput"):
+            body = text[text.index(f"pub struct {struct} "):]
+            body = body[:body.index("\n}\n")]
+            fields = dict(re.findall(r'display_name = r##"([^"]*)"##.*?pub \w+: ([^\n]+),', body, re.S))
+            self.assertEqual(fields, {
+                "Bot": "Option<Bot>", "IDs": "Option<Vec<String>>", "Counts": "Option<HashMap<String, i64>>",
+                "Either": "Option<Either>", "Channel ID": "Option<String>"}, struct)
+        # No struct of its own for a wrapped field.
+        self.assertEqual(sorted(set(re.findall(r"pub struct (\w+)", text))),
+                         ["Bot", "Holder", "OpInput", "OpRequest"])
+
+    def test_inline_object_named_by_its_title(self):
+        # UPS's proof of delivery: an inline object titled `POD`; Slack's
+        # "Conversation IM Channel object", whose nested objects are named after it.
+        nested = {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}}}}
+        holder = {"type": "object", "properties": {
+            f"f{i}": {"type": "object", "title": name, "properties": {"id": {"type": "string"}, "shares": nested}}
+            for i, name in enumerate(["POD", "HTMLBody", "Proof of Delivery", "Conversation IM Channel object"])}}
         spec = spec_with(ok_json({"$ref": "#/components/schemas/Holder"}), {"Holder": holder}, method="get")
         with tempfile.TemporaryDirectory() as tmp:
             sliced = write_crate(Path(tmp), spec, ["op"])
             text = cg.render(Path(tmp))
         fields = sliced["components"]["schemas"]["Holder"]["properties"]
-        # A title with spaces stays the field's label.
+        # A title with spaces stays the field's label, as the vendor wrote it.
         self.assertEqual(fields["f2"]["x-runtara-label"], "Proof of Delivery")
+        self.assertEqual(fields["f3"]["x-runtara-label"], "Conversation IM Channel object")
         structs = set(re.findall(r"pub struct (\w+)", text))
-        referenced = re.findall(r"pub f\d+: Option<(\w+)>", text)
-        self.assertEqual(len(referenced), 3)
+        referenced = re.findall(r"pub (?:f\d+|shares): Option<(?:Vec<)?(\w+)>", text)
+        self.assertEqual(len(referenced), 8)
         self.assertEqual([name for name in referenced if name not in structs], [])
 
 
