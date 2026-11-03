@@ -131,13 +131,73 @@ fn rate_limit_in_the_body_keeps_the_retry_hint() {
 fn http_errors_are_still_errors() {
     let cases = [
         (429, "SLACK_RATE_LIMITED", "transient"),
-        (503, "SLACK_UPSTREAM_ERROR", "transient"),
+        (401, "SLACK_UNAUTHORIZED", "permanent"),
         (404, "SLACK_REQUEST_FAILED", "permanent"),
     ];
     for (status, code, category) in cases {
         let err = decode::<Value>(response(status, "nope", &[])).unwrap_err();
         assert_eq!((err.code.as_str(), err.category), (code, category));
     }
+}
+
+#[test]
+fn a_write_without_an_answer_is_not_retried() {
+    // Slack drops no repeated call: a message sent again is posted twice.
+    for status in [500, 502, 503, 504] {
+        let err = decode::<Value>(response(status, "busy", &[])).unwrap_err();
+        assert_eq!(
+            (err.code.as_str(), err.category),
+            ("SLACK_OUTCOME_UNKNOWN", "permanent"),
+            "{status}"
+        );
+        assert!(
+            err.message.contains("check before sending it again"),
+            "{}",
+            err.message
+        );
+        assert_eq!(err.attributes["status_code"], json!(status.to_string()));
+    }
+    for method in ["POST", "DELETE"] {
+        let err = kit::network_error(method, "/api/chat.postMessage", "SLACK", "timed out");
+        assert_eq!(
+            (err.code.as_str(), err.category),
+            ("SLACK_OUTCOME_UNKNOWN", "permanent"),
+            "{method}"
+        );
+        assert!(err.message.contains("timed out"), "{}", err.message);
+    }
+}
+
+#[test]
+fn reads_and_refused_writes_are_still_retried() {
+    let err = kit::network_error("GET", "/api/conversations.history", "SLACK", "timed out");
+    assert_eq!(
+        (err.code.as_str(), err.category),
+        ("SLACK_NETWORK_ERROR", "transient")
+    );
+    let read: Result<Value, _> = kit::decode(
+        &response(503, "busy", &[]),
+        "GET",
+        "/api/conversations.history",
+        "SLACK",
+    );
+    let err = read.unwrap_err();
+    assert_eq!(
+        (err.code.as_str(), err.category),
+        ("SLACK_UPSTREAM_ERROR", "transient")
+    );
+    // A 429 or `ratelimited` means Slack refused the call, so nothing was posted.
+    let err = decode::<Value>(response(429, "", &[("Retry-After", "2")])).unwrap_err();
+    assert_eq!(
+        (err.code.as_str(), err.category, err.retry_after_ms),
+        ("SLACK_RATE_LIMITED", "transient", Some(2000))
+    );
+    let body = r#"{"ok": false, "error": "ratelimited"}"#;
+    let err = decode::<Value>(response(200, body, &[])).unwrap_err();
+    assert_eq!(
+        (err.code.as_str(), err.category),
+        ("SLACK_RATE_LIMITED", "transient")
+    );
 }
 
 #[test]
