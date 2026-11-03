@@ -303,20 +303,20 @@ pub struct ChatPostEphemeralRequest {
     pub as_user: Option<bool>,
     #[field(
         display_name = r##"Attachments"##,
-        description = r##"A JSON-based array of structured attachments, presented as a URL-encoded string."##
+        description = r##"Legacy secondary attachments, a JSON array."##
     )]
     #[serde(
         rename = "attachments",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub attachments: Option<String>,
+    pub attachments: Option<Vec<Value>>,
     #[field(
         display_name = r##"Blocks"##,
-        description = r##"A JSON-based array of structured blocks, presented as a URL-encoded string."##
+        description = r##"Block Kit blocks, a JSON array (https://api.slack.com/block-kit)."##
     )]
     #[serde(rename = "blocks", default, skip_serializing_if = "Option::is_none")]
-    pub blocks: Option<String>,
+    pub blocks: Option<Vec<Value>>,
     #[field(
         display_name = r##"Channel"##,
         description = r##"Channel, private group, or IM channel to send message to. Can be an encoded ID, or a name."##
@@ -436,23 +436,23 @@ pub struct ChatPostMessageRequest {
         description = r##"Pass true to post the message as the authed user, instead of as a bot. Defaults to false. See [authorship](#authorship) below."##
     )]
     #[serde(rename = "as_user", default, skip_serializing_if = "Option::is_none")]
-    pub as_user: Option<String>,
+    pub as_user: Option<bool>,
     #[field(
         display_name = r##"Attachments"##,
-        description = r##"A JSON-based array of structured attachments, presented as a URL-encoded string."##
+        description = r##"Legacy secondary attachments, a JSON array."##
     )]
     #[serde(
         rename = "attachments",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub attachments: Option<String>,
+    pub attachments: Option<Vec<Value>>,
     #[field(
         display_name = r##"Blocks"##,
-        description = r##"A JSON-based array of structured blocks, presented as a URL-encoded string."##
+        description = r##"Block Kit blocks, a JSON array (https://api.slack.com/block-kit)."##
     )]
     #[serde(rename = "blocks", default, skip_serializing_if = "Option::is_none")]
-    pub blocks: Option<String>,
+    pub blocks: Option<Vec<Value>>,
     #[field(
         display_name = r##"Channel"##,
         description = r##"Channel, private group, or IM channel to send message to. Can be an encoded ID, or a name. See [below](#channels) for more details."##
@@ -607,20 +607,20 @@ pub struct ChatScheduleMessageRequest {
     pub as_user: Option<bool>,
     #[field(
         display_name = r##"Attachments"##,
-        description = r##"A JSON-based array of structured attachments, presented as a URL-encoded string."##
+        description = r##"Legacy secondary attachments, a JSON array."##
     )]
     #[serde(
         rename = "attachments",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub attachments: Option<String>,
+    pub attachments: Option<Vec<Value>>,
     #[field(
         display_name = r##"Blocks"##,
-        description = r##"A JSON-based array of structured blocks, presented as a URL-encoded string."##
+        description = r##"Block Kit blocks, a JSON array (https://api.slack.com/block-kit)."##
     )]
     #[serde(rename = "blocks", default, skip_serializing_if = "Option::is_none")]
-    pub blocks: Option<String>,
+    pub blocks: Option<Vec<Value>>,
     #[field(
         display_name = r##"Channel"##,
         description = r##"Channel, private group, or DM channel to send message to. Can be an encoded ID, or a name. See [below](#channels) for more details."##
@@ -648,7 +648,7 @@ pub struct ChatScheduleMessageRequest {
         description = r##"Unix EPOCH timestamp of time in future to send the message."##
     )]
     #[serde(rename = "post_at", default, skip_serializing_if = "Option::is_none")]
-    pub post_at: Option<String>,
+    pub post_at: Option<i64>,
     #[field(
         display_name = r##"Reply Broadcast"##,
         description = r##"Used in conjunction with `thread_ts` and indicates whether reply should be made visible to everyone in the channel or conversation. Defaults to `false`."##
@@ -889,23 +889,23 @@ pub struct ChatUpdateRequest {
         description = r##"Pass true to update the message as the authed user. [Bot users](/bot-users) in this context are considered authed users."##
     )]
     #[serde(rename = "as_user", default, skip_serializing_if = "Option::is_none")]
-    pub as_user: Option<String>,
+    pub as_user: Option<bool>,
     #[field(
         display_name = r##"Attachments"##,
-        description = r##"A JSON-based array of structured attachments, presented as a URL-encoded string. This field is required when not presenting `text`. If you don't include this field, the message's previous `attachments` will be retained. To remove previous `attachments`, include an empty array for this field."##
+        description = r##"Legacy secondary attachments, a JSON array."##
     )]
     #[serde(
         rename = "attachments",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub attachments: Option<String>,
+    pub attachments: Option<Vec<Value>>,
     #[field(
         display_name = r##"Blocks"##,
-        description = r##"A JSON-based array of [structured blocks](/block-kit/building), presented as a URL-encoded string. If you don't include this field, the message's previous `blocks` will be retained. To remove previous `blocks`, include an empty array for this field."##
+        description = r##"Block Kit blocks, a JSON array (https://api.slack.com/block-kit)."##
     )]
     #[serde(rename = "blocks", default, skip_serializing_if = "Option::is_none")]
-    pub blocks: Option<String>,
+    pub blocks: Option<Vec<Value>>,
     #[field(
         display_name = r##"Channel"##,
         description = r##"Channel containing the message to be updated."##
@@ -921,7 +921,7 @@ pub struct ChatUpdateRequest {
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub link_names: Option<String>,
+    pub link_names: Option<bool>,
     #[field(
         display_name = r##"Parse"##,
         description = r##"Change how messages are treated. Defaults to `client`, unlike `chat.postMessage`. Accepts either `none` or `full`. If you do not specify a value for this field, the original value set for the message will be overwritten with the default, `client`."##
@@ -5510,20 +5510,20 @@ pub struct ChatPostEphemeralInput {
     pub as_user: Option<bool>,
     #[field(
         display_name = r##"Attachments"##,
-        description = r##"A JSON-based array of structured attachments, presented as a URL-encoded string."##
+        description = r##"Legacy secondary attachments, a JSON array."##
     )]
     #[serde(
         rename = "attachments",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub attachments: Option<String>,
+    pub attachments: Option<Vec<Value>>,
     #[field(
         display_name = r##"Blocks"##,
-        description = r##"A JSON-based array of structured blocks, presented as a URL-encoded string."##
+        description = r##"Block Kit blocks, a JSON array (https://api.slack.com/block-kit)."##
     )]
     #[serde(rename = "blocks", default, skip_serializing_if = "Option::is_none")]
-    pub blocks: Option<String>,
+    pub blocks: Option<Vec<Value>>,
     #[field(
         display_name = r##"Channel"##,
         description = r##"Channel, private group, or IM channel to send message to. Can be an encoded ID, or a name."##
@@ -5637,23 +5637,23 @@ pub struct ChatPostMessageInput {
         description = r##"Pass true to post the message as the authed user, instead of as a bot. Defaults to false. See [authorship](#authorship) below."##
     )]
     #[serde(rename = "as_user", default, skip_serializing_if = "Option::is_none")]
-    pub as_user: Option<String>,
+    pub as_user: Option<bool>,
     #[field(
         display_name = r##"Attachments"##,
-        description = r##"A JSON-based array of structured attachments, presented as a URL-encoded string."##
+        description = r##"Legacy secondary attachments, a JSON array."##
     )]
     #[serde(
         rename = "attachments",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub attachments: Option<String>,
+    pub attachments: Option<Vec<Value>>,
     #[field(
         display_name = r##"Blocks"##,
-        description = r##"A JSON-based array of structured blocks, presented as a URL-encoded string."##
+        description = r##"Block Kit blocks, a JSON array (https://api.slack.com/block-kit)."##
     )]
     #[serde(rename = "blocks", default, skip_serializing_if = "Option::is_none")]
-    pub blocks: Option<String>,
+    pub blocks: Option<Vec<Value>>,
     #[field(
         display_name = r##"Channel"##,
         description = r##"Channel, private group, or IM channel to send message to. Can be an encoded ID, or a name. See [below](#channels) for more details."##
@@ -5809,20 +5809,20 @@ pub struct ChatScheduleMessageInput {
     pub as_user: Option<bool>,
     #[field(
         display_name = r##"Attachments"##,
-        description = r##"A JSON-based array of structured attachments, presented as a URL-encoded string."##
+        description = r##"Legacy secondary attachments, a JSON array."##
     )]
     #[serde(
         rename = "attachments",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub attachments: Option<String>,
+    pub attachments: Option<Vec<Value>>,
     #[field(
         display_name = r##"Blocks"##,
-        description = r##"A JSON-based array of structured blocks, presented as a URL-encoded string."##
+        description = r##"Block Kit blocks, a JSON array (https://api.slack.com/block-kit)."##
     )]
     #[serde(rename = "blocks", default, skip_serializing_if = "Option::is_none")]
-    pub blocks: Option<String>,
+    pub blocks: Option<Vec<Value>>,
     #[field(
         display_name = r##"Channel"##,
         description = r##"Channel, private group, or DM channel to send message to. Can be an encoded ID, or a name. See [below](#channels) for more details."##
@@ -5850,7 +5850,7 @@ pub struct ChatScheduleMessageInput {
         description = r##"Unix EPOCH timestamp of time in future to send the message."##
     )]
     #[serde(rename = "post_at", default, skip_serializing_if = "Option::is_none")]
-    pub post_at: Option<String>,
+    pub post_at: Option<i64>,
     #[field(
         display_name = r##"Reply Broadcast"##,
         description = r##"Used in conjunction with `thread_ts` and indicates whether reply should be made visible to everyone in the channel or conversation. Defaults to `false`."##
@@ -5944,23 +5944,23 @@ pub struct ChatUpdateInput {
         description = r##"Pass true to update the message as the authed user. [Bot users](/bot-users) in this context are considered authed users."##
     )]
     #[serde(rename = "as_user", default, skip_serializing_if = "Option::is_none")]
-    pub as_user: Option<String>,
+    pub as_user: Option<bool>,
     #[field(
         display_name = r##"Attachments"##,
-        description = r##"A JSON-based array of structured attachments, presented as a URL-encoded string. This field is required when not presenting `text`. If you don't include this field, the message's previous `attachments` will be retained. To remove previous `attachments`, include an empty array for this field."##
+        description = r##"Legacy secondary attachments, a JSON array."##
     )]
     #[serde(
         rename = "attachments",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub attachments: Option<String>,
+    pub attachments: Option<Vec<Value>>,
     #[field(
         display_name = r##"Blocks"##,
-        description = r##"A JSON-based array of [structured blocks](/block-kit/building), presented as a URL-encoded string. If you don't include this field, the message's previous `blocks` will be retained. To remove previous `blocks`, include an empty array for this field."##
+        description = r##"Block Kit blocks, a JSON array (https://api.slack.com/block-kit)."##
     )]
     #[serde(rename = "blocks", default, skip_serializing_if = "Option::is_none")]
-    pub blocks: Option<String>,
+    pub blocks: Option<Vec<Value>>,
     #[field(
         display_name = r##"Channel"##,
         description = r##"Channel containing the message to be updated."##
@@ -5976,7 +5976,7 @@ pub struct ChatUpdateInput {
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub link_names: Option<String>,
+    pub link_names: Option<bool>,
     #[field(
         display_name = r##"Parse"##,
         description = r##"Change how messages are treated. Defaults to `client`, unlike `chat.postMessage`. Accepts either `none` or `full`. If you do not specify a value for this field, the original value set for the message will be overwritten with the default, `client`."##

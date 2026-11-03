@@ -51,8 +51,8 @@ fn ok_false_is_an_error_with_slacks_code() {
 fn slack_codes_map_to_error_categories() {
     let cases = [
         ("ratelimited", "SLACK_RATE_LIMITED", "transient"),
-        ("internal_error", "SLACK_UPSTREAM_ERROR", "transient"),
         ("service_unavailable", "SLACK_UPSTREAM_ERROR", "transient"),
+        ("request_timeout", "SLACK_UPSTREAM_ERROR", "transient"),
         ("invalid_auth", "SLACK_UNAUTHORIZED", "permanent"),
         ("missing_scope", "SLACK_UNAUTHORIZED", "permanent"),
         ("not_in_channel", "SLACK_REQUEST_FAILED", "permanent"),
@@ -66,6 +66,50 @@ fn slack_codes_map_to_error_categories() {
             "{slack}"
         );
     }
+}
+
+#[test]
+fn a_write_slack_may_have_carried_out_is_not_retried() {
+    // Slack: "it's possible some aspect of the operation succeeded".
+    for slack in ["internal_error", "fatal_error"] {
+        let body = json!({ "ok": false, "error": slack }).to_string();
+        let err = decode::<Value>(response(200, &body, &[])).unwrap_err();
+        assert_eq!(
+            (err.code.as_str(), err.category),
+            ("SLACK_OUTCOME_UNKNOWN", "permanent"),
+            "{slack}"
+        );
+        // A read can be sent again.
+        let read: Result<Value, _> = kit::decode(
+            &response(200, &body, &[]),
+            "GET",
+            "/api/conversations.history",
+            "SLACK",
+        );
+        let err = read.unwrap_err();
+        assert_eq!(
+            (err.code.as_str(), err.category),
+            ("SLACK_UPSTREAM_ERROR", "transient"),
+            "{slack}"
+        );
+    }
+}
+
+#[test]
+fn slacks_explanation_of_an_error_is_kept() {
+    let body = json!({
+        "ok": false,
+        "error": "invalid_blocks",
+        "response_metadata": { "messages": ["[ERROR] missing required field: text [json-pointer:/blocks/0/text]"] },
+    })
+    .to_string();
+    let err = decode::<Value>(response(200, &body, &[])).unwrap_err();
+    assert_eq!(err.code, "SLACK_REQUEST_FAILED");
+    assert_eq!(
+        err.attributes["messages"],
+        json!(["[ERROR] missing required field: text [json-pointer:/blocks/0/text]"])
+    );
+    assert!(err.message.contains("/blocks/0/text"), "{}", err.message);
 }
 
 #[test]

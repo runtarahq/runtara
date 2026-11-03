@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const TIMEOUT_MS: u64 = 30_000;
 const ERROR_BODY_LIMIT: usize = 512;
@@ -383,9 +383,6 @@ pub fn decode<T: DeserializeOwned>(
             .with_attr("status_code", status.to_string())
             .with_attr("path", path));
     }
-    if let Some(err) = slack_error(response, path, prefix) {
-        return Err(err);
-    }
 
     let invalid = |e: serde_json::Error| {
         AgentError::permanent(
@@ -397,30 +394,42 @@ pub fn decode<T: DeserializeOwned>(
     if text.trim().is_empty() {
         return serde_json::from_value(Value::Null).map_err(invalid);
     }
-    match serde_json::from_slice(&response.body) {
-        Ok(value) => Ok(value),
+    // Parsed once: the same value is checked for Slack's error and then typed.
+    let body: Value = match serde_json::from_slice(&response.body) {
+        Ok(body) => body,
         Err(e) if !is_json(&response.headers) => {
-            serde_json::from_value(Value::String(text.into_owned())).map_err(|_| invalid(e))
+            return serde_json::from_value(Value::String(text.into_owned()))
+                .map_err(|_| invalid(e));
         }
-        Err(e) => Err(invalid(e)),
+        Err(e) => return Err(invalid(e)),
+    };
+    if let Some(err) = slack_error(&body, &response.headers, method, path, prefix) {
+        return Err(err);
     }
+    serde_json::from_value(body).map_err(invalid)
 }
 
-/// Slack's error for a call it answered with `200 OK` and `"ok": false`, if it
-/// is one. Slack's own code (`channel_not_found`, …) is in the `error`
-/// attribute and the message, with the `needed` and `provided` scopes when
-/// Slack names them:
+/// Slack's error for a call it answered with `200 OK` and `"ok": false`, if
+/// `body` is one. Slack's own code (`channel_not_found`, …) is in the `error`
+/// attribute and the message, with what Slack says about it: the `needed` and
+/// `provided` scopes, and `response_metadata.messages` (which field of
+/// `invalid_blocks` or `invalid_arguments` is wrong) as `messages`.
 ///
 /// - `ratelimited`: transient, retried after Slack's `Retry-After`;
-/// - Slack's own failures (`internal_error`, `service_unavailable`, …): transient;
+/// - `service_unavailable` and `request_timeout` (Slack did not take the
+///   request in): transient;
+/// - `internal_error` and `fatal_error`, after which Slack may have carried
+///   out part of the call: transient for a read, and for anything else
+///   permanent `_OUTCOME_UNKNOWN`, so a message is not posted twice;
 /// - a token that is invalid or lacks a scope: permanent `_UNAUTHORIZED`;
 /// - anything else: permanent `_REQUEST_FAILED`.
 pub fn slack_error(
-    response: &runtara_http::HttpResponse,
+    body: &Value,
+    headers: &HashMap<String, String>,
+    method: &str,
     path: &str,
     prefix: &str,
 ) -> Option<AgentError> {
-    let body: Value = serde_json::from_slice(&response.body).ok()?;
     if body.get("ok") != Some(&Value::Bool(false)) {
         return None;
     }
@@ -428,15 +437,33 @@ pub fn slack_error(
         .get("error")
         .and_then(Value::as_str)
         .unwrap_or("unknown_error");
-    let message = format!("{prefix} {path}: Slack answered `{code}`");
+    let details: Vec<&str> = body
+        .pointer("/response_metadata/messages")
+        .and_then(Value::as_array)
+        .map(|messages| messages.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let mut message = format!("{prefix} {method} {path}: Slack answered `{code}`");
+    if !details.is_empty() {
+        message = format!("{message}: {}", details.join("; "));
+    }
     let err = match code {
         "ratelimited" | "rate_limited" => {
             AgentError::transient(format!("{prefix}_RATE_LIMITED"), message)
-                .with_retry_after_ms(retry_after_ms(&response.headers))
+                .with_retry_after_ms(retry_after_ms(headers))
         }
-        "internal_error" | "fatal_error" | "service_unavailable" | "request_timeout" => {
+        "service_unavailable" | "request_timeout" => {
             AgentError::transient(format!("{prefix}_UPSTREAM_ERROR"), message)
         }
+        "internal_error" | "fatal_error" if method.eq_ignore_ascii_case("GET") => {
+            AgentError::transient(format!("{prefix}_UPSTREAM_ERROR"), message)
+        }
+        "internal_error" | "fatal_error" => AgentError::permanent(
+            format!("{prefix}_OUTCOME_UNKNOWN"),
+            format!(
+                "{message}. Slack may have carried it out (a message posted); \
+                 check before sending it again"
+            ),
+        ),
         "not_authed"
         | "invalid_auth"
         | "account_inactive"
@@ -454,6 +481,10 @@ pub fn slack_error(
         if let Some(value) = body.get(scopes).and_then(Value::as_str) {
             err = err.with_attr(scopes, value);
         }
+    }
+    if !details.is_empty() {
+        err.attributes
+            .insert("messages".to_string(), json!(details));
     }
     Some(err)
 }

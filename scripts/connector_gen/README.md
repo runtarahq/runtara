@@ -252,8 +252,8 @@ optional_fields:
 timestamps (`ts`) as numbers; sent as one, `1712345678.000100` becomes
 `1712345678.0001`, another message's id. Give the input name the type (or the
 whole schema) it should have; it applies to that parameter or request-body
-field in every listed operation, keeping its description. A name no listed
-operation takes is an error.
+field in every listed operation, keeping its description unless the schema
+gives one. A name no listed operation takes is an error.
 
 ```yaml
 input_types:

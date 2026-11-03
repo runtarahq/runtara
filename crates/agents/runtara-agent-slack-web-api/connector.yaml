@@ -15,12 +15,27 @@ spec:
 connection_parameters:
   - token
 # Message timestamps are ids ("1712345678.000100"); the spec types some as
-# numbers, which would drop their trailing zeros.
+# numbers, which would drop their trailing zeros. The rest keep the types of
+# Slack's form-encoded API, where everything is a string; sent as JSON, Block
+# Kit is an array, flags booleans and times numbers.
 input_types:
   ts: string
   thread_ts: string
   latest: string
   oldest: string
+  blocks:
+    type: array
+    items: {type: object}
+    description: Block Kit blocks, a JSON array (https://api.slack.com/block-kit).
+  attachments:
+    type: array
+    items: {type: object}
+    description: Legacy secondary attachments, a JSON array.
+  as_user: boolean
+  link_names: boolean
+  post_at:
+    type: integer
+    format: int64
 # The spec's shared `ok: true` schema is titled "default success response".
 labels:
   ok: OK

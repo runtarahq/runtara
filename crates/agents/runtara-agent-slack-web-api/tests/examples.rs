@@ -208,6 +208,39 @@ fn post_message_sends_its_fields_as_json() {
 }
 
 #[test]
+fn json_inputs_take_json_types() {
+    // Slack's spec keeps its form-encoded API's strings; as JSON, Block Kit is
+    // an array, flags are booleans and times are numbers.
+    let blocks = json!([{ "type": "section", "text": { "type": "mrkdwn", "text": "*Done*" } }]);
+    let input: ChatScheduleMessageInput = serde_json::from_value(json!({
+        "channel": "C0123456789",
+        "text": "Done",
+        "blocks": blocks,
+        "link_names": true,
+        "post_at": 1793697708,
+    }))
+    .unwrap();
+    assert_eq!(
+        input.request().unwrap().body_json(),
+        Some(json!({
+            "channel": "C0123456789",
+            "text": "Done",
+            "blocks": blocks,
+            "link_names": true,
+            "post_at": 1793697708,
+        }))
+    );
+    let input: ChatUpdateInput = serde_json::from_value(json!({
+        "channel": "C0123456789", "ts": "1712345678.000100", "as_user": true, "link_names": false,
+    }))
+    .unwrap();
+    assert_eq!(
+        input.request().unwrap().body_json().unwrap()["as_user"],
+        json!(true)
+    );
+}
+
+#[test]
 fn message_timestamps_are_sent_as_written() {
     // Slack's spec types these as numbers; as one, `…000100` would become `…0001`.
     let input: ChatDeleteInput = serde_json::from_value(json!({

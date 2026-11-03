@@ -719,14 +719,9 @@ TYPE_KEYWORDS = {
 def normalize_schemas(sliced: dict) -> None:
     def visit(node):
         # JSON Schema's list forms, which OpenAPI 3.0 does not have: Slack's
-        # `items: [A, B]` means one of A or B, and `type: [string, "null"]` a
-        # nullable string.
-        if isinstance(node.get("items"), list):
-            alternatives = node.pop("items")
-            if node.get("type") == "array":
-                node["items"] = {"anyOf": alternatives}
-            else:
-                node["anyOf"] = alternatives
+        # `type: [string, "null"]` means a nullable string, and `items: [A, B]`
+        # one of A or B. The type list goes first, so that the `items` of an
+        # `array` it names stay that array's.
         if isinstance(node.get("type"), list):
             listed = node.pop("type")
             types = [t for t in listed if t != "null"]
@@ -743,6 +738,12 @@ def normalize_schemas(sliced: dict) -> None:
                 ]
                 for key in {key for t in types for key in TYPE_KEYWORDS.get(t, ())}:
                     node.pop(key, None)
+        if isinstance(node.get("items"), list):
+            alternatives = node.pop("items")
+            if node.get("type") == "array":
+                node["items"] = {"anyOf": alternatives}
+            else:
+                node["anyOf"] = alternatives
         # `type: "null"` alone (a field Slack always sends as null), or as one
         # alternative of a union, is OpenAPI 3.0's `nullable`.
         if node.get("type") == "null":
@@ -752,8 +753,12 @@ def normalize_schemas(sliced: dict) -> None:
             if isinstance(node.get(key), list):
                 kept = [s for s in node[key] if not (isinstance(s, dict) and s.get("type") == "null")]
                 if len(kept) < len(node[key]):
-                    node[key] = kept
                     node["nullable"] = True
+                    if kept:
+                        node[key] = kept
+                    else:
+                        # Only ever null: an empty `anyOf` is no valid schema.
+                        del node[key]
         # Plain `integer` would become i32; vendor ids and amounts outgrow it.
         if node.get("type") == "integer" and "format" not in node:
             node["format"] = "int64"
@@ -919,14 +924,15 @@ def retype_inputs(sliced: dict, types: dict) -> None:
     spec should have given it, applied to the parameters and request-body
     fields of every listed operation. Slack's spec types message timestamps
     (`ts`) as numbers, which would send `1712345678.000100` as
-    `1712345678.0001`, another message's id."""
+    `1712345678.0001`, another message's id. The field keeps its description
+    unless the schema gives one."""
     if not types:
         return
 
     def retyped(schema: dict, name: str) -> dict:
         new = types[name]
         new = copy.deepcopy(new) if isinstance(new, dict) else {"type": new}
-        return {**new, **{key: schema[key] for key in RETYPE_KEPT if key in schema}}
+        return {**{key: schema[key] for key in RETYPE_KEPT if key in schema}, **new}
 
     used = set()
     for item in sliced["paths"].values():

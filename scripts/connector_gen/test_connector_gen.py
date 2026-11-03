@@ -336,6 +336,22 @@ class NormalizeTest(unittest.TestCase):
             {"type": "object"}, {"type": "array", "items": {"type": "object"}}]})
         self.assertEqual(fields["never"], {"nullable": True})
 
+    def test_items_listed_beside_a_type_list_stay_the_arrays(self):
+        a, b = {"$ref": "#/components/schemas/A"}, {"$ref": "#/components/schemas/B"}
+        cases = (
+            ({"type": ["array", "null"], "items": [a, b]},
+             {"type": "array", "nullable": True, "items": {"anyOf": [a, b]}}),
+            ({"type": ["array", "object"], "items": [a, b]},
+             {"anyOf": [{"type": "array", "items": {"anyOf": [a, b]}}, {"type": "object"}]}),
+            # Only ever null: no empty `anyOf`, which is no valid schema.
+            ({"anyOf": [{"type": "null"}]}, {"nullable": True}),
+            ({"items": [{"type": "null"}]}, {"nullable": True}),
+        )
+        for schema, expected in cases:
+            spec = {"components": {"schemas": {"X": copy.deepcopy(schema)}}}
+            cg.normalize_schemas(spec)
+            self.assertEqual(spec["components"]["schemas"]["X"], expected, schema)
+
     def test_a_phrase_naming_an_inline_object_is_spelled_as_its_struct(self):
         # The generator names the struct `ConversationImChannel`; the phrase stays the label.
         holder = {"type": "object", "properties": {"channel": {
@@ -454,6 +470,11 @@ class InputTypesTest(unittest.TestCase):
         sliced = self.slice({"ts": {"type": "array", "items": {"type": "string"}}})
         self.assertEqual(operation(sliced, "replies")["parameters"][0]["schema"],
                          {"type": "array", "items": {"type": "string"}})
+
+    def test_a_schema_with_a_description_replaces_the_vendors(self):
+        sliced = self.slice({"ts": {"type": "string", "description": "Message ID."}})
+        body = operation(sliced, "delete")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(body["properties"]["ts"], {"type": "string", "description": "Message ID."})
 
     def test_a_name_no_input_has_fails(self):
         with self.assertRaises(SystemExit) as raised:

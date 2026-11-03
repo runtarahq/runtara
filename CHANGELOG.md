@@ -21,10 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (list, info, look up by email), reactions (add, remove, get), files (info,
   list, delete), pins (add, remove) and `auth.test`. Slack answers a failed
   call with `200 OK` and `"ok": false`; such an answer is an error carrying
-  Slack's code (`channel_not_found`, …), transient for `ratelimited` and
-  Slack's own failures, `SLACK_UNAUTHORIZED` for a bad token or a missing
-  scope. The hand-written `slack` agent (send a message, react, upload and
-  download files) is unchanged.
+  Slack's code (`channel_not_found`, …) and its explanation (which block of
+  `invalid_blocks` is wrong), transient for `ratelimited` and Slack being
+  unavailable, `SLACK_UNAUTHORIZED` for a bad token or a missing scope, and
+  `SLACK_OUTCOME_UNKNOWN`, not retried, for a write Slack may have partly
+  carried out (`internal_error`, `fatal_error`), so a message is not posted
+  twice. Block Kit `blocks` and `attachments` are JSON arrays, as in the
+  hand-written `slack` agent (send a message, react, upload and download
+  files), which is unchanged.
 
 - **The connector generator reads Swagger 2.0 specs**, as Slack publishes its
   only one: `fetch` converts them to OpenAPI 3 (form parameters become a body
