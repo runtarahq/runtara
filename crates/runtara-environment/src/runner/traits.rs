@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 
 /// Errors from runner operations.
 #[derive(Debug, Error)]
@@ -702,6 +702,16 @@ pub trait Runner: Send + Sync {
     /// interpreted as idle; dispatchers may use their batch bound as
     /// conservative fallback capacity for compatibility runners.
     fn preparation_occupancy(&self) -> Option<PreparationOccupancy> {
+        None
+    }
+
+    /// Signalled each time a run gives back its slot in [`Self::occupancy`],
+    /// so a dispatcher holding launches back for want of a slot claims the
+    /// next one at once instead of at its next poll.
+    ///
+    /// `None` means the runner does not signal; dispatchers then notice freed
+    /// slots by polling, as before.
+    fn capacity_released(&self) -> Option<Arc<Notify>> {
         None
     }
 

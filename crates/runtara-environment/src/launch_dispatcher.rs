@@ -374,6 +374,7 @@ impl LaunchDispatcher {
             poll_ms = self.config.poll_interval.as_millis(),
             "Launch dispatcher started"
         );
+        let capacity_released = self.runner.capacity_released();
         loop {
             let processed = match self.dispatch_once().await {
                 Ok(processed) => processed,
@@ -394,6 +395,14 @@ impl LaunchDispatcher {
                     return;
                 }
                 _ = self.wake.notified() => {}
+                // A run gave its slot back: a launch held back for want of
+                // one can be claimed now.
+                _ = async {
+                    match &capacity_released {
+                        Some(released) => released.notified().await,
+                        None => std::future::pending().await,
+                    }
+                } => {}
                 _ = tokio::time::sleep(self.config.poll_interval) => {}
             }
         }
@@ -465,11 +474,33 @@ impl LaunchDispatcher {
                     .unwrap_or(usize::MAX)
             })
             .unwrap_or(self.config.batch_size);
+        // Claim no more launches than the runner has run slots for. A claim
+        // the runner then refuses with `CapacityUnavailable` is leased,
+        // fenced, prepared and requeued only to be claimed again: while every
+        // slot is busy, each waiting launch went round that loop every
+        // `capacity_retry_delay`, several writes each, without a run ever
+        // starting sooner. Launches already in preparation will each take a
+        // slot, so they count against the free ones. A runner that reports no
+        // occupancy keeps the old bound.
+        let preparing = self
+            .config
+            .preparation_worker_limit
+            .saturating_sub(local_capacity);
+        let run_capacity = self
+            .runner
+            .occupancy()
+            .map(|occupancy| {
+                usize::try_from(occupancy.limit.saturating_sub(occupancy.held))
+                    .unwrap_or(usize::MAX)
+                    .saturating_sub(preparing)
+            })
+            .unwrap_or(usize::MAX);
         let claim_limit = self
             .config
             .batch_size
             .min(local_capacity)
-            .min(runner_capacity);
+            .min(runner_capacity)
+            .min(run_capacity);
         let launches = repository
             .claim_ready_for_preparation_of(
                 &self.owner,
