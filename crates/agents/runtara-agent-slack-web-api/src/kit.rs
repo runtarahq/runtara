@@ -340,20 +340,49 @@ impl Request {
                 .header("Content-Type", JSON_CONTENT_TYPE)
                 .body_bytes(body);
         }
-        let response = builder.call_agent_async().await.map_err(|e| {
-            AgentError::transient(
-                format!("{prefix}_NETWORK_ERROR"),
-                format!("{prefix} {} {} failed: {e}", self.method, self.path),
-            )
-        })?;
+        let response = builder
+            .call_agent_async()
+            .await
+            .map_err(|e| network_error(self.method, &self.path, prefix, &e.to_string()))?;
 
         decode(&response, self.method, &self.path, prefix)
     }
 }
 
+/// A request that got no response (a network error or the timeout). Only a
+/// read is worth retrying; anything else may have been carried out.
+pub fn network_error(method: &str, path: &str, prefix: &str, cause: &str) -> AgentError {
+    let message = format!("{prefix} {method} {path} failed: {cause}");
+    if is_read(method) {
+        AgentError::transient(format!("{prefix}_NETWORK_ERROR"), message)
+    } else {
+        outcome_unknown(prefix, message)
+    }
+}
+
+fn is_read(method: &str) -> bool {
+    method.eq_ignore_ascii_case("GET")
+}
+
+/// A request that is not a read and got no answer, a 5xx, or Slack's
+/// `internal_error`: Slack may or may not have carried it out. Permanent, so
+/// the step is not sent again; Slack drops no repeated message, so the
+/// workflow decides (read the channel's history) before retrying.
+pub fn outcome_unknown(prefix: &str, message: String) -> AgentError {
+    AgentError::permanent(
+        format!("{prefix}_OUTCOME_UNKNOWN"),
+        format!(
+            "{message}. Slack may have carried it out (a message posted); \
+             check before sending it again"
+        ),
+    )
+}
+
 /// Turns a response into the capability's output.
 ///
-/// - A non-2xx status is an error: 429 and 5xx are transient, the rest permanent.
+/// - A non-2xx status is an error: 429 is transient (Slack refused the
+///   request), a 5xx is transient for a read and [`outcome_unknown`] otherwise,
+///   and the rest are permanent.
 /// - A 2xx body with `"ok": false` is Slack's error: see [`slack_error`].
 /// - An empty 2xx body (e.g. 204) decodes as JSON `null`, so an operation
 ///   without a response body returns `Value::Null`.
@@ -375,7 +404,10 @@ pub fn decode<T: DeserializeOwned>(
         let err = match status {
             429 => AgentError::transient(format!("{prefix}_RATE_LIMITED"), message)
                 .with_retry_after_ms(retry_after_ms(&response.headers)),
-            500..=599 => AgentError::transient(format!("{prefix}_UPSTREAM_ERROR"), message),
+            500..=599 if is_read(method) => {
+                AgentError::transient(format!("{prefix}_UPSTREAM_ERROR"), message)
+            }
+            500..=599 => outcome_unknown(prefix, message),
             401 | 403 => AgentError::permanent(format!("{prefix}_UNAUTHORIZED"), message),
             _ => AgentError::permanent(format!("{prefix}_REQUEST_FAILED"), message),
         };
@@ -419,8 +451,8 @@ pub fn decode<T: DeserializeOwned>(
 /// - `service_unavailable` and `request_timeout` (Slack did not take the
 ///   request in): transient;
 /// - `internal_error` and `fatal_error`, after which Slack may have carried
-///   out part of the call: transient for a read, and for anything else
-///   permanent `_OUTCOME_UNKNOWN`, so a message is not posted twice;
+///   out part of the call: transient for a read, and [`outcome_unknown`] for
+///   anything else, so a message is not posted twice;
 /// - a token that is invalid or lacks a scope: permanent `_UNAUTHORIZED`;
 /// - anything else: permanent `_REQUEST_FAILED`.
 pub fn slack_error(
@@ -454,16 +486,10 @@ pub fn slack_error(
         "service_unavailable" | "request_timeout" => {
             AgentError::transient(format!("{prefix}_UPSTREAM_ERROR"), message)
         }
-        "internal_error" | "fatal_error" if method.eq_ignore_ascii_case("GET") => {
+        "internal_error" | "fatal_error" if is_read(method) => {
             AgentError::transient(format!("{prefix}_UPSTREAM_ERROR"), message)
         }
-        "internal_error" | "fatal_error" => AgentError::permanent(
-            format!("{prefix}_OUTCOME_UNKNOWN"),
-            format!(
-                "{message}. Slack may have carried it out (a message posted); \
-                 check before sending it again"
-            ),
-        ),
+        "internal_error" | "fatal_error" => outcome_unknown(prefix, message),
         "not_authed"
         | "invalid_auth"
         | "account_inactive"
