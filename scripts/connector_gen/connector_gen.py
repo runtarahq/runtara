@@ -1173,12 +1173,16 @@ def describe_fields(node, labels: dict) -> None:
     properties = node.get("properties")
     if isinstance(properties, dict):
         required = node.get("required") if isinstance(node.get("required"), list) else []
-        for name, prop in properties.items():
+        for name, prop in list(properties.items()):
             if not isinstance(prop, dict):
                 continue
-            # OpenAPI 3.0 ignores keys next to a $ref, so such a field keeps its raw name.
-            if "$ref" not in prop:
-                describe_field(prop, name, prop, labels, name in required)
+            if "$ref" in prop:
+                # openapi-generator drops keys beside a `$ref` (OpenAPI 3.0 ignores
+                # them), label included; `allOf` of the one `$ref` is the same type
+                # and keeps them.
+                prop = properties[name] = {"allOf": [{"$ref": prop["$ref"]}],
+                                           **{key: value for key, value in prop.items() if key != "$ref"}}
+            describe_field(prop, name, prop, labels, name in required)
             describe_fields(prop, labels)
     for key, value in node.items():
         # `properties` maps names to schemas and was walked above; the rest is data.

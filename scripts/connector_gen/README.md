@@ -323,9 +323,9 @@ crates/agents/runtara-agent-<id>/
   `fetch` in this order: the `labels:` override in `connector.yaml`; the
   vendor's `title` when it is a phrase (one-word titles name models); the field
   name humanized (`person_id`, `personId` → "Person ID", with known acronyms
-  such as ID, URL, HTML, VAT kept upper-case). A field that is a bare `$ref`
-  keeps its raw name unless overridden, because OpenAPI 3.0 ignores keys next to
-  a `$ref`. Scalar `example`s become the field's placeholder and scalar
+  such as ID, URL, HTML, VAT kept upper-case). openapi-generator drops keys
+  beside a `$ref`, so `fetch` writes a field that is a bare `$ref` as `allOf`
+  of that one `$ref`: the same type, with its label. Scalar `example`s become the field's placeholder and scalar
   `default`s the default value of optional inputs. Descriptions, summaries and
   the agent's name are printed as written; an operation without a summary is
   named after its operationId.

@@ -115,7 +115,12 @@
         "additionalProperties": false,
         "properties": {
           "app_id": {
-            "$ref": "#/components/schemas/defs_app_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_app_id"
+              }
+            ],
+            "x-runtara-label": "App ID"
           },
           "deleted": {
             "type": "boolean",
@@ -149,14 +154,24 @@
             "x-runtara-label": "Icons"
           },
           "id": {
-            "$ref": "#/components/schemas/defs_bot_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_bot_id"
+              }
+            ],
+            "x-runtara-label": "ID"
           },
           "name": {
             "type": "string",
             "x-runtara-label": "Name"
           },
           "team_id": {
-            "$ref": "#/components/schemas/defs_team"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_team"
+              }
+            ],
+            "x-runtara-label": "Team ID"
           },
           "updated": {
             "format": "int64",
@@ -189,7 +204,12 @@
             "x-runtara-label": "Created"
           },
           "id": {
-            "$ref": "#/components/schemas/defs_comment_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_comment_id"
+              }
+            ],
+            "x-runtara-label": "ID"
           },
           "is_intro": {
             "type": "boolean",
@@ -205,7 +225,12 @@
             "x-runtara-label": "Num Stars"
           },
           "pinned_info": {
-            "$ref": "#/components/schemas/defs_pinned_info"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_pinned_info"
+              }
+            ],
+            "x-runtara-label": "Pinned Info"
           },
           "pinned_to": {
             "items": {
@@ -227,7 +252,12 @@
             "x-runtara-label": "Timestamp"
           },
           "user": {
-            "$ref": "#/components/schemas/defs_user_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_user_id"
+              }
+            ],
+            "x-runtara-label": "User"
           }
         },
         "required": [
@@ -252,7 +282,12 @@
             "additionalProperties": false,
             "properties": {
               "accepted_user": {
-                "$ref": "#/components/schemas/defs_user_id"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_user_id"
+                  }
+                ],
+                "x-runtara-label": "Accepted User"
               },
               "connected_team_ids": {
                 "items": {
@@ -264,7 +299,12 @@
                 "x-runtara-label": "Connected Team IDs"
               },
               "conversation_host_id": {
-                "$ref": "#/components/schemas/defs_workspace_id"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_workspace_id"
+                  }
+                ],
+                "x-runtara-label": "Conversation Host ID"
               },
               "created": {
                 "format": "int64",
@@ -272,7 +312,12 @@
                 "x-runtara-label": "Created"
               },
               "creator": {
-                "$ref": "#/components/schemas/defs_user_id"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_user_id"
+                  }
+                ],
+                "x-runtara-label": "Creator"
               },
               "display_counts": {
                 "additionalProperties": false,
@@ -296,14 +341,24 @@
                 "x-runtara-label": "Display Counts"
               },
               "enterprise_id": {
-                "$ref": "#/components/schemas/defs_enterprise_id"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_enterprise_id"
+                  }
+                ],
+                "x-runtara-label": "Enterprise ID"
               },
               "has_pins": {
                 "type": "boolean",
                 "x-runtara-label": "Has Pins"
               },
               "id": {
-                "$ref": "#/components/schemas/defs_channel"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_channel"
+                  }
+                ],
+                "x-runtara-label": "ID"
               },
               "internal_team_ids": {
                 "items": {
@@ -407,7 +462,12 @@
                 "x-runtara-label": "Is Thread Only"
               },
               "last_read": {
-                "$ref": "#/components/schemas/defs_ts"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_ts"
+                  }
+                ],
+                "x-runtara-label": "Last Read"
               },
               "latest": {
                 "anyOf": [
@@ -489,7 +549,12 @@
                 "additionalProperties": false,
                 "properties": {
                   "creator": {
-                    "$ref": "#/components/schemas/defs_topic_purpose_creator"
+                    "allOf": [
+                      {
+                        "$ref": "#/components/schemas/defs_topic_purpose_creator"
+                      }
+                    ],
+                    "x-runtara-label": "Creator"
                   },
                   "last_set": {
                     "format": "int64",
@@ -523,17 +588,32 @@
                   "additionalProperties": false,
                   "properties": {
                     "accepted_user": {
-                      "$ref": "#/components/schemas/defs_user_id"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/defs_user_id"
+                        }
+                      ],
+                      "x-runtara-label": "Accepted User"
                     },
                     "is_active": {
                       "type": "boolean",
                       "x-runtara-label": "Is Active"
                     },
                     "team": {
-                      "$ref": "#/components/schemas/objs_team"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/objs_team"
+                        }
+                      ],
+                      "x-runtara-label": "Team"
                     },
                     "user": {
-                      "$ref": "#/components/schemas/defs_user_id"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/defs_user_id"
+                        }
+                      ],
+                      "x-runtara-label": "User"
                     }
                   },
                   "required": [
@@ -557,7 +637,12 @@
                 "additionalProperties": false,
                 "properties": {
                   "creator": {
-                    "$ref": "#/components/schemas/defs_topic_purpose_creator"
+                    "allOf": [
+                      {
+                        "$ref": "#/components/schemas/defs_topic_purpose_creator"
+                      }
+                    ],
+                    "x-runtara-label": "Creator"
                   },
                   "last_set": {
                     "format": "int64",
@@ -598,7 +683,12 @@
                 "x-runtara-label": "Use Case"
               },
               "user": {
-                "$ref": "#/components/schemas/defs_user_id"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_user_id"
+                  }
+                ],
+                "x-runtara-label": "User"
               },
               "version": {
                 "format": "int64",
@@ -631,7 +721,12 @@
             "additionalProperties": false,
             "properties": {
               "accepted_user": {
-                "$ref": "#/components/schemas/defs_user_id"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_user_id"
+                  }
+                ],
+                "x-runtara-label": "Accepted User"
               },
               "connected_team_ids": {
                 "items": {
@@ -643,7 +738,12 @@
                 "x-runtara-label": "Connected Team IDs"
               },
               "conversation_host_id": {
-                "$ref": "#/components/schemas/defs_workspace_id"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_workspace_id"
+                  }
+                ],
+                "x-runtara-label": "Conversation Host ID"
               },
               "created": {
                 "format": "int64",
@@ -651,7 +751,12 @@
                 "x-runtara-label": "Created"
               },
               "creator": {
-                "$ref": "#/components/schemas/defs_user_id"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_user_id"
+                  }
+                ],
+                "x-runtara-label": "Creator"
               },
               "display_counts": {
                 "additionalProperties": false,
@@ -675,7 +780,12 @@
                 "x-runtara-label": "Display Counts"
               },
               "id": {
-                "$ref": "#/components/schemas/defs_channel"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_channel"
+                  }
+                ],
+                "x-runtara-label": "ID"
               },
               "internal_team_ids": {
                 "items": {
@@ -767,7 +877,12 @@
                 "x-runtara-label": "Is Thread Only"
               },
               "last_read": {
-                "$ref": "#/components/schemas/defs_ts"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_ts"
+                  }
+                ],
+                "x-runtara-label": "Last Read"
               },
               "latest": {
                 "anyOf": [
@@ -849,7 +964,12 @@
                 "additionalProperties": false,
                 "properties": {
                   "creator": {
-                    "$ref": "#/components/schemas/defs_topic_purpose_creator"
+                    "allOf": [
+                      {
+                        "$ref": "#/components/schemas/defs_topic_purpose_creator"
+                      }
+                    ],
+                    "x-runtara-label": "Creator"
                   },
                   "last_set": {
                     "format": "int64",
@@ -883,17 +1003,32 @@
                   "additionalProperties": false,
                   "properties": {
                     "accepted_user": {
-                      "$ref": "#/components/schemas/defs_user_id"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/defs_user_id"
+                        }
+                      ],
+                      "x-runtara-label": "Accepted User"
                     },
                     "is_active": {
                       "type": "boolean",
                       "x-runtara-label": "Is Active"
                     },
                     "team": {
-                      "$ref": "#/components/schemas/objs_team"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/objs_team"
+                        }
+                      ],
+                      "x-runtara-label": "Team"
                     },
                     "user": {
-                      "$ref": "#/components/schemas/defs_user_id"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/defs_user_id"
+                        }
+                      ],
+                      "x-runtara-label": "User"
                     }
                   },
                   "required": [
@@ -917,7 +1052,12 @@
                 "additionalProperties": false,
                 "properties": {
                   "creator": {
-                    "$ref": "#/components/schemas/defs_topic_purpose_creator"
+                    "allOf": [
+                      {
+                        "$ref": "#/components/schemas/defs_topic_purpose_creator"
+                      }
+                    ],
+                    "x-runtara-label": "Creator"
                   },
                   "last_set": {
                     "format": "int64",
@@ -954,7 +1094,12 @@
                 "x-runtara-label": "Unread Count Display"
               },
               "user": {
-                "$ref": "#/components/schemas/defs_user_id"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_user_id"
+                  }
+                ],
+                "x-runtara-label": "User"
               },
               "version": {
                 "format": "int64",
@@ -997,7 +1142,12 @@
                 "x-runtara-label": "Has Pins"
               },
               "id": {
-                "$ref": "#/components/schemas/defs_dm_id"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_dm_id"
+                  }
+                ],
+                "x-runtara-label": "ID"
               },
               "is_archived": {
                 "type": "boolean",
@@ -1036,7 +1186,12 @@
                 "x-runtara-label": "Is User Deleted"
               },
               "last_read": {
-                "$ref": "#/components/schemas/defs_ts"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_ts"
+                  }
+                ],
+                "x-runtara-label": "Last Read"
               },
               "latest": {
                 "anyOf": [
@@ -1075,7 +1230,12 @@
                       "x-runtara-label": "Date Create"
                     },
                     "id": {
-                      "$ref": "#/components/schemas/defs_team"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/defs_team"
+                        }
+                      ],
+                      "x-runtara-label": "ID"
                     },
                     "is_active": {
                       "type": "boolean",
@@ -1086,7 +1246,12 @@
                       "x-runtara-label": "Name"
                     },
                     "team": {
-                      "$ref": "#/components/schemas/objs_team"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/objs_team"
+                        }
+                      ],
+                      "x-runtara-label": "Team"
                     }
                   },
                   "required": [
@@ -1114,7 +1279,12 @@
                 "x-runtara-label": "Unread Count Display"
               },
               "user": {
-                "$ref": "#/components/schemas/defs_user_id"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_user_id"
+                  }
+                ],
+                "x-runtara-label": "User"
               },
               "version": {
                 "format": "int64",
@@ -1140,13 +1310,28 @@
         "additionalProperties": false,
         "properties": {
           "enterprise_id": {
-            "$ref": "#/components/schemas/defs_enterprise_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_enterprise_id"
+              }
+            ],
+            "x-runtara-label": "Enterprise ID"
           },
           "enterprise_name": {
-            "$ref": "#/components/schemas/defs_enterprise_name"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_enterprise_name"
+              }
+            ],
+            "x-runtara-label": "Enterprise Name"
           },
           "id": {
-            "$ref": "#/components/schemas/defs_enterprise_user_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_enterprise_user_id"
+              }
+            ],
+            "x-runtara-label": "ID"
           },
           "is_admin": {
             "type": "boolean",
@@ -1247,7 +1432,12 @@
             "x-runtara-label": "Editable"
           },
           "editor": {
-            "$ref": "#/components/schemas/defs_user_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_user_id"
+              }
+            ],
+            "x-runtara-label": "Editor"
           },
           "external_id": {
             "type": "string",
@@ -1279,7 +1469,12 @@
             "x-runtara-label": "Has Rich Preview"
           },
           "id": {
-            "$ref": "#/components/schemas/defs_file_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_file_id"
+              }
+            ],
+            "x-runtara-label": "ID"
           },
           "image_exif_rotation": {
             "format": "int64",
@@ -1311,7 +1506,12 @@
             "x-runtara-label": "Is Tombstoned"
           },
           "last_editor": {
-            "$ref": "#/components/schemas/defs_user_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_user_id"
+              }
+            ],
+            "x-runtara-label": "Last Editor"
           },
           "mimetype": {
             "type": "string",
@@ -1355,7 +1555,12 @@
             "x-runtara-label": "Permalink Public"
           },
           "pinned_info": {
-            "$ref": "#/components/schemas/defs_pinned_info"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_pinned_info"
+              }
+            ],
+            "x-runtara-label": "Pinned Info"
           },
           "pinned_to": {
             "items": {
@@ -1404,7 +1609,12 @@
             "x-runtara-label": "Size"
           },
           "source_team": {
-            "$ref": "#/components/schemas/defs_team"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_team"
+              }
+            ],
+            "x-runtara-label": "Source Team"
           },
           "state": {
             "type": "string",
@@ -1548,7 +1758,12 @@
             "x-runtara-label": "User"
           },
           "user_team": {
-            "$ref": "#/components/schemas/defs_team"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_team"
+              }
+            ],
+            "x-runtara-label": "User Team"
           },
           "username": {
             "type": "string",
@@ -1642,7 +1857,12 @@
             "x-runtara-label": "Attachments"
           },
           "blocks": {
-            "$ref": "#/components/schemas/blocks"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/blocks"
+              }
+            ],
+            "x-runtara-label": "Blocks"
           },
           "bot_id": {
             "anyOf": [
@@ -1654,21 +1874,36 @@
             "x-runtara-label": "Bot ID"
           },
           "bot_profile": {
-            "$ref": "#/components/schemas/objs_bot_profile"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/objs_bot_profile"
+              }
+            ],
+            "x-runtara-label": "Bot Profile"
           },
           "client_msg_id": {
             "type": "string",
             "x-runtara-label": "Client Msg ID"
           },
           "comment": {
-            "$ref": "#/components/schemas/objs_comment"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/objs_comment"
+              }
+            ],
+            "x-runtara-label": "Comment"
           },
           "display_as_bot": {
             "type": "boolean",
             "x-runtara-label": "Display As Bot"
           },
           "file": {
-            "$ref": "#/components/schemas/objs_file"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/objs_file"
+              }
+            ],
+            "x-runtara-label": "File"
           },
           "files": {
             "items": {
@@ -1696,7 +1931,12 @@
             "x-runtara-label": "Icons"
           },
           "inviter": {
-            "$ref": "#/components/schemas/defs_user_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_user_id"
+              }
+            ],
+            "x-runtara-label": "Inviter"
           },
           "is_delayed_message": {
             "type": "boolean",
@@ -1711,10 +1951,20 @@
             "x-runtara-label": "Is Starred"
           },
           "last_read": {
-            "$ref": "#/components/schemas/defs_ts"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_ts"
+              }
+            ],
+            "x-runtara-label": "Last Read"
           },
           "latest_reply": {
-            "$ref": "#/components/schemas/defs_ts"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_ts"
+              }
+            ],
+            "x-runtara-label": "Latest Reply"
           },
           "name": {
             "type": "string",
@@ -1725,7 +1975,12 @@
             "x-runtara-label": "Old Name"
           },
           "parent_user_id": {
-            "$ref": "#/components/schemas/defs_user_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_user_id"
+              }
+            ],
+            "x-runtara-label": "Parent User ID"
           },
           "permalink": {
             "format": "uri",
@@ -1770,7 +2025,12 @@
             "x-runtara-label": "Reply Users Count"
           },
           "source_team": {
-            "$ref": "#/components/schemas/defs_workspace_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_workspace_id"
+              }
+            ],
+            "x-runtara-label": "Source Team"
           },
           "subscribed": {
             "type": "boolean",
@@ -1781,21 +2041,36 @@
             "x-runtara-label": "Subtype"
           },
           "team": {
-            "$ref": "#/components/schemas/defs_workspace_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_workspace_id"
+              }
+            ],
+            "x-runtara-label": "Team"
           },
           "text": {
             "type": "string",
             "x-runtara-label": "Text"
           },
           "thread_ts": {
-            "$ref": "#/components/schemas/defs_ts"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_ts"
+              }
+            ],
+            "x-runtara-label": "Thread Ts"
           },
           "topic": {
             "type": "string",
             "x-runtara-label": "Topic"
           },
           "ts": {
-            "$ref": "#/components/schemas/defs_ts"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_ts"
+              }
+            ],
+            "x-runtara-label": "Ts"
           },
           "type": {
             "type": "string",
@@ -1811,13 +2086,28 @@
             "x-runtara-label": "Upload"
           },
           "user": {
-            "$ref": "#/components/schemas/defs_user_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_user_id"
+              }
+            ],
+            "x-runtara-label": "User"
           },
           "user_profile": {
-            "$ref": "#/components/schemas/objs_user_profile_short"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/objs_user_profile_short"
+              }
+            ],
+            "x-runtara-label": "User Profile"
           },
           "user_team": {
-            "$ref": "#/components/schemas/defs_workspace_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_workspace_id"
+              }
+            ],
+            "x-runtara-label": "User Team"
           },
           "username": {
             "type": "string",
@@ -2045,23 +2335,48 @@
             "x-runtara-label": "Email Domain"
           },
           "enterprise_id": {
-            "$ref": "#/components/schemas/defs_enterprise_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_enterprise_id"
+              }
+            ],
+            "x-runtara-label": "Enterprise ID"
           },
           "enterprise_name": {
-            "$ref": "#/components/schemas/defs_enterprise_name"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_enterprise_name"
+              }
+            ],
+            "x-runtara-label": "Enterprise Name"
           },
           "external_org_migrations": {
-            "$ref": "#/components/schemas/objs_external_org_migrations"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/objs_external_org_migrations"
+              }
+            ],
+            "x-runtara-label": "External Org Migrations"
           },
           "has_compliance_export": {
             "type": "boolean",
             "x-runtara-label": "Has Compliance Export"
           },
           "icon": {
-            "$ref": "#/components/schemas/objs_icon"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/objs_icon"
+              }
+            ],
+            "x-runtara-label": "Icon"
           },
           "id": {
-            "$ref": "#/components/schemas/defs_workspace_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_workspace_id"
+              }
+            ],
+            "x-runtara-label": "ID"
           },
           "is_assigned": {
             "type": "boolean",
@@ -2123,7 +2438,12 @@
             "x-runtara-label": "Plan"
           },
           "primary_owner": {
-            "$ref": "#/components/schemas/objs_primary_owner"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/objs_primary_owner"
+              }
+            ],
+            "x-runtara-label": "Primary Owner"
           },
           "sso_provider": {
             "properties": {
@@ -2264,14 +2584,24 @@
                 "x-runtara-label": "Deleted"
               },
               "enterprise_user": {
-                "$ref": "#/components/schemas/objs_enterprise_user"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/objs_enterprise_user"
+                  }
+                ],
+                "x-runtara-label": "Enterprise User"
               },
               "has_2fa": {
                 "type": "boolean",
                 "x-runtara-label": "Has 2fa"
               },
               "id": {
-                "$ref": "#/components/schemas/defs_user_id"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_user_id"
+                  }
+                ],
+                "x-runtara-label": "ID"
               },
               "is_admin": {
                 "type": "boolean",
@@ -2330,17 +2660,32 @@
                 "x-runtara-label": "Presence"
               },
               "profile": {
-                "$ref": "#/components/schemas/objs_user_profile"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/objs_user_profile"
+                  }
+                ],
+                "x-runtara-label": "Profile"
               },
               "real_name": {
                 "type": "string",
                 "x-runtara-label": "Real Name"
               },
               "team": {
-                "$ref": "#/components/schemas/defs_workspace_id"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_workspace_id"
+                  }
+                ],
+                "x-runtara-label": "Team"
               },
               "team_id": {
-                "$ref": "#/components/schemas/defs_workspace_id"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_workspace_id"
+                  }
+                ],
+                "x-runtara-label": "Team ID"
               },
               "team_profile": {
                 "additionalProperties": false,
@@ -2412,14 +2757,24 @@
                 "x-runtara-label": "Deleted"
               },
               "enterprise_user": {
-                "$ref": "#/components/schemas/objs_enterprise_user"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/objs_enterprise_user"
+                  }
+                ],
+                "x-runtara-label": "Enterprise User"
               },
               "has_2fa": {
                 "type": "boolean",
                 "x-runtara-label": "Has 2fa"
               },
               "id": {
-                "$ref": "#/components/schemas/defs_user_id"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_user_id"
+                  }
+                ],
+                "x-runtara-label": "ID"
               },
               "is_admin": {
                 "type": "boolean",
@@ -2474,14 +2829,24 @@
                 "x-runtara-label": "Presence"
               },
               "profile": {
-                "$ref": "#/components/schemas/objs_user_profile"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/objs_user_profile"
+                  }
+                ],
+                "x-runtara-label": "Profile"
               },
               "real_name": {
                 "type": "string",
                 "x-runtara-label": "Real Name"
               },
               "team_id": {
-                "$ref": "#/components/schemas/defs_workspace_id"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/defs_workspace_id"
+                  }
+                ],
+                "x-runtara-label": "Team ID"
               },
               "team_profile": {
                 "additionalProperties": false,
@@ -2557,14 +2922,24 @@
             "x-runtara-label": "Always Active"
           },
           "api_app_id": {
-            "$ref": "#/components/schemas/defs_optional_app_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_optional_app_id"
+              }
+            ],
+            "x-runtara-label": "API App ID"
           },
           "avatar_hash": {
             "type": "string",
             "x-runtara-label": "Avatar Hash"
           },
           "bot_id": {
-            "$ref": "#/components/schemas/defs_bot_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_bot_id"
+              }
+            ],
+            "x-runtara-label": "Bot ID"
           },
           "display_name": {
             "type": "string",
@@ -2748,7 +3123,12 @@
             "x-runtara-label": "Status Text Canonical"
           },
           "team": {
-            "$ref": "#/components/schemas/defs_workspace_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_workspace_id"
+              }
+            ],
+            "x-runtara-label": "Team"
           },
           "title": {
             "type": "string",
@@ -2831,7 +3211,12 @@
             "x-runtara-label": "Real Name Normalized"
           },
           "team": {
-            "$ref": "#/components/schemas/defs_workspace_id"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/defs_workspace_id"
+              }
+            ],
+            "x-runtara-label": "Team"
           }
         },
         "required": [
@@ -2966,7 +3351,12 @@
                   "description": "Schema for successful response auth.test method",
                   "properties": {
                     "bot_id": {
-                      "$ref": "#/components/schemas/defs_bot_id"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/defs_bot_id"
+                        }
+                      ],
+                      "x-runtara-label": "Bot ID"
                     },
                     "is_enterprise_install": {
                       "type": "boolean",
@@ -2985,7 +3375,12 @@
                       "x-runtara-label": "Team"
                     },
                     "team_id": {
-                      "$ref": "#/components/schemas/defs_team"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/defs_team"
+                        }
+                      ],
+                      "x-runtara-label": "Team ID"
                     },
                     "url": {
                       "type": "string",
@@ -2996,7 +3391,12 @@
                       "x-runtara-label": "User"
                     },
                     "user_id": {
-                      "$ref": "#/components/schemas/defs_user_id"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/defs_user_id"
+                        }
+                      ],
+                      "x-runtara-label": "User ID"
                     }
                   },
                   "required": [
@@ -3133,7 +3533,12 @@
                   "description": "Schema for successful response of chat.delete method",
                   "properties": {
                     "channel": {
-                      "$ref": "#/components/schemas/defs_channel"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/defs_channel"
+                        }
+                      ],
+                      "x-runtara-label": "Channel"
                     },
                     "ok": {
                       "enum": [
@@ -3144,7 +3549,12 @@
                       "x-runtara-label": "OK"
                     },
                     "ts": {
-                      "$ref": "#/components/schemas/defs_ts"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/defs_ts"
+                        }
+                      ],
+                      "x-runtara-label": "Ts"
                     }
                   },
                   "required": [
@@ -3433,7 +3843,12 @@
                   "description": "Schema for successful response chat.getPermalink",
                   "properties": {
                     "channel": {
-                      "$ref": "#/components/schemas/defs_channel"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/defs_channel"
+                        }
+                      ],
+                      "x-runtara-label": "Channel"
                     },
                     "ok": {
                       "enum": [
@@ -3635,7 +4050,12 @@
                   "description": "Schema for successful response from chat.postEphemeral method",
                   "properties": {
                     "message_ts": {
-                      "$ref": "#/components/schemas/defs_ts"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/defs_ts"
+                        }
+                      ],
+                      "x-runtara-label": "Message Ts"
                     },
                     "ok": {
                       "enum": [
@@ -3868,10 +4288,20 @@
                   "description": "Schema for successful response of chat.postMessage method",
                   "properties": {
                     "channel": {
-                      "$ref": "#/components/schemas/defs_channel"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/defs_channel"
+                        }
+                      ],
+                      "x-runtara-label": "Channel"
                     },
                     "message": {
-                      "$ref": "#/components/schemas/objs_message"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/objs_message"
+                        }
+                      ],
+                      "x-runtara-label": "Message"
                     },
                     "ok": {
                       "enum": [
@@ -3882,7 +4312,12 @@
                       "x-runtara-label": "OK"
                     },
                     "ts": {
-                      "$ref": "#/components/schemas/defs_ts"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/defs_ts"
+                        }
+                      ],
+                      "x-runtara-label": "Ts"
                     }
                   },
                   "required": [
@@ -4082,19 +4517,39 @@
                   "description": "Schema for successful response of chat.scheduleMessage method",
                   "properties": {
                     "channel": {
-                      "$ref": "#/components/schemas/defs_channel"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/defs_channel"
+                        }
+                      ],
+                      "x-runtara-label": "Channel"
                     },
                     "message": {
                       "additionalProperties": false,
                       "properties": {
                         "bot_id": {
-                          "$ref": "#/components/schemas/defs_bot_id"
+                          "allOf": [
+                            {
+                              "$ref": "#/components/schemas/defs_bot_id"
+                            }
+                          ],
+                          "x-runtara-label": "Bot ID"
                         },
                         "bot_profile": {
-                          "$ref": "#/components/schemas/objs_bot_profile"
+                          "allOf": [
+                            {
+                              "$ref": "#/components/schemas/objs_bot_profile"
+                            }
+                          ],
+                          "x-runtara-label": "Bot Profile"
                         },
                         "team": {
-                          "$ref": "#/components/schemas/defs_team"
+                          "allOf": [
+                            {
+                              "$ref": "#/components/schemas/defs_team"
+                            }
+                          ],
+                          "x-runtara-label": "Team"
                         },
                         "text": {
                           "type": "string",
@@ -4105,7 +4560,12 @@
                           "x-runtara-label": "Type"
                         },
                         "user": {
-                          "$ref": "#/components/schemas/defs_user_id"
+                          "allOf": [
+                            {
+                              "$ref": "#/components/schemas/defs_user_id"
+                            }
+                          ],
+                          "x-runtara-label": "User"
                         },
                         "username": {
                           "type": "string",
@@ -4355,7 +4815,12 @@
                         "additionalProperties": false,
                         "properties": {
                           "channel_id": {
-                            "$ref": "#/components/schemas/defs_channel_id"
+                            "allOf": [
+                              {
+                                "$ref": "#/components/schemas/defs_channel_id"
+                              }
+                            ],
+                            "x-runtara-label": "Channel ID"
                           },
                           "date_created": {
                             "format": "int64",
@@ -4934,7 +5399,12 @@
                   "description": "Schema for successful response conversations.create method",
                   "properties": {
                     "channel": {
-                      "$ref": "#/components/schemas/objs_conversation"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/objs_conversation"
+                        }
+                      ],
+                      "x-runtara-label": "Channel"
                     },
                     "ok": {
                       "enum": [
@@ -5379,7 +5849,12 @@
                   "description": "Schema for successful response conversations.info",
                   "properties": {
                     "channel": {
-                      "$ref": "#/components/schemas/objs_conversation"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/objs_conversation"
+                        }
+                      ],
+                      "x-runtara-label": "Channel"
                     },
                     "ok": {
                       "enum": [
@@ -5566,7 +6041,12 @@
                   "description": "Schema for successful response from conversations.invite method",
                   "properties": {
                     "channel": {
-                      "$ref": "#/components/schemas/objs_conversation"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/objs_conversation"
+                        }
+                      ],
+                      "x-runtara-label": "Channel"
                     },
                     "ok": {
                       "enum": [
@@ -5691,7 +6171,12 @@
                             "x-runtara-label": "OK"
                           },
                           "user": {
-                            "$ref": "#/components/schemas/defs_user_id"
+                            "allOf": [
+                              {
+                                "$ref": "#/components/schemas/defs_user_id"
+                              }
+                            ],
+                            "x-runtara-label": "User"
                           }
                         },
                         "required": [
@@ -5826,7 +6311,12 @@
                   "description": "Schema for successful response from conversations.join method",
                   "properties": {
                     "channel": {
-                      "$ref": "#/components/schemas/objs_conversation"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/objs_conversation"
+                        }
+                      ],
+                      "x-runtara-label": "Channel"
                     },
                     "ok": {
                       "enum": [
@@ -6603,7 +7093,12 @@
                               "x-runtara-label": "Created"
                             },
                             "id": {
-                              "$ref": "#/components/schemas/defs_dm_id"
+                              "allOf": [
+                                {
+                                  "$ref": "#/components/schemas/defs_dm_id"
+                                }
+                              ],
+                              "x-runtara-label": "ID"
                             },
                             "is_im": {
                               "type": "boolean",
@@ -6614,10 +7109,20 @@
                               "x-runtara-label": "Is Open"
                             },
                             "last_read": {
-                              "$ref": "#/components/schemas/defs_ts"
+                              "allOf": [
+                                {
+                                  "$ref": "#/components/schemas/defs_ts"
+                                }
+                              ],
+                              "x-runtara-label": "Last Read"
                             },
                             "latest": {
-                              "$ref": "#/components/schemas/objs_message"
+                              "allOf": [
+                                {
+                                  "$ref": "#/components/schemas/objs_message"
+                                }
+                              ],
+                              "x-runtara-label": "Latest"
                             },
                             "unread_count": {
                               "type": "number",
@@ -6628,7 +7133,12 @@
                               "x-runtara-label": "Unread Count Display"
                             },
                             "user": {
-                              "$ref": "#/components/schemas/defs_user_id"
+                              "allOf": [
+                                {
+                                  "$ref": "#/components/schemas/defs_user_id"
+                                }
+                              ],
+                              "x-runtara-label": "User"
                             }
                           },
                           "required": [
@@ -6828,7 +7338,12 @@
                   "description": "Schema for successful response from conversations.rename method",
                   "properties": {
                     "channel": {
-                      "$ref": "#/components/schemas/objs_conversation"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/objs_conversation"
+                        }
+                      ],
+                      "x-runtara-label": "Channel"
                     },
                     "ok": {
                       "enum": [
@@ -7080,10 +7595,20 @@
                             "additionalProperties": false,
                             "properties": {
                               "last_read": {
-                                "$ref": "#/components/schemas/defs_ts"
+                                "allOf": [
+                                  {
+                                    "$ref": "#/components/schemas/defs_ts"
+                                  }
+                                ],
+                                "x-runtara-label": "Last Read"
                               },
                               "latest_reply": {
-                                "$ref": "#/components/schemas/defs_ts"
+                                "allOf": [
+                                  {
+                                    "$ref": "#/components/schemas/defs_ts"
+                                  }
+                                ],
+                                "x-runtara-label": "Latest Reply"
                               },
                               "reply_count": {
                                 "format": "int64",
@@ -7104,24 +7629,44 @@
                                 "x-runtara-label": "Reply Users Count"
                               },
                               "source_team": {
-                                "$ref": "#/components/schemas/defs_team"
+                                "allOf": [
+                                  {
+                                    "$ref": "#/components/schemas/defs_team"
+                                  }
+                                ],
+                                "x-runtara-label": "Source Team"
                               },
                               "subscribed": {
                                 "type": "boolean",
                                 "x-runtara-label": "Subscribed"
                               },
                               "team": {
-                                "$ref": "#/components/schemas/defs_team"
+                                "allOf": [
+                                  {
+                                    "$ref": "#/components/schemas/defs_team"
+                                  }
+                                ],
+                                "x-runtara-label": "Team"
                               },
                               "text": {
                                 "type": "string",
                                 "x-runtara-label": "Text"
                               },
                               "thread_ts": {
-                                "$ref": "#/components/schemas/defs_ts"
+                                "allOf": [
+                                  {
+                                    "$ref": "#/components/schemas/defs_ts"
+                                  }
+                                ],
+                                "x-runtara-label": "Thread Ts"
                               },
                               "ts": {
-                                "$ref": "#/components/schemas/defs_ts"
+                                "allOf": [
+                                  {
+                                    "$ref": "#/components/schemas/defs_ts"
+                                  }
+                                ],
+                                "x-runtara-label": "Ts"
                               },
                               "type": {
                                 "type": "string",
@@ -7133,13 +7678,28 @@
                                 "x-runtara-label": "Unread Count"
                               },
                               "user": {
-                                "$ref": "#/components/schemas/defs_user_id"
+                                "allOf": [
+                                  {
+                                    "$ref": "#/components/schemas/defs_user_id"
+                                  }
+                                ],
+                                "x-runtara-label": "User"
                               },
                               "user_profile": {
-                                "$ref": "#/components/schemas/objs_user_profile_short"
+                                "allOf": [
+                                  {
+                                    "$ref": "#/components/schemas/objs_user_profile_short"
+                                  }
+                                ],
+                                "x-runtara-label": "User Profile"
                               },
                               "user_team": {
-                                "$ref": "#/components/schemas/defs_team"
+                                "allOf": [
+                                  {
+                                    "$ref": "#/components/schemas/defs_team"
+                                  }
+                                ],
+                                "x-runtara-label": "User Team"
                               }
                             },
                             "required": [
@@ -7161,36 +7721,76 @@
                                 "x-runtara-label": "Is Starred"
                               },
                               "parent_user_id": {
-                                "$ref": "#/components/schemas/defs_user_id"
+                                "allOf": [
+                                  {
+                                    "$ref": "#/components/schemas/defs_user_id"
+                                  }
+                                ],
+                                "x-runtara-label": "Parent User ID"
                               },
                               "source_team": {
-                                "$ref": "#/components/schemas/defs_team"
+                                "allOf": [
+                                  {
+                                    "$ref": "#/components/schemas/defs_team"
+                                  }
+                                ],
+                                "x-runtara-label": "Source Team"
                               },
                               "team": {
-                                "$ref": "#/components/schemas/defs_team"
+                                "allOf": [
+                                  {
+                                    "$ref": "#/components/schemas/defs_team"
+                                  }
+                                ],
+                                "x-runtara-label": "Team"
                               },
                               "text": {
                                 "type": "string",
                                 "x-runtara-label": "Text"
                               },
                               "thread_ts": {
-                                "$ref": "#/components/schemas/defs_ts"
+                                "allOf": [
+                                  {
+                                    "$ref": "#/components/schemas/defs_ts"
+                                  }
+                                ],
+                                "x-runtara-label": "Thread Ts"
                               },
                               "ts": {
-                                "$ref": "#/components/schemas/defs_ts"
+                                "allOf": [
+                                  {
+                                    "$ref": "#/components/schemas/defs_ts"
+                                  }
+                                ],
+                                "x-runtara-label": "Ts"
                               },
                               "type": {
                                 "type": "string",
                                 "x-runtara-label": "Type"
                               },
                               "user": {
-                                "$ref": "#/components/schemas/defs_user_id"
+                                "allOf": [
+                                  {
+                                    "$ref": "#/components/schemas/defs_user_id"
+                                  }
+                                ],
+                                "x-runtara-label": "User"
                               },
                               "user_profile": {
-                                "$ref": "#/components/schemas/objs_user_profile_short"
+                                "allOf": [
+                                  {
+                                    "$ref": "#/components/schemas/objs_user_profile_short"
+                                  }
+                                ],
+                                "x-runtara-label": "User Profile"
                               },
                               "user_team": {
-                                "$ref": "#/components/schemas/defs_team"
+                                "allOf": [
+                                  {
+                                    "$ref": "#/components/schemas/defs_team"
+                                  }
+                                ],
+                                "x-runtara-label": "User Team"
                               }
                             },
                             "required": [
@@ -7354,7 +7954,12 @@
                   "description": "Schema for successful response from conversations.setPurpose method",
                   "properties": {
                     "channel": {
-                      "$ref": "#/components/schemas/objs_conversation"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/objs_conversation"
+                        }
+                      ],
+                      "x-runtara-label": "Channel"
                     },
                     "ok": {
                       "enum": [
@@ -7507,7 +8112,12 @@
                   "description": "Schema for successful response from conversations.setTopic method",
                   "properties": {
                     "channel": {
-                      "$ref": "#/components/schemas/objs_conversation"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/objs_conversation"
+                        }
+                      ],
+                      "x-runtara-label": "Channel"
                     },
                     "ok": {
                       "enum": [
@@ -7880,17 +8490,32 @@
                   "description": "Schema for successful response from files.info method",
                   "properties": {
                     "comments": {
-                      "$ref": "#/components/schemas/objs_comments"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/objs_comments"
+                        }
+                      ],
+                      "x-runtara-label": "Comments"
                     },
                     "content_html": {
                       "nullable": true,
                       "x-runtara-label": "Content HTML"
                     },
                     "editor": {
-                      "$ref": "#/components/schemas/defs_user_id"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/defs_user_id"
+                        }
+                      ],
+                      "x-runtara-label": "Editor"
                     },
                     "file": {
-                      "$ref": "#/components/schemas/objs_file"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/objs_file"
+                        }
+                      ],
+                      "x-runtara-label": "File"
                     },
                     "ok": {
                       "enum": [
@@ -7901,10 +8526,20 @@
                       "x-runtara-label": "OK"
                     },
                     "paging": {
-                      "$ref": "#/components/schemas/objs_paging"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/objs_paging"
+                        }
+                      ],
+                      "x-runtara-label": "Paging"
                     },
                     "response_metadata": {
-                      "$ref": "#/components/schemas/objs_response_metadata"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/objs_response_metadata"
+                        }
+                      ],
+                      "x-runtara-label": "Response Metadata"
                     }
                   },
                   "required": [
@@ -8194,7 +8829,12 @@
                       "x-runtara-label": "OK"
                     },
                     "paging": {
-                      "$ref": "#/components/schemas/objs_paging"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/objs_paging"
+                        }
+                      ],
+                      "x-runtara-label": "Paging"
                     }
                   },
                   "required": [
@@ -8812,10 +9452,20 @@
                       "additionalProperties": false,
                       "properties": {
                         "channel": {
-                          "$ref": "#/components/schemas/defs_channel"
+                          "allOf": [
+                            {
+                              "$ref": "#/components/schemas/defs_channel"
+                            }
+                          ],
+                          "x-runtara-label": "Channel"
                         },
                         "message": {
-                          "$ref": "#/components/schemas/objs_message"
+                          "allOf": [
+                            {
+                              "$ref": "#/components/schemas/objs_message"
+                            }
+                          ],
+                          "x-runtara-label": "Message"
                         },
                         "ok": {
                           "enum": [
@@ -8844,7 +9494,12 @@
                       "additionalProperties": false,
                       "properties": {
                         "file": {
-                          "$ref": "#/components/schemas/objs_file"
+                          "allOf": [
+                            {
+                              "$ref": "#/components/schemas/objs_file"
+                            }
+                          ],
+                          "x-runtara-label": "File"
                         },
                         "ok": {
                           "enum": [
@@ -8872,10 +9527,20 @@
                       "additionalProperties": false,
                       "properties": {
                         "comment": {
-                          "$ref": "#/components/schemas/objs_comment"
+                          "allOf": [
+                            {
+                              "$ref": "#/components/schemas/objs_comment"
+                            }
+                          ],
+                          "x-runtara-label": "Comment"
                         },
                         "file": {
-                          "$ref": "#/components/schemas/objs_file"
+                          "allOf": [
+                            {
+                              "$ref": "#/components/schemas/objs_file"
+                            }
+                          ],
+                          "x-runtara-label": "File"
                         },
                         "ok": {
                           "enum": [
@@ -9228,7 +9893,12 @@
                       "x-runtara-label": "OK"
                     },
                     "user": {
-                      "$ref": "#/components/schemas/objs_user"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/objs_user"
+                        }
+                      ],
+                      "x-runtara-label": "User"
                     }
                   },
                   "required": [
@@ -9468,7 +10138,12 @@
                       "x-runtara-label": "OK"
                     },
                     "response_metadata": {
-                      "$ref": "#/components/schemas/objs_response_metadata"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/objs_response_metadata"
+                        }
+                      ],
+                      "x-runtara-label": "Response Metadata"
                     }
                   },
                   "required": [
@@ -9633,7 +10308,12 @@
                       "x-runtara-label": "OK"
                     },
                     "user": {
-                      "$ref": "#/components/schemas/objs_user"
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/objs_user"
+                        }
+                      ],
+                      "x-runtara-label": "User"
                     }
                   },
                   "required": [

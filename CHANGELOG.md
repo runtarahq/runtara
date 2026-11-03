@@ -35,8 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `input_types` (inputs the spec types wrongly, such as Slack's message
   timestamps). Error responses coded `default` are now sliced with their
   schemas, an inline object named by a phrase with runs of capitals compiles,
-  and an array query parameter in a style the templates cannot send is
-  refused.
+  an array query parameter in a style the templates cannot send is refused,
+  and a field that refers to a schema (`$ref`) gets a humanized label instead
+  of its raw name (`bot_id` is "Bot ID"; the UPS agent's labels change so).
 
 - **UPS agent, generated from UPS's Tracking and Shipping specs.** Four
   capabilities: track a package, create a shipment and its label, void a

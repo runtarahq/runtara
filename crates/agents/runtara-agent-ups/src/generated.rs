@@ -64,7 +64,7 @@ pub struct Activity {
     )]
     #[serde(rename = "gmtTime", default, skip_serializing_if = "Option::is_none")]
     pub gmt_time: Option<String>,
-    #[field(display_name = r##"location"##)]
+    #[field(display_name = r##"Location"##)]
     #[serde(rename = "location", default, skip_serializing_if = "Option::is_none")]
     pub location: Option<Location>,
     #[field(
@@ -77,7 +77,7 @@ pub struct Activity {
         skip_serializing_if = "Option::is_none"
     )]
     pub logical_scan: Option<bool>,
-    #[field(display_name = r##"status"##)]
+    #[field(display_name = r##"Status"##)]
     #[serde(rename = "status", default, skip_serializing_if = "Option::is_none")]
     pub status: Option<Status>,
     #[field(
@@ -642,7 +642,7 @@ pub struct ChildLtlCharges {
         skip_serializing_if = "Option::is_none"
     )]
     pub insurance_charges: Option<String>,
-    #[field(display_name = r##"OtherCharges"##)]
+    #[field(display_name = r##"Other Charges"##)]
     #[serde(
         rename = "OtherCharges",
         default,
@@ -658,7 +658,7 @@ pub struct ChildLtlCharges {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ChildLtlPackage")]
 pub struct ChildLtlPackage {
-    #[field(display_name = r##"HandlingUnits"##)]
+    #[field(display_name = r##"Handling Units"##)]
     #[serde(
         rename = "HandlingUnits",
         default,
@@ -676,7 +676,7 @@ pub struct ChildLtlPackage {
         skip_serializing_if = "Option::is_none"
     )]
     pub number_of_identical_units: Option<String>,
-    #[field(display_name = r##"ReferenceNumber"##)]
+    #[field(display_name = r##"Reference Number"##)]
     #[serde(
         rename = "ReferenceNumber",
         default,
@@ -723,14 +723,14 @@ pub struct ChildProduct {
         skip_serializing_if = "Option::is_none"
     )]
     pub description: Option<String>,
-    #[field(display_name = r##"EEIInformation"##)]
+    #[field(display_name = r##"EEI Information"##)]
     #[serde(
         rename = "EEIInformation",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub eei_information: Option<ProductEeiInformation>,
-    #[field(display_name = r##"ExcludeFromForm"##)]
+    #[field(display_name = r##"Exclude From Form"##)]
     #[serde(
         rename = "ExcludeFromForm",
         default,
@@ -781,7 +781,7 @@ pub struct ChildProduct {
         skip_serializing_if = "Option::is_none"
     )]
     pub net_cost_code: Option<String>,
-    #[field(display_name = r##"NetCostDateRange"##)]
+    #[field(display_name = r##"Net Cost Date Range"##)]
     #[serde(
         rename = "NetCostDateRange",
         default,
@@ -809,7 +809,7 @@ pub struct ChildProduct {
         skip_serializing_if = "Option::is_none"
     )]
     pub number_of_units: Option<String>,
-    #[field(display_name = r##"PackingListInfo"##)]
+    #[field(display_name = r##"Packing List Info"##)]
     #[serde(
         rename = "PackingListInfo",
         default,
@@ -854,7 +854,7 @@ No [3] - A completed and signed Certificate for the good voluntarily provided to
         skip_serializing_if = "Option::is_none"
     )]
     pub product_number: Option<String>,
-    #[field(display_name = r##"ProductWeight"##)]
+    #[field(display_name = r##"Product Weight"##)]
     #[serde(
         rename = "ProductWeight",
         default,
@@ -874,7 +874,7 @@ Note: This value is calculated based on the Product/Unit/Value and /Product/Unit
         skip_serializing_if = "Option::is_none"
     )]
     pub sed_total_value: Option<String>,
-    #[field(display_name = r##"ScheduleB"##)]
+    #[field(display_name = r##"Schedule B"##)]
     #[serde(rename = "ScheduleB", default, skip_serializing_if = "Option::is_none")]
     pub schedule_b: Option<ProductScheduleB>,
     #[field(
@@ -958,7 +958,7 @@ Valid values are :
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "Cn22ContentCn22ContentWeight")]
 pub struct Cn22ContentCn22ContentWeight {
-    #[field(display_name = r##"UnitOfMeasurement"##)]
+    #[field(display_name = r##"Unit Of Measurement"##)]
     #[serde(
         rename = "UnitOfMeasurement",
         default,
@@ -1082,14 +1082,14 @@ If the combined MI package and CN22 label is requested, only the first 30 charac
         skip_serializing_if = "Option::is_none"
     )]
     pub cn22_content_total_value: Option<String>,
-    #[field(display_name = r##"CN22ContentWeight"##)]
+    #[field(display_name = r##"CN22 Content Weight"##)]
     #[serde(
         rename = "CN22ContentWeight",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub cn22_content_weight: Option<Cn22ContentCn22ContentWeight>,
-    #[field(display_name = r##"DDSReferenceNumber"##)]
+    #[field(display_name = r##"DDS Reference Number"##)]
     #[serde(
         rename = "DDSReferenceNumber",
         default,
@@ -1144,7 +1144,7 @@ pub struct CodTurnInPageImage {
         skip_serializing_if = "Option::is_none"
     )]
     pub graphic_image: Option<String>,
-    #[field(display_name = r##"ImageFormat"##)]
+    #[field(display_name = r##"Image Format"##)]
     #[serde(
         rename = "ImageFormat",
         default,
@@ -1429,7 +1429,7 @@ pub struct ContactsUltimateConsignee {
         skip_serializing_if = "Option::is_none"
     )]
     pub company_name: Option<String>,
-    #[field(display_name = r##"UltimateConsigneeType"##)]
+    #[field(display_name = r##"Ultimate Consignee Type"##)]
     #[serde(
         rename = "UltimateConsigneeType",
         default,
@@ -1615,7 +1615,7 @@ pub struct DeliveryDate {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "DeliveryInformation")]
 pub struct DeliveryInformation {
-    #[field(display_name = r##"deliveryPhoto"##)]
+    #[field(display_name = r##"Delivery Photo"##)]
     #[serde(
         rename = "deliveryPhoto",
         default,
@@ -1643,7 +1643,7 @@ pub struct DeliveryInformation {
         skip_serializing_if = "Option::is_none"
     )]
     pub received_by: Option<String>,
-    #[field(display_name = r##"signature"##)]
+    #[field(display_name = r##"Signature"##)]
     #[serde(rename = "signature", default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<Signature>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -1821,7 +1821,7 @@ pub struct DimensionsUnitOfMeasurement {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "DryIceDryIceWeight")]
 pub struct DryIceDryIceWeight {
-    #[field(display_name = r##"UnitOfMeasurement"##)]
+    #[field(display_name = r##"Unit Of Measurement"##)]
     #[serde(
         rename = "UnitOfMeasurement",
         default,
@@ -2001,7 +2001,7 @@ Refer to EEI License Codes in the Appendix for valid values.  Applies to EEI For
         skip_serializing_if = "Option::is_none"
     )]
     pub usml_category_code: Option<String>,
-    #[field(display_name = r##"UnitOfMeasurement"##)]
+    #[field(display_name = r##"Unit Of Measurement"##)]
     #[serde(
         rename = "UnitOfMeasurement",
         default,
@@ -2102,7 +2102,7 @@ pub struct FormImage {
         skip_serializing_if = "Option::is_none"
     )]
     pub graphic_image: Option<String>,
-    #[field(display_name = r##"ImageFormat"##)]
+    #[field(display_name = r##"Image Format"##)]
     #[serde(
         rename = "ImageFormat",
         default,
@@ -2184,7 +2184,7 @@ pub struct ForwardAgentAddress {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "FreightDensityInfoAdjustedHeight")]
 pub struct FreightDensityInfoAdjustedHeight {
-    #[field(display_name = r##"UnitOfMeasurement"##)]
+    #[field(display_name = r##"Unit Of Measurement"##)]
     #[serde(
         rename = "UnitOfMeasurement",
         default,
@@ -2231,7 +2231,7 @@ pub struct FreightDensityInfoHandlingUnits {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "FreightShipmentInformationFreightDensityInfo")]
 pub struct FreightShipmentInformationFreightDensityInfo {
-    #[field(display_name = r##"AdjustedHeight"##)]
+    #[field(display_name = r##"Adjusted Height"##)]
     #[serde(
         rename = "AdjustedHeight",
         default,
@@ -2347,7 +2347,7 @@ pub struct FrsShipmentDataFreightDensityRate {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "FrsShipmentDataHandlingUnits")]
 pub struct FrsShipmentDataHandlingUnits {
-    #[field(display_name = r##"AdjustedHeight"##)]
+    #[field(display_name = r##"Adjusted Height"##)]
     #[serde(
         rename = "AdjustedHeight",
         default,
@@ -2379,7 +2379,7 @@ pub struct FrsShipmentDataHandlingUnits {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "FrsShipmentDataTransportationCharges")]
 pub struct FrsShipmentDataTransportationCharges {
-    #[field(display_name = r##"DiscountAmount"##)]
+    #[field(display_name = r##"Discount Amount"##)]
     #[serde(
         rename = "DiscountAmount",
         default,
@@ -2396,14 +2396,14 @@ pub struct FrsShipmentDataTransportationCharges {
         skip_serializing_if = "Option::is_none"
     )]
     pub discount_percentage: Option<String>,
-    #[field(display_name = r##"GrossCharge"##)]
+    #[field(display_name = r##"Gross Charge"##)]
     #[serde(
         rename = "GrossCharge",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub gross_charge: Option<TransportationChargesGrossCharge>,
-    #[field(display_name = r##"NetCharge"##)]
+    #[field(display_name = r##"Net Charge"##)]
     #[serde(rename = "NetCharge", default, skip_serializing_if = "Option::is_none")]
     pub net_charge: Option<TransportationChargesNetCharge>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -2437,7 +2437,7 @@ pub struct GlobalTaxInformationAgentTaxIdentificationNumber {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "HandlingUnitsAdjustedHeight")]
 pub struct HandlingUnitsAdjustedHeight {
-    #[field(display_name = r##"UnitOfMeasurement"##)]
+    #[field(display_name = r##"Unit Of Measurement"##)]
     #[serde(
         rename = "UnitOfMeasurement",
         default,
@@ -2471,7 +2471,7 @@ pub struct HandlingUnitsDimensions {
     )]
     #[serde(rename = "Length", default, skip_serializing_if = "Option::is_none")]
     pub length: Option<String>,
-    #[field(display_name = r##"UnitOfMeasurement"##)]
+    #[field(display_name = r##"Unit Of Measurement"##)]
     #[serde(
         rename = "UnitOfMeasurement",
         default,
@@ -2560,7 +2560,7 @@ pub struct HighValueReportImage {
         skip_serializing_if = "Option::is_none"
     )]
     pub graphic_image: Option<String>,
-    #[field(display_name = r##"ImageFormat"##)]
+    #[field(display_name = r##"Image Format"##)]
     #[serde(
         rename = "ImageFormat",
         default,
@@ -2793,14 +2793,14 @@ pub struct InternationalFormsCn22Form {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "InternationalFormsContacts")]
 pub struct InternationalFormsContacts {
-    #[field(display_name = r##"ForwardAgent"##)]
+    #[field(display_name = r##"Forward Agent"##)]
     #[serde(
         rename = "ForwardAgent",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub forward_agent: Option<ContactsForwardAgent>,
-    #[field(display_name = r##"IntermediateConsignee"##)]
+    #[field(display_name = r##"Intermediate Consignee"##)]
     #[serde(
         rename = "IntermediateConsignee",
         default,
@@ -2810,10 +2810,10 @@ pub struct InternationalFormsContacts {
     #[field(display_name = r##"Producer"##)]
     #[serde(rename = "Producer", default, skip_serializing_if = "Option::is_none")]
     pub producer: Option<ContactsProducer>,
-    #[field(display_name = r##"SoldTo"##)]
+    #[field(display_name = r##"Sold To"##)]
     #[serde(rename = "SoldTo", default, skip_serializing_if = "Option::is_none")]
     pub sold_to: Option<ContactsSoldTo>,
-    #[field(display_name = r##"UltimateConsignee"##)]
+    #[field(display_name = r##"Ultimate Consignee"##)]
     #[serde(
         rename = "UltimateConsignee",
         default,
@@ -2878,14 +2878,14 @@ Valid values:
         skip_serializing_if = "Option::is_none"
     )]
     pub e_mail_address: Option<String>,
-    #[field(display_name = r##"ShipperFiled"##)]
+    #[field(display_name = r##"Shipper Filed"##)]
     #[serde(
         rename = "ShipperFiled",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub shipper_filed: Option<EeiFilingOptionShipperFiled>,
-    #[field(display_name = r##"UPSFiled"##)]
+    #[field(display_name = r##"UPS Filed"##)]
     #[serde(rename = "UPSFiled", default, skip_serializing_if = "Option::is_none")]
     pub ups_filed: Option<EeiFilingOptionUpsFiled>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -2974,7 +2974,7 @@ pub struct InternationalFormsProduct {
         skip_serializing_if = "Option::is_none"
     )]
     pub commodity_code: Option<String>,
-    #[field(display_name = r##"DDSReferenceNumber"##)]
+    #[field(display_name = r##"DDS Reference Number"##)]
     #[serde(
         rename = "DDSReferenceNumber",
         default,
@@ -2991,14 +2991,14 @@ pub struct InternationalFormsProduct {
         skip_serializing_if = "Option::is_none"
     )]
     pub description: Option<Vec<String>>,
-    #[field(display_name = r##"EEIInformation"##)]
+    #[field(display_name = r##"EEI Information"##)]
     #[serde(
         rename = "EEIInformation",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub eei_information: Option<ProductEeiInformation>,
-    #[field(display_name = r##"ExcludeFromForm"##)]
+    #[field(display_name = r##"Exclude From Form"##)]
     #[serde(
         rename = "ExcludeFromForm",
         default,
@@ -3049,7 +3049,7 @@ pub struct InternationalFormsProduct {
         skip_serializing_if = "Option::is_none"
     )]
     pub net_cost_code: Option<String>,
-    #[field(display_name = r##"NetCostDateRange"##)]
+    #[field(display_name = r##"Net Cost Date Range"##)]
     #[serde(
         rename = "NetCostDateRange",
         default,
@@ -3076,7 +3076,7 @@ pub struct InternationalFormsProduct {
         skip_serializing_if = "Option::is_none"
     )]
     pub origin_country_code: Option<String>,
-    #[field(display_name = r##"PackingListInfo"##)]
+    #[field(display_name = r##"Packing List Info"##)]
     #[serde(
         rename = "PackingListInfo",
         default,
@@ -3140,7 +3140,7 @@ No [3] - A completed and signed Certificate for the good voluntarily provided to
         skip_serializing_if = "Option::is_none"
     )]
     pub product_identifier_exempt_indicator: Option<bool>,
-    #[field(display_name = r##"ProductWeight"##)]
+    #[field(display_name = r##"Product Weight"##)]
     #[serde(
         rename = "ProductWeight",
         default,
@@ -3160,7 +3160,7 @@ Note: This value is calculated based on the Product/Unit/Value and /Product/Unit
         skip_serializing_if = "Option::is_none"
     )]
     pub sed_total_value: Option<String>,
-    #[field(display_name = r##"ScheduleB"##)]
+    #[field(display_name = r##"Schedule B"##)]
     #[serde(rename = "ScheduleB", default, skip_serializing_if = "Option::is_none")]
     pub schedule_b: Option<ProductScheduleB>,
     #[field(
@@ -3212,7 +3212,7 @@ pub struct InternationalFormsProductIdentifier {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "InternationalFormsUpsPremiumCareForm")]
 pub struct InternationalFormsUpsPremiumCareForm {
-    #[field(display_name = r##"LanguageForUPSPremiumCare"##)]
+    #[field(display_name = r##"Language For UPS Premium Care"##)]
     #[serde(
         rename = "LanguageForUPSPremiumCare",
         default,
@@ -3327,7 +3327,7 @@ pub struct LabelRecoveryFormImage {
         skip_serializing_if = "Option::is_none"
     )]
     pub graphic_image: Option<String>,
-    #[field(display_name = r##"ImageFormat"##)]
+    #[field(display_name = r##"Image Format"##)]
     #[serde(
         rename = "ImageFormat",
         default,
@@ -3430,14 +3430,14 @@ Note: Label Image will only scale up to 4 X 6, even when requesting 4 X 8.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "LabelRecoveryRequest")]
 pub struct LabelRecoveryRequest {
-    #[field(display_name = r##"LabelDelivery"##)]
+    #[field(display_name = r##"Label Delivery"##)]
     #[serde(
         rename = "LabelDelivery",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub label_delivery: Option<LabelRecoveryRequestLabelDelivery>,
-    #[field(display_name = r##"LabelSpecification"##)]
+    #[field(display_name = r##"Label Specification"##)]
     #[serde(
         rename = "LabelSpecification",
         default,
@@ -3463,7 +3463,7 @@ If both, TrackingNumber and MailInnovationsTrackingNumber are provided, the requ
         skip_serializing_if = "Option::is_none"
     )]
     pub mail_innovations_tracking_number: Option<String>,
-    #[field(display_name = r##"ReferenceValues"##)]
+    #[field(display_name = r##"Reference Values"##)]
     #[serde(
         rename = "ReferenceValues",
         default,
@@ -3497,7 +3497,7 @@ If both, TrackingNumber and MailInnovationsTrackingNumber are provided, the requ
     #[field(display_name = r##"Translate"##)]
     #[serde(rename = "Translate", default, skip_serializing_if = "Option::is_none")]
     pub translate: Option<LabelRecoveryRequestTranslate>,
-    #[field(display_name = r##"UPSPremiumCareForm"##)]
+    #[field(display_name = r##"UPS Premium Care Form"##)]
     #[serde(
         rename = "UPSPremiumCareForm",
         default,
@@ -3555,14 +3555,14 @@ pub struct LabelRecoveryRequestLabelSpecification {
         skip_serializing_if = "Option::is_none"
     )]
     pub http_user_agent: Option<String>,
-    #[field(display_name = r##"LabelImageFormat"##)]
+    #[field(display_name = r##"Label Image Format"##)]
     #[serde(
         rename = "LabelImageFormat",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub label_image_format: Option<LabelRecoveryLabelSpecificationLabelImageFormat>,
-    #[field(display_name = r##"LabelStockSize"##)]
+    #[field(display_name = r##"Label Stock Size"##)]
     #[serde(
         rename = "LabelStockSize",
         default,
@@ -3578,7 +3578,7 @@ pub struct LabelRecoveryRequestLabelSpecification {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "LabelRecoveryRequestReferenceValues")]
 pub struct LabelRecoveryRequestReferenceValues {
-    #[field(display_name = r##"ReferenceNumber"##)]
+    #[field(display_name = r##"Reference Number"##)]
     #[serde(
         rename = "ReferenceNumber",
         default,
@@ -3629,7 +3629,7 @@ Example: 1701 = 2017 January  Supported values: 1701, 1707, 1903, 2603"##
         skip_serializing_if = "Option::is_none"
     )]
     pub sub_version: Option<String>,
-    #[field(display_name = r##"TransactionReference"##)]
+    #[field(display_name = r##"Transaction Reference"##)]
     #[serde(
         rename = "TransactionReference",
         default,
@@ -3724,7 +3724,7 @@ pub struct LabelRecoveryRequestUpsPremiumCareForm {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "LabelRecoveryResponse")]
 pub struct LabelRecoveryResponse {
-    #[field(display_name = r##"CODTurnInPage"##)]
+    #[field(display_name = r##"COD Turn In Page"##)]
     #[serde(
         rename = "CODTurnInPage",
         default,
@@ -3734,7 +3734,7 @@ pub struct LabelRecoveryResponse {
     #[field(display_name = r##"Form"##)]
     #[serde(rename = "Form", default, skip_serializing_if = "Option::is_none")]
     pub form: Option<LabelRecoveryResponseForm>,
-    #[field(display_name = r##"HighValueReport"##)]
+    #[field(display_name = r##"High Value Report"##)]
     #[serde(
         rename = "HighValueReport",
         default,
@@ -3816,14 +3816,14 @@ pub struct LabelRecoveryResponseLabelResults {
     #[field(display_name = r##"Form"##)]
     #[serde(rename = "Form", default, skip_serializing_if = "Option::is_none")]
     pub form: Option<LabelResultsForm>,
-    #[field(display_name = r##"LabelImage"##)]
+    #[field(display_name = r##"Label Image"##)]
     #[serde(
         rename = "LabelImage",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub label_image: Option<LabelResultsLabelImage>,
-    #[field(display_name = r##"MailInnovationsLabelImage"##)]
+    #[field(display_name = r##"Mail Innovations Label Image"##)]
     #[serde(
         rename = "MailInnovationsLabelImage",
         default,
@@ -3865,14 +3865,14 @@ pub struct LabelRecoveryResponseResponse {
     #[field(display_name = r##"Alert"##)]
     #[serde(rename = "Alert", default, skip_serializing_if = "Option::is_none")]
     pub alert: Option<Vec<ResponseAlert>>,
-    #[field(display_name = r##"ResponseStatus"##)]
+    #[field(display_name = r##"Response Status"##)]
     #[serde(
         rename = "ResponseStatus",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub response_status: Option<LrResponseResponseStatus>,
-    #[field(display_name = r##"TransactionReference"##)]
+    #[field(display_name = r##"Transaction Reference"##)]
     #[serde(
         rename = "TransactionReference",
         default,
@@ -3908,7 +3908,7 @@ pub struct LabelRecoveryResponseTrackingCandidate {
         skip_serializing_if = "Option::is_none"
     )]
     pub destination_postal_code: Option<String>,
-    #[field(display_name = r##"PickupDateRange"##)]
+    #[field(display_name = r##"Pickup Date Range"##)]
     #[serde(
         rename = "PickupDateRange",
         default,
@@ -3972,7 +3972,7 @@ pub struct LabelResultsLabelImage {
         skip_serializing_if = "Option::is_none"
     )]
     pub international_signature_graphic_image: Option<String>,
-    #[field(display_name = r##"LabelImageFormat"##)]
+    #[field(display_name = r##"Label Image Format"##)]
     #[serde(
         rename = "LabelImageFormat",
         default,
@@ -4031,7 +4031,7 @@ pub struct LabelResultsMailInnovationsLabelImage {
         skip_serializing_if = "Option::is_none"
     )]
     pub international_signature_graphic_image: Option<String>,
-    #[field(display_name = r##"LabelImageFormat"##)]
+    #[field(display_name = r##"Label Image Format"##)]
     #[serde(
         rename = "LabelImageFormat",
         default,
@@ -4157,7 +4157,7 @@ pub struct LabelSpecificationLabelStockSize {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "LabelrecoveryResponseWrapper")]
 pub struct LabelrecoveryResponseWrapper {
-    #[field(display_name = r##"LabelRecoveryResponse"##)]
+    #[field(display_name = r##"Label Recovery Response"##)]
     #[serde(
         rename = "LabelRecoveryResponse",
         default,
@@ -4173,7 +4173,7 @@ pub struct LabelrecoveryResponseWrapper {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "Location")]
 pub struct Location {
-    #[field(display_name = r##"address"##)]
+    #[field(display_name = r##"Address"##)]
     #[serde(rename = "address", default, skip_serializing_if = "Option::is_none")]
     pub address: Option<Address>,
     #[field(
@@ -4227,7 +4227,7 @@ pub struct LrFormImage {
         skip_serializing_if = "Option::is_none"
     )]
     pub graphic_image: Option<String>,
-    #[field(display_name = r##"ImageFormat"##)]
+    #[field(display_name = r##"Image Format"##)]
     #[serde(
         rename = "ImageFormat",
         default,
@@ -4316,7 +4316,7 @@ pub struct LrcodTurnInPageImage {
         skip_serializing_if = "Option::is_none"
     )]
     pub graphic_image: Option<String>,
-    #[field(display_name = r##"ImageFormat"##)]
+    #[field(display_name = r##"Image Format"##)]
     #[serde(
         rename = "ImageFormat",
         default,
@@ -4419,7 +4419,7 @@ Valid values are:
         skip_serializing_if = "Option::is_none"
     )]
     pub freight_class: Option<String>,
-    #[field(display_name = r##"PackageWeight"##)]
+    #[field(display_name = r##"Package Weight"##)]
     #[serde(
         rename = "PackageWeight",
         default,
@@ -4778,7 +4778,7 @@ pub struct Milestones {
     )]
     #[serde(rename = "state", default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
-    #[field(display_name = r##"subMilestone"##)]
+    #[field(display_name = r##"Sub Milestone"##)]
     #[serde(
         rename = "subMilestone",
         default,
@@ -5169,7 +5169,7 @@ pub struct NotificationVoiceMessage {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "Package")]
 pub struct Package {
-    #[field(display_name = r##"accessPointInformation"##)]
+    #[field(display_name = r##"Access Point Information"##)]
     #[serde(
         rename = "accessPointInformation",
         default,
@@ -5206,7 +5206,7 @@ pub struct Package {
         skip_serializing_if = "Option::is_none"
     )]
     pub alternate_tracking_number: Option<Vec<AlternateTrackingNumber>>,
-    #[field(display_name = r##"currentStatus"##)]
+    #[field(display_name = r##"Current Status"##)]
     #[serde(
         rename = "currentStatus",
         default,
@@ -5220,21 +5220,21 @@ pub struct Package {
         skip_serializing_if = "Option::is_none"
     )]
     pub delivery_date: Option<Vec<DeliveryDate>>,
-    #[field(display_name = r##"deliveryInformation"##)]
+    #[field(display_name = r##"Delivery Information"##)]
     #[serde(
         rename = "deliveryInformation",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub delivery_information: Option<DeliveryInformation>,
-    #[field(display_name = r##"deliveryTime"##)]
+    #[field(display_name = r##"Delivery Time"##)]
     #[serde(
         rename = "deliveryTime",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub delivery_time: Option<DeliveryTime>,
-    #[field(display_name = r##"dimension"##)]
+    #[field(display_name = r##"Dimension"##)]
     #[serde(rename = "dimension", default, skip_serializing_if = "Option::is_none")]
     pub dimension: Option<Dimension>,
     #[field(
@@ -5286,7 +5286,7 @@ pub struct Package {
         skip_serializing_if = "Option::is_none"
     )]
     pub reference_number: Option<Vec<ReferenceNumber>>,
-    #[field(display_name = r##"service"##)]
+    #[field(display_name = r##"Service"##)]
     #[serde(rename = "service", default, skip_serializing_if = "Option::is_none")]
     pub service: Option<Service>,
     #[field(display_name = r##"Status Code"##)]
@@ -5334,7 +5334,7 @@ pub struct Package {
         skip_serializing_if = "Option::is_none"
     )]
     pub ucix_status: Option<String>,
-    #[field(display_name = r##"weight"##)]
+    #[field(display_name = r##"Weight"##)]
     #[serde(rename = "weight", default, skip_serializing_if = "Option::is_none")]
     pub weight: Option<Weight>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -5346,7 +5346,7 @@ pub struct Package {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "PackageAddress")]
 pub struct PackageAddress {
-    #[field(display_name = r##"address"##)]
+    #[field(display_name = r##"Address"##)]
     #[serde(rename = "address", default, skip_serializing_if = "Option::is_none")]
     pub address: Option<Address>,
     #[field(
@@ -5404,7 +5404,7 @@ pub struct PackageCommodity {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "PackageDimWeight")]
 pub struct PackageDimWeight {
-    #[field(display_name = r##"UnitOfMeasurement"##)]
+    #[field(display_name = r##"Unit Of Measurement"##)]
     #[serde(
         rename = "UnitOfMeasurement",
         default,
@@ -5435,7 +5435,7 @@ pub struct PackageDimensions {
     )]
     #[serde(rename = "Length", default, skip_serializing_if = "Option::is_none")]
     pub length: Option<String>,
-    #[field(display_name = r##"UnitOfMeasurement"##)]
+    #[field(display_name = r##"Unit Of Measurement"##)]
     #[serde(
         rename = "UnitOfMeasurement",
         default,
@@ -5524,7 +5524,7 @@ pub struct PackageLevelResultsStatus {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "PackagePackageServiceOptions")]
 pub struct PackagePackageServiceOptions {
-    #[field(display_name = r##"AccessPointCOD"##)]
+    #[field(display_name = r##"Access Point COD"##)]
     #[serde(
         rename = "AccessPointCOD",
         default,
@@ -5544,21 +5544,21 @@ pub struct PackagePackageServiceOptions {
         skip_serializing_if = "Option::is_none"
     )]
     pub clinical_trials_id: Option<String>,
-    #[field(display_name = r##"DeclaredValue"##)]
+    #[field(display_name = r##"Declared Value"##)]
     #[serde(
         rename = "DeclaredValue",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub declared_value: Option<PackageServiceOptionsDeclaredValue>,
-    #[field(display_name = r##"DeliveryConfirmation"##)]
+    #[field(display_name = r##"Delivery Confirmation"##)]
     #[serde(
         rename = "DeliveryConfirmation",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub delivery_confirmation: Option<PackageServiceOptionsDeliveryConfirmation>,
-    #[field(display_name = r##"DryIce"##)]
+    #[field(display_name = r##"Dry Ice"##)]
     #[serde(rename = "DryIce", default, skip_serializing_if = "Option::is_none")]
     pub dry_ice: Option<PackageServiceOptionsDryIce>,
     #[field(display_name = r##"Haz Mat"##)]
@@ -5666,7 +5666,7 @@ The UPSPremiumCareIndicator can be requested with following UPS services:
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "PackagePackageWeight")]
 pub struct PackagePackageWeight {
-    #[field(display_name = r##"UnitOfMeasurement"##)]
+    #[field(display_name = r##"Unit Of Measurement"##)]
     #[serde(
         rename = "UnitOfMeasurement",
         default,
@@ -6059,7 +6059,7 @@ pub struct PackageResultsShippingLabel {
     )]
     #[serde(rename = "HTMLImage", default, skip_serializing_if = "Option::is_none")]
     pub html_image: Option<String>,
-    #[field(display_name = r##"ImageFormat"##)]
+    #[field(display_name = r##"Image Format"##)]
     #[serde(
         rename = "ImageFormat",
         default,
@@ -6103,7 +6103,7 @@ The receipt image is only returned for the first 5 packages."##
         skip_serializing_if = "Option::is_none"
     )]
     pub graphic_image: Option<String>,
-    #[field(display_name = r##"ImageFormat"##)]
+    #[field(display_name = r##"Image Format"##)]
     #[serde(
         rename = "ImageFormat",
         default,
@@ -6163,7 +6163,7 @@ pub struct PackageServiceOptionsAccessPointCod {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "PackageServiceOptionsCod")]
 pub struct PackageServiceOptionsCod {
-    #[field(display_name = r##"CODAmount"##)]
+    #[field(display_name = r##"COD Amount"##)]
     #[serde(rename = "CODAmount", default, skip_serializing_if = "Option::is_none")]
     pub cod_amount: Option<PackageServiceOptionsCodCodAmount>,
     #[field(
@@ -6274,7 +6274,7 @@ pub struct PackageServiceOptionsDeliveryConfirmation {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "PackageServiceOptionsDryIce")]
 pub struct PackageServiceOptionsDryIce {
-    #[field(display_name = r##"DryIceWeight"##)]
+    #[field(display_name = r##"Dry Ice Weight"##)]
     #[serde(
         rename = "DryIceWeight",
         default,
@@ -6708,7 +6708,7 @@ Valid values:
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "PackageServiceOptionsNotification")]
 pub struct PackageServiceOptionsNotification {
-    #[field(display_name = r##"EMail"##)]
+    #[field(display_name = r##"E Mail"##)]
     #[serde(rename = "EMail", default, skip_serializing_if = "Option::is_none")]
     pub e_mail: Option<PackageServiceOptionsNotificationEMail>,
     #[field(
@@ -7010,21 +7010,21 @@ pub struct PaymentInformation {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "PaymentInformationShipmentCharge")]
 pub struct PaymentInformationShipmentCharge {
-    #[field(display_name = r##"BillReceiver"##)]
+    #[field(display_name = r##"Bill Receiver"##)]
     #[serde(
         rename = "BillReceiver",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub bill_receiver: Option<ShipmentChargeBillReceiver>,
-    #[field(display_name = r##"BillShipper"##)]
+    #[field(display_name = r##"Bill Shipper"##)]
     #[serde(
         rename = "BillShipper",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub bill_shipper: Option<ShipmentChargeBillShipper>,
-    #[field(display_name = r##"BillThirdParty"##)]
+    #[field(display_name = r##"Bill Third Party"##)]
     #[serde(
         rename = "BillThirdParty",
         default,
@@ -7296,7 +7296,7 @@ pub struct ProductDdsReferenceNumber {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ProductEeiInformation")]
 pub struct ProductEeiInformation {
-    #[field(display_name = r##"DDTCInformation"##)]
+    #[field(display_name = r##"DDTC Information"##)]
     #[serde(
         rename = "DDTCInformation",
         default,
@@ -7377,7 +7377,7 @@ pub struct ProductPackingListInfo {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ProductProductWeight")]
 pub struct ProductProductWeight {
-    #[field(display_name = r##"UnitOfMeasurement"##)]
+    #[field(display_name = r##"Unit Of Measurement"##)]
     #[serde(
         rename = "UnitOfMeasurement",
         default,
@@ -7433,7 +7433,7 @@ pub struct ProductUnit {
     )]
     #[serde(rename = "Number", default, skip_serializing_if = "Option::is_none")]
     pub number: Option<String>,
-    #[field(display_name = r##"UnitOfMeasurement"##)]
+    #[field(display_name = r##"Unit Of Measurement"##)]
     #[serde(
         rename = "UnitOfMeasurement",
         default,
@@ -7493,7 +7493,7 @@ pub struct ReceiptImage {
         skip_serializing_if = "Option::is_none"
     )]
     pub graphic_image: Option<String>,
-    #[field(display_name = r##"ImageFormat"##)]
+    #[field(display_name = r##"Image Format"##)]
     #[serde(
         rename = "ImageFormat",
         default,
@@ -7619,7 +7619,7 @@ pub struct RequestTransactionReference {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "Response")]
 pub struct Response {
-    #[field(display_name = r##"response"##)]
+    #[field(display_name = r##"Response"##)]
     #[serde(rename = "response", default, skip_serializing_if = "Option::is_none")]
     pub response: Option<TrackingErrorResponse>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -7943,7 +7943,7 @@ Vendor Collect ID Number type code will be printed on commercial invoice if pres
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ShipResponseWrapper")]
 pub struct ShipResponseWrapper {
-    #[field(display_name = r##"ShipmentResponse"##)]
+    #[field(display_name = r##"Shipment Response"##)]
     #[serde(
         rename = "ShipmentResponse",
         default,
@@ -8206,7 +8206,7 @@ This element or one of the sibling elements CreditCard or AccountNumber must be 
         skip_serializing_if = "Option::is_none"
     )]
     pub alternate_payment_method: Option<String>,
-    #[field(display_name = r##"CreditCard"##)]
+    #[field(display_name = r##"Credit Card"##)]
     #[serde(
         rename = "CreditCard",
         default,
@@ -8559,7 +8559,7 @@ For Density Based Rating (DBR), the customer must have DBR Contract Service."##
         skip_serializing_if = "Option::is_none"
     )]
     pub density_eligible_indicator: Option<String>,
-    #[field(display_name = r##"FreightDensityInfo"##)]
+    #[field(display_name = r##"Freight Density Info"##)]
     #[serde(
         rename = "FreightDensityInfo",
         default,
@@ -8709,7 +8709,7 @@ pub struct ShipmentPackage {
         skip_serializing_if = "Option::is_none"
     )]
     pub description: Option<String>,
-    #[field(display_name = r##"DimWeight"##)]
+    #[field(display_name = r##"Dim Weight"##)]
     #[serde(rename = "DimWeight", default, skip_serializing_if = "Option::is_none")]
     pub dim_weight: Option<PackageDimWeight>,
     #[field(display_name = r##"Dimensions"##)]
@@ -8719,7 +8719,7 @@ pub struct ShipmentPackage {
         skip_serializing_if = "Option::is_none"
     )]
     pub dimensions: Option<PackageDimensions>,
-    #[field(display_name = r##"HazMatPackageInformation"##)]
+    #[field(display_name = r##"Haz Mat Package Information"##)]
     #[serde(
         rename = "HazMatPackageInformation",
         default,
@@ -8768,14 +8768,14 @@ This is an empty tag, any value inside is ignored."##
         skip_serializing_if = "Option::is_none"
     )]
     pub oversize_indicator: Option<String>,
-    #[field(display_name = r##"PackageServiceOptions"##)]
+    #[field(display_name = r##"Package Service Options"##)]
     #[serde(
         rename = "PackageServiceOptions",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub package_service_options: Option<PackagePackageServiceOptions>,
-    #[field(display_name = r##"PackageWeight"##)]
+    #[field(display_name = r##"Package Weight"##)]
     #[serde(
         rename = "PackageWeight",
         default,
@@ -8802,14 +8802,14 @@ This is an empty tag, any value inside is ignored."##
         skip_serializing_if = "Option::is_none"
     )]
     pub reference_number: Option<Vec<PackageReferenceNumber>>,
-    #[field(display_name = r##"SimpleRate"##)]
+    #[field(display_name = r##"Simple Rate"##)]
     #[serde(
         rename = "SimpleRate",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub simple_rate: Option<PackageSimpleRate>,
-    #[field(display_name = r##"UPSPremier"##)]
+    #[field(display_name = r##"UPS Premier"##)]
     #[serde(
         rename = "UPSPremier",
         default,
@@ -8913,14 +8913,14 @@ pub struct ShipmentReferenceNumber {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ShipmentRequest")]
 pub struct ShipmentRequest {
-    #[field(display_name = r##"LabelSpecification"##)]
+    #[field(display_name = r##"Label Specification"##)]
     #[serde(
         rename = "LabelSpecification",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub label_specification: Option<ShipmentRequestLabelSpecification>,
-    #[field(display_name = r##"ReceiptSpecification"##)]
+    #[field(display_name = r##"Receipt Specification"##)]
     #[serde(
         rename = "ReceiptSpecification",
         default,
@@ -8993,14 +8993,14 @@ eng = English (Latin-1)  Default is English (Latin-1)."##
         skip_serializing_if = "Option::is_none"
     )]
     pub instruction: Option<Vec<LabelSpecificationInstruction>>,
-    #[field(display_name = r##"LabelImageFormat"##)]
+    #[field(display_name = r##"Label Image Format"##)]
     #[serde(
         rename = "LabelImageFormat",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub label_image_format: Option<LabelSpecificationLabelImageFormat>,
-    #[field(display_name = r##"LabelStockSize"##)]
+    #[field(display_name = r##"Label Stock Size"##)]
     #[serde(
         rename = "LabelStockSize",
         default,
@@ -9016,7 +9016,7 @@ eng = English (Latin-1)  Default is English (Latin-1)."##
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ShipmentRequestReceiptSpecification")]
 pub struct ShipmentRequestReceiptSpecification {
-    #[field(display_name = r##"ImageFormat"##)]
+    #[field(display_name = r##"Image Format"##)]
     #[serde(
         rename = "ImageFormat",
         default,
@@ -9065,7 +9065,7 @@ Example: 1607 = 2016 July  Supported values: 1601, 1607, 1701, 1707, 1801, 1807,
         skip_serializing_if = "Option::is_none"
     )]
     pub sub_version: Option<String>,
-    #[field(display_name = r##"TransactionReference"##)]
+    #[field(display_name = r##"Transaction Reference"##)]
     #[serde(
         rename = "TransactionReference",
         default,
@@ -9081,7 +9081,7 @@ Example: 1607 = 2016 July  Supported values: 1601, 1607, 1701, 1707, 1801, 1807,
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ShipmentRequestShipment")]
 pub struct ShipmentRequestShipment {
-    #[field(display_name = r##"AlternateDeliveryAddress"##)]
+    #[field(display_name = r##"Alternate Delivery Address"##)]
     #[serde(
         rename = "AlternateDeliveryAddress",
         default,
@@ -9123,7 +9123,7 @@ Cost Center length is numeric with a max length of 4 for Mail Innovations Return
         skip_serializing_if = "Option::is_none"
     )]
     pub cost_center_barcode_indicator: Option<String>,
-    #[field(display_name = r##"DGSignatoryInfo"##)]
+    #[field(display_name = r##"DG Signatory Info"##)]
     #[serde(
         rename = "DGSignatoryInfo",
         default,
@@ -9163,21 +9163,21 @@ Valid only for shipments with different origin and destination countries or terr
         skip_serializing_if = "Option::is_none"
     )]
     pub documents_only_indicator: Option<String>,
-    #[field(display_name = r##"FRSPaymentInformation"##)]
+    #[field(display_name = r##"FRS Payment Information"##)]
     #[serde(
         rename = "FRSPaymentInformation",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub frs_payment_information: Option<ShipmentFrsPaymentInformation>,
-    #[field(display_name = r##"FreightShipmentInformation"##)]
+    #[field(display_name = r##"Freight Shipment Information"##)]
     #[serde(
         rename = "FreightShipmentInformation",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub freight_shipment_information: Option<ShipmentFreightShipmentInformation>,
-    #[field(display_name = r##"GlobalTaxInformation"##)]
+    #[field(display_name = r##"Global Tax Information"##)]
     #[serde(
         rename = "GlobalTaxInformation",
         default,
@@ -9204,7 +9204,7 @@ Valid only for shipments with different origin and destination countries or terr
         skip_serializing_if = "Option::is_none"
     )]
     pub healthcare_identifier: Option<String>,
-    #[field(display_name = r##"InvoiceLineTotal"##)]
+    #[field(display_name = r##"Invoice Line Total"##)]
     #[serde(
         rename = "InvoiceLineTotal",
         default,
@@ -9341,14 +9341,14 @@ This is an empty tag, any value inside is ignored.                              
         skip_serializing_if = "Option::is_none"
     )]
     pub package_id_barcode_indicator: Option<String>,
-    #[field(display_name = r##"PaymentInformation"##)]
+    #[field(display_name = r##"Payment Information"##)]
     #[serde(
         rename = "PaymentInformation",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub payment_information: Option<ShipmentPaymentInformation>,
-    #[field(display_name = r##"PromotionalDiscountInformation"##)]
+    #[field(display_name = r##"Promotional Discount Information"##)]
     #[serde(
         rename = "PromotionalDiscountInformation",
         default,
@@ -9379,7 +9379,7 @@ If present, Billable Weight Calculation method information and Rating Method inf
         skip_serializing_if = "Option::is_none"
     )]
     pub reference_number: Option<Vec<ShipmentReferenceNumber>>,
-    #[field(display_name = r##"ReturnService"##)]
+    #[field(display_name = r##"Return Service"##)]
     #[serde(
         rename = "ReturnService",
         default,
@@ -9389,10 +9389,10 @@ If present, Billable Weight Calculation method information and Rating Method inf
     #[field(display_name = r##"Service"##)]
     #[serde(rename = "Service", default, skip_serializing_if = "Option::is_none")]
     pub service: Option<ShipmentService>,
-    #[field(display_name = r##"ShipFrom"##)]
+    #[field(display_name = r##"Ship From"##)]
     #[serde(rename = "ShipFrom", default, skip_serializing_if = "Option::is_none")]
     pub ship_from: Option<ShipmentShipFrom>,
-    #[field(display_name = r##"ShipTo"##)]
+    #[field(display_name = r##"Ship To"##)]
     #[serde(rename = "ShipTo", default, skip_serializing_if = "Option::is_none")]
     pub ship_to: Option<ShipmentShipTo>,
     #[field(
@@ -9412,7 +9412,7 @@ If present, Billable Weight Calculation method information and Rating Method inf
         skip_serializing_if = "Option::is_none"
     )]
     pub shipment_indication_type: Option<Vec<ShipmentShipmentIndicationType>>,
-    #[field(display_name = r##"ShipmentRatingOptions"##)]
+    #[field(display_name = r##"Shipment Rating Options"##)]
     #[serde(
         rename = "ShipmentRatingOptions",
         default,
@@ -9432,7 +9432,7 @@ If present, Billable Weight Calculation method information and Rating Method inf
         skip_serializing_if = "Option::is_none"
     )]
     pub shipment_risk_entering_eu: Option<String>,
-    #[field(display_name = r##"ShipmentServiceOptions"##)]
+    #[field(display_name = r##"Shipment Service Options"##)]
     #[serde(
         rename = "ShipmentServiceOptions",
         default,
@@ -9487,7 +9487,7 @@ SubClass is only required if the customer's contract have them subclass the pack
         skip_serializing_if = "Option::is_none"
     )]
     pub tax_information_indicator: Option<String>,
-    #[field(display_name = r##"TradeDirect"##)]
+    #[field(display_name = r##"Trade Direct"##)]
     #[serde(
         rename = "TradeDirect",
         default,
@@ -9511,7 +9511,7 @@ Note: For International Mail Innovations shipments use No Service Selected. Inte
         skip_serializing_if = "Option::is_none"
     )]
     pub usps_endorsement: Option<String>,
-    #[field(display_name = r##"WorldEase"##)]
+    #[field(display_name = r##"World Ease"##)]
     #[serde(rename = "WorldEase", default, skip_serializing_if = "Option::is_none")]
     pub world_ease: Option<ShipmentWorldEase>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -9526,7 +9526,7 @@ pub struct ShipmentResponse {
     #[field(display_name = r##"Response"##)]
     #[serde(rename = "Response", default, skip_serializing_if = "Option::is_none")]
     pub response: Option<ShipmentResponseResponse>,
-    #[field(display_name = r##"ShipmentResults"##)]
+    #[field(display_name = r##"Shipment Results"##)]
     #[serde(
         rename = "ShipmentResults",
         default,
@@ -9551,14 +9551,14 @@ pub struct ShipmentResponseResponse {
     )]
     #[serde(rename = "Alert", default, skip_serializing_if = "Option::is_none")]
     pub alert: Option<Vec<ResponseAlert>>,
-    #[field(display_name = r##"ResponseStatus"##)]
+    #[field(display_name = r##"Response Status"##)]
     #[serde(
         rename = "ResponseStatus",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub response_status: Option<ResponseResponseStatus>,
-    #[field(display_name = r##"TransactionReference"##)]
+    #[field(display_name = r##"Transaction Reference"##)]
     #[serde(
         rename = "TransactionReference",
         default,
@@ -9606,14 +9606,14 @@ pub struct ShipmentResponseShipmentResults {
         skip_serializing_if = "Option::is_none"
     )]
     pub billable_weight_calculation_method: Option<String>,
-    #[field(display_name = r##"BillingWeight"##)]
+    #[field(display_name = r##"Billing Weight"##)]
     #[serde(
         rename = "BillingWeight",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub billing_weight: Option<ShipmentResultsBillingWeight>,
-    #[field(display_name = r##"CODTurnInPage"##)]
+    #[field(display_name = r##"COD Turn In Page"##)]
     #[serde(
         rename = "CODTurnInPage",
         default,
@@ -9659,7 +9659,7 @@ pub struct ShipmentResponseShipmentResults {
         skip_serializing_if = "Option::is_none"
     )]
     pub disclaimer: Option<Vec<ShipmentResultsDisclaimer>>,
-    #[field(display_name = r##"FRSShipmentData"##)]
+    #[field(display_name = r##"FRS Shipment Data"##)]
     #[serde(
         rename = "FRSShipmentData",
         default,
@@ -9675,7 +9675,7 @@ pub struct ShipmentResponseShipmentResults {
     )]
     #[serde(rename = "GCCN", default, skip_serializing_if = "Option::is_none")]
     pub gccn: Option<String>,
-    #[field(display_name = r##"HighValueReport"##)]
+    #[field(display_name = r##"High Value Report"##)]
     #[serde(
         rename = "HighValueReport",
         default,
@@ -9748,7 +9748,7 @@ If the shipment is an MI Returns shipment, the Mail Manifest ID (MMI) will be co
     )]
     #[serde(rename = "Message", default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    #[field(display_name = r##"NegotiatedRateCharges"##)]
+    #[field(display_name = r##"Negotiated Rate Charges"##)]
     #[serde(
         rename = "NegotiatedRateCharges",
         default,
@@ -9768,7 +9768,7 @@ If the shipment is an MI Returns shipment, the Mail Manifest ID (MMI) will be co
         skip_serializing_if = "Option::is_none"
     )]
     pub package_results: Option<Vec<ShipmentResultsPackageResults>>,
-    #[field(display_name = r##"PalletLabel"##)]
+    #[field(display_name = r##"Pallet Label"##)]
     #[serde(
         rename = "PalletLabel",
         default,
@@ -9809,7 +9809,7 @@ Print/Electronic Return shipment."##
         skip_serializing_if = "Option::is_none"
     )]
     pub roar_rated_indicator: Option<String>,
-    #[field(display_name = r##"ShipmentCharges"##)]
+    #[field(display_name = r##"Shipment Charges"##)]
     #[serde(
         rename = "ShipmentCharges",
         default,
@@ -9852,7 +9852,7 @@ Print/Electronic Return shipment."##
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ShipmentResultsBillingWeight")]
 pub struct ShipmentResultsBillingWeight {
-    #[field(display_name = r##"UnitOfMeasurement"##)]
+    #[field(display_name = r##"Unit Of Measurement"##)]
     #[serde(
         rename = "UnitOfMeasurement",
         default,
@@ -9896,7 +9896,7 @@ pub struct ShipmentResultsControlLogReceipt {
         skip_serializing_if = "Option::is_none"
     )]
     pub graphic_image: Option<String>,
-    #[field(display_name = r##"ImageFormat"##)]
+    #[field(display_name = r##"Image Format"##)]
     #[serde(
         rename = "ImageFormat",
         default,
@@ -9999,7 +9999,7 @@ pub struct ShipmentResultsFormImage {
         skip_serializing_if = "Option::is_none"
     )]
     pub graphic_image: Option<String>,
-    #[field(display_name = r##"ImageFormat"##)]
+    #[field(display_name = r##"Image Format"##)]
     #[serde(
         rename = "ImageFormat",
         default,
@@ -10015,7 +10015,7 @@ pub struct ShipmentResultsFormImage {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ShipmentResultsFrsShipmentData")]
 pub struct ShipmentResultsFrsShipmentData {
-    #[field(display_name = r##"FreightDensityRate"##)]
+    #[field(display_name = r##"Freight Density Rate"##)]
     #[serde(
         rename = "FreightDensityRate",
         default,
@@ -10035,7 +10035,7 @@ pub struct ShipmentResultsFrsShipmentData {
         skip_serializing_if = "Option::is_none"
     )]
     pub handling_units: Option<Vec<FrsShipmentDataHandlingUnits>>,
-    #[field(display_name = r##"TransportationCharges"##)]
+    #[field(display_name = r##"Transportation Charges"##)]
     #[serde(
         rename = "TransportationCharges",
         default,
@@ -10125,14 +10125,14 @@ Negotiated itemized charges are only returned for certain contract-only shipment
         skip_serializing_if = "Option::is_none"
     )]
     pub tax_charges: Option<Vec<NegotiatedRateChargesTaxCharges>>,
-    #[field(display_name = r##"TotalCharge"##)]
+    #[field(display_name = r##"Total Charge"##)]
     #[serde(
         rename = "TotalCharge",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub total_charge: Option<NegotiatedRateChargesTotalCharge>,
-    #[field(display_name = r##"TotalChargesWithTaxes"##)]
+    #[field(display_name = r##"Total Charges With Taxes"##)]
     #[serde(
         rename = "TotalChargesWithTaxes",
         default,
@@ -10161,7 +10161,7 @@ pub struct ShipmentResultsPackageResults {
         skip_serializing_if = "Option::is_none"
     )]
     pub accessorial: Option<Vec<PackageResultsAccessorial>>,
-    #[field(display_name = r##"BaseServiceCharge"##)]
+    #[field(display_name = r##"Base Service Charge"##)]
     #[serde(
         rename = "BaseServiceCharge",
         default,
@@ -10196,7 +10196,7 @@ Mail Innovations shipments US to VI, PR, and GU are not considered international
         skip_serializing_if = "Option::is_none"
     )]
     pub itemized_charges: Option<Vec<PackageResultsItemizedCharges>>,
-    #[field(display_name = r##"NegotiatedCharges"##)]
+    #[field(display_name = r##"Negotiated Charges"##)]
     #[serde(
         rename = "NegotiatedCharges",
         default,
@@ -10216,28 +10216,28 @@ Mail Innovations shipments US to VI, PR, and GU are not considered international
         skip_serializing_if = "Option::is_none"
     )]
     pub rate_modifier: Option<Vec<PackageResultsRateModifier>>,
-    #[field(display_name = r##"ServiceOptionsCharges"##)]
+    #[field(display_name = r##"Service Options Charges"##)]
     #[serde(
         rename = "ServiceOptionsCharges",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub service_options_charges: Option<PackageResultsServiceOptionsCharges>,
-    #[field(display_name = r##"ShippingLabel"##)]
+    #[field(display_name = r##"Shipping Label"##)]
     #[serde(
         rename = "ShippingLabel",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub shipping_label: Option<PackageResultsShippingLabel>,
-    #[field(display_name = r##"ShippingReceipt"##)]
+    #[field(display_name = r##"Shipping Receipt"##)]
     #[serde(
         rename = "ShippingReceipt",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub shipping_receipt: Option<PackageResultsShippingReceipt>,
-    #[field(display_name = r##"SimpleRate"##)]
+    #[field(display_name = r##"Simple Rate"##)]
     #[serde(
         rename = "SimpleRate",
         default,
@@ -10293,7 +10293,7 @@ pub struct ShipmentResultsPalletLabel {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ShipmentResultsShipmentCharges")]
 pub struct ShipmentResultsShipmentCharges {
-    #[field(display_name = r##"BaseServiceCharge"##)]
+    #[field(display_name = r##"Base Service Charge"##)]
     #[serde(
         rename = "BaseServiceCharge",
         default,
@@ -10336,7 +10336,7 @@ All Other origins:
     )]
     #[serde(rename = "RateChart", default, skip_serializing_if = "Option::is_none")]
     pub rate_chart: Option<String>,
-    #[field(display_name = r##"ServiceOptionsCharges"##)]
+    #[field(display_name = r##"Service Options Charges"##)]
     #[serde(
         rename = "ServiceOptionsCharges",
         default,
@@ -10356,21 +10356,21 @@ All Other origins:
         skip_serializing_if = "Option::is_none"
     )]
     pub tax_charges: Option<Vec<ShipmentChargesTaxCharges>>,
-    #[field(display_name = r##"TotalCharges"##)]
+    #[field(display_name = r##"Total Charges"##)]
     #[serde(
         rename = "TotalCharges",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub total_charges: Option<ShipmentChargesTotalCharges>,
-    #[field(display_name = r##"TotalChargesWithTaxes"##)]
+    #[field(display_name = r##"Total Charges With Taxes"##)]
     #[serde(
         rename = "TotalChargesWithTaxes",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub total_charges_with_taxes: Option<ShipmentChargesTotalChargesWithTaxes>,
-    #[field(display_name = r##"TransportationCharges"##)]
+    #[field(display_name = r##"Transportation Charges"##)]
     #[serde(
         rename = "TransportationCharges",
         default,
@@ -10520,7 +10520,7 @@ pub struct ShipmentServiceOptionsAccessPointCod {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ShipmentServiceOptionsCod")]
 pub struct ShipmentServiceOptionsCod {
-    #[field(display_name = r##"CODAmount"##)]
+    #[field(display_name = r##"COD Amount"##)]
     #[serde(rename = "CODAmount", default, skip_serializing_if = "Option::is_none")]
     pub cod_amount: Option<CodCodAmount>,
     #[field(
@@ -10581,14 +10581,14 @@ It is evaluated only when:
         skip_serializing_if = "Option::is_none"
     )]
     pub additional_document_indicator: Option<String>,
-    #[field(display_name = r##"BlanketPeriod"##)]
+    #[field(display_name = r##"Blanket Period"##)]
     #[serde(
         rename = "BlanketPeriod",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub blanket_period: Option<InternationalFormsBlanketPeriod>,
-    #[field(display_name = r##"CN22Form"##)]
+    #[field(display_name = r##"CN22 Form"##)]
     #[serde(rename = "CN22Form", default, skip_serializing_if = "Option::is_none")]
     pub cn22_form: Option<InternationalFormsCn22Form>,
     #[field(
@@ -10639,7 +10639,7 @@ It is evaluated only when:
     #[field(display_name = r##"Discount"##)]
     #[serde(rename = "Discount", default, skip_serializing_if = "Option::is_none")]
     pub discount: Option<InternationalFormsDiscount>,
-    #[field(display_name = r##"EEIFilingOption"##)]
+    #[field(display_name = r##"EEI Filing Option"##)]
     #[serde(
         rename = "EEIFilingOption",
         default,
@@ -10712,7 +10712,7 @@ Note: 01 and 05 are mutually exclusive and 05 are only valid for return shipment
     )]
     #[serde(rename = "FormType", default, skip_serializing_if = "Option::is_none")]
     pub form_type: Option<Vec<String>>,
-    #[field(display_name = r##"FreightCharges"##)]
+    #[field(display_name = r##"Freight Charges"##)]
     #[serde(
         rename = "FreightCharges",
         default,
@@ -10739,7 +10739,7 @@ Note: 01 and 05 are mutually exclusive and 05 are only valid for return shipment
         skip_serializing_if = "Option::is_none"
     )]
     pub in_bond_code: Option<String>,
-    #[field(display_name = r##"InsuranceCharges"##)]
+    #[field(display_name = r##"Insurance Charges"##)]
     #[serde(
         rename = "InsuranceCharges",
         default,
@@ -10786,7 +10786,7 @@ Note: 01 and 05 are mutually exclusive and 05 are only valid for return shipment
         skip_serializing_if = "Option::is_none"
     )]
     pub mode_of_transport: Option<String>,
-    #[field(display_name = r##"OtherCharges"##)]
+    #[field(display_name = r##"Other Charges"##)]
     #[serde(
         rename = "OtherCharges",
         default,
@@ -10931,14 +10931,14 @@ FOB: Free On Board"##
         skip_serializing_if = "Option::is_none"
     )]
     pub terms_of_shipment: Option<String>,
-    #[field(display_name = r##"UPSPremiumCareForm"##)]
+    #[field(display_name = r##"UPS Premium Care Form"##)]
     #[serde(
         rename = "UPSPremiumCareForm",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub ups_premium_care_form: Option<InternationalFormsUpsPremiumCareForm>,
-    #[field(display_name = r##"UserCreatedForm"##)]
+    #[field(display_name = r##"User Created Form"##)]
     #[serde(
         rename = "UserCreatedForm",
         default,
@@ -10954,7 +10954,7 @@ FOB: Free On Board"##
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ShipmentServiceOptionsLabelDelivery")]
 pub struct ShipmentServiceOptionsLabelDelivery {
-    #[field(display_name = r##"EMail"##)]
+    #[field(display_name = r##"E Mail"##)]
     #[serde(rename = "EMail", default, skip_serializing_if = "Option::is_none")]
     pub e_mail: Option<LabelDeliveryEMail>,
     #[field(
@@ -11006,7 +11006,7 @@ pub struct ShipmentServiceOptionsLabelMethod {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ShipmentServiceOptionsNotification")]
 pub struct ShipmentServiceOptionsNotification {
-    #[field(display_name = r##"EMail"##)]
+    #[field(display_name = r##"E Mail"##)]
     #[serde(rename = "EMail", default, skip_serializing_if = "Option::is_none")]
     pub e_mail: Option<NotificationEMail>,
     #[field(display_name = r##"Locale"##)]
@@ -11037,14 +11037,14 @@ Valid values:
         skip_serializing_if = "Option::is_none"
     )]
     pub notification_code: Option<String>,
-    #[field(display_name = r##"TextMessage"##)]
+    #[field(display_name = r##"Text Message"##)]
     #[serde(
         rename = "TextMessage",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub text_message: Option<NotificationTextMessage>,
-    #[field(display_name = r##"VoiceMessage"##)]
+    #[field(display_name = r##"Voice Message"##)]
     #[serde(
         rename = "VoiceMessage",
         default,
@@ -11060,7 +11060,7 @@ Valid values:
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ShipmentServiceOptionsPreAlertNotification")]
 pub struct ShipmentServiceOptionsPreAlertNotification {
-    #[field(display_name = r##"EMailMessage"##)]
+    #[field(display_name = r##"E Mail Message"##)]
     #[serde(
         rename = "EMailMessage",
         default,
@@ -11070,14 +11070,14 @@ pub struct ShipmentServiceOptionsPreAlertNotification {
     #[field(display_name = r##"Locale"##)]
     #[serde(rename = "Locale", default, skip_serializing_if = "Option::is_none")]
     pub locale: Option<PreAlertNotificationLocale>,
-    #[field(display_name = r##"TextMessage"##)]
+    #[field(display_name = r##"Text Message"##)]
     #[serde(
         rename = "TextMessage",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub text_message: Option<PreAlertNotificationTextMessage>,
-    #[field(display_name = r##"VoiceMessage"##)]
+    #[field(display_name = r##"Voice Message"##)]
     #[serde(
         rename = "VoiceMessage",
         default,
@@ -11271,7 +11271,7 @@ pub struct ShipmentShipFrom {
     #[field(display_name = r##"Phone"##)]
     #[serde(rename = "Phone", default, skip_serializing_if = "Option::is_none")]
     pub phone: Option<ShipFromPhone>,
-    #[field(display_name = r##"TaxIDType"##)]
+    #[field(display_name = r##"Tax ID Type"##)]
     #[serde(rename = "TaxIDType", default, skip_serializing_if = "Option::is_none")]
     pub tax_id_type: Option<ShipFromTaxIdType>,
     #[field(
@@ -11285,7 +11285,7 @@ Applies to EEI Form only. This element has been deprecated, replacement can be f
         skip_serializing_if = "Option::is_none"
     )]
     pub tax_identification_number: Option<String>,
-    #[field(display_name = r##"VendorInfo"##)]
+    #[field(display_name = r##"Vendor Info"##)]
     #[serde(
         rename = "VendorInfo",
         default,
@@ -11479,7 +11479,7 @@ User should be eligible for user level discount"##
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ShipmentShipmentServiceOptions")]
 pub struct ShipmentShipmentServiceOptions {
-    #[field(display_name = r##"AccessPointCOD"##)]
+    #[field(display_name = r##"Access Point COD"##)]
     #[serde(
         rename = "AccessPointCOD",
         default,
@@ -11509,7 +11509,7 @@ pub struct ShipmentShipmentServiceOptions {
         skip_serializing_if = "Option::is_none"
     )]
     pub deliver_to_addressee_only_indicator: Option<String>,
-    #[field(display_name = r##"DeliveryConfirmation"##)]
+    #[field(display_name = r##"Delivery Confirmation"##)]
     #[serde(
         rename = "DeliveryConfirmation",
         default,
@@ -11591,7 +11591,7 @@ Default is Room of Choice.  Shippers account needs to have a valid contract for 
         skip_serializing_if = "Option::is_none"
     )]
     pub inside_delivery: Option<String>,
-    #[field(display_name = r##"InternationalForms"##)]
+    #[field(display_name = r##"International Forms"##)]
     #[serde(
         rename = "InternationalForms",
         default,
@@ -11608,14 +11608,14 @@ Default is Room of Choice.  Shippers account needs to have a valid contract for 
         skip_serializing_if = "Option::is_none"
     )]
     pub item_disposal: Option<String>,
-    #[field(display_name = r##"LabelDelivery"##)]
+    #[field(display_name = r##"Label Delivery"##)]
     #[serde(
         rename = "LabelDelivery",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub label_delivery: Option<ShipmentServiceOptionsLabelDelivery>,
-    #[field(display_name = r##"LabelMethod"##)]
+    #[field(display_name = r##"Label Method"##)]
     #[serde(
         rename = "LabelMethod",
         default,
@@ -11664,7 +11664,7 @@ This accessorial is only valid for UPS Worldwide Express Freight and UPS Worldwi
         skip_serializing_if = "Option::is_none"
     )]
     pub pre_alert_notification: Option<Vec<ShipmentServiceOptionsPreAlertNotification>>,
-    #[field(display_name = r##"RestrictedArticles"##)]
+    #[field(display_name = r##"Restricted Articles"##)]
     #[serde(
         rename = "RestrictedArticles",
         default,
@@ -11721,7 +11721,7 @@ This accessorial is only valid for UPS Worldwide Express Freight and UPS Worldwi
         skip_serializing_if = "Option::is_none"
     )]
     pub up_scarbonneutral_indicator: Option<String>,
-    #[field(display_name = r##"VerifiedDelivery"##)]
+    #[field(display_name = r##"Verified Delivery"##)]
     #[serde(
         rename = "VerifiedDelivery",
         default,
@@ -11981,7 +11981,10 @@ pub struct ShipmentWorldEase {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ShipmentWorldEasePortOfEntry")]
 pub struct ShipmentWorldEasePortOfEntry {
-    #[field(display_name = r##"Address"##)]
+    #[field(
+        display_name = r##"Address"##,
+        description = r##"Address of the POE. For Master/Child Shipment"##
+    )]
     #[serde(rename = "Address", default, skip_serializing_if = "Option::is_none")]
     pub address: Option<AddressPoe>,
     #[field(
@@ -12118,7 +12121,7 @@ A phone number is required if destination is international.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ShippingErrorResponse")]
 pub struct ShippingErrorResponse {
-    #[field(display_name = r##"response"##)]
+    #[field(display_name = r##"Response"##)]
     #[serde(rename = "response", default, skip_serializing_if = "Option::is_none")]
     pub response: Option<CommonErrorResponse>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -12381,7 +12384,7 @@ pub struct SummaryResultStatus {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "TrackApiResponse")]
 pub struct TrackApiResponse {
-    #[field(display_name = r##"trackResponse"##)]
+    #[field(display_name = r##"Track Response"##)]
     #[serde(
         rename = "trackResponse",
         default,
@@ -12517,14 +12520,14 @@ pub struct TradeDirectChild {
         skip_serializing_if = "Option::is_none"
     )]
     pub haz_mat_indicator: Option<String>,
-    #[field(display_name = r##"LtlCharges"##)]
+    #[field(display_name = r##"Ltl Charges"##)]
     #[serde(
         rename = "LtlCharges",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub ltl_charges: Option<ChildLtlCharges>,
-    #[field(display_name = r##"LtlPackage"##)]
+    #[field(display_name = r##"Ltl Package"##)]
     #[serde(
         rename = "LtlPackage",
         default,
@@ -12563,7 +12566,7 @@ pub struct TradeDirectChild {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "TradeDirectMaster")]
 pub struct TradeDirectMaster {
-    #[field(display_name = r##"NotificationBeforeDelivery"##)]
+    #[field(display_name = r##"Notification Before Delivery"##)]
     #[serde(
         rename = "NotificationBeforeDelivery",
         default,
@@ -12573,7 +12576,7 @@ pub struct TradeDirectMaster {
     #[field(display_name = r##"Pickup"##)]
     #[serde(rename = "Pickup", default, skip_serializing_if = "Option::is_none")]
     pub pickup: Option<MasterPickup>,
-    #[field(display_name = r##"SoldTo"##)]
+    #[field(display_name = r##"Sold To"##)]
     #[serde(rename = "SoldTo", default, skip_serializing_if = "Option::is_none")]
     pub sold_to: Option<MasterSoldTo>,
     #[field(
@@ -12586,7 +12589,7 @@ pub struct TradeDirectMaster {
         skip_serializing_if = "Option::is_none"
     )]
     pub sold_to_same_as_ship_to: Option<String>,
-    #[field(display_name = r##"TradeComplianceDetails"##)]
+    #[field(display_name = r##"Trade Compliance Details"##)]
     #[serde(
         rename = "TradeComplianceDetails",
         default,
@@ -13097,7 +13100,7 @@ pub struct VoidShipmentResponse {
     #[field(display_name = r##"Response"##)]
     #[serde(rename = "Response", default, skip_serializing_if = "Option::is_none")]
     pub response: Option<VoidShipmentResponseResponse>,
-    #[field(display_name = r##"SummaryResult"##)]
+    #[field(display_name = r##"Summary Result"##)]
     #[serde(
         rename = "SummaryResult",
         default,
@@ -13138,14 +13141,14 @@ pub struct VoidShipmentResponseResponse {
     #[field(display_name = r##"Alert"##)]
     #[serde(rename = "Alert", default, skip_serializing_if = "Option::is_none")]
     pub alert: Option<ResponseAlert>,
-    #[field(display_name = r##"ResponseStatus"##)]
+    #[field(display_name = r##"Response Status"##)]
     #[serde(
         rename = "ResponseStatus",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub response_status: Option<VoidResponseResponseStatus>,
-    #[field(display_name = r##"TransactionReference"##)]
+    #[field(display_name = r##"Transaction Reference"##)]
     #[serde(
         rename = "TransactionReference",
         default,
@@ -13173,7 +13176,7 @@ pub struct VoidShipmentResponseSummaryResult {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "VoidshipmentResponseWrapper")]
 pub struct VoidshipmentResponseWrapper {
-    #[field(display_name = r##"VoidShipmentResponse"##)]
+    #[field(display_name = r##"Void Shipment Response"##)]
     #[serde(
         rename = "VoidShipmentResponse",
         default,
@@ -13236,14 +13239,14 @@ pub struct LabelRecoveryInput {
     #[field(skip)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub _connection: Option<RawConnection>,
-    #[field(display_name = r##"LabelDelivery"##)]
+    #[field(display_name = r##"Label Delivery"##)]
     #[serde(
         rename = "LabelDelivery",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub label_delivery: Option<LabelRecoveryRequestLabelDelivery>,
-    #[field(display_name = r##"LabelSpecification"##)]
+    #[field(display_name = r##"Label Specification"##)]
     #[serde(
         rename = "LabelSpecification",
         default,
@@ -13269,7 +13272,7 @@ If both, TrackingNumber and MailInnovationsTrackingNumber are provided, the requ
         skip_serializing_if = "Option::is_none"
     )]
     pub mail_innovations_tracking_number: Option<String>,
-    #[field(display_name = r##"ReferenceValues"##)]
+    #[field(display_name = r##"Reference Values"##)]
     #[serde(
         rename = "ReferenceValues",
         default,
@@ -13303,7 +13306,7 @@ If both, TrackingNumber and MailInnovationsTrackingNumber are provided, the requ
     #[field(display_name = r##"Translate"##)]
     #[serde(rename = "Translate", default, skip_serializing_if = "Option::is_none")]
     pub translate: Option<LabelRecoveryRequestTranslate>,
-    #[field(display_name = r##"UPSPremiumCareForm"##)]
+    #[field(display_name = r##"UPS Premium Care Form"##)]
     #[serde(
         rename = "UPSPremiumCareForm",
         default,
@@ -13369,14 +13372,14 @@ city = validation will include city.Length 15"##
         skip_serializing_if = "Option::is_none"
     )]
     pub additionaladdressvalidation: Option<String>,
-    #[field(display_name = r##"LabelSpecification"##)]
+    #[field(display_name = r##"Label Specification"##)]
     #[serde(
         rename = "LabelSpecification",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub label_specification: Option<ShipmentRequestLabelSpecification>,
-    #[field(display_name = r##"ReceiptSpecification"##)]
+    #[field(display_name = r##"Receipt Specification"##)]
     #[serde(
         rename = "ReceiptSpecification",
         default,

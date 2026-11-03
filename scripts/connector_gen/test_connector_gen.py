@@ -7,6 +7,7 @@ repository's rustfmt; they are skipped when the generator is not installed.
     python scripts/connector_gen/test_connector_gen.py
 """
 
+import copy
 import json
 import re
 import sys
@@ -754,6 +755,18 @@ class DescribeFieldsTest(unittest.TestCase):
         # A required field gets no default: the metadata would call it optional.
         self.assertNotIn("x-runtara-default", limit)
 
+    def test_a_bare_ref_field_is_labelled_through_all_of(self):
+        # openapi-generator drops a label written beside a `$ref`.
+        schema = {"type": "object", "properties": {
+            "bot_id": {"$ref": "#/components/schemas/defs_bot_id", "description": "The bot."},
+            "ok": {"$ref": "#/components/schemas/defs_ok"},
+        }}
+        cg.describe_fields(schema, {"ok": "OK"})
+        self.assertEqual(schema["properties"]["bot_id"], {
+            "allOf": [{"$ref": "#/components/schemas/defs_bot_id"}],
+            "description": "The bot.", "x-runtara-label": "Bot ID"})
+        self.assertEqual(schema["properties"]["ok"]["x-runtara-label"], "OK")
+
     def test_property_named_properties_is_a_field_not_a_map(self):
         sliced = cg.slice_spec(sample_spec(), ["listItems"])
         cg.describe_fields(sliced, {})
@@ -895,6 +908,32 @@ class ModelNameRenderTest(unittest.TestCase):
         referenced = re.findall(r"pub f\d+: Option<(\w+)>", text)
         self.assertEqual(len(referenced), len(self.NAMES))
         self.assertEqual([name for name in referenced if name not in structs], [])
+
+    def test_a_ref_field_keeps_its_type_and_gets_its_label(self):
+        targets = {
+            "Bot": {"type": "object", "properties": {"id": {"type": "string"}}},
+            "Ids": {"type": "array", "items": {"type": "string"}},
+            "Counts": {"type": "object", "additionalProperties": {"type": "integer"}},
+            "Either": {"anyOf": [{"type": "string"}, {"$ref": "#/components/schemas/Bot"}]},
+            "channel_id": {"type": "string", "pattern": "^C[A-Z0-9]+$"},
+        }
+        holder = {"type": "object", "properties": {
+            name.lower(): {"$ref": f"#/components/schemas/{name}"} for name in targets}}
+        op = {**ok_json({"$ref": "#/components/schemas/Holder"}), **json_body(copy.deepcopy(holder))}
+        spec = spec_with(op, {**targets, "Holder": holder})
+        with tempfile.TemporaryDirectory() as tmp:
+            write_crate(Path(tmp), spec, ["op"])
+            text = cg.render(Path(tmp))
+        for struct in ("Holder", "OpInput"):
+            body = text[text.index(f"pub struct {struct} "):]
+            body = body[:body.index("\n}\n")]
+            fields = dict(re.findall(r'display_name = r##"([^"]*)"##.*?pub \w+: ([^\n]+),', body, re.S))
+            self.assertEqual(fields, {
+                "Bot": "Option<Bot>", "IDs": "Option<Vec<String>>", "Counts": "Option<HashMap<String, i64>>",
+                "Either": "Option<Either>", "Channel ID": "Option<String>"}, struct)
+        # No struct of its own for a wrapped field.
+        self.assertEqual(sorted(set(re.findall(r"pub struct (\w+)", text))),
+                         ["Bot", "Holder", "OpInput", "OpRequest"])
 
     def test_inline_object_named_by_its_title(self):
         # UPS's proof of delivery: an inline object titled `POD`; Slack's

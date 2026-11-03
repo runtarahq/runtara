@@ -44,7 +44,7 @@ pub struct AuthTestErrorSchema {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "AuthTestSuccessSchema")]
 pub struct AuthTestSuccessSchema {
-    #[field(display_name = r##"bot_id"##)]
+    #[field(display_name = r##"Bot ID"##)]
     #[serde(rename = "bot_id", default, skip_serializing_if = "Option::is_none")]
     pub bot_id: Option<String>,
     #[field(display_name = r##"Is Enterprise Install"##)]
@@ -60,7 +60,7 @@ pub struct AuthTestSuccessSchema {
     #[field(display_name = r##"Team"##)]
     #[serde(rename = "team", default, skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
-    #[field(display_name = r##"team_id"##)]
+    #[field(display_name = r##"Team ID"##)]
     #[serde(rename = "team_id", default, skip_serializing_if = "Option::is_none")]
     pub team_id: Option<String>,
     #[field(display_name = r##"URL"##)]
@@ -69,7 +69,7 @@ pub struct AuthTestSuccessSchema {
     #[field(display_name = r##"User"##)]
     #[serde(rename = "user", default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
-    #[field(display_name = r##"user_id"##)]
+    #[field(display_name = r##"User ID"##)]
     #[serde(rename = "user_id", default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -211,13 +211,13 @@ pub struct ChatDeleteScheduledMessageSchema {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ChatDeleteSuccessSchema")]
 pub struct ChatDeleteSuccessSchema {
-    #[field(display_name = r##"channel"##)]
+    #[field(display_name = r##"Channel"##)]
     #[serde(rename = "channel", default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
     #[field(display_name = r##"OK"##)]
     #[serde(rename = "ok", default, skip_serializing_if = "Option::is_none")]
     pub ok: Option<bool>,
-    #[field(display_name = r##"ts"##)]
+    #[field(display_name = r##"Ts"##)]
     #[serde(rename = "ts", default, skip_serializing_if = "Option::is_none")]
     pub ts: Option<String>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -253,7 +253,7 @@ pub struct ChatGetPermalinkErrorSchema {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ChatGetPermalinkSuccessSchema")]
 pub struct ChatGetPermalinkSuccessSchema {
-    #[field(display_name = r##"channel"##)]
+    #[field(display_name = r##"Channel"##)]
     #[serde(rename = "channel", default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
     #[field(display_name = r##"OK"##)]
@@ -388,7 +388,7 @@ pub struct ChatPostEphemeralRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ChatPostEphemeralSuccessSchema")]
 pub struct ChatPostEphemeralSuccessSchema {
-    #[field(display_name = r##"message_ts"##)]
+    #[field(display_name = r##"Message Ts"##)]
     #[serde(
         rename = "message_ts",
         default,
@@ -554,16 +554,16 @@ pub struct ChatPostMessageRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ChatPostMessageSuccessSchema")]
 pub struct ChatPostMessageSuccessSchema {
-    #[field(display_name = r##"channel"##)]
+    #[field(display_name = r##"Channel"##)]
     #[serde(rename = "channel", default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
-    #[field(display_name = r##"message"##)]
+    #[field(display_name = r##"Message"##)]
     #[serde(rename = "message", default, skip_serializing_if = "Option::is_none")]
     pub message: Option<ObjsMessage>,
     #[field(display_name = r##"OK"##)]
     #[serde(rename = "ok", default, skip_serializing_if = "Option::is_none")]
     pub ok: Option<bool>,
-    #[field(display_name = r##"ts"##)]
+    #[field(display_name = r##"Ts"##)]
     #[serde(rename = "ts", default, skip_serializing_if = "Option::is_none")]
     pub ts: Option<String>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -700,7 +700,7 @@ pub struct ChatScheduleMessageRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ChatScheduleMessageSuccessSchema")]
 pub struct ChatScheduleMessageSuccessSchema {
-    #[field(display_name = r##"channel"##)]
+    #[field(display_name = r##"Channel"##)]
     #[serde(rename = "channel", default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
     #[field(display_name = r##"Message"##)]
@@ -728,17 +728,17 @@ pub struct ChatScheduleMessageSuccessSchema {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ChatScheduleMessageSuccessSchemaMessage")]
 pub struct ChatScheduleMessageSuccessSchemaMessage {
-    #[field(display_name = r##"bot_id"##)]
+    #[field(display_name = r##"Bot ID"##)]
     #[serde(rename = "bot_id", default, skip_serializing_if = "Option::is_none")]
     pub bot_id: Option<String>,
-    #[field(display_name = r##"bot_profile"##)]
+    #[field(display_name = r##"Bot Profile"##)]
     #[serde(
         rename = "bot_profile",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub bot_profile: Option<ObjsBotProfile>,
-    #[field(display_name = r##"team"##)]
+    #[field(display_name = r##"Team"##)]
     #[serde(rename = "team", default, skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
     #[field(display_name = r##"Text"##)]
@@ -747,7 +747,7 @@ pub struct ChatScheduleMessageSuccessSchemaMessage {
     #[field(display_name = r##"Type"##)]
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub r#type: Option<String>,
-    #[field(display_name = r##"user"##)]
+    #[field(display_name = r##"User"##)]
     #[serde(rename = "user", default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
     #[field(display_name = r##"Username"##)]
@@ -828,7 +828,7 @@ pub struct ChatScheduledMessagesListSchemaResponseMetadata {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ChatScheduledMessagesListSchemaScheduledMessagesInner")]
 pub struct ChatScheduledMessagesListSchemaScheduledMessagesInner {
-    #[field(display_name = r##"channel_id"##)]
+    #[field(display_name = r##"Channel ID"##)]
     #[serde(
         rename = "channel_id",
         default,
@@ -979,7 +979,7 @@ pub struct ConversationImChannelObjectFromConversationsMethods {
     #[field(display_name = r##"Has Pins"##)]
     #[serde(rename = "has_pins", default, skip_serializing_if = "Option::is_none")]
     pub has_pins: Option<bool>,
-    #[field(display_name = r##"id"##)]
+    #[field(display_name = r##"ID"##)]
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[field(display_name = r##"Is Archived"##)]
@@ -1029,7 +1029,7 @@ pub struct ConversationImChannelObjectFromConversationsMethods {
         skip_serializing_if = "Option::is_none"
     )]
     pub is_user_deleted: Option<bool>,
-    #[field(display_name = r##"last_read"##)]
+    #[field(display_name = r##"Last Read"##)]
     #[serde(rename = "last_read", default, skip_serializing_if = "Option::is_none")]
     pub last_read: Option<String>,
     #[field(display_name = r##"latest"##)]
@@ -1065,7 +1065,7 @@ pub struct ConversationImChannelObjectFromConversationsMethods {
         skip_serializing_if = "Option::is_none"
     )]
     pub unread_count_display: Option<i64>,
-    #[field(display_name = r##"user"##)]
+    #[field(display_name = r##"User"##)]
     #[serde(rename = "user", default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
     #[field(display_name = r##"Version"##)]
@@ -1089,7 +1089,7 @@ pub struct ConversationImChannelObjectFromConversationsMethodsSharesInner {
         skip_serializing_if = "Option::is_none"
     )]
     pub date_create: Option<i64>,
-    #[field(display_name = r##"id"##)]
+    #[field(display_name = r##"ID"##)]
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[field(display_name = r##"Is Active"##)]
@@ -1098,7 +1098,7 @@ pub struct ConversationImChannelObjectFromConversationsMethodsSharesInner {
     #[field(display_name = r##"Name"##)]
     #[serde(rename = "name", default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[field(display_name = r##"team"##)]
+    #[field(display_name = r##"Team"##)]
     #[serde(rename = "team", default, skip_serializing_if = "Option::is_none")]
     pub team: Option<ObjsTeam>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -1110,7 +1110,7 @@ pub struct ConversationImChannelObjectFromConversationsMethodsSharesInner {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ConversationMpimObject")]
 pub struct ConversationMpimObject {
-    #[field(display_name = r##"accepted_user"##)]
+    #[field(display_name = r##"Accepted User"##)]
     #[serde(
         rename = "accepted_user",
         default,
@@ -1124,7 +1124,7 @@ pub struct ConversationMpimObject {
         skip_serializing_if = "Option::is_none"
     )]
     pub connected_team_ids: Option<Vec<String>>,
-    #[field(display_name = r##"conversation_host_id"##)]
+    #[field(display_name = r##"Conversation Host ID"##)]
     #[serde(
         rename = "conversation_host_id",
         default,
@@ -1134,7 +1134,7 @@ pub struct ConversationMpimObject {
     #[field(display_name = r##"Created"##)]
     #[serde(rename = "created", default, skip_serializing_if = "Option::is_none")]
     pub created: Option<i64>,
-    #[field(display_name = r##"creator"##)]
+    #[field(display_name = r##"Creator"##)]
     #[serde(rename = "creator", default, skip_serializing_if = "Option::is_none")]
     pub creator: Option<String>,
     #[field(display_name = r##"Display Counts"##)]
@@ -1144,7 +1144,7 @@ pub struct ConversationMpimObject {
         skip_serializing_if = "Option::is_none"
     )]
     pub display_counts: Option<ConversationObjectDisplayCounts>,
-    #[field(display_name = r##"id"##)]
+    #[field(display_name = r##"ID"##)]
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[field(display_name = r##"Internal Team IDs"##)]
@@ -1255,7 +1255,7 @@ pub struct ConversationMpimObject {
         skip_serializing_if = "Option::is_none"
     )]
     pub is_thread_only: Option<bool>,
-    #[field(display_name = r##"last_read"##)]
+    #[field(display_name = r##"Last Read"##)]
     #[serde(rename = "last_read", default, skip_serializing_if = "Option::is_none")]
     pub last_read: Option<String>,
     #[field(display_name = r##"latest"##)]
@@ -1357,7 +1357,7 @@ pub struct ConversationMpimObject {
         skip_serializing_if = "Option::is_none"
     )]
     pub unread_count_display: Option<i64>,
-    #[field(display_name = r##"user"##)]
+    #[field(display_name = r##"User"##)]
     #[serde(rename = "user", default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
     #[field(display_name = r##"Version"##)]
@@ -1372,7 +1372,7 @@ pub struct ConversationMpimObject {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ConversationObject")]
 pub struct ConversationObject {
-    #[field(display_name = r##"accepted_user"##)]
+    #[field(display_name = r##"Accepted User"##)]
     #[serde(
         rename = "accepted_user",
         default,
@@ -1386,7 +1386,7 @@ pub struct ConversationObject {
         skip_serializing_if = "Option::is_none"
     )]
     pub connected_team_ids: Option<Vec<String>>,
-    #[field(display_name = r##"conversation_host_id"##)]
+    #[field(display_name = r##"Conversation Host ID"##)]
     #[serde(
         rename = "conversation_host_id",
         default,
@@ -1396,7 +1396,7 @@ pub struct ConversationObject {
     #[field(display_name = r##"Created"##)]
     #[serde(rename = "created", default, skip_serializing_if = "Option::is_none")]
     pub created: Option<i64>,
-    #[field(display_name = r##"creator"##)]
+    #[field(display_name = r##"Creator"##)]
     #[serde(rename = "creator", default, skip_serializing_if = "Option::is_none")]
     pub creator: Option<String>,
     #[field(display_name = r##"Display Counts"##)]
@@ -1406,7 +1406,7 @@ pub struct ConversationObject {
         skip_serializing_if = "Option::is_none"
     )]
     pub display_counts: Option<ConversationObjectDisplayCounts>,
-    #[field(display_name = r##"enterprise_id"##)]
+    #[field(display_name = r##"Enterprise ID"##)]
     #[serde(
         rename = "enterprise_id",
         default,
@@ -1416,7 +1416,7 @@ pub struct ConversationObject {
     #[field(display_name = r##"Has Pins"##)]
     #[serde(rename = "has_pins", default, skip_serializing_if = "Option::is_none")]
     pub has_pins: Option<bool>,
-    #[field(display_name = r##"id"##)]
+    #[field(display_name = r##"ID"##)]
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[field(display_name = r##"Internal Team IDs"##)]
@@ -1548,7 +1548,7 @@ pub struct ConversationObject {
         skip_serializing_if = "Option::is_none"
     )]
     pub is_thread_only: Option<bool>,
-    #[field(display_name = r##"last_read"##)]
+    #[field(display_name = r##"Last Read"##)]
     #[serde(rename = "last_read", default, skip_serializing_if = "Option::is_none")]
     pub last_read: Option<String>,
     #[field(display_name = r##"latest"##)]
@@ -1653,7 +1653,7 @@ pub struct ConversationObject {
     #[field(display_name = r##"Use Case"##)]
     #[serde(rename = "use_case", default, skip_serializing_if = "Option::is_none")]
     pub use_case: Option<String>,
-    #[field(display_name = r##"user"##)]
+    #[field(display_name = r##"User"##)]
     #[serde(rename = "user", default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
     #[field(display_name = r##"Version"##)]
@@ -1691,7 +1691,7 @@ pub struct ConversationObjectDisplayCounts {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ConversationObjectPurpose")]
 pub struct ConversationObjectPurpose {
-    #[field(display_name = r##"creator"##)]
+    #[field(display_name = r##"Creator"##)]
     #[serde(rename = "creator", default, skip_serializing_if = "Option::is_none")]
     pub creator: Option<String>,
     #[field(display_name = r##"Last Set"##)]
@@ -1709,7 +1709,7 @@ pub struct ConversationObjectPurpose {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ConversationObjectSharesInner")]
 pub struct ConversationObjectSharesInner {
-    #[field(display_name = r##"accepted_user"##)]
+    #[field(display_name = r##"Accepted User"##)]
     #[serde(
         rename = "accepted_user",
         default,
@@ -1719,10 +1719,10 @@ pub struct ConversationObjectSharesInner {
     #[field(display_name = r##"Is Active"##)]
     #[serde(rename = "is_active", default, skip_serializing_if = "Option::is_none")]
     pub is_active: Option<bool>,
-    #[field(display_name = r##"team"##)]
+    #[field(display_name = r##"Team"##)]
     #[serde(rename = "team", default, skip_serializing_if = "Option::is_none")]
     pub team: Option<ObjsTeam>,
-    #[field(display_name = r##"user"##)]
+    #[field(display_name = r##"User"##)]
     #[serde(rename = "user", default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -1734,7 +1734,7 @@ pub struct ConversationObjectSharesInner {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ConversationObjectTopic")]
 pub struct ConversationObjectTopic {
-    #[field(display_name = r##"creator"##)]
+    #[field(display_name = r##"Creator"##)]
     #[serde(rename = "creator", default, skip_serializing_if = "Option::is_none")]
     pub creator: Option<String>,
     #[field(display_name = r##"Last Set"##)]
@@ -1867,7 +1867,7 @@ pub struct ConversationsCreateRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ConversationsCreateSuccessSchema")]
 pub struct ConversationsCreateSuccessSchema {
-    #[field(display_name = r##"channel"##)]
+    #[field(display_name = r##"Channel"##)]
     #[serde(rename = "channel", default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<ObjsConversation>,
     #[field(display_name = r##"OK"##)]
@@ -1977,7 +1977,7 @@ pub struct ConversationsInfoErrorSchema {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ConversationsInfoSuccessSchema")]
 pub struct ConversationsInfoSuccessSchema {
-    #[field(display_name = r##"channel"##)]
+    #[field(display_name = r##"Channel"##)]
     #[serde(rename = "channel", default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<ObjsConversation>,
     #[field(display_name = r##"OK"##)]
@@ -1992,7 +1992,7 @@ pub struct ConversationsInfoSuccessSchema {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ConversationsInviteErrorSchema")]
 pub struct ConversationsInviteErrorSchema {
-    #[field(display_name = r##"channel"##)]
+    #[field(display_name = r##"Channel"##)]
     #[serde(rename = "channel", default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<ObjsConversation>,
     #[field(display_name = r##"OK"##)]
@@ -2106,7 +2106,7 @@ pub struct ConversationsJoinRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ConversationsJoinSuccessSchema")]
 pub struct ConversationsJoinSuccessSchema {
-    #[field(display_name = r##"channel"##)]
+    #[field(display_name = r##"Channel"##)]
     #[serde(rename = "channel", default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<ObjsConversation>,
     #[field(display_name = r##"OK"##)]
@@ -2374,7 +2374,7 @@ pub struct ConversationsOpenSuccessSchemaChannelAnyOf {
     #[field(display_name = r##"Created"##)]
     #[serde(rename = "created", default, skip_serializing_if = "Option::is_none")]
     pub created: Option<String>,
-    #[field(display_name = r##"id"##)]
+    #[field(display_name = r##"ID"##)]
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[field(display_name = r##"Is Im"##)]
@@ -2383,10 +2383,10 @@ pub struct ConversationsOpenSuccessSchemaChannelAnyOf {
     #[field(display_name = r##"Is Open"##)]
     #[serde(rename = "is_open", default, skip_serializing_if = "Option::is_none")]
     pub is_open: Option<bool>,
-    #[field(display_name = r##"last_read"##)]
+    #[field(display_name = r##"Last Read"##)]
     #[serde(rename = "last_read", default, skip_serializing_if = "Option::is_none")]
     pub last_read: Option<String>,
-    #[field(display_name = r##"latest"##)]
+    #[field(display_name = r##"Latest"##)]
     #[serde(rename = "latest", default, skip_serializing_if = "Option::is_none")]
     pub latest: Option<ObjsMessage>,
     #[field(display_name = r##"Unread Count"##)]
@@ -2403,7 +2403,7 @@ pub struct ConversationsOpenSuccessSchemaChannelAnyOf {
         skip_serializing_if = "Option::is_none"
     )]
     pub unread_count_display: Option<f64>,
-    #[field(display_name = r##"user"##)]
+    #[field(display_name = r##"User"##)]
     #[serde(rename = "user", default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -2466,7 +2466,7 @@ pub struct ConversationsRenameRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ConversationsRenameSuccessSchema")]
 pub struct ConversationsRenameSuccessSchema {
-    #[field(display_name = r##"channel"##)]
+    #[field(display_name = r##"Channel"##)]
     #[serde(rename = "channel", default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<ObjsConversation>,
     #[field(display_name = r##"OK"##)]
@@ -2532,10 +2532,10 @@ pub type ConversationsRepliesSuccessSchemaMessagesInner = Value;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ConversationsRepliesSuccessSchemaMessagesInnerAnyOf")]
 pub struct ConversationsRepliesSuccessSchemaMessagesInnerAnyOf {
-    #[field(display_name = r##"last_read"##)]
+    #[field(display_name = r##"Last Read"##)]
     #[serde(rename = "last_read", default, skip_serializing_if = "Option::is_none")]
     pub last_read: Option<String>,
-    #[field(display_name = r##"latest_reply"##)]
+    #[field(display_name = r##"Latest Reply"##)]
     #[serde(
         rename = "latest_reply",
         default,
@@ -2563,7 +2563,7 @@ pub struct ConversationsRepliesSuccessSchemaMessagesInnerAnyOf {
         skip_serializing_if = "Option::is_none"
     )]
     pub reply_users_count: Option<i64>,
-    #[field(display_name = r##"source_team"##)]
+    #[field(display_name = r##"Source Team"##)]
     #[serde(
         rename = "source_team",
         default,
@@ -2577,16 +2577,16 @@ pub struct ConversationsRepliesSuccessSchemaMessagesInnerAnyOf {
         skip_serializing_if = "Option::is_none"
     )]
     pub subscribed: Option<bool>,
-    #[field(display_name = r##"team"##)]
+    #[field(display_name = r##"Team"##)]
     #[serde(rename = "team", default, skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
     #[field(display_name = r##"Text"##)]
     #[serde(rename = "text", default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    #[field(display_name = r##"thread_ts"##)]
+    #[field(display_name = r##"Thread Ts"##)]
     #[serde(rename = "thread_ts", default, skip_serializing_if = "Option::is_none")]
     pub thread_ts: Option<String>,
-    #[field(display_name = r##"ts"##)]
+    #[field(display_name = r##"Ts"##)]
     #[serde(rename = "ts", default, skip_serializing_if = "Option::is_none")]
     pub ts: Option<String>,
     #[field(display_name = r##"Type"##)]
@@ -2599,17 +2599,17 @@ pub struct ConversationsRepliesSuccessSchemaMessagesInnerAnyOf {
         skip_serializing_if = "Option::is_none"
     )]
     pub unread_count: Option<i64>,
-    #[field(display_name = r##"user"##)]
+    #[field(display_name = r##"User"##)]
     #[serde(rename = "user", default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
-    #[field(display_name = r##"user_profile"##)]
+    #[field(display_name = r##"User Profile"##)]
     #[serde(
         rename = "user_profile",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub user_profile: Option<ObjsUserProfileShort>,
-    #[field(display_name = r##"user_team"##)]
+    #[field(display_name = r##"User Team"##)]
     #[serde(rename = "user_team", default, skip_serializing_if = "Option::is_none")]
     pub user_team: Option<String>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -2628,46 +2628,46 @@ pub struct ConversationsRepliesSuccessSchemaMessagesInnerAnyOf1 {
         skip_serializing_if = "Option::is_none"
     )]
     pub is_starred: Option<bool>,
-    #[field(display_name = r##"parent_user_id"##)]
+    #[field(display_name = r##"Parent User ID"##)]
     #[serde(
         rename = "parent_user_id",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub parent_user_id: Option<String>,
-    #[field(display_name = r##"source_team"##)]
+    #[field(display_name = r##"Source Team"##)]
     #[serde(
         rename = "source_team",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub source_team: Option<String>,
-    #[field(display_name = r##"team"##)]
+    #[field(display_name = r##"Team"##)]
     #[serde(rename = "team", default, skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
     #[field(display_name = r##"Text"##)]
     #[serde(rename = "text", default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    #[field(display_name = r##"thread_ts"##)]
+    #[field(display_name = r##"Thread Ts"##)]
     #[serde(rename = "thread_ts", default, skip_serializing_if = "Option::is_none")]
     pub thread_ts: Option<String>,
-    #[field(display_name = r##"ts"##)]
+    #[field(display_name = r##"Ts"##)]
     #[serde(rename = "ts", default, skip_serializing_if = "Option::is_none")]
     pub ts: Option<String>,
     #[field(display_name = r##"Type"##)]
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub r#type: Option<String>,
-    #[field(display_name = r##"user"##)]
+    #[field(display_name = r##"User"##)]
     #[serde(rename = "user", default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
-    #[field(display_name = r##"user_profile"##)]
+    #[field(display_name = r##"User Profile"##)]
     #[serde(
         rename = "user_profile",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub user_profile: Option<ObjsUserProfileShort>,
-    #[field(display_name = r##"user_team"##)]
+    #[field(display_name = r##"User Team"##)]
     #[serde(rename = "user_team", default, skip_serializing_if = "Option::is_none")]
     pub user_team: Option<String>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -2730,7 +2730,7 @@ pub struct ConversationsSetPurposeRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ConversationsSetPurposeSuccessSchema")]
 pub struct ConversationsSetPurposeSuccessSchema {
-    #[field(display_name = r##"channel"##)]
+    #[field(display_name = r##"Channel"##)]
     #[serde(rename = "channel", default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<ObjsConversation>,
     #[field(display_name = r##"OK"##)]
@@ -2796,7 +2796,7 @@ pub struct ConversationsSetTopicRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ConversationsSetTopicSuccessSchema")]
 pub struct ConversationsSetTopicSuccessSchema {
-    #[field(display_name = r##"channel"##)]
+    #[field(display_name = r##"Channel"##)]
     #[serde(rename = "channel", default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<ObjsConversation>,
     #[field(display_name = r##"OK"##)]
@@ -2863,7 +2863,7 @@ pub struct ErrorsIsReturnedWhenAnErrorAssociatesAnUserInner {
     #[field(display_name = r##"OK"##)]
     #[serde(rename = "ok", default, skip_serializing_if = "Option::is_none")]
     pub ok: Option<bool>,
-    #[field(display_name = r##"user"##)]
+    #[field(display_name = r##"User"##)]
     #[serde(rename = "user", default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -2947,7 +2947,7 @@ pub struct FilesInfoErrorSchema {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "FilesInfoSchema")]
 pub struct FilesInfoSchema {
-    #[field(display_name = r##"comments"##)]
+    #[field(display_name = r##"Comments"##)]
     #[serde(rename = "comments", default, skip_serializing_if = "Option::is_none")]
     pub comments: Option<Vec<Value>>,
     #[field(display_name = r##"Content HTML"##)]
@@ -2957,19 +2957,19 @@ pub struct FilesInfoSchema {
         skip_serializing_if = "Option::is_none"
     )]
     pub content_html: Option<Value>,
-    #[field(display_name = r##"editor"##)]
+    #[field(display_name = r##"Editor"##)]
     #[serde(rename = "editor", default, skip_serializing_if = "Option::is_none")]
     pub editor: Option<String>,
-    #[field(display_name = r##"file"##)]
+    #[field(display_name = r##"File"##)]
     #[serde(rename = "file", default, skip_serializing_if = "Option::is_none")]
     pub file: Option<ObjsFile>,
     #[field(display_name = r##"OK"##)]
     #[serde(rename = "ok", default, skip_serializing_if = "Option::is_none")]
     pub ok: Option<bool>,
-    #[field(display_name = r##"paging"##)]
+    #[field(display_name = r##"Paging"##)]
     #[serde(rename = "paging", default, skip_serializing_if = "Option::is_none")]
     pub paging: Option<ObjsPaging>,
-    #[field(display_name = r##"response_metadata"##)]
+    #[field(display_name = r##"Response Metadata"##)]
     #[serde(
         rename = "response_metadata",
         default,
@@ -3015,7 +3015,7 @@ pub struct FilesListSchema {
     #[field(display_name = r##"OK"##)]
     #[serde(rename = "ok", default, skip_serializing_if = "Option::is_none")]
     pub ok: Option<bool>,
-    #[field(display_name = r##"paging"##)]
+    #[field(display_name = r##"Paging"##)]
     #[serde(rename = "paging", default, skip_serializing_if = "Option::is_none")]
     pub paging: Option<ObjsPaging>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -3065,7 +3065,7 @@ pub struct NewPagingStyle {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ObjsBotProfile")]
 pub struct ObjsBotProfile {
-    #[field(display_name = r##"app_id"##)]
+    #[field(display_name = r##"App ID"##)]
     #[serde(rename = "app_id", default, skip_serializing_if = "Option::is_none")]
     pub app_id: Option<String>,
     #[field(display_name = r##"Deleted"##)]
@@ -3074,13 +3074,13 @@ pub struct ObjsBotProfile {
     #[field(display_name = r##"Icons"##)]
     #[serde(rename = "icons", default, skip_serializing_if = "Option::is_none")]
     pub icons: Option<ObjsBotProfileIcons>,
-    #[field(display_name = r##"id"##)]
+    #[field(display_name = r##"ID"##)]
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[field(display_name = r##"Name"##)]
     #[serde(rename = "name", default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[field(display_name = r##"team_id"##)]
+    #[field(display_name = r##"Team ID"##)]
     #[serde(rename = "team_id", default, skip_serializing_if = "Option::is_none")]
     pub team_id: Option<String>,
     #[field(display_name = r##"Updated"##)]
@@ -3119,7 +3119,7 @@ pub struct ObjsComment {
     #[field(display_name = r##"Created"##)]
     #[serde(rename = "created", default, skip_serializing_if = "Option::is_none")]
     pub created: Option<i64>,
-    #[field(display_name = r##"id"##)]
+    #[field(display_name = r##"ID"##)]
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[field(display_name = r##"Is Intro"##)]
@@ -3135,7 +3135,7 @@ pub struct ObjsComment {
     #[field(display_name = r##"Num Stars"##)]
     #[serde(rename = "num_stars", default, skip_serializing_if = "Option::is_none")]
     pub num_stars: Option<i64>,
-    #[field(display_name = r##"pinned_info"##)]
+    #[field(display_name = r##"Pinned Info"##)]
     #[serde(
         rename = "pinned_info",
         default,
@@ -3151,7 +3151,7 @@ pub struct ObjsComment {
     #[field(display_name = r##"Timestamp"##)]
     #[serde(rename = "timestamp", default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<i64>,
-    #[field(display_name = r##"user"##)]
+    #[field(display_name = r##"User"##)]
     #[serde(rename = "user", default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -3166,21 +3166,21 @@ pub type ObjsConversation = Value;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ObjsEnterpriseUser")]
 pub struct ObjsEnterpriseUser {
-    #[field(display_name = r##"enterprise_id"##)]
+    #[field(display_name = r##"Enterprise ID"##)]
     #[serde(
         rename = "enterprise_id",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub enterprise_id: Option<String>,
-    #[field(display_name = r##"enterprise_name"##)]
+    #[field(display_name = r##"Enterprise Name"##)]
     #[serde(
         rename = "enterprise_name",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub enterprise_name: Option<String>,
-    #[field(display_name = r##"id"##)]
+    #[field(display_name = r##"ID"##)]
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[field(display_name = r##"Is Admin"##)]
@@ -3269,7 +3269,7 @@ pub struct ObjsFile {
     #[field(display_name = r##"Editable"##)]
     #[serde(rename = "editable", default, skip_serializing_if = "Option::is_none")]
     pub editable: Option<bool>,
-    #[field(display_name = r##"editor"##)]
+    #[field(display_name = r##"Editor"##)]
     #[serde(rename = "editor", default, skip_serializing_if = "Option::is_none")]
     pub editor: Option<String>,
     #[field(display_name = r##"External ID"##)]
@@ -3306,7 +3306,7 @@ pub struct ObjsFile {
         skip_serializing_if = "Option::is_none"
     )]
     pub has_rich_preview: Option<bool>,
-    #[field(display_name = r##"id"##)]
+    #[field(display_name = r##"ID"##)]
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[field(display_name = r##"Image Exif Rotation"##)]
@@ -3343,7 +3343,7 @@ pub struct ObjsFile {
         skip_serializing_if = "Option::is_none"
     )]
     pub is_tombstoned: Option<bool>,
-    #[field(display_name = r##"last_editor"##)]
+    #[field(display_name = r##"Last Editor"##)]
     #[serde(
         rename = "last_editor",
         default,
@@ -3393,7 +3393,7 @@ pub struct ObjsFile {
         skip_serializing_if = "Option::is_none"
     )]
     pub permalink_public: Option<String>,
-    #[field(display_name = r##"pinned_info"##)]
+    #[field(display_name = r##"Pinned Info"##)]
     #[serde(
         rename = "pinned_info",
         default,
@@ -3429,7 +3429,7 @@ pub struct ObjsFile {
     #[field(display_name = r##"Size"##)]
     #[serde(rename = "size", default, skip_serializing_if = "Option::is_none")]
     pub size: Option<i64>,
-    #[field(display_name = r##"source_team"##)]
+    #[field(display_name = r##"Source Team"##)]
     #[serde(
         rename = "source_team",
         default,
@@ -3587,7 +3587,7 @@ pub struct ObjsFile {
     #[field(display_name = r##"User"##)]
     #[serde(rename = "user", default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
-    #[field(display_name = r##"user_team"##)]
+    #[field(display_name = r##"User Team"##)]
     #[serde(rename = "user_team", default, skip_serializing_if = "Option::is_none")]
     pub user_team: Option<String>,
     #[field(display_name = r##"Username"##)]
@@ -3662,7 +3662,7 @@ pub struct ObjsMessage {
     )]
     pub attachments: Option<Vec<ObjsMessageAttachmentsInner>>,
     #[field(
-        display_name = r##"blocks"##,
+        display_name = r##"Blocks"##,
         description = r##"This is a very loose definition, in the future, we'll populate this with deeper schema in this definition namespace."##
     )]
     #[serde(rename = "blocks", default, skip_serializing_if = "Option::is_none")]
@@ -3670,7 +3670,7 @@ pub struct ObjsMessage {
     #[field(display_name = r##"bot_id"##)]
     #[serde(rename = "bot_id", default, skip_serializing_if = "Option::is_none")]
     pub bot_id: Option<String>,
-    #[field(display_name = r##"bot_profile"##)]
+    #[field(display_name = r##"Bot Profile"##)]
     #[serde(
         rename = "bot_profile",
         default,
@@ -3684,7 +3684,7 @@ pub struct ObjsMessage {
         skip_serializing_if = "Option::is_none"
     )]
     pub client_msg_id: Option<String>,
-    #[field(display_name = r##"comment"##)]
+    #[field(display_name = r##"Comment"##)]
     #[serde(rename = "comment", default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<ObjsComment>,
     #[field(display_name = r##"Display As Bot"##)]
@@ -3694,7 +3694,7 @@ pub struct ObjsMessage {
         skip_serializing_if = "Option::is_none"
     )]
     pub display_as_bot: Option<bool>,
-    #[field(display_name = r##"file"##)]
+    #[field(display_name = r##"File"##)]
     #[serde(rename = "file", default, skip_serializing_if = "Option::is_none")]
     pub file: Option<ObjsFile>,
     #[field(display_name = r##"Files"##)]
@@ -3703,7 +3703,7 @@ pub struct ObjsMessage {
     #[field(display_name = r##"Icons"##)]
     #[serde(rename = "icons", default, skip_serializing_if = "Option::is_none")]
     pub icons: Option<ObjsMessageIcons>,
-    #[field(display_name = r##"inviter"##)]
+    #[field(display_name = r##"Inviter"##)]
     #[serde(rename = "inviter", default, skip_serializing_if = "Option::is_none")]
     pub inviter: Option<String>,
     #[field(display_name = r##"Is Delayed Message"##)]
@@ -3723,10 +3723,10 @@ pub struct ObjsMessage {
         skip_serializing_if = "Option::is_none"
     )]
     pub is_starred: Option<bool>,
-    #[field(display_name = r##"last_read"##)]
+    #[field(display_name = r##"Last Read"##)]
     #[serde(rename = "last_read", default, skip_serializing_if = "Option::is_none")]
     pub last_read: Option<String>,
-    #[field(display_name = r##"latest_reply"##)]
+    #[field(display_name = r##"Latest Reply"##)]
     #[serde(
         rename = "latest_reply",
         default,
@@ -3739,7 +3739,7 @@ pub struct ObjsMessage {
     #[field(display_name = r##"Old Name"##)]
     #[serde(rename = "old_name", default, skip_serializing_if = "Option::is_none")]
     pub old_name: Option<String>,
-    #[field(display_name = r##"parent_user_id"##)]
+    #[field(display_name = r##"Parent User ID"##)]
     #[serde(
         rename = "parent_user_id",
         default,
@@ -3779,7 +3779,7 @@ pub struct ObjsMessage {
         skip_serializing_if = "Option::is_none"
     )]
     pub reply_users_count: Option<i64>,
-    #[field(display_name = r##"source_team"##)]
+    #[field(display_name = r##"Source Team"##)]
     #[serde(
         rename = "source_team",
         default,
@@ -3796,19 +3796,19 @@ pub struct ObjsMessage {
     #[field(display_name = r##"Subtype"##)]
     #[serde(rename = "subtype", default, skip_serializing_if = "Option::is_none")]
     pub subtype: Option<String>,
-    #[field(display_name = r##"team"##)]
+    #[field(display_name = r##"Team"##)]
     #[serde(rename = "team", default, skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
     #[field(display_name = r##"Text"##)]
     #[serde(rename = "text", default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    #[field(display_name = r##"thread_ts"##)]
+    #[field(display_name = r##"Thread Ts"##)]
     #[serde(rename = "thread_ts", default, skip_serializing_if = "Option::is_none")]
     pub thread_ts: Option<String>,
     #[field(display_name = r##"Topic"##)]
     #[serde(rename = "topic", default, skip_serializing_if = "Option::is_none")]
     pub topic: Option<String>,
-    #[field(display_name = r##"ts"##)]
+    #[field(display_name = r##"Ts"##)]
     #[serde(rename = "ts", default, skip_serializing_if = "Option::is_none")]
     pub ts: Option<String>,
     #[field(display_name = r##"Type"##)]
@@ -3824,17 +3824,17 @@ pub struct ObjsMessage {
     #[field(display_name = r##"Upload"##)]
     #[serde(rename = "upload", default, skip_serializing_if = "Option::is_none")]
     pub upload: Option<bool>,
-    #[field(display_name = r##"user"##)]
+    #[field(display_name = r##"User"##)]
     #[serde(rename = "user", default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
-    #[field(display_name = r##"user_profile"##)]
+    #[field(display_name = r##"User Profile"##)]
     #[serde(
         rename = "user_profile",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub user_profile: Option<ObjsUserProfileShort>,
-    #[field(display_name = r##"user_team"##)]
+    #[field(display_name = r##"User Team"##)]
     #[serde(rename = "user_team", default, skip_serializing_if = "Option::is_none")]
     pub user_team: Option<String>,
     #[field(display_name = r##"Username"##)]
@@ -4013,21 +4013,21 @@ pub struct ObjsTeam {
         skip_serializing_if = "Option::is_none"
     )]
     pub email_domain: Option<String>,
-    #[field(display_name = r##"enterprise_id"##)]
+    #[field(display_name = r##"Enterprise ID"##)]
     #[serde(
         rename = "enterprise_id",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub enterprise_id: Option<String>,
-    #[field(display_name = r##"enterprise_name"##)]
+    #[field(display_name = r##"Enterprise Name"##)]
     #[serde(
         rename = "enterprise_name",
         default,
         skip_serializing_if = "Option::is_none"
     )]
     pub enterprise_name: Option<String>,
-    #[field(display_name = r##"external_org_migrations"##)]
+    #[field(display_name = r##"External Org Migrations"##)]
     #[serde(
         rename = "external_org_migrations",
         default,
@@ -4041,10 +4041,10 @@ pub struct ObjsTeam {
         skip_serializing_if = "Option::is_none"
     )]
     pub has_compliance_export: Option<bool>,
-    #[field(display_name = r##"icon"##)]
+    #[field(display_name = r##"Icon"##)]
     #[serde(rename = "icon", default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<ObjsIcon>,
-    #[field(display_name = r##"id"##)]
+    #[field(display_name = r##"ID"##)]
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[field(display_name = r##"Is Assigned"##)]
@@ -4118,7 +4118,7 @@ pub struct ObjsTeam {
     )]
     #[serde(rename = "plan", default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
-    #[field(display_name = r##"primary_owner"##)]
+    #[field(display_name = r##"Primary Owner"##)]
     #[serde(
         rename = "primary_owner",
         default,
@@ -4244,7 +4244,7 @@ pub struct ObjsUserAnyOf {
     #[field(display_name = r##"Deleted"##)]
     #[serde(rename = "deleted", default, skip_serializing_if = "Option::is_none")]
     pub deleted: Option<bool>,
-    #[field(display_name = r##"enterprise_user"##)]
+    #[field(display_name = r##"Enterprise User"##)]
     #[serde(
         rename = "enterprise_user",
         default,
@@ -4254,7 +4254,7 @@ pub struct ObjsUserAnyOf {
     #[field(display_name = r##"Has 2fa"##)]
     #[serde(rename = "has_2fa", default, skip_serializing_if = "Option::is_none")]
     pub has_2fa: Option<bool>,
-    #[field(display_name = r##"id"##)]
+    #[field(display_name = r##"ID"##)]
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[field(display_name = r##"Is Admin"##)]
@@ -4331,16 +4331,16 @@ pub struct ObjsUserAnyOf {
     #[field(display_name = r##"Presence"##)]
     #[serde(rename = "presence", default, skip_serializing_if = "Option::is_none")]
     pub presence: Option<String>,
-    #[field(display_name = r##"profile"##)]
+    #[field(display_name = r##"Profile"##)]
     #[serde(rename = "profile", default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<ObjsUserProfile>,
     #[field(display_name = r##"Real Name"##)]
     #[serde(rename = "real_name", default, skip_serializing_if = "Option::is_none")]
     pub real_name: Option<String>,
-    #[field(display_name = r##"team"##)]
+    #[field(display_name = r##"Team"##)]
     #[serde(rename = "team", default, skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
-    #[field(display_name = r##"team_id"##)]
+    #[field(display_name = r##"Team ID"##)]
     #[serde(rename = "team_id", default, skip_serializing_if = "Option::is_none")]
     pub team_id: Option<String>,
     #[field(display_name = r##"Team Profile"##)]
@@ -4387,7 +4387,7 @@ pub struct ObjsUserAnyOf1 {
     #[field(display_name = r##"Deleted"##)]
     #[serde(rename = "deleted", default, skip_serializing_if = "Option::is_none")]
     pub deleted: Option<bool>,
-    #[field(display_name = r##"enterprise_user"##)]
+    #[field(display_name = r##"Enterprise User"##)]
     #[serde(
         rename = "enterprise_user",
         default,
@@ -4397,7 +4397,7 @@ pub struct ObjsUserAnyOf1 {
     #[field(display_name = r##"Has 2fa"##)]
     #[serde(rename = "has_2fa", default, skip_serializing_if = "Option::is_none")]
     pub has_2fa: Option<bool>,
-    #[field(display_name = r##"id"##)]
+    #[field(display_name = r##"ID"##)]
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[field(display_name = r##"Is Admin"##)]
@@ -4467,13 +4467,13 @@ pub struct ObjsUserAnyOf1 {
     #[field(display_name = r##"Presence"##)]
     #[serde(rename = "presence", default, skip_serializing_if = "Option::is_none")]
     pub presence: Option<String>,
-    #[field(display_name = r##"profile"##)]
+    #[field(display_name = r##"Profile"##)]
     #[serde(rename = "profile", default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<ObjsUserProfile>,
     #[field(display_name = r##"Real Name"##)]
     #[serde(rename = "real_name", default, skip_serializing_if = "Option::is_none")]
     pub real_name: Option<String>,
-    #[field(display_name = r##"team_id"##)]
+    #[field(display_name = r##"Team ID"##)]
     #[serde(rename = "team_id", default, skip_serializing_if = "Option::is_none")]
     pub team_id: Option<String>,
     #[field(display_name = r##"Team Profile"##)]
@@ -4533,7 +4533,7 @@ pub struct ObjsUserProfile {
         skip_serializing_if = "Option::is_none"
     )]
     pub always_active: Option<bool>,
-    #[field(display_name = r##"api_app_id"##)]
+    #[field(display_name = r##"API App ID"##)]
     #[serde(
         rename = "api_app_id",
         default,
@@ -4547,7 +4547,7 @@ pub struct ObjsUserProfile {
         skip_serializing_if = "Option::is_none"
     )]
     pub avatar_hash: Option<String>,
-    #[field(display_name = r##"bot_id"##)]
+    #[field(display_name = r##"Bot ID"##)]
     #[serde(rename = "bot_id", default, skip_serializing_if = "Option::is_none")]
     pub bot_id: Option<String>,
     #[field(display_name = r##"Display Name"##)]
@@ -4739,7 +4739,7 @@ pub struct ObjsUserProfile {
         skip_serializing_if = "Option::is_none"
     )]
     pub status_text_canonical: Option<String>,
-    #[field(display_name = r##"team"##)]
+    #[field(display_name = r##"Team"##)]
     #[serde(rename = "team", default, skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
     #[field(display_name = r##"Title"##)]
@@ -4824,7 +4824,7 @@ pub struct ObjsUserProfileShort {
         skip_serializing_if = "Option::is_none"
     )]
     pub real_name_normalized: Option<String>,
-    #[field(display_name = r##"team"##)]
+    #[field(display_name = r##"Team"##)]
     #[serde(rename = "team", default, skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -5040,10 +5040,10 @@ pub type ReactionsGetSuccessSchema = Value;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ReactionsGetSuccessSchemaAnyOf")]
 pub struct ReactionsGetSuccessSchemaAnyOf {
-    #[field(display_name = r##"channel"##)]
+    #[field(display_name = r##"Channel"##)]
     #[serde(rename = "channel", default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
-    #[field(display_name = r##"message"##)]
+    #[field(display_name = r##"Message"##)]
     #[serde(rename = "message", default, skip_serializing_if = "Option::is_none")]
     pub message: Option<ObjsMessage>,
     #[field(display_name = r##"OK"##)]
@@ -5061,7 +5061,7 @@ pub struct ReactionsGetSuccessSchemaAnyOf {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ReactionsGetSuccessSchemaAnyOf1")]
 pub struct ReactionsGetSuccessSchemaAnyOf1 {
-    #[field(display_name = r##"file"##)]
+    #[field(display_name = r##"File"##)]
     #[serde(rename = "file", default, skip_serializing_if = "Option::is_none")]
     pub file: Option<ObjsFile>,
     #[field(display_name = r##"OK"##)]
@@ -5079,10 +5079,10 @@ pub struct ReactionsGetSuccessSchemaAnyOf1 {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ReactionsGetSuccessSchemaAnyOf2")]
 pub struct ReactionsGetSuccessSchemaAnyOf2 {
-    #[field(display_name = r##"comment"##)]
+    #[field(display_name = r##"Comment"##)]
     #[serde(rename = "comment", default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<ObjsComment>,
-    #[field(display_name = r##"file"##)]
+    #[field(display_name = r##"File"##)]
     #[serde(rename = "file", default, skip_serializing_if = "Option::is_none")]
     pub file: Option<ObjsFile>,
     #[field(display_name = r##"OK"##)]
@@ -5215,7 +5215,7 @@ pub struct UsersInfoSuccessSchema {
     #[field(display_name = r##"OK"##)]
     #[serde(rename = "ok", default, skip_serializing_if = "Option::is_none")]
     pub ok: Option<bool>,
-    #[field(display_name = r##"user"##)]
+    #[field(display_name = r##"User"##)]
     #[serde(rename = "user", default, skip_serializing_if = "Option::is_none")]
     pub user: Option<ObjsUser>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -5260,7 +5260,7 @@ pub struct UsersListSchema {
     #[field(display_name = r##"OK"##)]
     #[serde(rename = "ok", default, skip_serializing_if = "Option::is_none")]
     pub ok: Option<bool>,
-    #[field(display_name = r##"response_metadata"##)]
+    #[field(display_name = r##"Response Metadata"##)]
     #[serde(
         rename = "response_metadata",
         default,
@@ -5303,7 +5303,7 @@ pub struct UsersLookupByEmailSuccessSchema {
     #[field(display_name = r##"OK"##)]
     #[serde(rename = "ok", default, skip_serializing_if = "Option::is_none")]
     pub ok: Option<bool>,
-    #[field(display_name = r##"user"##)]
+    #[field(display_name = r##"User"##)]
     #[serde(rename = "user", default, skip_serializing_if = "Option::is_none")]
     pub user: Option<ObjsUser>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
