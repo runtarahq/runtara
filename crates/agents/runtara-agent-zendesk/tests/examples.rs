@@ -341,6 +341,8 @@ fn inputs_carry_labels() {
     };
     assert_eq!(label("list-tickets", "page[size]"), "Page Size");
     assert_eq!(label("create-ticket", "requester_id"), "Requester ID");
+    // A field that is a bare `$ref` is labelled like any other.
+    assert_eq!(label("create-ticket", "comment"), "Comment");
     assert_eq!(
         label("export-search-results", "filter[type]"),
         "Filter Type"

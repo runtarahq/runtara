@@ -305,7 +305,7 @@ pub struct AuditObject {
     #[field(display_name = r##"Ticket ID"##)]
     #[serde(rename = "ticket_id", default, skip_serializing_if = "Option::is_none")]
     pub ticket_id: Option<i64>,
-    #[field(display_name = r##"via"##)]
+    #[field(display_name = r##"Via"##)]
     #[serde(rename = "via", default, skip_serializing_if = "Option::is_none")]
     pub via: Option<ViaObject>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -414,7 +414,7 @@ pub struct CreateUserRequest {
     pub alias: Option<String>,
     #[field(
         display_name = r##"Auto Ownership"##,
-        description = r##"Write-only ownership control for the Shared Email EAP. When true, automatic ownership is applied only to the identity created from `email`. Ignored unless the account has the Shared Email EAP enabled."##
+        description = r##"When true, creates the identity specified by `email` as "owned", or as "shared" if another user owns the address. Does not apply to `identities[]`. See [Shared email](/api-reference/ticketing/users/user_identities/#shared-email)."##
     )]
     #[serde(
         rename = "auto_ownership",
@@ -1442,7 +1442,7 @@ pub type OrganizationObjectOrganizationFieldsValue = Value;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "OrganizationResponse")]
 pub struct OrganizationResponse {
-    #[field(display_name = r##"organization"##)]
+    #[field(display_name = r##"Organization"##)]
     #[serde(
         rename = "organization",
         default,
@@ -1947,7 +1947,7 @@ pub struct TicketCommentObject {
     )]
     #[serde(rename = "uploads", default, skip_serializing_if = "Option::is_none")]
     pub uploads: Option<Vec<String>>,
-    #[field(display_name = r##"via"##)]
+    #[field(display_name = r##"Via"##)]
     #[serde(rename = "via", default, skip_serializing_if = "Option::is_none")]
     pub via: Option<TicketAuditViaObject>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -2499,7 +2499,7 @@ pub struct TicketObject {
         skip_serializing_if = "Option::is_none"
     )]
     pub collaborators: Option<Vec<CollaboratorObject>>,
-    #[field(display_name = r##"comment"##)]
+    #[field(display_name = r##"Comment"##)]
     #[serde(rename = "comment", default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<TicketCommentObject>,
     #[field(
@@ -2938,7 +2938,7 @@ If not specified, defaults to the authenticated user.
     )]
     #[serde(rename = "url", default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    #[field(display_name = r##"via"##)]
+    #[field(display_name = r##"Via"##)]
     #[serde(rename = "via", default, skip_serializing_if = "Option::is_none")]
     pub via: Option<ViaObject>,
     #[field(
@@ -3571,7 +3571,7 @@ pub struct TicketObjectVoiceComment {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "TicketResponse")]
 pub struct TicketResponse {
-    #[field(display_name = r##"ticket"##)]
+    #[field(display_name = r##"Ticket"##)]
     #[serde(rename = "ticket", default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<TicketObject>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -3583,10 +3583,10 @@ pub struct TicketResponse {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "TicketUpdateResponse")]
 pub struct TicketUpdateResponse {
-    #[field(display_name = r##"audit"##)]
+    #[field(display_name = r##"Audit"##)]
     #[serde(rename = "audit", default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<AuditObject>,
-    #[field(display_name = r##"ticket"##)]
+    #[field(display_name = r##"Ticket"##)]
     #[serde(rename = "ticket", default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<TicketObject>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -4108,7 +4108,7 @@ pub struct UserForEndUser {
 pub struct UserIdentityInput {
     #[field(
         display_name = r##"Auto Ownership"##,
-        description = r##"Write-only ownership control for the Shared Email EAP. When true, attempts `owned` first and falls back to `shared` on an ownership conflict. Ignored unless the account has the Shared Email EAP enabled. Mutually exclusive with `ownership`; requests that supply both keys are rejected."##
+        description = r##"When true, creates the email identity as "owned", or as "shared" if another user owns the address. See [Shared email](/api-reference/ticketing/users/user_identities/#shared-email)."##
     )]
     #[serde(
         rename = "auto_ownership",
@@ -4118,7 +4118,7 @@ pub struct UserIdentityInput {
     pub auto_ownership: Option<bool>,
     #[field(
         display_name = r##"Ownership"##,
-        description = r##"Write-only ownership control for the Shared Email EAP. Ignored unless the account has the Shared Email EAP enabled. Mutually exclusive with `auto_ownership`; requests that supply both keys are rejected. One of: owned, shared."##
+        description = r##"Sets the email identity to "owned" or "shared". Defaults to "owned". See [Shared email](/api-reference/ticketing/users/user_identities/#shared-email). One of: owned, shared."##
     )]
     #[serde(rename = "ownership", default, skip_serializing_if = "Option::is_none")]
     pub ownership: Option<String>,
@@ -4165,7 +4165,7 @@ pub type UserObject = Value;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "UserResponse")]
 pub struct UserResponse {
-    #[field(display_name = r##"user"##)]
+    #[field(display_name = r##"User"##)]
     #[serde(rename = "user", default, skip_serializing_if = "Option::is_none")]
     pub user: Option<UserObject>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
@@ -4195,7 +4195,7 @@ pub struct UserUpdateInput {
     pub alias: Option<String>,
     #[field(
         display_name = r##"Auto Ownership"##,
-        description = r##"Write-only ownership control for the Shared Email EAP. When true, automatic ownership is applied only to the identity created from `email`. Ignored unless the account has the Shared Email EAP enabled."##
+        description = r##"When true, creates the identity specified by `email` as "owned", or as "shared" if another user owns the address. See [Shared email](/api-reference/ticketing/users/user_identities/#shared-email)."##
     )]
     #[serde(
         rename = "auto_ownership",
@@ -5784,7 +5784,7 @@ See [Sideloading](/documentation/api-basics/working-with-data/side_loading/#supp
         skip_serializing_if = "Option::is_none"
     )]
     pub collaborators: Option<Vec<CollaboratorObject>>,
-    #[field(display_name = r##"comment"##)]
+    #[field(display_name = r##"Comment"##)]
     #[serde(rename = "comment", default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<TicketCommentObject>,
     #[field(
@@ -6133,7 +6133,7 @@ If not specified, defaults to the authenticated user.
         skip_serializing_if = "Option::is_none"
     )]
     pub updated_stamp: Option<String>,
-    #[field(display_name = r##"via"##)]
+    #[field(display_name = r##"Via"##)]
     #[serde(rename = "via", default, skip_serializing_if = "Option::is_none")]
     pub via: Option<ViaObject>,
     #[field(
@@ -6596,7 +6596,7 @@ pub struct UpdateTicketInput {
         skip_serializing_if = "Option::is_none"
     )]
     pub collaborators: Option<Vec<CollaboratorObject>>,
-    #[field(display_name = r##"comment"##)]
+    #[field(display_name = r##"Comment"##)]
     #[serde(rename = "comment", default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<TicketCommentObject>,
     #[field(
@@ -6945,7 +6945,7 @@ If not specified, defaults to the authenticated user.
         skip_serializing_if = "Option::is_none"
     )]
     pub updated_stamp: Option<String>,
-    #[field(display_name = r##"via"##)]
+    #[field(display_name = r##"Via"##)]
     #[serde(rename = "via", default, skip_serializing_if = "Option::is_none")]
     pub via: Option<ViaObject>,
     #[field(
@@ -7086,7 +7086,7 @@ pub struct CreateOrUpdateUserInput {
     pub alias: Option<Option<String>>,
     #[field(
         display_name = r##"Auto Ownership"##,
-        description = r##"Write-only ownership control for the Shared Email EAP. When true, automatic ownership is applied only to the identity created from `email`. Ignored unless the account has the Shared Email EAP enabled."##
+        description = r##"When true, creates the identity specified by `email` as "owned", or as "shared" if another user owns the address. Does not apply to `identities[]`. See [Shared email](/api-reference/ticketing/users/user_identities/#shared-email)."##
     )]
     #[serde(
         rename = "auto_ownership",
@@ -7548,7 +7548,7 @@ pub struct CreateUserInput {
     pub alias: Option<Option<String>>,
     #[field(
         display_name = r##"Auto Ownership"##,
-        description = r##"Write-only ownership control for the Shared Email EAP. When true, automatic ownership is applied only to the identity created from `email`. Ignored unless the account has the Shared Email EAP enabled."##
+        description = r##"When true, creates the identity specified by `email` as "owned", or as "shared" if another user owns the address. Does not apply to `identities[]`. See [Shared email](/api-reference/ticketing/users/user_identities/#shared-email)."##
     )]
     #[serde(
         rename = "auto_ownership",
@@ -8194,7 +8194,7 @@ pub struct UpdateUserInput {
     pub alias: Option<Option<String>>,
     #[field(
         display_name = r##"Auto Ownership"##,
-        description = r##"Write-only ownership control for the Shared Email EAP. When true, automatic ownership is applied only to the identity created from `email`. Ignored unless the account has the Shared Email EAP enabled."##
+        description = r##"When true, creates the identity specified by `email` as "owned", or as "shared" if another user owns the address. See [Shared email](/api-reference/ticketing/users/user_identities/#shared-email)."##
     )]
     #[serde(
         rename = "auto_ownership",

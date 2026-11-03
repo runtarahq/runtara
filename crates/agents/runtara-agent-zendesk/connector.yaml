@@ -7,7 +7,7 @@ agent:
   error_prefix: ZENDESK
 spec:
   url: https://developer.zendesk.com/zendesk/oas.yaml
-  sha256: 809a093dd15caa57536520db2c7dd8a829e8e6c2a25c01b3f7af3f4e9b8d22e6
+  sha256: 5ff8bb4529fa1a26686278a0ee638def46e2d65f7564fe3305695537e831b2ae
 # Zendesk wraps request bodies: {"ticket": {...}}. Their fields become inputs.
 body_envelopes:
   - ticket
