@@ -122,6 +122,8 @@ tower = { version = "0.5", features = ["util"] }
 
 # Plumbing
 zeroize = "1"
+# Run channel credentials (run_channel.rs): v4 UUIDs, from the OS generator.
+uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 sha2 = { workspace = true }
 # Dyn-compatible async for the RuntimeHost trait (implemented in

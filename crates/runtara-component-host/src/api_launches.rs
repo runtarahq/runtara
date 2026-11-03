@@ -142,6 +142,8 @@ pub struct ApiLaunches {
     limiter: std::sync::OnceLock<Arc<dyn runtara_workflow_api::server::CallLimiter>>,
     /// Compiles queued for each tenant's warm compiler (SYN-930).
     compiles: crate::compile_worker::CompileQueues,
+    /// The run channel's per-launch credentials ([`crate::run_channel`]).
+    credentials: Arc<crate::run_channel::RunCredentials>,
 }
 
 impl Default for ApiLaunches {
@@ -158,6 +160,7 @@ impl Default for ApiLaunches {
             control: std::sync::OnceLock::new(),
             trusted: std::sync::OnceLock::new(),
             compiles: Default::default(),
+            credentials: Default::default(),
         }
     }
 }
@@ -402,9 +405,43 @@ impl ApiLaunches {
             .take()
     }
 
+    /// A run channel credential for `launch_id`, which must be serving: the
+    /// bearer its runner presents on [`Self::credentialed_router`]. Calls
+    /// with it wait until [`Self::open_start`]; it is revoked when the launch
+    /// finishes. Never log it.
+    pub fn mint_credential(&self, launch_id: &str) -> Result<String, String> {
+        let binding = self
+            .slots
+            .lock()
+            .expect("workflow API launches poisoned")
+            .get(launch_id)
+            .map(|slot| slot.binding.clone())
+            .ok_or_else(|| format!("launch {launch_id} does not serve the workflow API"))?;
+        Ok(self.credentials.mint(binding))
+    }
+
+    /// `launch_id`'s durable start is confirmed: its run channel calls are
+    /// served from now on.
+    pub fn open_start(&self, launch_id: &str) -> bool {
+        self.credentials.open(launch_id)
+    }
+
+    /// `launch_id` will not start: its run channel calls are refused.
+    pub fn refuse_start(&self, launch_id: &str) -> bool {
+        self.credentials.refuse(launch_id)
+    }
+
+    /// The `/v1` router served over the run channel: each request's binding
+    /// is the one its bearer credential names ([`crate::run_channel`]).
+    pub fn credentialed_router(self: &Arc<Self>) -> axum::Router {
+        crate::run_channel::credentialed(self.router(), Arc::clone(&self.credentials))
+    }
+
     /// Stop serving `launch_id` and hand back the outcome it posted, if any.
-    /// Later requests from that launch are `fenced`.
+    /// Later requests from that launch are `fenced`, and its run channel
+    /// credential is revoked.
     pub fn finish(&self, launch_id: &str) -> Option<PostedOutcome> {
+        self.credentials.revoke(launch_id);
         let slot = self
             .slots
             .lock()
@@ -2975,6 +3012,67 @@ mod tests {
             backend.launch_state(&completed).await.unwrap(),
             LaunchState::Fenced
         );
+    }
+
+    /// The run channel: a runner elsewhere reads its input and, when its
+    /// guest died without an outcome, posts the failed one, with only the
+    /// launch's credential; the credential ends with the launch.
+    #[tokio::test]
+    async fn a_run_channel_credential_serves_its_launch_and_a_host_side_failed_outcome() {
+        use tower::ServiceExt;
+        let launches = Arc::new(ApiLaunches::default());
+        launches
+            .begin(binding(1), info(), b"in".to_vec(), no_runtime(), controls())
+            .unwrap();
+        let credential = launches.mint_credential("launch-1").unwrap();
+        assert!(launches.mint_credential("launch-2").is_err());
+        assert!(launches.open_start("launch-1"));
+        let app = launches.credentialed_router();
+        let call = |request: axum::http::request::Builder, body: &'static str| {
+            let app = app.clone();
+            let credential = credential.clone();
+            async move {
+                app.oneshot(
+                    request
+                        .header("authorization", format!("Bearer {credential}"))
+                        .body(axum::body::Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let input = call(axum::http::Request::get("/v1/run/input"), "").await;
+        assert_eq!(input.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            axum::body::to_bytes(input.into_body(), 64).await.unwrap(),
+            &b"in"[..]
+        );
+        let failed = call(
+            axum::http::Request::post("/v1/run/outcome")
+                .header("runtara-outcome", "failed")
+                .header("idempotency-key", "fenders-shim-outcome-launch-1-1")
+                .header("content-type", "application/json"),
+            r#"{"code":"GUEST_KILLED","message":"the VMM was killed by signal 9","category":"permanent","severity":"error","retryable":false,"attributes":{"source":"fenders-shim","signal":9}}"#,
+        )
+        .await;
+        let status = failed.status();
+        let detail = axum::body::to_bytes(failed.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            status,
+            axum::http::StatusCode::NO_CONTENT,
+            "{}",
+            String::from_utf8_lossy(&detail)
+        );
+        assert!(launches.posted("launch-1"));
+        match launches.finish("launch-1") {
+            Some(PostedOutcome::Failed(error)) => assert_eq!(error.code, "GUEST_KILLED"),
+            other => panic!("unexpected outcome {other:?}"),
+        }
+        let after = call(axum::http::Request::get("/v1/run/input"), "").await;
+        assert_eq!(after.status(), axum::http::StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
