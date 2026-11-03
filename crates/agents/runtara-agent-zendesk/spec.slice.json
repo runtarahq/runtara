@@ -410,7 +410,12 @@
             "x-runtara-label": "Ticket ID"
           },
           "via": {
-            "$ref": "#/components/schemas/ViaObject"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ViaObject"
+              }
+            ],
+            "x-runtara-label": "Via"
           }
         },
         "type": "object"
@@ -814,6 +819,7 @@
           },
           "organization_fields": {
             "additionalProperties": {
+              "nullable": true,
               "oneOf": [
                 {
                   "type": "string"
@@ -829,9 +835,6 @@
                     "type": "string"
                   },
                   "type": "array"
-                },
-                {
-                  "type": "null"
                 }
               ]
             },
@@ -888,7 +891,12 @@
       "OrganizationResponse": {
         "properties": {
           "organization": {
-            "$ref": "#/components/schemas/OrganizationObject"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/OrganizationObject"
+              }
+            ],
+            "x-runtara-label": "Organization"
           }
         },
         "type": "object"
@@ -1386,7 +1394,12 @@
             "x-runtara-label": "Uploads"
           },
           "via": {
-            "$ref": "#/components/schemas/TicketAuditViaObject"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TicketAuditViaObject"
+              }
+            ],
+            "x-runtara-label": "Via"
           }
         },
         "type": "object"
@@ -1734,6 +1747,7 @@
           "value": {
             "description": "The value to assign to the custom field.\nType depends on the field configuration:\n- Text/textarea: string\n- Checkbox: boolean or \"true\"/\"false\" string\n- Dropdown/tagger: string or array of strings (multi-select)\n- Number/decimal: number or string representation\n- Date: string (ISO 8601 format)\n- Lookup: the target record's id, or an id prefixed with `external_id:` or `name:`\n- Multi-lookup: an array of target record ids, up to `max_selections` entries. Each write replaces the\n  entire set of selections. Unresolved ids are silently dropped. See\n  [Setting multi-lookup field values](/api-reference/ticketing/lookup_relationships/lookup_relationships/#setting-multi-lookup-field-values)\n- null when the field has no value set\n",
             "example": "745",
+            "nullable": true,
             "oneOf": [
               {
                 "type": "string"
@@ -1749,9 +1763,6 @@
                   "type": "string"
                 },
                 "type": "array"
-              },
-              {
-                "type": "null"
               }
             ],
             "x-runtara-example": "745",
@@ -1882,6 +1893,7 @@
           },
           "brand_id": {
             "description": "The id of the brand this ticket is associated with. See [Setting up multiple brands](https://support.zendesk.com/hc/en-us/articles/4408829476378)",
+            "nullable": true,
             "oneOf": [
               {
                 "format": "int64",
@@ -1889,9 +1901,6 @@
               },
               {
                 "type": "string"
-              },
-              {
-                "type": "null"
               }
             ],
             "x-runtara-label": "Brand ID"
@@ -1915,7 +1924,12 @@
             "x-runtara-label": "Collaborators"
           },
           "comment": {
-            "$ref": "#/components/schemas/TicketCommentObject"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TicketCommentObject"
+              }
+            ],
+            "x-runtara-label": "Comment"
           },
           "created_at": {
             "description": "When this record was created",
@@ -2821,7 +2835,12 @@
             "x-runtara-label": "URL"
           },
           "via": {
-            "$ref": "#/components/schemas/ViaObject"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ViaObject"
+              }
+            ],
+            "x-runtara-label": "Via"
           },
           "via_followup_source_id": {
             "description": "Write only. The id of a closed ticket when creating a follow-up ticket. See [Creating a follow-up ticket](/documentation/ticketing/managing-tickets/creating-and-updating-tickets#creating-a-follow-up-ticket)",
@@ -2892,7 +2911,12 @@
       "TicketResponse": {
         "properties": {
           "ticket": {
-            "$ref": "#/components/schemas/TicketObject"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TicketObject"
+              }
+            ],
+            "x-runtara-label": "Ticket"
           }
         },
         "type": "object"
@@ -2900,10 +2924,20 @@
       "TicketUpdateResponse": {
         "properties": {
           "audit": {
-            "$ref": "#/components/schemas/AuditObject"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AuditObject"
+              }
+            ],
+            "x-runtara-label": "Audit"
           },
           "ticket": {
-            "$ref": "#/components/schemas/TicketObject"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TicketObject"
+              }
+            ],
+            "x-runtara-label": "Ticket"
           }
         },
         "type": "object"
@@ -3383,17 +3417,19 @@
       "UserIdentityInput": {
         "properties": {
           "auto_ownership": {
-            "description": "Write-only ownership control for the Shared Email EAP. When true, attempts `owned` first and falls back to `shared` on an ownership conflict. Ignored unless the account has the Shared Email EAP enabled. Mutually exclusive with `ownership`; requests that supply both keys are rejected.",
+            "description": "When true, creates the email identity as \"owned\", or as \"shared\" if another user owns the address. See [Shared email](/api-reference/ticketing/users/user_identities/#shared-email).",
             "type": "boolean",
+            "writeOnly": true,
             "x-runtara-label": "Auto Ownership"
           },
           "ownership": {
-            "description": "Write-only ownership control for the Shared Email EAP. Ignored unless the account has the Shared Email EAP enabled. Mutually exclusive with `auto_ownership`; requests that supply both keys are rejected.",
+            "description": "Sets the email identity to \"owned\" or \"shared\". Defaults to \"owned\". See [Shared email](/api-reference/ticketing/users/user_identities/#shared-email).",
             "enum": [
               "owned",
               "shared"
             ],
             "type": "string",
+            "writeOnly": true,
             "x-runtara-label": "Ownership"
           },
           "primary": {
@@ -3460,7 +3496,12 @@
       "UserResponse": {
         "properties": {
           "user": {
-            "$ref": "#/components/schemas/UserObject"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/UserObject"
+              }
+            ],
+            "x-runtara-label": "User"
           }
         },
         "type": "object"
@@ -3485,7 +3526,7 @@
             "x-runtara-label": "Alias"
           },
           "auto_ownership": {
-            "description": "Write-only ownership control for the Shared Email EAP. When true, automatic ownership is applied only to the identity created from `email`. Ignored unless the account has the Shared Email EAP enabled.",
+            "description": "When true, creates the identity specified by `email` as \"owned\", or as \"shared\" if another user owns the address. See [Shared email](/api-reference/ticketing/users/user_identities/#shared-email).",
             "type": "boolean",
             "writeOnly": true,
             "x-runtara-label": "Auto Ownership"
@@ -5504,6 +5545,40 @@
                       "role": "agent"
                     }
                   }
+                },
+                "identity_auto_ownership": {
+                  "summary": "Create a user with automatic ownership on an identity",
+                  "value": {
+                    "user": {
+                      "external_id": "household-customer-202",
+                      "identities": [
+                        {
+                          "auto_ownership": true,
+                          "type": "email",
+                          "value": "household@example.com"
+                        }
+                      ],
+                      "name": "Jamie Rivera",
+                      "role": "end-user"
+                    }
+                  }
+                },
+                "shared_email_identity": {
+                  "summary": "Create a user with a shared email identity",
+                  "value": {
+                    "user": {
+                      "external_id": "household-customer-202",
+                      "identities": [
+                        {
+                          "ownership": "shared",
+                          "type": "email",
+                          "value": "household@example.com"
+                        }
+                      ],
+                      "name": "Jamie Rivera",
+                      "role": "end-user"
+                    }
+                  }
                 }
               },
               "schema": {
@@ -5530,7 +5605,7 @@
                     "x-runtara-label": "Alias"
                   },
                   "auto_ownership": {
-                    "description": "Write-only ownership control for the Shared Email EAP. When true, automatic ownership is applied only to the identity created from `email`. Ignored unless the account has the Shared Email EAP enabled.",
+                    "description": "When true, creates the identity specified by `email` as \"owned\", or as \"shared\" if another user owns the address. Does not apply to `identities[]`. See [Shared email](/api-reference/ticketing/users/user_identities/#shared-email).",
                     "type": "boolean",
                     "writeOnly": true,
                     "x-runtara-label": "Auto Ownership"
@@ -5927,7 +6002,7 @@
                     "x-runtara-label": "Alias"
                   },
                   "auto_ownership": {
-                    "description": "Write-only ownership control for the Shared Email EAP. When true, automatic ownership is applied only to the identity created from `email`. Ignored unless the account has the Shared Email EAP enabled.",
+                    "description": "When true, creates the identity specified by `email` as \"owned\", or as \"shared\" if another user owns the address. Does not apply to `identities[]`. See [Shared email](/api-reference/ticketing/users/user_identities/#shared-email).",
                     "type": "boolean",
                     "writeOnly": true,
                     "x-runtara-label": "Auto Ownership"
