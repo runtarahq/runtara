@@ -307,6 +307,7 @@ pub async fn create_runtara_pool(
         .connect(&database_url)
         .await?;
     runtara_store_postgres::tenant_scope::require_row_security(&pool, "runtime").await?;
+    runtara_store_postgres::tenant_scope::check_enum_index_use(&pool, "runtime").await;
     // Read back off the pool rather than echoing the request, so the line says
     // what this process is actually running with. `0` means the timeout is
     // disabled, the same way the environment variables spell it.

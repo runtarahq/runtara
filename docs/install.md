@@ -132,6 +132,21 @@ in those modes on a non-loopback address**, because authentication is happening
 somewhere other than in-process. See
 [deployment/auth-modes.md](deployment/auth-modes.md).
 
+### Enum indexes under row level security
+
+The server and runtime databases keep tenants apart with row level security.
+Under a policy, Postgres uses an index for a condition only when its operator
+is leakproof, and enum equality is not by default: every condition on an enum
+column (an instance's status, for one) then scans its whole table, and gets
+slower as the table grows. Enum equality compares two OIDs and cannot leak
+anything. As a superuser, run once in each of those databases:
+
+```sql
+ALTER FUNCTION pg_catalog.enum_eq(anyenum, anyenum) LEAKPROOF;
+```
+
+The server logs a warning at startup while it is not done.
+
 ### Object-model database role
 
 Raw SQL (`sql/execute`, MCP `execute_sql`) runs as the role in

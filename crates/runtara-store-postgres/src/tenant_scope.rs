@@ -77,6 +77,35 @@ pub async fn require_row_security(pool: &sqlx::PgPool, database: &str) -> Result
     }
 }
 
+/// Warns when row level security keeps `pool`'s enum columns off their
+/// indexes. Under a row security policy Postgres only pushes a condition into
+/// an index scan when its operator is leakproof, and enum equality is not by
+/// default: every `status = ...` on a table with a policy then scans the whole
+/// table (the admission gate's count took 70 ms instead of 1 ms on 120k
+/// instances). Enum equality compares two OIDs and cannot leak anything; an
+/// administrator marks it once per database:
+/// `ALTER FUNCTION pg_catalog.enum_eq(anyenum, anyenum) LEAKPROOF;`
+pub async fn check_enum_index_use(pool: &sqlx::PgPool, database: &str) {
+    let leakproof: Result<bool, sqlx::Error> = sqlx::query_scalar(
+        "SELECT proleakproof FROM pg_proc WHERE oid = 'pg_catalog.enum_eq(anyenum, anyenum)'::regprocedure",
+    )
+    .fetch_one(pool)
+    .await;
+    match (escapes_row_security(pool).await, leakproof) {
+        (Ok(false), Ok(false)) => tracing::warn!(
+            database,
+            "enum equality is not leakproof: under row level security every enum \
+             condition (instance status, ...) scans its whole table. As an \
+             administrator, run once in this database: ALTER FUNCTION \
+             pg_catalog.enum_eq(anyenum, anyenum) LEAKPROOF;"
+        ),
+        (_, Err(error)) => {
+            tracing::debug!(database, %error, "could not check enum equality's leakproofness")
+        }
+        _ => {}
+    }
+}
+
 async fn name_tenant(connection: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT set_config('runtara.tenant_id', $1, false)")
         .bind(current().unwrap_or_default())
