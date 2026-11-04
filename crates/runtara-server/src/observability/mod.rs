@@ -206,7 +206,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    fn new(meter: Meter) -> Self {
+    pub(crate) fn new(meter: Meter) -> Self {
         // Compilation metrics
         let compilations_total = meter
             .u64_counter("runtara.compilation.total")
@@ -364,6 +364,29 @@ impl Metrics {
 /// Get the global metrics instance
 pub fn metrics() -> Option<&'static Metrics> {
     METRICS.get()
+}
+
+/// The `tenant` attribute for a metric recorded for `tenant`, when
+/// `RUNTARA_METRICS_TENANT_LABEL` is on and this process serves `tenant`.
+/// Anything else (the setting off, an empty or unserved tenant) leaves the
+/// series unlabelled, so the label is bounded by the served tenants.
+pub fn tenant_attribute(tenant: &str) -> Option<KeyValue> {
+    tenant_attribute_for(
+        runtara_environment::pipeline_metrics::tenant_label_enabled(),
+        tenant,
+        crate::config::is_served_tenant,
+    )
+}
+
+pub(crate) fn tenant_attribute_for(
+    enabled: bool,
+    tenant: &str,
+    served: impl Fn(&str) -> bool,
+) -> Option<KeyValue> {
+    if !enabled || !served(tenant) {
+        return None;
+    }
+    runtara_environment::pipeline_metrics::tenant_attribute(enabled, tenant)
 }
 
 /// Record the duration of a per-tenant membership/revocation lookup. `outcome` is `"allow"`

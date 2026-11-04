@@ -492,11 +492,14 @@ async fn process_event(
     // Record metrics
     if let Some((m, process_start)) = telemetry {
         let duration = process_start.elapsed().as_secs_f64();
-        let attributes = [KeyValue::new("trigger_type", trigger_event.trigger_type())];
+        let tenant = crate::observability::tenant_attribute(&trigger_event.tenant_id);
+        let mut attributes = vec![KeyValue::new("trigger_type", trigger_event.trigger_type())];
+        attributes.extend(tenant.clone());
         m.trigger_events_total.add(1, &attributes);
-        // Duration is a histogram: tenant_id/workflow_id would multiply its
-        // buckets per workflow and tenant, exploding series count. Keep only
-        // low-cardinality labels; per-workflow timing belongs in traces.
+        // Duration is a histogram: workflow_id would multiply its buckets per
+        // workflow, exploding series count. Keep only low-cardinality labels;
+        // per-workflow timing belongs in traces. The tenant is added only
+        // where an operator asked for it (`RUNTARA_METRICS_TENANT_LABEL`).
         let status = match &process_result {
             ProcessResult::Success => "success",
             ProcessResult::Deduplicated => "deduplicated",
@@ -505,19 +508,16 @@ async fn process_event(
             ProcessResult::RetryLater(_) => "retry_later",
             ProcessResult::HandoffInProgress(_) => "handoff_in_progress",
         };
-        m.trigger_processing_duration.record(
-            duration,
-            &[
-                KeyValue::new("trigger_type", trigger_event.trigger_type().to_string()),
-                KeyValue::new("status", status),
-            ],
-        );
+        let mut duration_attributes = vec![
+            KeyValue::new("trigger_type", trigger_event.trigger_type().to_string()),
+            KeyValue::new("status", status),
+        ];
+        duration_attributes.extend(tenant);
+        m.trigger_processing_duration
+            .record(duration, &duration_attributes);
         match &process_result {
             ProcessResult::PermanentFailure(_) => {
-                m.trigger_events_failed.add(
-                    1,
-                    &[KeyValue::new("trigger_type", trigger_event.trigger_type())],
-                );
+                m.trigger_events_failed.add(1, &attributes);
             }
             ProcessResult::NotRunnable(_) => {
                 // Counted under its own status label above, not as a failure -
@@ -635,10 +635,12 @@ async fn process_event(
                 );
                 // Record as failed
                 if let Some(m) = metrics() {
-                    m.trigger_events_failed.add(
-                        1,
-                        &[KeyValue::new("trigger_type", trigger_event.trigger_type())],
-                    );
+                    let mut attributes =
+                        vec![KeyValue::new("trigger_type", trigger_event.trigger_type())];
+                    attributes.extend(crate::observability::tenant_attribute(
+                        &trigger_event.tenant_id,
+                    ));
+                    m.trigger_events_failed.add(1, &attributes);
                 }
                 // ACK to remove from PEL
                 if let Err(ack_err) = acker.acknowledge_event(entry_id).await {

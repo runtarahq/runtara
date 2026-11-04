@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-tenant metrics in a shared process.** With
+  `RUNTARA_METRICS_TENANT_LABEL=1`, HTTP request, admission, trigger and
+  launch metrics carry a `tenant_id` attribute (the name the workflow metrics use): the served tenant the request or
+  run resolved, never a user, and none when it is unknown. Off by default, so
+  a single-tenant install keeps its series count. See
+  `docs/pipeline-monitoring.md`.
+
 - **Slack Web API agent, generated from Slack's spec.** Thirty-four
   capabilities on the existing `slack_bot` connection: messages (post, post
   ephemeral, update, delete, schedule, list and delete scheduled messages,
