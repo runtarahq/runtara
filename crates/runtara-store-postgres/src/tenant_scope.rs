@@ -9,7 +9,9 @@
 //! The tenant is set on the connection as it is handed out, whether it was
 //! idle (`before_acquire`) or newly opened (`after_connect`), so every query
 //! and transaction on it runs under the scope it was acquired in. That costs
-//! one statement per acquire, and no call site changes.
+//! one statement per acquire, and no call site changes. The statement also
+//! proves an idle connection alive (a dead one is closed and replaced), so the
+//! pool's own ping before each acquire is turned off: one round trip, not two.
 //!
 //! The scope is a task-local: work spawned onto another task
 //! (`tokio::spawn`, `spawn_blocking`) leaves it and runs as the system path.
@@ -87,6 +89,7 @@ async fn name_tenant(connection: &mut sqlx::PgConnection) -> Result<(), sqlx::Er
 /// are handed out in ([`scoped`]), or none.
 pub fn scoping(options: PgPoolOptions) -> PgPoolOptions {
     options
+        .test_before_acquire(false)
         .after_connect(|connection, _| Box::pin(name_tenant(connection)))
         .before_acquire(|connection, _| {
             Box::pin(async move { name_tenant(connection).await.map(|_| true) })

@@ -42,7 +42,13 @@ impl ExecutionLease {
         handle: &RunnerHandle,
     ) -> &'static str {
         let repository = LaunchRepository::new(pool.clone());
+        // The claim already granted a lease: renew it on the same schedule as
+        // after a renewal, not at once. Most runs end before the first
+        // renewal is due, so they make none, and none is cancelled in flight
+        // (which would cost its pooled connection) when the run ends.
+        let mut due = renewal_due(self.deadline, Instant::now());
         loop {
+            tokio::time::sleep_until(due).await;
             if Instant::now() >= self.deadline {
                 return "execution ownership lease expired";
             }
@@ -67,20 +73,44 @@ impl ExecutionLease {
                     // Measuring from before that request is conservative and
                     // avoids comparing independent host/database wall clocks.
                     self.deadline = requested_at + LEASE_DURATION - EXPIRY_MARGIN;
-                    tokio::time::sleep_until(self.deadline.min(Instant::now() + RENEW_INTERVAL))
-                        .await;
+                    due = renewal_due(self.deadline, Instant::now());
                 }
                 Ok(Ok(false)) => return "execution ownership was revoked or expired",
                 Err(_) => return "execution ownership renewal exceeded its lease",
                 Ok(Err(error)) => {
                     tracing::debug!(launch_id = %handle.launch_id, %error, "Execution lease renewal failed");
-                    tokio::time::sleep_until(self.deadline.min(Instant::now() + RETRY_INTERVAL))
-                        .await;
+                    due = self.deadline.min(Instant::now() + RETRY_INTERVAL);
                 }
             }
-            if Instant::now() >= self.deadline {
-                return "execution ownership lease expired";
-            }
         }
+    }
+}
+
+/// When a lease that ends at `deadline` is next renewed: `RENEW_INTERVAL`
+/// from `now`, but never later than a full lease's slack before `deadline`
+/// (the margin a renewal right after a grant would leave), so a lease granted
+/// long before its monitor starts is renewed at once.
+fn renewal_due(deadline: Instant, now: Instant) -> Instant {
+    let slack = LEASE_DURATION - RENEW_INTERVAL - EXPIRY_MARGIN;
+    let latest = deadline.checked_sub(slack).unwrap_or(now);
+    (now + RENEW_INTERVAL).min(latest).max(now)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fresh_lease_is_renewed_on_schedule_and_an_old_one_at_once() {
+        let now = Instant::now();
+        let fresh = now + LEASE_DURATION - EXPIRY_MARGIN;
+        assert_eq!(renewal_due(fresh, now), now + RENEW_INTERVAL);
+        // Granted 5 s before its monitor started: renewed 5 s in, keeping
+        // the same slack before its deadline; granted 15 s before: at once.
+        let older = fresh - Duration::from_secs(5);
+        assert_eq!(renewal_due(older, now), now + Duration::from_secs(5));
+        assert_eq!(renewal_due(fresh - Duration::from_secs(15), now), now);
+        assert_eq!(renewal_due(now + Duration::from_secs(2), now), now);
+        assert_eq!(renewal_due(now, now), now);
     }
 }
