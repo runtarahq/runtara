@@ -945,14 +945,21 @@ mod prepared_launch_tests {
         launch.input = serde_json::json!({ "password": "input-secret-value" });
         launch.prepersisted_input = Some(b"stored-secret-value".to_vec());
         let printed = format!("{launch:?} {launch:#?}");
-        for secret in [
-            "env-secret-value",
-            "input-secret-value",
-            "stored-secret-value",
+        // Failure messages name the field, never the value or the output.
+        for (field, secret) in [
+            ("env", "env-secret-value"),
+            ("input", "input-secret-value"),
+            ("prepersisted_input", "stored-secret-value"),
         ] {
-            assert!(!printed.contains(secret), "{secret} leaked: {printed}");
+            assert!(
+                !printed.contains(secret),
+                "launch {field} leaked into Debug"
+            );
         }
-        assert!(printed.contains("RUN_CREDENTIAL"), "{printed}");
+        assert!(
+            printed.contains("RUN_CREDENTIAL"),
+            "Debug no longer names the env keys"
+        );
         assert!(printed.contains("launch-1"), "{printed}");
     }
 

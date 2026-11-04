@@ -58,8 +58,19 @@ mod tests {
             .unwrap();
         app.oneshot(request).await.unwrap();
         let printed = seen.lock().unwrap().clone();
-        assert!(!printed.contains(TOKEN), "credential leaked: {printed}");
-        assert!(printed.contains("authorization"), "{printed}");
-        assert!(printed.contains("visible"), "{printed}");
+        // Failure messages never print the captured output, which would carry
+        // the credential if it leaked.
+        assert!(
+            !printed.contains(TOKEN),
+            "a credential header value was printed"
+        );
+        assert!(
+            printed.contains("authorization"),
+            "the header names were not printed"
+        );
+        assert!(
+            printed.contains("visible"),
+            "a plain header value was hidden"
+        );
     }
 }
