@@ -133,6 +133,7 @@ pub async fn recover_registered_with(
     container: &crate::container_registry::ContainerInfo,
     policy: RecoveryPolicy,
 ) -> Result<Option<RecoveryOutcome>> {
+    let _admitted = crate::nested_guard::admit(pool).await;
     let mut guard = pool.begin().await?;
     let launch_state: Option<String> =
         sqlx::query_scalar("SELECT state FROM instance_launches WHERE launch_id = $1 FOR UPDATE")
@@ -253,6 +254,7 @@ pub async fn recover_orphaned_with(
     instance_id: &str,
     policy: RecoveryPolicy,
 ) -> Result<Option<RecoveryOutcome>> {
+    let _admitted = crate::nested_guard::admit(pool).await;
     let mut guard = pool.begin().await?;
     sqlx::query(ORPHAN_RECOVERY_LOCK)
         .bind(instance_id)

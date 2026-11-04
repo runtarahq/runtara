@@ -375,8 +375,15 @@ impl LaunchDispatcher {
             "Launch dispatcher started"
         );
         let capacity_released = self.runner.capacity_released();
+        // Each launch wakes the loop a few times (enqueued, prepared, slot
+        // given back); the recovery sweeps only need the poll interval.
+        let mut swept_at: Option<tokio::time::Instant> = None;
         loop {
-            let processed = match self.dispatch_once().await {
+            let sweep = swept_at.is_none_or(|at| at.elapsed() >= self.config.poll_interval);
+            if sweep {
+                swept_at = Some(tokio::time::Instant::now());
+            }
+            let processed = match self.dispatch_pass(sweep).await {
                 Ok(processed) => processed,
                 Err(error) => {
                     error!(error = %error, "Launch dispatcher scan failed");
@@ -413,13 +420,30 @@ impl LaunchDispatcher {
     /// This is public for narrow integration tests; normal hosts call
     /// [`Self::run`] and wake it through the shared [`Notify`].
     pub async fn dispatch_once(&self) -> anyhow::Result<usize> {
+        self.dispatch_pass(true).await
+    }
+
+    /// One pass: abort delivery and a bounded claim, preceded by the
+    /// expiry/recovery sweeps when `sweep`.
+    async fn dispatch_pass(&self, sweep: bool) -> anyhow::Result<usize> {
         // Serve control for already-running executions even during drain and
         // before queue preparation/reconciliation can consume this pass.
         ContainerRegistry::new(self.pool.clone())
             .deliver_abort_requests(&self.owner, self.runner.as_ref(), self.config.batch_size)
             .await?;
         let repository = LaunchRepository::new(self.pool.clone());
+        if sweep {
+            self.sweep(&repository).await?;
+        }
 
+        if self.drain.is_draining() {
+            return Ok(0);
+        }
+        self.claim_and_prepare(&repository).await
+    }
+
+    /// Expire and recover queue rows.
+    async fn sweep(&self, repository: &LaunchRepository) -> anyhow::Result<()> {
         // A monitor can be interrupted after Core persisted a park/terminal
         // outcome but before it released the matching launch generation. The
         // queue row is the durable single-instance lease, so reconcile that
@@ -456,11 +480,11 @@ impl LaunchDispatcher {
                 "Recovered expired launch dispatcher leases"
             );
         }
+        Ok(())
+    }
 
-        if self.drain.is_draining() {
-            return Ok(0);
-        }
-
+    /// Claim what this host has room for and start preparing it.
+    async fn claim_and_prepare(&self, repository: &LaunchRepository) -> anyhow::Result<usize> {
         // `options_for` has Core/image database reads before the runner can
         // acquire its own preparation permit. Bound those detached workers
         // here as well, otherwise a slow database could grow an unbounded
@@ -518,7 +542,7 @@ impl LaunchDispatcher {
                     // capacity snapshot. The durable row has already been
                     // claimed, so return exactly this incarnation to queue.
                     self.requeue_owned_bounded(
-                        &repository,
+                        repository,
                         &launch,
                         self.config.preparation_retry_delay,
                         Some(PREPARATION_CAPACITY_UNAVAILABLE),
@@ -1129,6 +1153,16 @@ impl LaunchDispatcher {
         const CLAIM_WATCH_INTERVAL: Duration = Duration::from_millis(200);
 
         loop {
+            // The claim was just granted, so the first read waits an interval
+            // like the rest: most preparations finish before it, and are
+            // spared a read that their completion would cancel mid-acquire
+            // (closing the pooled connection).
+            if tokio::time::timeout_at(deadline, tokio::time::sleep(CLAIM_WATCH_INTERVAL))
+                .await
+                .is_err()
+            {
+                return PreparationClaimWatch::Deadline;
+            }
             match tokio::time::timeout_at(deadline, repository.get(&launch.launch_id)).await {
                 Ok(Ok(Some(current)))
                     if current.state == crate::launch_queue::LaunchState::Preparing
@@ -1148,13 +1182,6 @@ impl LaunchDispatcher {
                     );
                 }
                 Err(_) => return PreparationClaimWatch::Deadline,
-            }
-
-            if tokio::time::timeout_at(deadline, tokio::time::sleep(CLAIM_WATCH_INTERVAL))
-                .await
-                .is_err()
-            {
-                return PreparationClaimWatch::Deadline;
             }
         }
     }

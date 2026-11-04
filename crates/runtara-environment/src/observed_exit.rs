@@ -175,6 +175,7 @@ async fn settle(
     persistence: &dyn Persistence,
     handle: &RunnerHandle,
 ) -> Result<bool> {
+    let _admitted = crate::nested_guard::admit(pool).await;
     let mut guard = pool.begin().await?;
     sqlx::query("SELECT launch_id FROM instance_launches WHERE launch_id = $1 FOR UPDATE")
         .bind(&handle.launch_id)

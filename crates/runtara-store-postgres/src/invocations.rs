@@ -107,8 +107,15 @@ async fn read_root(
 ) -> FenceResult<(String, Option<LeaseRow>)> {
     validate_identity(tenant)?;
     validate_identity(instance)?;
-    let row: Option<(String, Option<String>, Option<i64>, Option<bool>)> = sqlx::query_as(
-        "SELECT i.status::text, l.owner, l.epoch, l.active FROM instances i \
+    #[derive(sqlx::FromRow)]
+    struct RootRow {
+        status: String,
+        owner: Option<String>,
+        epoch: Option<i64>,
+        active: Option<bool>,
+    }
+    let row: Option<RootRow> = sqlx::query_as(
+        "SELECT i.status::text AS status, l.owner, l.epoch, l.active FROM instances i \
          LEFT JOIN invocation_root_leases l ON l.instance_id = i.instance_id \
          WHERE i.instance_id=$1 AND i.tenant_id=$2",
     )
@@ -117,8 +124,9 @@ async fn read_root(
     .fetch_optional(pool)
     .await
     .map_err(storage)?;
-    let (status, owner, epoch, active) = row.ok_or_else(|| denied(FenceRejection::UnknownRoot))?;
-    let lease = match (owner, epoch, active) {
+    let row = row.ok_or_else(|| denied(FenceRejection::UnknownRoot))?;
+    let status = row.status;
+    let lease = match (row.owner, row.epoch, row.active) {
         (Some(owner), Some(epoch), Some(active)) => Some(LeaseRow {
             owner,
             epoch,

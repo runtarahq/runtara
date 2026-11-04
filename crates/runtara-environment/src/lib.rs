@@ -267,6 +267,7 @@ pub mod heartbeat_monitor;
 pub mod execution_lease;
 /// Runs blocked in an in-process wait on this host.
 pub mod in_process_waits;
+mod nested_guard;
 mod observed_exit;
 
 /// Automatic recovery of instances killed by an Environment restart.
