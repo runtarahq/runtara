@@ -591,7 +591,7 @@ impl LaunchRepository {
         let launch = Launch::try_from(row)?;
         if let Some(metrics) = &self.metrics {
             if reason != "gate_confirmed" {
-                metrics.transition(launch.state, reason);
+                metrics.transition(launch.state, reason, &launch.tenant_id);
             }
             let queue_outcome =
                 queue_outcome.or_else(|| was_waiting.then_some(launch.state.as_str()));
@@ -602,6 +602,7 @@ impl LaunchRepository {
                         .unwrap_or(i64::MAX) as f64
                         / 1_000_000.0,
                     outcome,
+                    &launch.tenant_id,
                 );
             }
         }

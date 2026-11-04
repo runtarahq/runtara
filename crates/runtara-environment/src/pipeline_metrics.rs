@@ -20,6 +20,34 @@ pub fn telemetry_enabled() -> bool {
     !std::env::var("OTEL_SDK_DISABLED").is_ok_and(|value| value.eq_ignore_ascii_case("true"))
 }
 
+/// Names the setting that adds a `tenant` attribute to per-tenant metrics.
+pub const TENANT_LABEL_SETTING: &str = "RUNTARA_METRICS_TENANT_LABEL";
+
+/// The attribute a tenant-labelled metric carries its tenant in.
+pub const TENANT_ATTRIBUTE: &str = "tenant_id";
+
+/// Whether launch, admission, trigger and HTTP metrics carry the tenant they
+/// were recorded for. Off unless `RUNTARA_METRICS_TENANT_LABEL` is `1` or
+/// `true`: a process serving one tenant keeps its series count, and one
+/// serving several opts in to a series per tenant. Read once.
+pub fn tenant_label_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| tenant_label_from(std::env::var(TENANT_LABEL_SETTING).ok().as_deref()))
+}
+
+fn tenant_label_from(raw: Option<&str>) -> bool {
+    raw.is_some_and(|value| {
+        let value = value.trim();
+        value == "1" || value.eq_ignore_ascii_case("true")
+    })
+}
+
+/// The `tenant` attribute for `tenant` when `enabled`, else nothing. An
+/// empty tenant is unknown, and leaves the series unlabelled.
+pub fn tenant_attribute(enabled: bool, tenant: &str) -> Option<KeyValue> {
+    (enabled && !tenant.is_empty()).then(|| KeyValue::new(TENANT_ATTRIBUTE, tenant.to_owned()))
+}
+
 /// Register additive local capacity and occupancy. Call once per pool owner.
 /// The SDK retains callbacks, but callbacks must not keep the pool alive.
 pub fn observe_pool(meter: &Meter, pool: &'static str, permits: &Arc<Semaphore>, capacity: usize) {
@@ -65,6 +93,8 @@ pub struct PipelineMetrics {
     queue_duration: Histogram<f64>,
     hold_duration: Histogram<f64>,
     runs: Counter<u64>,
+    /// Whether launch metrics carry their tenant ([`tenant_label_enabled`]).
+    tenant_label: bool,
 }
 
 impl PipelineMetrics {
@@ -96,7 +126,14 @@ impl PipelineMetrics {
                 )
                 .build(),
             meter,
+            tenant_label: tenant_label_enabled(),
         }
+    }
+
+    /// Label launch metrics with their tenant, or not, whatever the setting.
+    pub fn with_tenant_label(mut self, enabled: bool) -> Self {
+        self.tenant_label = enabled;
+        self
     }
 
     /// Process instruments, absent when telemetry is disabled at startup.
@@ -129,20 +166,20 @@ impl PipelineMetrics {
     }
 
     /// Call only after the transition committed and only for rows it changed.
-    pub fn transition(&self, state: LaunchState, reason: &'static str) {
-        self.transitions.add(
-            1,
-            &[
-                KeyValue::new("state", state.as_str()),
-                KeyValue::new("reason", reason),
-            ],
-        );
+    pub fn transition(&self, state: LaunchState, reason: &'static str, tenant: &str) {
+        let mut attributes = vec![
+            KeyValue::new("state", state.as_str()),
+            KeyValue::new("reason", reason),
+        ];
+        attributes.extend(tenant_attribute(self.tenant_label, tenant));
+        self.transitions.add(1, &attributes);
     }
 
     /// Record the final queue residence from authoritative transition timestamps.
-    pub fn queue_duration(&self, seconds: f64, outcome: &'static str) {
-        self.queue_duration
-            .record(seconds.max(0.0), &[KeyValue::new("outcome", outcome)]);
+    pub fn queue_duration(&self, seconds: f64, outcome: &'static str, tenant: &str) {
+        let mut attributes = vec![KeyValue::new("outcome", outcome)];
+        attributes.extend(tenant_attribute(self.tenant_label, tenant));
+        self.queue_duration.record(seconds.max(0.0), &attributes);
     }
 
     /// Start a timer owned by a held permit.
@@ -192,8 +229,84 @@ mod tests {
         let provider = SdkMeterProvider::builder()
             .with_periodic_exporter(exporter.clone())
             .build();
-        let metrics = PipelineMetrics::new(provider.meter("pipeline-test"));
+        let metrics =
+            PipelineMetrics::new(provider.meter("pipeline-test")).with_tenant_label(false);
         (provider, exporter, metrics)
+    }
+
+    /// Every attribute key recorded on the launch instruments.
+    fn launch_attribute_keys(exporter: &InMemoryMetricExporter) -> Vec<String> {
+        let mut keys = Vec::new();
+        for resource in exporter.get_finished_metrics().unwrap() {
+            for scope in resource.scope_metrics() {
+                for metric in scope.metrics() {
+                    if !metric.name().starts_with("runtara.launch.") {
+                        continue;
+                    }
+                    let attrs: Vec<_> = match metric.data() {
+                        AggregatedMetrics::U64(MetricData::Sum(s)) => s
+                            .data_points()
+                            .flat_map(|p| p.attributes().cloned().collect::<Vec<_>>())
+                            .collect(),
+                        AggregatedMetrics::F64(MetricData::Histogram(h)) => h
+                            .data_points()
+                            .flat_map(|p| p.attributes().cloned().collect::<Vec<_>>())
+                            .collect(),
+                        _ => panic!("unexpected instrument"),
+                    };
+                    keys.extend(attrs.into_iter().map(|a| {
+                        if a.key.as_str() == TENANT_ATTRIBUTE {
+                            format!("{}={}", a.key, a.value)
+                        } else {
+                            a.key.to_string()
+                        }
+                    }));
+                }
+            }
+        }
+        keys
+    }
+
+    #[test]
+    fn the_tenant_label_setting_is_off_unless_asked_for() {
+        assert!(!tenant_label_from(None));
+        assert!(!tenant_label_from(Some("")));
+        assert!(!tenant_label_from(Some("0")));
+        assert!(!tenant_label_from(Some("false")));
+        assert!(!tenant_label_from(Some("yes")));
+        assert!(tenant_label_from(Some("1")));
+        assert!(tenant_label_from(Some(" TRUE ")));
+        assert_eq!(tenant_attribute(false, "acme"), None);
+        assert_eq!(tenant_attribute(true, ""), None);
+        assert_eq!(
+            tenant_attribute(true, "acme"),
+            Some(KeyValue::new("tenant_id", "acme"))
+        );
+    }
+
+    #[test]
+    fn launch_metrics_carry_their_tenant_only_when_enabled() {
+        for enabled in [false, true] {
+            let (provider, exporter, metrics) = setup();
+            let metrics = metrics.with_tenant_label(enabled);
+            metrics.transition(LaunchState::Queued, "enqueue", "acme");
+            metrics.queue_duration(1.0, "started", "acme");
+            // A launch whose tenant is unknown stays unlabelled.
+            metrics.transition(LaunchState::Queued, "enqueue", "");
+            provider.force_flush().unwrap();
+            let keys = launch_attribute_keys(&exporter);
+            let labelled = keys.iter().filter(|k| k.starts_with("tenant_id")).count();
+            if enabled {
+                assert_eq!(labelled, 2, "{keys:?}");
+                assert!(
+                    keys.iter()
+                        .all(|k| !k.starts_with("tenant_id") || k == "tenant_id=acme")
+                );
+            } else {
+                assert_eq!(labelled, 0, "{keys:?}");
+            }
+            provider.shutdown().unwrap();
+        }
     }
 
     fn sum(exporter: &InMemoryMetricExporter, name: &str) -> Option<i64> {
@@ -291,8 +404,8 @@ mod tests {
     #[test]
     fn transition_and_wait_metrics_have_only_bounded_attributes() {
         let (provider, exporter, metrics) = setup();
-        metrics.transition(LaunchState::Failed, "queue_timeout");
-        metrics.queue_duration(2.5, "expired");
+        metrics.transition(LaunchState::Failed, "queue_timeout", "acme");
+        metrics.queue_duration(2.5, "expired", "acme");
         provider.force_flush().unwrap();
         assert_eq!(sum(&exporter, "runtara.launch.transitions"), Some(1));
         for resource in exporter.get_finished_metrics().unwrap() {

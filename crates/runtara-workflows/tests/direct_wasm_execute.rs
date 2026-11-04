@@ -872,6 +872,21 @@ fn direct_e2e_components_dir() -> PathBuf {
     shared_components_dir()
 }
 
+/// Stages every component of `bundle` into `components`. Hard links are
+/// cheap, but the temp dir may sit on another filesystem than the bundle (as
+/// on the CI runners), so a failed link falls back to a copy.
+fn stage_bundle_components(bundle: &Path, components: &Path) {
+    for entry in fs::read_dir(bundle).expect("read bundle") {
+        let entry = entry.expect("bundle entry");
+        if entry.file_type().expect("entry type").is_file() {
+            let target = components.join(entry.file_name());
+            if fs::hard_link(entry.path(), &target).is_err() {
+                fs::copy(entry.path(), &target).expect("copy bundle component");
+            }
+        }
+    }
+}
+
 fn run_direct_workflow(
     components_dir: &Path,
     workflow_id: &str,
@@ -10477,13 +10492,7 @@ fn a_non_staged_agent_cannot_park_its_parent_with_a_reserved_code() {
                 let temp = tempfile::tempdir().expect("tempdir");
                 let components = temp.path().join("components");
                 fs::create_dir(&components).expect("components dir");
-                for entry in fs::read_dir(&bundle).expect("read bundle") {
-                    let entry = entry.expect("bundle entry");
-                    if entry.file_type().expect("entry type").is_file() {
-                        fs::hard_link(entry.path(), components.join(entry.file_name()))
-                            .expect("link bundle component");
-                    }
-                }
+                stage_bundle_components(&bundle, &components);
                 fs::write(
                     components.join("runtara_agent_reserved_code.wasm"),
                     wat::parse_str(
@@ -10640,13 +10649,7 @@ fn a_reserved_code_bubbling_out_of_a_staged_workflow_agent_cannot_park_the_root(
         // The bundle plus the untagged fixture agent returning `sentinel`.
         let components = temp.path().join("components");
         fs::create_dir(&components).expect("components dir");
-        for entry in fs::read_dir(&bundle).expect("read bundle") {
-            let entry = entry.expect("bundle entry");
-            if entry.file_type().expect("entry type").is_file() {
-                fs::hard_link(entry.path(), components.join(entry.file_name()))
-                    .expect("link bundle component");
-            }
-        }
+        stage_bundle_components(&bundle, &components);
         fs::write(
             components.join("runtara_agent_reserved_code.wasm"),
             wat::parse_str(

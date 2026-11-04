@@ -144,8 +144,22 @@ async fn setup(
     hold: Option<oneshot::Receiver<()>>,
     placed: Arc<Notify>,
 ) -> Setup {
+    setup_on(
+        Arc::new(InMemoryPersistence::new()),
+        behaviour,
+        hold,
+        placed,
+    )
+    .await
+}
+
+async fn setup_on(
+    persistence: Arc<dyn Persistence>,
+    behaviour: Behaviour,
+    hold: Option<oneshot::Receiver<()>>,
+    placed: Arc<Notify>,
+) -> Setup {
     let dir = tempfile::tempdir().unwrap();
-    let persistence: Arc<dyn Persistence> = Arc::new(InMemoryPersistence::new());
     let artifacts = Arc::new(FilesystemArtifactStore::new(dir.path().join("artifacts")));
     // An empty module: the runner reads only its trusted pins.
     let workflow = artifacts.put(b"\0asm\x01\0\0\0").await.unwrap();
@@ -274,5 +288,65 @@ async fn a_run_its_provider_loses_is_handed_to_recovery() {
             assert!(reason.contains("lost with its host"), "{reason}")
         }
         other => panic!("expected a lost report, got {other:?}"),
+    }
+}
+
+/// A run placed with a provider ends through the same Core completion as a
+/// local one, so the host's completion metrics count it, and count it once.
+#[cfg(feature = "db-integration-tests")]
+mod completion_metrics {
+    use super::*;
+    use runtara_core::persistence::{InstanceCompletionMetrics, InstanceMetricsSink};
+    use runtara_store_postgres::PostgresPersistence;
+
+    #[derive(Default)]
+    struct Counting(Mutex<Vec<(String, InstanceStatus)>>);
+
+    impl InstanceMetricsSink for Counting {
+        fn on_terminal(&self, metrics: &InstanceCompletionMetrics) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((metrics.tenant_id.clone(), metrics.status));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_external_runners_completion_is_counted_once() {
+        let url = std::env::var("TEST_ENVIRONMENT_DATABASE_URL")
+            .or_else(|_| std::env::var("RUNTARA_ENVIRONMENT_DATABASE_URL"))
+            .expect("db-integration-tests requires an environment database URL");
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        runtara_environment::migrations::run(&pool).await.unwrap();
+        let sink = Arc::new(Counting::default());
+        let persistence: Arc<dyn Persistence> =
+            Arc::new(PostgresPersistence::new(pool).with_metrics_sink(sink.clone()));
+        let placed = Arc::new(Notify::new());
+        let s = setup_on(persistence, Behaviour::Complete, None, placed).await;
+        let instance = format!("provider-metrics-{}", uuid::Uuid::new_v4());
+        register(&s.persistence, &instance).await;
+        let handle = s
+            .runner
+            .try_launch_detached(&options(&instance, s.workflow.clone()))
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            s.runner.wait_for_exit(&handle, Duration::from_millis(20)),
+        )
+        .await
+        .expect("the run ends on its outcome");
+        let record = s
+            .persistence
+            .get_instance(&instance)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.status, InstanceStatus::Completed, "{record:?}");
+        assert_eq!(
+            *sink.0.lock().unwrap(),
+            [("tenant-p".to_string(), InstanceStatus::Completed)],
+            "one completion, for the run's tenant"
+        );
     }
 }

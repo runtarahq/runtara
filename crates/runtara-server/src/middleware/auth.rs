@@ -102,6 +102,7 @@ async fn authenticate_with(
         }
         let span = auth_span(&auth_context);
         let tenant = auth_context.org_id.clone();
+        crate::middleware::http_metrics::note_tenant(request.extensions(), &tenant);
         request.extensions_mut().insert(auth_context);
         return as_tenant(enforce_membership_here, &tenant, next.run(request))
             .instrument(span)
@@ -143,6 +144,7 @@ async fn authenticate_with(
 
     let span = auth_span(&auth_context);
     let tenant = auth_context.org_id.clone();
+    crate::middleware::http_metrics::note_tenant(request.extensions(), &tenant);
     request.extensions_mut().insert(auth_context);
     as_tenant(enforce_membership_here, &tenant, next.run(request))
         .instrument(span)

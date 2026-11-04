@@ -850,7 +850,8 @@ impl ExecutionEngine {
             .await;
         if let Some((metrics, started)) = telemetry {
             let outcome = admission_outcome(&result);
-            let attributes = [opentelemetry::KeyValue::new("outcome", outcome)];
+            let mut attributes = vec![opentelemetry::KeyValue::new("outcome", outcome)];
+            attributes.extend(crate::observability::tenant_attribute(tenant_id));
             metrics.admission_requests.add(1, &attributes);
             metrics
                 .admission_duration

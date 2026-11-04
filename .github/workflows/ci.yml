@@ -307,6 +307,16 @@ jobs:
           --health-retries 5
 
     steps:
+      # runtara-server's test build (every integration-test binary plus the
+      # restored cache) outgrew the runner's free disk and died with "No space
+      # left on device" in rustc. Drop preinstalled SDKs this job never uses.
+      - name: Free runner disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - uses: actions/checkout@v4
         with:
           submodules: true
