@@ -24,7 +24,7 @@ pub fn telemetry_enabled() -> bool {
 pub const TENANT_LABEL_SETTING: &str = "RUNTARA_METRICS_TENANT_LABEL";
 
 /// The attribute a tenant-labelled metric carries its tenant in.
-pub const TENANT_ATTRIBUTE: &str = "tenant";
+pub const TENANT_ATTRIBUTE: &str = "tenant_id";
 
 /// Whether launch, admission, trigger and HTTP metrics carry the tenant they
 /// were recorded for. Off unless `RUNTARA_METRICS_TENANT_LABEL` is `1` or
@@ -280,7 +280,7 @@ mod tests {
         assert_eq!(tenant_attribute(true, ""), None);
         assert_eq!(
             tenant_attribute(true, "acme"),
-            Some(KeyValue::new("tenant", "acme"))
+            Some(KeyValue::new("tenant_id", "acme"))
         );
     }
 
@@ -295,12 +295,12 @@ mod tests {
             metrics.transition(LaunchState::Queued, "enqueue", "");
             provider.force_flush().unwrap();
             let keys = launch_attribute_keys(&exporter);
-            let labelled = keys.iter().filter(|k| k.starts_with("tenant")).count();
+            let labelled = keys.iter().filter(|k| k.starts_with("tenant_id")).count();
             if enabled {
                 assert_eq!(labelled, 2, "{keys:?}");
                 assert!(
                     keys.iter()
-                        .all(|k| !k.starts_with("tenant") || k == "tenant=acme")
+                        .all(|k| !k.starts_with("tenant_id") || k == "tenant_id=acme")
                 );
             } else {
                 assert_eq!(labelled, 0, "{keys:?}");

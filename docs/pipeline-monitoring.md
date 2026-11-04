@@ -73,7 +73,7 @@ Existing trigger-duration bucket configuration is unchanged.
 
 A process serving several tenants (`RUNTARA_SERVED_TENANTS`) can label its
 metrics by tenant. Set `RUNTARA_METRICS_TENANT_LABEL=1` (or `true`) before
-startup, and these instruments gain a `tenant` attribute:
+startup, and these instruments gain a `tenant_id` attribute, the name `runtara.workflow.*` already uses:
 
 | Instruments | Tenant |
 | --- | --- |

@@ -214,7 +214,7 @@ mod tests {
         assert!(
             enabled
                 .iter()
-                .all(|p| p.contains(&"tenant=acme".to_string())),
+                .all(|p| p.contains(&"tenant_id=acme".to_string())),
             "{enabled:?}"
         );
 
@@ -222,7 +222,10 @@ mod tests {
             let points = recorded(on, tenant);
             assert_eq!(points.len(), 2);
             assert!(
-                points.iter().flatten().all(|a| !a.starts_with("tenant=")),
+                points
+                    .iter()
+                    .flatten()
+                    .all(|a| !a.starts_with("tenant_id=")),
                 "{on} {tenant:?}: {points:?}"
             );
         }
