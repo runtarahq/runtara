@@ -27,8 +27,9 @@ into a source of truth for admission, billing, or durable queue depth.
   unwind/cancellation. A precompile child retains its permit and timer until it
   is reaped after a timeout. The operational task registry and reaper count remain.
 - OTEL performs local aggregation and periodic batch export. Metric labels are
-  bounded; pipeline metrics have no tenant, workflow, instance, launch, image,
-  request, owner, or raw-error labels. Normal SDK record/collection/export costs
+  bounded; pipeline metrics have no workflow, instance, launch, image, request,
+  owner, or raw-error labels, and no tenant label unless
+  `RUNTARA_METRICS_TENANT_LABEL` asks for one (see [Tenant labels](#tenant-labels)). Normal SDK record/collection/export costs
   remain, as do operational database work and separately configured trace/log costs.
 
 A held-duration histogram describes released permits. It cannot reveal the age
@@ -67,6 +68,39 @@ state transition. Lease renewals and idempotent replays record no transition.
 New pipeline duration buckets, in seconds:
 `0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60, 300, 3600, +Inf`.
 Existing trigger-duration bucket configuration is unchanged.
+
+## Tenant labels
+
+A process serving several tenants (`RUNTARA_SERVED_TENANTS`) can label its
+metrics by tenant. Set `RUNTARA_METRICS_TENANT_LABEL=1` (or `true`) before
+startup, and these instruments gain a `tenant` attribute:
+
+| Instruments | Tenant |
+| --- | --- |
+| `runtara.http.requests.total`, `runtara.http.request.duration` | The served tenant the request's path named (`/api/runtime/{tenant}/…`, `/mcp/{tenant}`), else the one its credential authenticated for. |
+| `runtara.admission.requests`, `runtara.admission.duration` | The tenant admitting the run. |
+| `runtara.trigger.events.total`, `runtara.trigger.events.failed`, `runtara.trigger.processing.duration` | The trigger event's tenant. |
+| `runtara.launch.transitions`, `runtara.launch.queue.duration` | The launch's tenant. |
+
+It is off by default, so a single-tenant install keeps its series count; with
+it on, each labelled series is multiplied by the number of tenants that use it.
+Only tenant ids are used, never a user or anything else per request, and on the
+server only tenants this process serves. A metric whose tenant is unknown (an
+unauthenticated request whose path names none, such as `/health` or an OAuth
+callback) stays unlabelled. Like `OTEL_SDK_DISABLED`, this is a startup
+setting, not a live toggle.
+
+The workflow completion metrics (`runtara.workflow.invocations.total`,
+`runtara.workflow.execution.duration`, `runtara.workflow.memory.peak`,
+`runtara.workflow.cpu.usage`) carry `tenant_id` whatever this setting says.
+They are recorded once, when Core commits a run's terminal state, so a run
+placed on another runner (a provider such as a fleet) is counted as a local
+one is. Peak memory and CPU are recorded only where the runner observes them.
+
+```promql
+# Requests per tenant, by status class
+sum by (tenant, status_class) (rate(runtara_http_requests_total[5m]))
+```
 
 ## Children started by `control:start`
 
