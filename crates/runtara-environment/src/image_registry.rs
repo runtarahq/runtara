@@ -93,6 +93,16 @@ pub async fn inspect_current_workflow_image(
     let digest = image
         .artifact_digest()
         .map_err(crate::error::Error::Other)?;
+    // Artifacts are addressed by their content, so an inspection that passed
+    // holds for every later launch of the same digest: it is not read and
+    // parsed again (several MiB per launch).
+    if let Some(steps) = inspected_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&digest.to_string()).cloned())
+    {
+        return Ok(steps);
+    }
     let bytes = artifacts
         .get(&digest)
         .await
@@ -100,7 +110,7 @@ pub async fn inspect_current_workflow_image(
         .ok_or_else(|| {
             crate::error::Error::Other(format!("workflow artifact {digest} is not in the store"))
         })?;
-    tokio::task::spawn_blocking(move || {
+    let inspected = tokio::task::spawn_blocking(move || {
         runtara_component_host::lifecycle::require_workflow_entry(&bytes)?;
         Ok::<_, anyhow::Error>(
             match runtara_component_host::workflow_manifest::shared_child_steps(&bytes) {
@@ -113,7 +123,25 @@ pub async fn inspect_current_workflow_image(
     .map_err(|error| {
         crate::error::Error::Other(format!("workflow ABI inspection task panicked: {error}"))
     })?
-    .map_err(|error| crate::error::Error::Other(format!("unsupported workflow image: {error:#}")))
+    .map_err(|error| {
+        crate::error::Error::Other(format!("unsupported workflow image: {error:#}"))
+    })?;
+    if let Ok(mut cache) = inspected_cache().lock() {
+        if cache.len() >= INSPECTED_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.insert(digest.to_string(), inspected.clone());
+    }
+    Ok(inspected)
+}
+
+/// Most workflow inspections kept ([`inspect_current_workflow_image`]).
+const INSPECTED_CACHE_LIMIT: usize = 1024;
+
+fn inspected_cache() -> &'static std::sync::Mutex<HashMap<String, SharedChildSteps>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, SharedChildSteps>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
 }
 
 /// How long a read of the `images` row is reused.
