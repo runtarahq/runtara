@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Google Gemini is a new AI provider.** A `gemini_api_key` connection (an API
+  key from Google AI Studio) works with the AI Agent step and with every
+  `ai_tools` capability: text completion with structured output, image
+  generation and editing, vision and embeddings. The AI Agent model picker lists
+  the models the key can use. Gemini's temperature and top-p inputs are not sent,
+  because Gemini ignores them from 3.6 on. Google's terms require a billed
+  project for apps used in the EEA, Switzerland or the UK.
+
 - **Slack Web API agent, generated from Slack's spec.** Thirty-four
   capabilities on the existing `slack_bot` connection: messages (post, post
   ephemeral, update, delete, schedule, list and delete scheduled messages,

@@ -12,6 +12,12 @@
     "fnv1a64": "b8f430a26d056579"
   },
   {
+    "integrationId": "gemini_api_key",
+    "fieldCount": 1,
+    "serializedBytes": 536,
+    "fnv1a64": "bcf2b03bfd751c47"
+  },
+  {
     "integrationId": "http_api_key",
     "fieldCount": 3,
     "serializedBytes": 1029,

@@ -317,6 +317,56 @@ impl HttpConnectionExtractor for OpenAiExtractor {
 }
 
 // ============================================================================
+// Google Gemini Connection Type
+// ============================================================================
+
+/// The Gemini API. Paths are relative to this base, which names the API version.
+pub const GEMINI_API_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
+
+/// Parameters for Google Gemini API key authentication
+#[derive(Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "gemini_api_key",
+    display_name = "Google Gemini",
+    description = "Connect to Gemini models with a Google AI Studio API key",
+    category = "llm",
+    auth_type = "api_key"
+)]
+pub struct GeminiApiKeyParams {
+    /// Gemini API key
+    #[field(
+        display_name = "API Key",
+        description = "API key from Google AI Studio (aistudio.google.com/apikey). Google's terms require a billed project for apps used in the EEA, Switzerland or the UK.",
+        secret
+    )]
+    pub api_key: String,
+}
+
+/// HTTP extractor for Google Gemini connections
+pub struct GeminiExtractor;
+
+impl HttpConnectionExtractor for GeminiExtractor {
+    fn integration_id(&self) -> &'static str {
+        "gemini_api_key"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        let p: GeminiApiKeyParams = serde_json::from_value(params.clone())
+            .map_err(|e| format!("Invalid gemini_api_key connection parameters: {}", e))?;
+
+        let mut headers = HashMap::new();
+        headers.insert("x-goog-api-key".to_string(), p.api_key);
+
+        Ok(HttpConnectionConfig {
+            headers,
+            query_parameters: HashMap::new(),
+            url_prefix: GEMINI_API_BASE_URL.to_string(),
+            rate_limit_config: None,
+        })
+    }
+}
+
+// ============================================================================
 // AWS Bedrock Connection Type
 // ============================================================================
 

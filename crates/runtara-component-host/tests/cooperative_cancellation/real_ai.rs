@@ -10,7 +10,12 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde_json::{Value, json};
 
 fn connection(provider: &str) -> Value {
-    json!({"connection_id":"fixture-connection","integration_id":if provider == "openai" {"openai_api_key"} else {"aws_credentials"},"parameters":{}})
+    let integration_id = match provider {
+        "openai" => "openai_api_key",
+        "gemini" => "gemini_api_key",
+        _ => "aws_credentials",
+    };
+    json!({"connection_id":"fixture-connection","integration_id":integration_id,"parameters":{}})
 }
 
 fn input(provider: &str, capability: &str) -> Value {
@@ -105,6 +110,14 @@ async fn cancellation(
                     if provider == "openai" {
                         assert_eq!(request["url"], "/v1/chat/completions");
                         assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+                    } else if provider == "gemini" {
+                        assert!(
+                            request["url"]
+                                .as_str()
+                                .unwrap()
+                                .ends_with(":generateContent")
+                        );
+                        assert!(!body["contents"].as_array().unwrap().is_empty());
                     } else {
                         assert!(request["url"].as_str().unwrap().ends_with("/converse"));
                         assert!(!body["messages"].as_array().unwrap().is_empty());
@@ -115,6 +128,8 @@ async fn cancellation(
                 } else if capability == "embed-text" {
                     if provider == "bedrock" {
                         assert_eq!(body["inputText"], "before");
+                    } else if provider == "gemini" {
+                        assert_eq!(body["requests"].as_array().unwrap().len(), 2);
                     } else {
                         assert_eq!(
                             body["input"],
@@ -125,6 +140,8 @@ async fn cancellation(
                     assert!(request["url"].as_str().unwrap().starts_with(
                         if provider == "openai" {
                             "/v1/"
+                        } else if provider == "gemini" {
+                            "/models/"
                         } else if agent == "ai-tools" {
                             "/model/"
                         } else {
@@ -218,7 +235,7 @@ async fn provider_agents_cancel_headers_and_body_and_reuse() -> anyhow::Result<(
 
 #[tokio::test]
 async fn ai_tools_text_helpers_cancel_headers_and_body() -> anyhow::Result<()> {
-    for provider in ["openai", "bedrock"] {
+    for provider in ["openai", "bedrock", "gemini"] {
         for partial in [false, true] {
             cancellation("ai-tools", provider, "text-completion", partial).await?;
         }
@@ -228,7 +245,7 @@ async fn ai_tools_text_helpers_cancel_headers_and_body() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn shared_providers_cancel_chat_completion_and_turn() -> anyhow::Result<()> {
-    for provider in ["openai", "bedrock"] {
+    for provider in ["openai", "bedrock", "gemini"] {
         for capability in ["chat-completion", "chat-turn"] {
             for partial in [false, true] {
                 cancellation("ai-tools", provider, capability, partial).await?;
@@ -240,7 +257,7 @@ async fn shared_providers_cancel_chat_completion_and_turn() -> anyhow::Result<()
 
 #[tokio::test]
 async fn summary_cancellation_does_not_return_fallback_state() -> anyhow::Result<()> {
-    for provider in ["openai", "bedrock"] {
+    for provider in ["openai", "bedrock", "gemini"] {
         for partial in [false, true] {
             cancellation("ai-tools", provider, "summarize-memory", partial).await?;
         }
@@ -250,7 +267,7 @@ async fn summary_cancellation_does_not_return_fallback_state() -> anyhow::Result
 
 #[tokio::test]
 async fn embedding_cancellation_stops_the_remaining_batch() -> anyhow::Result<()> {
-    for provider in ["openai", "bedrock"] {
+    for provider in ["openai", "bedrock", "gemini"] {
         for partial in [false, true] {
             cancellation("ai-tools", provider, "embed-text", partial).await?;
         }

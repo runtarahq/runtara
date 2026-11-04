@@ -1,7 +1,7 @@
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use reqwest::Client;
 use runtara_agents::extractors::connection_types::{
-    ZENDESK_DEFAULT_SCOPE, ups_base_url, zendesk_base_url,
+    GEMINI_API_BASE_URL, ZENDESK_DEFAULT_SCOPE, ups_base_url, zendesk_base_url,
 };
 use runtara_agents::registry::find_connection_type;
 use runtara_dsl::agent_meta::{OAuthConfig, TokenEndpointAuth};
@@ -205,6 +205,17 @@ fn describe_connection_auth(
             }
             ConnectionAuthDescriptor {
                 base_url: Some("https://api.stripe.com".into()),
+                aws_signing: None,
+                azure_signing: None,
+                deferred_auth: None,
+            }
+        }
+        "gemini_api_key" => {
+            if let Some(key) = params["api_key"].as_str() {
+                headers.insert("x-goog-api-key".into(), key.to_string());
+            }
+            ConnectionAuthDescriptor {
+                base_url: Some(GEMINI_API_BASE_URL.into()),
                 aws_signing: None,
                 azure_signing: None,
                 deferred_auth: None,
@@ -1260,6 +1271,26 @@ mod tests {
                 Some("Bearer sk-x")
             );
         }
+    }
+
+    #[test]
+    fn gemini_key_goes_in_its_header_and_pins_the_api_host() {
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "gemini_api_key",
+            &json!({ "api_key": "key-value" }),
+            &mut headers,
+        );
+        assert_eq!(
+            headers.get("x-goog-api-key").map(String::as_str),
+            Some("key-value")
+        );
+        assert!(!headers.contains_key("Authorization"));
+        assert_eq!(
+            descriptor.base_url.as_deref(),
+            Some("https://generativelanguage.googleapis.com/v1beta")
+        );
     }
 
     #[test]

@@ -6,14 +6,16 @@
 //! dispatching based on `integration_id`.
 
 #[cfg(feature = "completion")]
-use crate::providers::{bedrock, openai};
+use crate::providers::{bedrock, gemini, openai};
 use serde_json::{Value, json};
 
 pub const PROVIDER_OPENAI: &str = "openai";
 pub const PROVIDER_BEDROCK: &str = "bedrock";
+pub const PROVIDER_GEMINI: &str = "gemini";
 
 const OPENAI_COMPATIBLE_INTEGRATIONS: &[&str] = &["openai_api_key"];
 const BEDROCK_COMPATIBLE_INTEGRATIONS: &[&str] = &["aws_credentials"];
+const GEMINI_COMPATIBLE_INTEGRATIONS: &[&str] = &["gemini_api_key"];
 
 /// Errors that can occur during provider creation.
 #[derive(Debug, thiserror::Error)]
@@ -31,6 +33,7 @@ pub fn compatible_integration_ids_for_provider(provider: &str) -> Option<&'stati
     match provider {
         PROVIDER_OPENAI => Some(OPENAI_COMPATIBLE_INTEGRATIONS),
         PROVIDER_BEDROCK => Some(BEDROCK_COMPATIBLE_INTEGRATIONS),
+        PROVIDER_GEMINI => Some(GEMINI_COMPATIBLE_INTEGRATIONS),
         _ => None,
     }
 }
@@ -51,6 +54,8 @@ pub fn provider_for_integration(integration_id: &str) -> Option<&'static str> {
         Some(PROVIDER_OPENAI)
     } else if BEDROCK_COMPATIBLE_INTEGRATIONS.contains(&integration_id) {
         Some(PROVIDER_BEDROCK)
+    } else if GEMINI_COMPATIBLE_INTEGRATIONS.contains(&integration_id) {
+        Some(PROVIDER_GEMINI)
     } else {
         None
     }
@@ -105,6 +110,7 @@ pub fn create_openai_model_with_connection(
 /// each LLM provider's structured output feature:
 /// - OpenAI: `response_format: { type: "json_schema", json_schema: { ... } }`
 /// - Bedrock: `outputConfig: { textFormat: { type: "json_schema", ... } }`
+/// - Gemini: `generationConfig: { responseMimeType, responseJsonSchema }`
 ///
 /// Returns `None` for unsupported providers (structured output will be
 /// best-effort via prompt instructions).
@@ -134,6 +140,12 @@ pub fn structured_output_params(integration_id: &str, json_schema: Value) -> Opt
                 }
             }
         })),
+        PROVIDER_GEMINI | "gemini_api_key" => Some(json!({
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "responseJsonSchema": json_schema
+            }
+        })),
         _ => None,
     }
 }
@@ -144,6 +156,7 @@ pub fn structured_output_params(integration_id: &str, json_schema: Value) -> Opt
 /// Currently supports:
 /// - `openai` / `openai_api_key` → OpenAI-compatible chat completions
 /// - `bedrock` / `aws_credentials` → Amazon Bedrock Converse
+/// - `gemini` / `gemini_api_key` → Google Gemini `generateContent`
 ///
 /// Returns a boxed `CompletionModel` so the caller doesn't need to know
 /// which concrete provider type is in use.
@@ -163,6 +176,13 @@ pub fn create_completion_model_with_connection(
                 .filter(|id| !id.is_empty())
                 .ok_or(ProviderError::MissingConnection)?;
             let m = bedrock::Client::from_connection_id(conn_id).completion_model(model);
+            Ok(Box::new(m))
+        }
+        PROVIDER_GEMINI | "gemini_api_key" => {
+            let conn_id = connection_id
+                .filter(|id| !id.is_empty())
+                .ok_or(ProviderError::MissingConnection)?;
+            let m = gemini::Client::from_connection_id(conn_id).completion_model(model);
             Ok(Box::new(m))
         }
         PROVIDER_OPENAI | "openai_api_key" => {
@@ -185,6 +205,20 @@ mod tests {
     }
 
     #[test]
+    fn gemini_structured_output_sits_in_generation_config() {
+        let params = structured_output_params(PROVIDER_GEMINI, json!({"type": "object"}))
+            .expect("gemini params");
+        assert_eq!(
+            params["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
+        assert_eq!(
+            params["generationConfig"]["responseJsonSchema"],
+            json!({"type": "object"})
+        );
+    }
+
+    #[test]
     fn provider_compatibility_maps_provider_to_connection_integrations() {
         assert!(provider_supports_integration(
             PROVIDER_OPENAI,
@@ -194,9 +228,17 @@ mod tests {
             PROVIDER_BEDROCK,
             "aws_credentials"
         ));
+        assert!(provider_supports_integration(
+            PROVIDER_GEMINI,
+            "gemini_api_key"
+        ));
         assert!(!provider_supports_integration(
             PROVIDER_OPENAI,
             "aws_credentials"
+        ));
+        assert!(!provider_supports_integration(
+            PROVIDER_GEMINI,
+            "openai_api_key"
         ));
         assert!(compatible_integration_ids_for_provider("unknown").is_none());
     }
@@ -211,8 +253,10 @@ mod tests {
         for id in [
             PROVIDER_OPENAI,
             PROVIDER_BEDROCK,
+            PROVIDER_GEMINI,
             "openai_api_key",
             "aws_credentials",
+            "gemini_api_key",
             "anthropic_api_key",
             "sqs_credentials",
             "",
@@ -238,6 +282,10 @@ mod tests {
         assert_eq!(
             provider_for_integration("aws_credentials"),
             Some(PROVIDER_BEDROCK)
+        );
+        assert_eq!(
+            provider_for_integration("gemini_api_key"),
+            Some(PROVIDER_GEMINI)
         );
         assert_eq!(provider_for_integration("sqs_credentials"), None);
     }

@@ -10,7 +10,8 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use reqwest::header::{ACCEPT, AUTHORIZATION};
 use runtara_agents::extractors::connection_types::{
-    AwsCredentialsExtractor, AwsCredentialsParams, OpenAiApiKeyParams, OpenAiExtractor,
+    AwsCredentialsExtractor, AwsCredentialsParams, GEMINI_API_BASE_URL, GeminiApiKeyParams,
+    GeminiExtractor, OpenAiApiKeyParams, OpenAiExtractor,
 };
 use serde_json::{Map, Value, json};
 
@@ -32,6 +33,11 @@ struct ResourceSpec {
 const OPENAI_RESOURCES: &[ResourceSpec] = &[ResourceSpec {
     name: "models",
     description: "Available OpenAI models",
+}];
+
+const GEMINI_RESOURCES: &[ResourceSpec] = &[ResourceSpec {
+    name: "models",
+    description: "Available Google Gemini models",
 }];
 
 const AWS_RESOURCES: &[ResourceSpec] = &[
@@ -59,7 +65,7 @@ trait ConnectionResourceExtractor: Send + Sync {
 }
 
 static RESOURCE_EXTRACTORS: &[&dyn ConnectionResourceExtractor] =
-    &[&OpenAiExtractor, &AwsCredentialsExtractor];
+    &[&OpenAiExtractor, &GeminiExtractor, &AwsCredentialsExtractor];
 
 fn extractor_for_integration(
     integration_id: &str,
@@ -275,6 +281,100 @@ async fn resolve_openai_models(
 }
 
 #[async_trait]
+impl ConnectionResourceExtractor for GeminiExtractor {
+    fn integration_id(&self) -> &'static str {
+        "gemini_api_key"
+    }
+
+    fn resources(&self) -> &'static [ResourceSpec] {
+        GEMINI_RESOURCES
+    }
+
+    async fn resolve(
+        &self,
+        client: &reqwest::Client,
+        parameters: &Value,
+        request: &ConnectionResourceRequest,
+    ) -> Result<ConnectionResourcePage, ConnectionsError> {
+        let parameters: GeminiApiKeyParams = parse_parameters(self.integration_id(), parameters)?;
+        match request.resource_name.as_str() {
+            "models" => {
+                resolve_gemini_models(client, GEMINI_API_BASE_URL, &parameters.api_key, request)
+                    .await
+            }
+            _ => unreachable!("resource name was validated against Gemini extractor metadata"),
+        }
+    }
+}
+
+async fn resolve_gemini_models(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    request: &ConnectionResourceRequest,
+) -> Result<ConnectionResourcePage, ConnectionsError> {
+    let mut url = append_path(base_url, "models")?;
+    url.query_pairs_mut()
+        .append_pair("pageSize", &request_limit(request).to_string());
+    if let Some(cursor) = request.cursor.as_deref() {
+        url.query_pairs_mut().append_pair("pageToken", cursor);
+    }
+    let response = client
+        .get(url)
+        .header("x-goog-api-key", api_key)
+        .header(ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|error| {
+            ConnectionsError::AuthResolution(
+                format!("Gemini model discovery failed: {error}").into(),
+            )
+        })?;
+    let body = response_json(response, "Gemini").await?;
+    let models = body
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            ConnectionsError::AuthResolution(
+                "Gemini model discovery response is missing 'models'".into(),
+            )
+        })?;
+    let items = models
+        .iter()
+        .filter_map(|model| {
+            let generates_content = model
+                .get("supportedGenerationMethods")?
+                .as_array()?
+                .iter()
+                .any(|method| method == "generateContent");
+            let name = model.get("name")?.as_str()?;
+            let id = name.strip_prefix("models/").unwrap_or(name);
+            let label = model
+                .get("displayName")
+                .and_then(Value::as_str)
+                .unwrap_or(id);
+            (generates_content && contains_search(request, &[id, label])).then(|| {
+                ConnectionResourceItem {
+                    value: Value::String(id.to_string()),
+                    label: label.to_string(),
+                    description: model
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    metadata: model.clone(),
+                }
+            })
+        })
+        .collect();
+    let next_cursor = body
+        .get("nextPageToken")
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string);
+    Ok(resource_page(items, next_cursor))
+}
+
+#[async_trait]
 impl ConnectionResourceExtractor for AwsCredentialsExtractor {
     fn integration_id(&self) -> &'static str {
         "aws_credentials"
@@ -484,7 +584,7 @@ async fn resolve_sqs_queues(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{body_json, header, header_exists, method, path};
+    use wiremock::matchers::{body_json, header, header_exists, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn request(resource_name: &str) -> ConnectionResourceRequest {
@@ -503,6 +603,13 @@ mod tests {
             vec![ConnectionResourceDefinition {
                 name: "models".into(),
                 description: "Available OpenAI models".into(),
+            }]
+        );
+        assert_eq!(
+            resources_for_integration("gemini_api_key"),
+            vec![ConnectionResourceDefinition {
+                name: "models".into(),
+                description: "Available Google Gemini models".into(),
             }]
         );
         assert_eq!(
@@ -545,6 +652,88 @@ mod tests {
         assert_eq!(page.items[0].value, "gpt-4o-mini");
         assert_eq!(page.items[0].label, "gpt-4o-mini");
         assert!(!page.stale);
+    }
+
+    #[tokio::test]
+    async fn gemini_models_keep_only_chat_models_and_drop_the_resource_prefix() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1beta/models"))
+            .and(header("x-goog-api-key", "secret"))
+            .and(query_param("pageSize", "1000"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "models": [
+                    {
+                        "name": "models/gemini-3.8-flash",
+                        "displayName": "Gemini 3.8 Flash",
+                        "description": "Fast",
+                        "supportedGenerationMethods": ["generateContent", "countTokens"]
+                    },
+                    {
+                        "name": "models/gemini-embedding-2",
+                        "displayName": "Gemini Embedding 2",
+                        "supportedGenerationMethods": ["embedContent"]
+                    }
+                ],
+                "nextPageToken": "page-2"
+            })))
+            .mount(&server)
+            .await;
+
+        let page = resolve_gemini_models(
+            &reqwest::Client::new(),
+            &format!("{}/v1beta", server.uri()),
+            "secret",
+            &request("models"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].value, "gemini-3.8-flash");
+        assert_eq!(page.items[0].label, "Gemini 3.8 Flash");
+        assert_eq!(page.items[0].description.as_deref(), Some("Fast"));
+        assert_eq!(page.next_cursor.as_deref(), Some("page-2"));
+    }
+
+    #[tokio::test]
+    async fn gemini_models_page_with_the_cursor_and_search_by_id_or_name() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1beta/models"))
+            .and(query_param("pageToken", "page-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "models": [
+                    {
+                        "name": "models/gemini-3.8-flash",
+                        "displayName": "Gemini 3.8 Flash",
+                        "supportedGenerationMethods": ["generateContent"]
+                    },
+                    {
+                        "name": "models/gemini-3.5-flash-lite",
+                        "displayName": "Gemini 3.5 Flash-Lite",
+                        "supportedGenerationMethods": ["generateContent"]
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let mut request = request("models");
+        request.cursor = Some("page-2".into());
+        request.search = Some("LITE".into());
+
+        let page = resolve_gemini_models(
+            &reqwest::Client::new(),
+            &format!("{}/v1beta", server.uri()),
+            "secret",
+            &request,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].value, "gemini-3.5-flash-lite");
+        assert_eq!(page.next_cursor, None);
     }
 
     #[tokio::test]

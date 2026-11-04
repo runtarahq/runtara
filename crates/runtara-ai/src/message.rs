@@ -123,6 +123,24 @@ impl AssistantContent {
                 name: name.into(),
                 arguments,
             },
+            signature: None,
+        })
+    }
+
+    /// Create a tool-call content carrying the provider's signature for it.
+    pub fn signed_tool_call(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+        signature: Option<String>,
+    ) -> Self {
+        AssistantContent::ToolCall(ToolCall {
+            id: id.into(),
+            function: ToolFunction {
+                name: name.into(),
+                arguments,
+            },
+            signature,
         })
     }
 }
@@ -162,6 +180,10 @@ impl From<&str> for Text {
 pub struct ToolCall {
     pub id: String,
     pub function: ToolFunction,
+    /// Opaque value the provider requires back when this call is replayed in
+    /// later turns (Gemini's `thoughtSignature`). Absent for other providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 /// The function part of a tool call.
@@ -231,6 +253,41 @@ mod tests {
         let json = serde_json::to_value(&msg).unwrap();
         let msg2: Message = serde_json::from_value(json).unwrap();
         assert_eq!(msg, msg2);
+    }
+
+    #[test]
+    fn signed_tool_call_keeps_its_signature_across_a_roundtrip() {
+        let msg = Message::Assistant {
+            content: OneOrMany::one(AssistantContent::signed_tool_call(
+                "call_1",
+                "search",
+                serde_json::json!({"q": "test"}),
+                Some("c2lnbmF0dXJl".to_string()),
+            )),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        let msg2: Message = serde_json::from_value(json).unwrap();
+        assert_eq!(msg, msg2);
+    }
+
+    #[test]
+    fn history_saved_before_signatures_existed_still_loads() {
+        let saved = serde_json::json!({
+            "role": "assistant",
+            "content": [{"id": "call_1", "function": {"name": "f", "arguments": {}}}]
+        });
+        let msg: Message = serde_json::from_value(saved.clone()).unwrap();
+        assert_eq!(
+            msg,
+            Message::Assistant {
+                content: OneOrMany::one(AssistantContent::tool_call(
+                    "call_1",
+                    "f",
+                    serde_json::json!({}),
+                )),
+            }
+        );
+        assert_eq!(serde_json::to_value(&msg).unwrap(), saved);
     }
 
     #[test]

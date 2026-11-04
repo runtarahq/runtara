@@ -773,3 +773,38 @@ fn test_ups_connection_type_is_registered() {
         Some(&["production", "sandbox"][..])
     );
 }
+
+// ============================================================================
+// GeminiExtractor Tests
+// ============================================================================
+
+#[test]
+fn test_gemini_extractor_sends_key_header_to_the_api() {
+    let config = extract_http_config("gemini_api_key", &json!({ "api_key": "key-value" }), None)
+        .expect("Should extract config");
+
+    assert_eq!(
+        config.headers.get("x-goog-api-key"),
+        Some(&"key-value".to_string())
+    );
+    assert!(!config.headers.contains_key("Authorization"));
+    assert_eq!(config.url_prefix, connection_types::GEMINI_API_BASE_URL);
+}
+
+#[test]
+fn test_gemini_extractor_requires_key() {
+    let err = extract_http_config("gemini_api_key", &json!({}), None)
+        .expect_err("missing api_key should fail");
+    assert!(err.contains("gemini_api_key"), "{err}");
+}
+
+#[test]
+fn test_gemini_connection_type_is_registered() {
+    assert!(get_http_extractor_ids().contains(&"gemini_api_key"));
+    let meta = crate::registry::find_connection_type("gemini_api_key")
+        .expect("gemini_api_key is in the static registry");
+    assert_eq!(meta.display_name, "Google Gemini");
+    let key = meta.fields.iter().find(|f| f.name == "api_key").unwrap();
+    assert!(key.is_secret);
+    assert_eq!(meta.fields.len(), 1, "the API host must stay pinned");
+}

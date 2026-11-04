@@ -77,6 +77,10 @@ pub async fn get_llm_models_handler(
             let catalog = runtara_ai::providers::openai_models::catalog_json();
             (StatusCode::OK, Json(catalog))
         }
+        "gemini" | "gemini_api_key" => {
+            let catalog = runtara_ai::providers::gemini_models::catalog_json();
+            (StatusCode::OK, Json(catalog))
+        }
         other => (
             StatusCode::BAD_REQUEST,
             Json(json!({

@@ -17,7 +17,7 @@ default = ["tracing", "completion"]
 # builds have no subscriber and shouldn't carry tracing in the .wasm.
 tracing = ["dep:tracing"]
 
-# LLM completion over HTTP: the OpenAI and Bedrock clients, provider dispatch
+# LLM completion over HTTP: the OpenAI, Bedrock and Gemini clients, provider dispatch
 # and `run_completion*`. Consumers that only need provider ids, catalogs and
 # defaults (runtara-server) turn it off so no HTTP backend is linked.
 completion = ["dep:runtara-http"]

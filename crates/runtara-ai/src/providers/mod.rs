@@ -6,5 +6,8 @@
 pub mod bedrock;
 pub mod bedrock_models;
 #[cfg(feature = "completion")]
+pub mod gemini;
+pub mod gemini_models;
+#[cfg(feature = "completion")]
 pub mod openai;
 pub mod openai_models;
