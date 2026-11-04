@@ -13,8 +13,9 @@ pub fn catalog_json() -> Value {
         "generatedAt": null,
         "source": "static Gemini AI Agent defaults",
         "models": [
-            {"provider": "Google", "modelName": "Gemini 3.8 Flash", "modelId": "gemini-3.8-flash", "recommendedForAiAgent": true},
-            {"provider": "Google", "modelName": "Gemini 3.5 Flash-Lite", "modelId": "gemini-3.5-flash-lite", "recommendedForAiAgent": true}
+            {"provider": "Google", "modelName": "Gemini 3.6 Flash", "modelId": "gemini-3.6-flash", "recommendedForAiAgent": true},
+            {"provider": "Google", "modelName": "Gemini 3.5 Flash-Lite", "modelId": "gemini-3.5-flash-lite", "recommendedForAiAgent": true},
+            {"provider": "Google", "modelName": "Gemini 3.8 Flash", "modelId": "gemini-3.8-flash", "recommendedForAiAgent": false}
         ]
     })
 }

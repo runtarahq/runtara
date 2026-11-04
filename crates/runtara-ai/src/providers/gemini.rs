@@ -286,8 +286,9 @@ impl GeminiCompletionModel {
 
 /// The parts of a `generateContent` answer, without the model's thoughts.
 ///
-/// A blocked prompt and an answer with nothing in it both arrive as successful
-/// responses, so this is where they become errors.
+/// A blocked prompt, an answer Gemini stopped for a reason such as `SAFETY`, and
+/// an answer with nothing in it all arrive as successful responses, so this is
+/// where they become errors. Text cut off by the token limit is still an answer.
 pub fn answer_parts(resp: &Value) -> Result<Vec<&Value>, String> {
     if let Some(reason) = resp
         .pointer("/promptFeedback/blockReason")
@@ -299,6 +300,17 @@ pub fn answer_parts(resp: &Value) -> Result<Vec<&Value>, String> {
     let candidate = resp
         .pointer("/candidates/0")
         .ok_or("Gemini response contained no candidates")?;
+    let finish_reason = candidate.get("finishReason").and_then(Value::as_str);
+    if !matches!(
+        finish_reason,
+        None | Some("STOP" | "MAX_TOKENS" | "FINISH_REASON_UNSPECIFIED")
+    ) {
+        return Err(format!(
+            "Gemini stopped the answer ({})",
+            finish_detail(resp)
+        ));
+    }
+
     let parts: Vec<&Value> = candidate
         .pointer("/content/parts")
         .and_then(Value::as_array)
@@ -307,6 +319,13 @@ pub fn answer_parts(resp: &Value) -> Result<Vec<&Value>, String> {
         .filter(|part| part.get("thought").and_then(Value::as_bool) != Some(true))
         .collect();
     if parts.is_empty() {
+        if finish_reason == Some("MAX_TOKENS") {
+            return Err(
+                "Gemini reached the token limit before answering: thinking counts \
+                 towards it, so raise max_tokens"
+                    .to_string(),
+            );
+        }
         return Err(format!(
             "Gemini response contained no content ({})",
             finish_detail(resp)
@@ -800,7 +819,14 @@ mod tests {
                     "content": {"parts": [{"text": "thinking", "thought": true}]},
                     "finishReason": "MAX_TOKENS"
                 }]}),
-                "finishReason MAX_TOKENS",
+                "raise max_tokens",
+            ),
+            (
+                json!({"candidates": [{
+                    "content": {"parts": [{"text": "partial answer"}]},
+                    "finishReason": "SAFETY"
+                }]}),
+                "finishReason SAFETY",
             ),
         ] {
             match model().parse_response(response) {

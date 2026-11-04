@@ -1250,11 +1250,7 @@ pub async fn summarize_memory(
     }
 
     let excess = history.len() - max;
-    let old_json = serde_json::to_string(&history[..excess]).unwrap_or_default();
-    let summary_prompt = format!(
-        "Summarize the following conversation history concisely, preserving key \
-         facts, decisions, and context:\n{old_json}"
-    );
+    let summary_prompt = memory_summary_prompt(&history[..excess]);
 
     let req = runtara_ai::CompletionInvokeRequest {
         integration_id: provider.to_string(),
@@ -1302,6 +1298,30 @@ pub async fn summarize_memory(
     }
 
     Ok(SummarizeMemoryOutput { state })
+}
+
+/// The prompt asking for a summary of `messages`. Tool-call signatures are
+/// opaque provider data, so they stay out of it.
+fn memory_summary_prompt(messages: &[Value]) -> String {
+    let mut messages = messages.to_vec();
+    for message in &mut messages {
+        match message.get_mut("content") {
+            Some(Value::Array(items)) => {
+                for item in items.iter_mut().filter_map(Value::as_object_mut) {
+                    item.remove("signature");
+                }
+            }
+            Some(Value::Object(item)) => {
+                item.remove("signature");
+            }
+            _ => {}
+        }
+    }
+    let old_json = serde_json::to_string(&messages).unwrap_or_default();
+    format!(
+        "Summarize the following conversation history concisely, preserving key \
+         facts, decisions, and context:\n{old_json}"
+    )
 }
 
 // ============================================================================
@@ -2542,6 +2562,19 @@ const DEFAULT_GEMINI_IMAGE_MODEL: &str = "gemini-nano-banana-2.1";
 const DEFAULT_GEMINI_EMBEDDING_MODEL: &str = "gemini-embedding-2";
 /// Requests per `batchEmbedContents` call; larger inputs are sent in several.
 const GEMINI_EMBED_BATCH_SIZE: usize = 100;
+/// Aspect ratios every Gemini image model accepts.
+const GEMINI_ASPECT_RATIOS: &[(i32, i32)] = &[
+    (1, 1),
+    (2, 3),
+    (3, 2),
+    (3, 4),
+    (4, 3),
+    (4, 5),
+    (5, 4),
+    (9, 16),
+    (16, 9),
+    (21, 9),
+];
 
 /// POST `body` to `{path}` under the Gemini connection's base URL via the
 /// outbound host service, which adds the API key.
@@ -2646,17 +2679,19 @@ fn gemini_image_config(width: Option<i32>, height: Option<i32>) -> Value {
     config
 }
 
-/// Gemini takes an aspect ratio rather than a pixel size.
+/// Gemini takes one of a fixed set of aspect ratios rather than a pixel size,
+/// so a requested size maps to the closest of them.
 fn gemini_aspect_ratio(width: Option<i32>, height: Option<i32>) -> Option<String> {
     let (width, height) = (width?, height?);
     if width <= 0 || height <= 0 {
         return None;
     }
-    let (mut a, mut b) = (width, height);
-    while b != 0 {
-        (a, b) = (b, a % b);
-    }
-    Some(format!("{}:{}", width / a, height / a))
+    let wanted = f64::from(width) / f64::from(height);
+    let distance = |&(w, h): &(i32, i32)| (f64::from(w) / f64::from(h) / wanted).ln().abs();
+    GEMINI_ASPECT_RATIOS
+        .iter()
+        .min_by(|a, b| distance(a).total_cmp(&distance(b)))
+        .map(|(w, h)| format!("{w}:{h}"))
 }
 
 fn gemini_image_part(image_data: &str) -> Value {
@@ -2900,6 +2935,15 @@ fn gemini_embed_body(model: &str, texts: &[String], dimension: Option<u32>) -> V
     json!({ "requests": requests })
 }
 
+/// `gemini-embedding-001` leaves shortened vectors unnormalized, which distorts
+/// similarity search. For a vector that is already normalized this changes nothing.
+fn gemini_normalize(vector: &mut [f32]) {
+    let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        vector.iter_mut().for_each(|v| *v /= norm);
+    }
+}
+
 fn gemini_embeddings(resp: &Value) -> Result<Vec<Vec<f32>>, AgentError> {
     let invalid = |message: &str| AgentError::permanent("GEMINI_INVALID_RESPONSE", message);
     resp["embeddings"]
@@ -2948,6 +2992,16 @@ async fn embed_text_gemini(
     }
 
     let dimension = embeddings.first().map(|v| v.len() as u32).unwrap_or(0);
+    if let Some(requested) = input.dimension {
+        if dimension != requested {
+            return Err(AgentError::permanent(
+                "GEMINI_DIMENSION_MISMATCH",
+                format!("Requested dimension {requested} but Gemini returned {dimension}"),
+            ));
+        }
+        embeddings.iter_mut().for_each(|v| gemini_normalize(v));
+    }
+
     Ok(EmbedTextOutput {
         embeddings,
         model,
@@ -3166,11 +3220,24 @@ mod tests {
     }
 
     #[test]
-    fn gemini_image_config_reduces_width_and_height_to_a_ratio() {
+    fn gemini_image_config_maps_a_size_to_the_closest_supported_ratio() {
         assert_eq!(
             gemini_image_config(Some(1920), Some(1080)),
             json!({"responseModalities": ["IMAGE"], "imageConfig": {"aspectRatio": "16:9"}})
         );
+        for (width, height, ratio) in [
+            (1024, 1024, "1:1"),
+            (1792, 1024, "16:9"),
+            (1024, 1792, "9:16"),
+            (1000, 700, "3:2"),
+            (3000, 1000, "21:9"),
+        ] {
+            assert_eq!(
+                gemini_aspect_ratio(Some(width), Some(height)).as_deref(),
+                Some(ratio),
+                "{width}x{height}"
+            );
+        }
         assert_eq!(
             gemini_image_config(Some(1024), None),
             json!({"responseModalities": ["IMAGE"]})
@@ -3283,6 +3350,34 @@ mod tests {
                 }
             ]})
         );
+    }
+
+    #[test]
+    fn memory_summaries_leave_tool_call_signatures_out() {
+        let messages = [json!({
+            "role": "assistant",
+            "content": [{
+                "id": "a",
+                "function": {"name": "lookup", "arguments": {}},
+                "signature": "opaque-provider-data"
+            }]
+        })];
+
+        let prompt = memory_summary_prompt(&messages);
+
+        assert!(prompt.contains("lookup"), "{prompt}");
+        assert!(!prompt.contains("opaque-provider-data"), "{prompt}");
+    }
+
+    #[test]
+    fn gemini_normalize_scales_to_unit_length() {
+        let mut vector = vec![3.0, 4.0];
+        gemini_normalize(&mut vector);
+        assert_eq!(vector, vec![0.6, 0.8]);
+
+        let mut zero = vec![0.0, 0.0];
+        gemini_normalize(&mut zero);
+        assert_eq!(zero, vec![0.0, 0.0]);
     }
 
     #[test]

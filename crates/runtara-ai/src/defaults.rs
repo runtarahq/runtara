@@ -10,8 +10,10 @@
 /// Default Amazon Bedrock model for AI Agent and agent-capability calls.
 pub const DEFAULT_BEDROCK_MODEL: &str = "anthropic.claude-sonnet-4-6";
 
-/// Default Google Gemini model for AI Agent and agent-capability calls.
-pub const DEFAULT_GEMINI_MODEL: &str = "gemini-3.8-flash";
+/// Default Google Gemini model for AI Agent and agent-capability calls. Not the
+/// newest Flash: Google's capacity for `gemini-3.8-flash` is short enough that
+/// a call left on the default would often fail with a 503.
+pub const DEFAULT_GEMINI_MODEL: &str = "gemini-3.6-flash";
 
 /// Default OpenAI model for text/chat completion calls.
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-4o";

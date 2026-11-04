@@ -40,6 +40,22 @@ const GEMINI_RESOURCES: &[ResourceSpec] = &[ResourceSpec {
     description: "Available Google Gemini models",
 }];
 
+/// Parts of the ids of Gemini models that support `generateContent` but answer
+/// with speech, images, video or music, or run as managed agents. They cannot
+/// serve a text or tool-calling step, and Google's list does not mark them.
+const GEMINI_NON_TEXT_MODEL_MARKERS: &[&str] = &[
+    "tts",
+    "image",
+    "banana",
+    "omni",
+    "lyria",
+    "transcribe",
+    "robotics",
+    "computer-use",
+    "deep-research",
+    "antigravity",
+];
+
 const AWS_RESOURCES: &[ResourceSpec] = &[
     ResourceSpec {
         name: "bedrock.models",
@@ -353,8 +369,11 @@ async fn resolve_gemini_models(
                 .get("displayName")
                 .and_then(Value::as_str)
                 .unwrap_or(id);
-            (generates_content && contains_search(request, &[id, label])).then(|| {
-                ConnectionResourceItem {
+            let answers_in_text = !GEMINI_NON_TEXT_MODEL_MARKERS
+                .iter()
+                .any(|marker| id.contains(marker));
+            (generates_content && answers_in_text && contains_search(request, &[id, label])).then(
+                || ConnectionResourceItem {
                     value: Value::String(id.to_string()),
                     label: label.to_string(),
                     description: model
@@ -362,8 +381,8 @@ async fn resolve_gemini_models(
                         .and_then(Value::as_str)
                         .map(str::to_string),
                     metadata: model.clone(),
-                }
-            })
+                },
+            )
         })
         .collect();
     let next_cursor = body
@@ -673,6 +692,16 @@ mod tests {
                         "name": "models/gemini-embedding-2",
                         "displayName": "Gemini Embedding 2",
                         "supportedGenerationMethods": ["embedContent"]
+                    },
+                    {
+                        "name": "models/gemini-3.8-flash-tts",
+                        "displayName": "Gemini 3.8 Flash TTS",
+                        "supportedGenerationMethods": ["generateContent"]
+                    },
+                    {
+                        "name": "models/gemini-nano-banana-2.1",
+                        "displayName": "Nano Banana 2.1",
+                        "supportedGenerationMethods": ["generateContent"]
                     }
                 ],
                 "nextPageToken": "page-2"
