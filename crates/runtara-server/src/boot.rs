@@ -123,6 +123,7 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
         eprintln!("❌ {message}");
         std::process::exit(1);
     }
+    runtara_store_postgres::tenant_scope::check_enum_index_use(&pool, "server").await;
 
     // Maintenance command: runs against the existing schema and exits without
     // migrating or starting the server.

@@ -6,7 +6,7 @@
 //! delivery mark, so consumers continue to deduplicate on `instance_id` while
 //! the outbox retries the same request identity.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -15,6 +15,7 @@ use runtara_store_postgres::tenant_scope::scoped;
 use serde_json::Value;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use thiserror::Error;
+use tokio::sync::Notify;
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -27,6 +28,10 @@ use crate::shutdown::ShutdownSignal;
 const DEFAULT_OUTBOX_DEADLINE: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_OUTBOX_LEASE: Duration = Duration::from_secs(30);
 const DEFAULT_OUTBOX_RETRY_DELAY: Duration = Duration::from_secs(1);
+/// The relay's backstop poll. New requests wake the relay in-process as they
+/// commit; the poll only finds what no wake announced: rows committed by
+/// another process, retries after a failed publish, and leases or deadlines
+/// that expired.
 const DEFAULT_OUTBOX_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_OUTBOX_BATCH_SIZE: usize = 50;
 const DEFAULT_ADMISSION_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
@@ -42,6 +47,9 @@ pub struct ExecutionOutboxPolicy {
     pub request_deadline: Duration,
     pub lease_duration: Duration,
     pub retry_delay: Duration,
+    /// How often the relay looks for claimable rows when nothing woke it
+    /// (`EXECUTION_OUTBOX_POLL_MS`). Requests enqueued in the relay's own
+    /// process do not wait for it.
     pub poll_interval: Duration,
     pub batch_size: usize,
 }
@@ -390,11 +398,29 @@ fn is_parent_label_violation(error: &sqlx::Error) -> bool {
         .is_some_and(|constraint| constraint == PARENT_RUN_LABEL_KEY)
 }
 
+/// The process's relay wake-up: every [`ExecutionOutbox`] made in this
+/// process shares it, so a request committed through any of them (HTTP,
+/// webhook, cron, chat, a `control:start` child) wakes the relay running in
+/// the same process at once instead of at its next poll.
+///
+/// It is a hint, not the delivery: a wake that finds nothing claimable costs
+/// one empty pass, and a row committed by another process, or left pending by
+/// a crash or a failed publish, is still found by the relay's poll
+/// ([`ExecutionOutboxPolicy::poll_interval`]). That keeps the run path free of
+/// any database-side notification (no `LISTEN`/`NOTIFY`, whose commit-time
+/// queue lock would serialize every enqueue in the cluster).
+fn process_relay_wake() -> Arc<Notify> {
+    static WAKE: OnceLock<Arc<Notify>> = OnceLock::new();
+    WAKE.get_or_init(|| Arc::new(Notify::new())).clone()
+}
+
 /// Server-owned database boundary for accepted asynchronous executions.
 #[derive(Clone)]
 pub struct ExecutionOutbox {
     pool: PgPool,
     policy: ExecutionOutboxPolicy,
+    /// Signalled after each new request commits; see [`process_relay_wake`].
+    relay_wake: Arc<Notify>,
 }
 
 impl ExecutionOutbox {
@@ -403,7 +429,24 @@ impl ExecutionOutbox {
     }
 
     pub fn with_policy(pool: PgPool, policy: ExecutionOutboxPolicy) -> Self {
-        Self { pool, policy }
+        Self {
+            pool,
+            policy,
+            relay_wake: process_relay_wake(),
+        }
+    }
+
+    /// This outbox with its own relay wake-up instead of the process's, so
+    /// enqueues through it wake only relays built on it (tests isolate
+    /// relays this way).
+    pub fn with_relay_wake(mut self, wake: Arc<Notify>) -> Self {
+        self.relay_wake = wake;
+        self
+    }
+
+    /// The wake-up a relay on this outbox waits on beside its poll.
+    pub fn relay_wake(&self) -> Arc<Notify> {
+        self.relay_wake.clone()
     }
 
     pub fn policy(&self) -> ExecutionOutboxPolicy {
@@ -747,6 +790,9 @@ impl ExecutionOutbox {
         );
 
         give_back!(tx.commit().await);
+        // Only now is the row visible to a relay's claim. A permit is stored
+        // when no relay is waiting, so a relay mid-pass runs once more.
+        self.relay_wake.notify_one();
 
         Ok(EnqueuedExecution {
             request_id,
@@ -1675,6 +1721,16 @@ impl ExecutionOutbox {
         let mut tx = self.pool.begin().await?;
         let request_ids = sqlx::query_as::<_, (Uuid, Option<String>)>(
             r#"
+            -- Start from the in-flight requests past their deadline (an
+            -- index range, normally empty), not from every outbox row: the
+            -- outbox keeps delivered rows, so driving from it cost a lookup
+            -- per request ever made on each sweep.
+            WITH due AS MATERIALIZED (
+                SELECT request_id, state
+                FROM execution_requests
+                WHERE state IN ('queued', 'delivered', 'launching')
+                  AND deadline_at <= NOW()
+            )
             UPDATE execution_outbox AS o
             SET state = 'expired',
                 lease_owner = NULL,
@@ -1683,9 +1739,8 @@ impl ExecutionOutbox {
                                   THEN 'launch_deadline_not_compiled'
                                   ELSE 'execution_outbox_deadline_exceeded' END,
                 updated_at = NOW()
-            FROM execution_requests AS r
+            FROM due AS r
             WHERE o.request_id = r.request_id
-              AND r.deadline_at <= NOW()
               AND (
                     (r.state = 'queued' AND o.state IN ('pending', 'leased'))
                  OR (r.state = 'delivered' AND o.state = 'delivered')
@@ -2258,13 +2313,24 @@ impl ExecutionOutboxRelay {
         }
     }
 
+    /// One full pass: expire overdue requests, recover expired launch
+    /// claims, then claim and deliver a batch.
     pub async fn run_once(&self) -> Result<RelayRunStats, ExecutionOutboxError> {
         let expired = self.outbox.expire_due().await?;
         let recovered = self.outbox.recover_expired_launch_claims().await?;
+        let mut stats = self.deliver_once().await?;
+        stats.expired = expired;
+        stats.recovered = recovered;
+        Ok(stats)
+    }
+
+    /// Claim and deliver one batch, without the expiry and recovery sweeps.
+    /// A wake runs only this: those sweeps join the outbox with every
+    /// request, and nothing a new request does makes them due sooner, so
+    /// they stay on the backstop poll.
+    pub async fn deliver_once(&self) -> Result<RelayRunStats, ExecutionOutboxError> {
         let claimed = self.outbox.claim_batch(&self.worker_id).await?;
         let mut stats = RelayRunStats {
-            expired,
-            recovered,
             claimed: claimed.len(),
             ..RelayRunStats::default()
         };
@@ -2367,29 +2433,52 @@ impl ExecutionOutboxRelay {
     }
 
     pub async fn run(self, shutdown: ShutdownSignal) {
-        info!(worker_id = %self.worker_id, "Execution outbox relay started");
-        let mut interval = tokio::time::interval(self.outbox.policy().poll_interval);
+        let policy = self.outbox.policy();
+        info!(
+            worker_id = %self.worker_id,
+            backstop_ms = policy.poll_interval.as_millis() as u64,
+            "Execution outbox relay started (woken on enqueue, polling as backstop)"
+        );
+        let wake = self.outbox.relay_wake();
+        let mut interval = tokio::time::interval(policy.poll_interval);
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
-            tokio::select! {
-                _ = interval.tick() => {}
+            let swept = tokio::select! {
+                _ = wake.notified() => false,
+                _ = interval.tick() => true,
                 _ = wait_for_shutdown(&shutdown) => {
                     info!(worker_id = %self.worker_id, "Execution outbox relay stopping on shutdown");
                     return;
                 }
-            }
+            };
             if shutdown.is_shutting_down() {
                 info!(worker_id = %self.worker_id, "Execution outbox relay stopping on shutdown");
                 return;
             }
-            match self.run_once().await {
-                Ok(stats) if stats.claimed > 0 || stats.expired > 0 || stats.recovered > 0 => {
-                    debug!(?stats, "Execution outbox relay pass completed");
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    error!(error = %error, "Execution outbox relay pass failed");
+            // A full batch may have left more rows claimable: pass again at
+            // once rather than waiting for the next wake or tick. Only the
+            // backstop tick sweeps expiries and recoveries.
+            let mut sweep = swept;
+            loop {
+                let pass = if std::mem::take(&mut sweep) {
+                    self.run_once().await
+                } else {
+                    self.deliver_once().await
+                };
+                match pass {
+                    Ok(stats) => {
+                        if stats.claimed > 0 || stats.expired > 0 || stats.recovered > 0 {
+                            debug!(?stats, "Execution outbox relay pass completed");
+                        }
+                        if stats.claimed < policy.batch_size || shutdown.is_shutting_down() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        error!(error = %error, "Execution outbox relay pass failed");
+                        break;
+                    }
                 }
             }
         }

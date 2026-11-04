@@ -2816,3 +2816,116 @@ async fn a_claim_scoped_to_tenants_takes_only_their_launches() {
 
     context.cleanup().await;
 }
+
+/// A mock runner whose run slots the test fills and frees.
+struct SlotRunner {
+    inner: MockRunner,
+    limit: u64,
+    held: std::sync::atomic::AtomicU64,
+}
+
+#[async_trait::async_trait]
+impl Runner for SlotRunner {
+    fn runner_type(&self) -> &'static str {
+        "slots"
+    }
+
+    async fn try_launch_detached(
+        &self,
+        options: &runtara_environment::runner::LaunchOptions,
+    ) -> runtara_environment::runner::Result<RunnerHandle> {
+        self.inner.try_launch_detached(options).await
+    }
+
+    async fn is_running(&self, handle: &RunnerHandle) -> bool {
+        self.inner.is_running(handle).await
+    }
+
+    async fn stop(&self, handle: &RunnerHandle) -> runtara_environment::runner::Result<()> {
+        self.inner.stop(handle).await
+    }
+
+    async fn collect_result(
+        &self,
+        handle: &RunnerHandle,
+    ) -> (
+        Option<serde_json::Value>,
+        Option<String>,
+        runtara_environment::runner::ContainerMetrics,
+    ) {
+        self.inner.collect_result(handle).await
+    }
+
+    fn occupancy(&self) -> Option<runtara_environment::runner::RunnerOccupancy> {
+        Some(runtara_environment::runner::RunnerOccupancy {
+            limit: self.limit,
+            held: self.held.load(std::sync::atomic::Ordering::SeqCst),
+        })
+    }
+}
+
+/// While every run slot is taken, the dispatcher leaves a ready launch queued
+/// instead of claiming, preparing and requeueing it each pass; it claims the
+/// launch once a slot is free.
+#[tokio::test]
+async fn a_launch_waits_unclaimed_while_the_runner_has_no_free_slot() {
+    let context = TestContext::new().await.expect("test database must start");
+    let fixture = fixture(&context).await;
+    std::fs::write(context.data_dir.join("test_binary"), b"mock workflow")
+        .expect("test artifact must be writable");
+    let repository = LaunchRepository::new(context.pool.clone());
+    let launch_id = Uuid::new_v4().to_string();
+    repository
+        .enqueue(request(
+            &fixture,
+            &launch_id,
+            LaunchKind::Start,
+            Duration::from_secs(30),
+        ))
+        .await
+        .expect("queue row must be inserted");
+
+    let runner = Arc::new(SlotRunner {
+        inner: MockRunner::never_completing(),
+        limit: 2,
+        held: std::sync::atomic::AtomicU64::new(2),
+    });
+    let dispatcher = LaunchDispatcher::new(
+        context.pool.clone(),
+        Arc::new(PostgresPersistence::new(context.pool.clone())),
+        runner.clone(),
+        Arc::new(tokio::sync::Notify::new()),
+        Default::default(),
+    );
+
+    let state = || async {
+        sqlx::query_as::<_, (String, i32)>(
+            "SELECT state, attempt_count FROM instance_launches WHERE launch_id = $1",
+        )
+        .bind(&launch_id)
+        .fetch_one(&context.pool)
+        .await
+        .expect("launch row must exist")
+    };
+    let before = state().await;
+    for _ in 0..3 {
+        assert_eq!(
+            dispatcher.dispatch_once().await.expect("dispatch scan"),
+            0,
+            "no slot is free, so nothing is claimed"
+        );
+    }
+    assert_eq!(
+        state().await,
+        before,
+        "the launch was not leased, prepared or requeued meanwhile"
+    );
+
+    runner.held.store(1, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        dispatcher.dispatch_once().await.expect("dispatch scan"),
+        1,
+        "a freed slot lets the launch be claimed"
+    );
+    context.cleanup().await;
+}

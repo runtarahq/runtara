@@ -9,7 +9,9 @@
 //! The tenant is set on the connection as it is handed out, whether it was
 //! idle (`before_acquire`) or newly opened (`after_connect`), so every query
 //! and transaction on it runs under the scope it was acquired in. That costs
-//! one statement per acquire, and no call site changes.
+//! one statement per acquire, and no call site changes. The statement also
+//! proves an idle connection alive (a dead one is closed and replaced), so the
+//! pool's own ping before each acquire is turned off: one round trip, not two.
 //!
 //! The scope is a task-local: work spawned onto another task
 //! (`tokio::spawn`, `spawn_blocking`) leaves it and runs as the system path.
@@ -75,6 +77,35 @@ pub async fn require_row_security(pool: &sqlx::PgPool, database: &str) -> Result
     }
 }
 
+/// Warns when row level security keeps `pool`'s enum columns off their
+/// indexes. Under a row security policy Postgres only pushes a condition into
+/// an index scan when its operator is leakproof, and enum equality is not by
+/// default: every `status = ...` on a table with a policy then scans the whole
+/// table (the admission gate's count took 70 ms instead of 1 ms on 120k
+/// instances). Enum equality compares two OIDs and cannot leak anything; an
+/// administrator marks it once per database:
+/// `ALTER FUNCTION pg_catalog.enum_eq(anyenum, anyenum) LEAKPROOF;`
+pub async fn check_enum_index_use(pool: &sqlx::PgPool, database: &str) {
+    let leakproof: Result<bool, sqlx::Error> = sqlx::query_scalar(
+        "SELECT proleakproof FROM pg_proc WHERE oid = 'pg_catalog.enum_eq(anyenum, anyenum)'::regprocedure",
+    )
+    .fetch_one(pool)
+    .await;
+    match (escapes_row_security(pool).await, leakproof) {
+        (Ok(false), Ok(false)) => tracing::warn!(
+            database,
+            "enum equality is not leakproof: under row level security every enum \
+             condition (instance status, ...) scans its whole table. As an \
+             administrator, run once in this database: ALTER FUNCTION \
+             pg_catalog.enum_eq(anyenum, anyenum) LEAKPROOF;"
+        ),
+        (_, Err(error)) => {
+            tracing::debug!(database, %error, "could not check enum equality's leakproofness")
+        }
+        _ => {}
+    }
+}
+
 async fn name_tenant(connection: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT set_config('runtara.tenant_id', $1, false)")
         .bind(current().unwrap_or_default())
@@ -87,6 +118,7 @@ async fn name_tenant(connection: &mut sqlx::PgConnection) -> Result<(), sqlx::Er
 /// are handed out in ([`scoped`]), or none.
 pub fn scoping(options: PgPoolOptions) -> PgPoolOptions {
     options
+        .test_before_acquire(false)
         .after_connect(|connection, _| Box::pin(name_tenant(connection)))
         .before_acquire(|connection, _| {
             Box::pin(async move { name_tenant(connection).await.map(|_| true) })

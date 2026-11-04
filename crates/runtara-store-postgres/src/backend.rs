@@ -1154,6 +1154,100 @@ impl Persistence for PostgresPersistence {
         Self::op_get_custom_signal(&self.pool, instance_id, checkpoint_id).await
     }
 
+    async fn load_checkpoint_with_status(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+    ) -> Result<
+        Option<(
+            runtara_core::domain::InstanceStatus,
+            Option<CheckpointRecord>,
+        )>,
+        CoreError,
+    > {
+        use sqlx::Row;
+        // The instance's status and the checkpoint in one statement.
+        let row = sqlx::query(
+            "SELECT i.status::text AS status, c.checkpoint_id AS checkpoint_id, c.state AS state, \
+                    c.created_at AS created_at \
+             FROM instances AS i \
+             LEFT JOIN checkpoints AS c ON c.instance_id = i.instance_id AND c.checkpoint_id = $2 \
+             WHERE i.instance_id = $1",
+        )
+        .bind(instance_id)
+        .bind(checkpoint_id)
+        .fetch_optional(&self.pool)
+        .await
+        .db()?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let status =
+            crate::encoding::status_from_str(&row.try_get::<String, _>("status").db()?).db()?;
+        let checkpoint = match row.try_get::<Option<String>, _>("checkpoint_id").db()? {
+            Some(checkpoint_id) => Some(CheckpointRecord {
+                instance_id: instance_id.to_owned(),
+                checkpoint_id,
+                state: row.try_get("state").db()?,
+                created_at: row.try_get("created_at").db()?,
+            }),
+            None => None,
+        };
+        Ok(Some((status, checkpoint)))
+    }
+
+    async fn get_signals(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+    ) -> Result<(Option<SignalRecord>, Option<CustomSignalRecord>), CoreError> {
+        use sqlx::Row;
+        // Both reads in one statement: a checkpoint call answers with both.
+        let row = sqlx::query(
+            "SELECT p.command_id::text AS command_id, p.signal_type::text AS signal_type, \
+                    p.payload AS payload, p.created_at AS created_at, \
+                    p.acknowledged_at AS acknowledged_at, \
+                    c.signal_id::text AS custom_signal_id, c.payload AS custom_payload, \
+                    c.created_at AS custom_created_at \
+             FROM (SELECT 1) AS one \
+             LEFT JOIN LATERAL (SELECT command_id, signal_type, payload, created_at, acknowledged_at \
+                 FROM pending_signals WHERE instance_id = $1 AND acknowledged_at IS NULL \
+                 AND signal_type <> 'resume' LIMIT 1) AS p ON true \
+             LEFT JOIN LATERAL (SELECT signal_id, payload, created_at FROM pending_checkpoint_signals \
+                 WHERE instance_id = $1 AND checkpoint_id = $2) AS c ON true",
+        )
+        .bind(instance_id)
+        .bind(checkpoint_id)
+        .fetch_one(&self.pool)
+        .await
+        .db()?;
+        let pending = match row.try_get::<Option<String>, _>("command_id").db()? {
+            Some(command_id) => Some(SignalRecord {
+                command_id,
+                instance_id: instance_id.to_owned(),
+                signal_type: crate::encoding::signal_type_from_str(
+                    &row.try_get::<String, _>("signal_type").db()?,
+                )
+                .db()?,
+                payload: row.try_get("payload").db()?,
+                created_at: row.try_get("created_at").db()?,
+                acknowledged_at: row.try_get("acknowledged_at").db()?,
+            }),
+            None => None,
+        };
+        let custom = match row.try_get::<Option<String>, _>("custom_signal_id").db()? {
+            Some(signal_id) => Some(CustomSignalRecord {
+                signal_id,
+                instance_id: instance_id.to_owned(),
+                checkpoint_id: checkpoint_id.to_owned(),
+                payload: row.try_get("custom_payload").db()?,
+                created_at: row.try_get("custom_created_at").db()?,
+            }),
+            None => None,
+        };
+        Ok((pending, custom))
+    }
+
     async fn save_retry_attempt(
         &self,
         instance_id: &str,
@@ -2077,6 +2171,38 @@ mod tests {
         assert!(signal.is_none());
 
         cleanup_test_instance(&pool, instance_id).await;
+    }
+
+    #[tokio::test]
+    async fn signals_read_together_match_the_separate_reads() {
+        let pool = test_pool().await;
+        let instance_id = Uuid::new_v4();
+        let id = instance_id.to_string();
+        create_test_instance(&pool, instance_id, "test-tenant").await;
+        let backend = PostgresPersistence::new(pool.clone());
+        let (pending, custom) = backend.get_signals(&id, "cp-1").await.unwrap();
+        assert!(pending.is_none() && custom.is_none());
+
+        insert_signal(&pool, &id, CoreSignalType::Cancel, b"why")
+            .await
+            .unwrap();
+        put_custom_signal(&pool, &id, "cp-1", b"payload")
+            .await
+            .unwrap();
+        let (pending, custom) = backend.get_signals(&id, "cp-1").await.unwrap();
+        let (pending, custom) = (pending.unwrap(), custom.unwrap());
+        let separate = backend.get_pending_signal(&id).await.unwrap().unwrap();
+        assert_eq!(pending.command_id, separate.command_id);
+        assert_eq!(pending.signal_type, separate.signal_type);
+        assert_eq!(pending.payload, separate.payload);
+        let separate = backend
+            .get_custom_signal(&id, "cp-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(custom.signal_id, separate.signal_id);
+        assert_eq!(custom.payload, separate.payload);
+        assert!(backend.get_signals(&id, "cp-2").await.unwrap().1.is_none());
     }
 
     #[tokio::test]

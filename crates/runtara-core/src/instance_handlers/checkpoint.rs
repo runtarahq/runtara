@@ -53,12 +53,30 @@ pub async fn handle_checkpoint_lookup(
     state: &InstanceHandlerState,
     request: GetCheckpointRequest,
 ) -> Result<CheckpointResponse> {
-    ensure_instance_running(state.persistence.as_ref(), &request.instance_id).await?;
-    if let Some(existing) = state
+    // The instance must be running; its status and the checkpoint are read
+    // together.
+    let existing = match state
         .persistence
-        .load_checkpoint(&request.instance_id, &request.checkpoint_id)
+        .load_checkpoint_with_status(&request.instance_id, &request.checkpoint_id)
         .await?
     {
+        Some((CoreInstanceStatus::Running, existing)) => existing,
+        Some((status, _)) => {
+            return Err(CoreError::InvalidInstanceState {
+                instance_id: request.instance_id.clone(),
+                expected: "running".to_string(),
+                actual: format!("{status:?}"),
+            }
+            .into());
+        }
+        None => {
+            return Err(CoreError::InstanceNotFound {
+                instance_id: request.instance_id.clone(),
+            }
+            .into());
+        }
+    };
+    if let Some(existing) = existing {
         return found_response(
             state,
             &request.instance_id,
@@ -157,9 +175,8 @@ pub async fn handle_checkpoint(
     }
 
     // 5. Check for pending signals to include in response
-    let pending_signal =
-        get_pending_signal(state.persistence.as_ref(), &request.instance_id).await?;
-    let custom_signal = custom_signal(state, &request.instance_id, &request.checkpoint_id).await?;
+    let (pending_signal, custom_signal) =
+        signals(state, &request.instance_id, &request.checkpoint_id).await?;
 
     if pending_signal.is_some() || custom_signal.is_some() {
         debug!(
@@ -187,8 +204,7 @@ async fn found_response(
     checkpoint_id: &str,
     stored: Vec<u8>,
 ) -> Result<CheckpointResponse> {
-    let pending_signal = get_pending_signal(state.persistence.as_ref(), instance_id).await?;
-    let custom_signal = custom_signal(state, instance_id, checkpoint_id).await?;
+    let (pending_signal, custom_signal) = signals(state, instance_id, checkpoint_id).await?;
     Ok(CheckpointResponse {
         found: true,
         state: stored,
@@ -197,20 +213,30 @@ async fn found_response(
     })
 }
 
-async fn custom_signal(
+/// The pending lifecycle signal and `checkpoint_id`'s custom signal, which a
+/// checkpoint call answers with, read together.
+async fn signals(
     state: &InstanceHandlerState,
     instance_id: &str,
     checkpoint_id: &str,
-) -> std::result::Result<Option<CustomSignal>, CoreError> {
-    Ok(state
+) -> std::result::Result<(Option<Signal>, Option<CustomSignal>), CoreError> {
+    let (pending, custom) = state
         .persistence
-        .get_custom_signal(instance_id, checkpoint_id)
-        .await?
-        .map(|sig| CustomSignal {
+        .get_signals(instance_id, checkpoint_id)
+        .await?;
+    Ok((
+        pending.map(|signal| Signal {
+            command_id: signal.command_id,
+            instance_id: instance_id.to_string(),
+            signal_type: SignalType::from(signal.signal_type).into(),
+            payload: signal.payload.unwrap_or_default(),
+        }),
+        custom.map(|sig| CustomSignal {
             signal_id: sig.signal_id,
             checkpoint_id: checkpoint_id.to_string(),
             payload: sig.payload.unwrap_or_default(),
-        }))
+        }),
+    ))
 }
 
 /// Validate that an instance exists and is still running.
@@ -260,24 +286,18 @@ pub async fn handle_get_checkpoint(
 ) -> Result<GetCheckpointResponse> {
     debug!("Looking up checkpoint (read-only)");
 
-    // 1. Validate instance exists
-    let instance = state
+    // 1. Validate instance exists and 2. look up the checkpoint, together.
+    let Some((_, checkpoint)) = state
         .persistence
-        .get_instance_meta(&request.instance_id)
-        .await?;
-    if instance.is_none() {
+        .load_checkpoint_with_status(&request.instance_id, &request.checkpoint_id)
+        .await?
+    else {
         return Err(CoreError::InstanceNotFound {
             instance_id: request.instance_id.clone(),
         }
         .into());
-    }
-
-    // 2. Look up checkpoint
-    if let Some(checkpoint) = state
-        .persistence
-        .load_checkpoint(&request.instance_id, &request.checkpoint_id)
-        .await?
-    {
+    };
+    if let Some(checkpoint) = checkpoint {
         debug!(
             checkpoint_id = %request.checkpoint_id,
             state_size = checkpoint.state.len(),

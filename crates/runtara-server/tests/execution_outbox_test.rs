@@ -1411,3 +1411,144 @@ async fn cancel_intents_and_outcomes_follow_launching_races() {
     assert!(ours(outbox.unpublished_outcomes(100).await.unwrap()).is_empty());
     cleanup(&pool, &tenant_id).await;
 }
+
+/// A relay, its stream key and a reader of that stream, isolated from other
+/// tests by a fresh stream prefix.
+#[cfg(feature = "valkey-integration-tests")]
+async fn relay_stream(
+    tenant_id: &str,
+) -> (
+    Arc<runtara_server::api::repositories::trigger_stream::TriggerStreamPublisher>,
+    redis::aio::ConnectionManager,
+    String,
+) {
+    use runtara_server::api::repositories::trigger_stream::TriggerStreamPublisher;
+    use runtara_server::valkey::ValkeyConfig;
+
+    let mut config =
+        ValkeyConfig::from_env().expect("valkey-integration-tests requires VALKEY_HOST");
+    config.trigger_stream_prefix = format!("runtara:test:outbox:{}", Uuid::new_v4());
+    let stream_key = config.trigger_stream_key(tenant_id);
+    let manager = redis::aio::ConnectionManager::new(
+        redis::Client::open(config.connection_url()).expect("build Valkey client"),
+    )
+    .await
+    .expect("connect Valkey");
+    let publisher = Arc::new(TriggerStreamPublisher::new(manager.clone(), config));
+    (publisher, manager, stream_key)
+}
+
+/// How long until `stream_key` holds an entry, if it gets one by `within`.
+#[cfg(feature = "valkey-integration-tests")]
+async fn time_to_first_entry(
+    manager: &redis::aio::ConnectionManager,
+    stream_key: &str,
+    within: Duration,
+) -> Option<Duration> {
+    use redis::AsyncCommands;
+    let started = tokio::time::Instant::now();
+    let mut redis = manager.clone();
+    while started.elapsed() < within {
+        let len: usize = redis.xlen(stream_key).await.expect("read stream length");
+        if len > 0 {
+            return Some(started.elapsed());
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    None
+}
+
+#[cfg(feature = "valkey-integration-tests")]
+#[tokio::test]
+async fn relay_is_woken_by_an_enqueue_in_its_process_without_waiting_for_its_poll() {
+    use redis::AsyncCommands;
+    use runtara_server::workers::execution_outbox::ExecutionOutboxRelay;
+
+    let _guard = OUTBOX_TEST_LOCK.lock().await;
+    let pool = test_pool().await;
+    let tenant_id = format!("outbox-wake-{}", Uuid::new_v4());
+    let (publisher, manager, stream_key) = relay_stream(&tenant_id).await;
+    // A poll far longer than the test's bound: only the wake can deliver.
+    let slow = ExecutionOutboxPolicy {
+        poll_interval: Duration::from_secs(10),
+        ..policy()
+    };
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let outbox = ExecutionOutbox::with_policy(pool.clone(), slow).with_relay_wake(wake);
+    let shutdown = runtara_server::shutdown::ShutdownSignal::new();
+    let relay =
+        tokio::spawn(ExecutionOutboxRelay::new(outbox.clone(), publisher).run(shutdown.clone()));
+    // Let the relay take its immediate first tick and park on the wake.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    outbox
+        .enqueue(
+            &tenant_id,
+            &event(&tenant_id, Uuid::new_v4()),
+            &source_idempotency_key("http-api", "woken"),
+            1,
+        )
+        .await
+        .expect("enqueue request");
+    let waited = time_to_first_entry(&manager, &stream_key, Duration::from_secs(2))
+        .await
+        .expect("the woken relay publishes the request");
+    assert!(
+        waited < Duration::from_millis(500),
+        "relay took {waited:?}, as if it waited for its poll"
+    );
+
+    shutdown.trigger();
+    relay.await.expect("relay stops on shutdown");
+    let mut redis = manager.clone();
+    let _: () = redis.del(&stream_key).await.expect("remove test stream");
+    cleanup(&pool, &tenant_id).await;
+}
+
+#[cfg(feature = "valkey-integration-tests")]
+#[tokio::test]
+async fn relay_still_finds_a_request_another_process_committed_by_its_backstop_poll() {
+    use redis::AsyncCommands;
+    use runtara_server::workers::execution_outbox::ExecutionOutboxRelay;
+
+    let _guard = OUTBOX_TEST_LOCK.lock().await;
+    let pool = test_pool().await;
+    let tenant_id = format!("outbox-backstop-{}", Uuid::new_v4());
+    let (publisher, manager, stream_key) = relay_stream(&tenant_id).await;
+    let backstop = ExecutionOutboxPolicy {
+        poll_interval: Duration::from_millis(300),
+        ..policy()
+    };
+    let relay_outbox = ExecutionOutbox::with_policy(pool.clone(), backstop)
+        .with_relay_wake(Arc::new(tokio::sync::Notify::new()));
+    // Another process: same database, a wake no relay here listens to.
+    let other_process = ExecutionOutbox::with_policy(pool.clone(), backstop)
+        .with_relay_wake(Arc::new(tokio::sync::Notify::new()));
+    let shutdown = runtara_server::shutdown::ShutdownSignal::new();
+    let relay =
+        tokio::spawn(ExecutionOutboxRelay::new(relay_outbox, publisher).run(shutdown.clone()));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    other_process
+        .enqueue(
+            &tenant_id,
+            &event(&tenant_id, Uuid::new_v4()),
+            &source_idempotency_key("http-api", "backstop"),
+            1,
+        )
+        .await
+        .expect("enqueue request");
+    let waited = time_to_first_entry(&manager, &stream_key, Duration::from_secs(3))
+        .await
+        .expect("the backstop poll publishes a request no wake announced");
+    assert!(
+        waited <= Duration::from_millis(300 + 250),
+        "backstop took {waited:?}"
+    );
+
+    shutdown.trigger();
+    relay.await.expect("relay stops on shutdown");
+    let mut redis = manager.clone();
+    let _: () = redis.del(&stream_key).await.expect("remove test stream");
+    cleanup(&pool, &tenant_id).await;
+}

@@ -301,6 +301,11 @@ pub async fn count_instances_by_status(
     .bind(tenant_id)
     .bind(statuses)
     .bind(ceiling)
+    // Planned for its parameters each time: a prepared statement's generic
+    // plan cannot see that the active statuses are rare and scans the whole
+    // table (25-70 ms on 120k mostly completed instances, against 0.1 ms on
+    // the status index).
+    .persistent(false)
     .fetch_one(pool)
     .await?;
 

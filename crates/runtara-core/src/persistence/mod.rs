@@ -1086,6 +1086,23 @@ pub trait Persistence: Send + Sync {
         checkpoint_id: &str,
     ) -> Result<Option<CheckpointRecord>, CoreError>;
 
+    /// The instance's status and, if stored, its checkpoint `checkpoint_id`:
+    /// `None` when there is no such instance. A checkpoint lookup checks the
+    /// instance first; a store may read both at once.
+    async fn load_checkpoint_with_status(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+    ) -> Result<Option<(InstanceStatus, Option<CheckpointRecord>)>, CoreError> {
+        let Some(instance) = self.get_instance_meta(instance_id).await? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            instance.status,
+            self.load_checkpoint(instance_id, checkpoint_id).await?,
+        )))
+    }
+
     /// Page through an instance's checkpoints, newest first.
     ///
     /// Ordered by `(created_at, checkpoint_id)` descending, comparing the id
@@ -1392,6 +1409,20 @@ pub trait Persistence: Send + Sync {
         instance_id: &str,
         checkpoint_id: &str,
     ) -> Result<Option<CustomSignalRecord>, CoreError>;
+
+    /// [`Self::get_pending_signal`] and [`Self::get_custom_signal`] for
+    /// `checkpoint_id`, which a checkpoint call answers with: a store may read
+    /// both at once.
+    async fn get_signals(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+    ) -> Result<(Option<SignalRecord>, Option<CustomSignalRecord>), CoreError> {
+        Ok((
+            self.get_pending_signal(instance_id).await?,
+            self.get_custom_signal(instance_id, checkpoint_id).await?,
+        ))
+    }
 
     /// Record that a durable step failed and is being retried.
     ///

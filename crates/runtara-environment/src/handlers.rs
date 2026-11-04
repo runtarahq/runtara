@@ -1365,15 +1365,21 @@ async fn settle_execution_timeout(
     );
     let _ = runner.stop(handle).await;
 
-    if !crate::observed_exit::settle_with_retry(
+    match crate::observed_exit::settle_with_retry(
         pool,
         persistence.as_ref(),
         handle,
         crate::observed_exit::ObservedExit::timeout(),
+        crate::observed_exit::Resources::default(),
     )
     .await
     {
-        return;
+        crate::observed_exit::Settled::NotOwned => return,
+        crate::observed_exit::Settled::Released(launch, reason) => {
+            lifecycle_observers.notify_released(&launch, reason);
+            return;
+        }
+        crate::observed_exit::Settled::Owned => {}
     }
 
     release_launch_after_monitor(
@@ -1394,55 +1400,15 @@ async fn settle_execution_timeout(
 /// diagnostics, so it writes them before discovering it is stale.
 async fn record_exit_diagnostics(
     pool: &PgPool,
-    persistence: &Arc<dyn Persistence>,
     runner: &Arc<dyn Runner>,
     handle: &RunnerHandle,
     instance_id: &str,
-) -> (
-    std::result::Result<
-        Option<(CoreInstanceStatus, Option<String>)>,
-        runtara_core::error::CoreError,
-    >,
-    Option<String>,
-) {
+) -> (Option<String>, crate::observed_exit::Resources) {
     let (_output, stderr, metrics) = runner.collect_result(handle).await;
-
-    // Store metrics and pick up the status the guest reported in the same
-    // statement: this monitor needs both, and they are the same row. Kept even
-    // when there are no metrics to write, so the crash check the caller runs
-    // always has a status to look at.
-
-    let observed_status = match crate::metrics::record_resources_returning_status(
-        pool,
-        instance_id,
-        metrics.memory_peak_bytes,
-        metrics.cpu_usage_usec,
-    )
-    .await
-    {
-        Ok(observed) => {
-            debug!(
-                instance_id = %instance_id,
-                memory_peak_bytes = ?metrics.memory_peak_bytes,
-                cpu_usage_usec = ?metrics.cpu_usage_usec,
-                "Stored container metrics"
-            );
-            Ok(observed)
-        }
-        Err(e) => {
-            warn!(
-                instance_id = %instance_id,
-                error = %e,
-                "Failed to store container metrics"
-            );
-            // The status this carries decides crash vs normal exit
-            // below, so a failed metrics write must not be read as a
-            // crash. Fall back to a plain status read, as before.
-            persistence
-                .get_instance_meta(instance_id)
-                .await
-                .map(|found| found.map(|i| (i.status, i.termination_reason)))
-        }
+    // The measurements are stored as the run settles, in its transaction.
+    let resources = crate::observed_exit::Resources {
+        memory_peak_bytes: metrics.memory_peak_bytes,
+        cpu_usage_usec: metrics.cpu_usage_usec,
     };
 
     // Store stderr via Persistence trait for debugging (even if instance succeeds via Core)
@@ -1464,7 +1430,7 @@ async fn record_exit_diagnostics(
         }
     }
 
-    (observed_status, stderr)
+    (stderr, resources)
 }
 
 /// Settle a guest that exited without reporting a terminal status.
@@ -1711,9 +1677,8 @@ pub fn spawn_container_monitor(
                     "Process terminated, checking Core status"
                 );
 
-                let (_observed_status, stderr) = record_exit_diagnostics(
+                let (stderr, resources) = record_exit_diagnostics(
                     &pool,
-                    &persistence,
                     &runner,
                     &handle,
                     &instance_id,
@@ -1747,13 +1712,25 @@ pub fn spawn_container_monitor(
                 };
                 // Retain the observed exit before Core cleanup. Both local retry
                 // and restart recovery keep the exact physical ownership fence.
-                if crate::observed_exit::settle_with_retry(
-                    &pool, persistence.as_ref(), &handle, intent,
-                ).await {
-                    release_launch_after_monitor(
-                        &pool, persistence.as_ref(), &handle.launch_id,
-                        &instance_id, &lifecycle_observers,
-                    ).await;
+                let settled = crate::observed_exit::settle_with_retry(
+                    &pool, persistence.as_ref(), &handle, intent, resources,
+                ).await;
+                if (resources.memory_peak_bytes.is_some() || resources.cpu_usage_usec.is_some())
+                    && let Err(error) = crate::metrics::emit_resources(&pool, &instance_id).await
+                {
+                    debug!(instance_id = %instance_id, %error, "Could not report resource metrics");
+                }
+                match settled {
+                    crate::observed_exit::Settled::NotOwned => {}
+                    crate::observed_exit::Settled::Released(launch, reason) => {
+                        lifecycle_observers.notify_released(&launch, reason);
+                    }
+                    crate::observed_exit::Settled::Owned => {
+                        release_launch_after_monitor(
+                            &pool, persistence.as_ref(), &handle.launch_id,
+                            &instance_id, &lifecycle_observers,
+                        ).await;
+                    }
                 }
 
             }

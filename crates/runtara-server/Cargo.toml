@@ -217,7 +217,7 @@ sqlx = { version = "0.8.6", features = [
 # HTTP/API
 axum = { version = "0.8", features = ["multipart"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "sensitive-headers"] }
 http-body-util = "0.1"
 bytes = "1"
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }

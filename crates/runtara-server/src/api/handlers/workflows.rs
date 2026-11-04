@@ -1966,7 +1966,8 @@ pub async fn validate_mappings_handler(
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(engine, request), fields(workflow_id = %workflow_id))]
+// `headers` carries the caller's `Authorization` bearer: never a span field.
+#[instrument(skip(engine, request, headers), fields(workflow_id = %workflow_id))]
 pub async fn execute_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(engine): State<Arc<ExecutionEngine>>,

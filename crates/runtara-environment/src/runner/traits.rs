@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 
 /// Errors from runner operations.
 #[derive(Debug, Error)]
@@ -426,7 +426,10 @@ impl StartGate {
 }
 
 /// Options for launching an instance.
-#[derive(Debug, Clone)]
+///
+/// This is a launch spec and may carry secrets (the guest environment, the
+/// run's input), so its `Debug` names those fields without their values.
+#[derive(Clone)]
 pub struct LaunchOptions {
     /// Immutable identifier for this physical launch attempt.
     ///
@@ -482,6 +485,32 @@ pub struct LaunchOptions {
     /// guest's linear memories. The runner's own ceiling still applies;
     /// `None` leaves only that ceiling.
     pub memory_limit_bytes: Option<u64>,
+}
+
+impl std::fmt::Debug for LaunchOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut env_keys: Vec<&str> = self.env.keys().map(String::as_str).collect();
+        env_keys.sort_unstable();
+        f.debug_struct("LaunchOptions")
+            .field("launch_id", &self.launch_id)
+            .field("instance_id", &self.instance_id)
+            .field("tenant_id", &self.tenant_id)
+            .field("workflow_digest", &self.workflow_digest)
+            .field("preparation_attempt", &self.preparation_attempt)
+            .field("preparation_deadline", &self.preparation_deadline)
+            .field("input", &"<redacted>")
+            .field("timeout", &self.timeout)
+            .field("checkpoint_id", &self.checkpoint_id)
+            .field("env_keys", &env_keys)
+            .field(
+                "prepersisted_input",
+                &self.prepersisted_input.as_ref().map(|b| b.len()),
+            )
+            .field("launch_kind", &self.launch_kind)
+            .field("start_gate", &self.start_gate.is_some())
+            .field("memory_limit_bytes", &self.memory_limit_bytes)
+            .finish()
+    }
 }
 
 /// Handle for a launched instance (detached execution).
@@ -705,6 +734,16 @@ pub trait Runner: Send + Sync {
         None
     }
 
+    /// Signalled each time a run gives back its slot in [`Self::occupancy`],
+    /// so a dispatcher holding launches back for want of a slot claims the
+    /// next one at once instead of at its next poll.
+    ///
+    /// `None` means the runner does not signal; dispatchers then notice freed
+    /// slots by polling, as before.
+    fn capacity_released(&self) -> Option<Arc<Notify>> {
+        None
+    }
+
     /// Wait for the instance to exit, polling with the given interval.
     ///
     /// The default implementation polls [`Runner::is_running`] at `poll_interval`.
@@ -895,6 +934,33 @@ mod prepared_launch_tests {
             start_gate: None,
             memory_limit_bytes: None,
         }
+    }
+
+    #[test]
+    fn debug_never_prints_the_launch_environment_or_input() {
+        let mut launch = options("launch-1");
+        launch
+            .env
+            .insert("RUN_CREDENTIAL".to_string(), "env-secret-value".to_string());
+        launch.input = serde_json::json!({ "password": "input-secret-value" });
+        launch.prepersisted_input = Some(b"stored-secret-value".to_vec());
+        let printed = format!("{launch:?} {launch:#?}");
+        // Failure messages name the field, never the value or the output.
+        for (field, secret) in [
+            ("env", "env-secret-value"),
+            ("input", "input-secret-value"),
+            ("prepersisted_input", "stored-secret-value"),
+        ] {
+            assert!(
+                !printed.contains(secret),
+                "launch {field} leaked into Debug"
+            );
+        }
+        assert!(
+            printed.contains("RUN_CREDENTIAL"),
+            "Debug no longer names the env keys"
+        );
+        assert!(printed.contains("launch-1"), "{printed}");
     }
 
     #[test]

@@ -374,8 +374,16 @@ impl LaunchDispatcher {
             poll_ms = self.config.poll_interval.as_millis(),
             "Launch dispatcher started"
         );
+        let capacity_released = self.runner.capacity_released();
+        // Each launch wakes the loop a few times (enqueued, prepared, slot
+        // given back); the recovery sweeps only need the poll interval.
+        let mut swept_at: Option<tokio::time::Instant> = None;
         loop {
-            let processed = match self.dispatch_once().await {
+            let sweep = swept_at.is_none_or(|at| at.elapsed() >= self.config.poll_interval);
+            if sweep {
+                swept_at = Some(tokio::time::Instant::now());
+            }
+            let processed = match self.dispatch_pass(sweep).await {
                 Ok(processed) => processed,
                 Err(error) => {
                     error!(error = %error, "Launch dispatcher scan failed");
@@ -394,6 +402,14 @@ impl LaunchDispatcher {
                     return;
                 }
                 _ = self.wake.notified() => {}
+                // A run gave its slot back: a launch held back for want of
+                // one can be claimed now.
+                _ = async {
+                    match &capacity_released {
+                        Some(released) => released.notified().await,
+                        None => std::future::pending().await,
+                    }
+                } => {}
                 _ = tokio::time::sleep(self.config.poll_interval) => {}
             }
         }
@@ -404,13 +420,30 @@ impl LaunchDispatcher {
     /// This is public for narrow integration tests; normal hosts call
     /// [`Self::run`] and wake it through the shared [`Notify`].
     pub async fn dispatch_once(&self) -> anyhow::Result<usize> {
+        self.dispatch_pass(true).await
+    }
+
+    /// One pass: abort delivery and a bounded claim, preceded by the
+    /// expiry/recovery sweeps when `sweep`.
+    async fn dispatch_pass(&self, sweep: bool) -> anyhow::Result<usize> {
         // Serve control for already-running executions even during drain and
         // before queue preparation/reconciliation can consume this pass.
         ContainerRegistry::new(self.pool.clone())
             .deliver_abort_requests(&self.owner, self.runner.as_ref(), self.config.batch_size)
             .await?;
         let repository = LaunchRepository::new(self.pool.clone());
+        if sweep {
+            self.sweep(&repository).await?;
+        }
 
+        if self.drain.is_draining() {
+            return Ok(0);
+        }
+        self.claim_and_prepare(&repository).await
+    }
+
+    /// Expire and recover queue rows.
+    async fn sweep(&self, repository: &LaunchRepository) -> anyhow::Result<()> {
         // A monitor can be interrupted after Core persisted a park/terminal
         // outcome but before it released the matching launch generation. The
         // queue row is the durable single-instance lease, so reconcile that
@@ -447,11 +480,11 @@ impl LaunchDispatcher {
                 "Recovered expired launch dispatcher leases"
             );
         }
+        Ok(())
+    }
 
-        if self.drain.is_draining() {
-            return Ok(0);
-        }
-
+    /// Claim what this host has room for and start preparing it.
+    async fn claim_and_prepare(&self, repository: &LaunchRepository) -> anyhow::Result<usize> {
         // `options_for` has Core/image database reads before the runner can
         // acquire its own preparation permit. Bound those detached workers
         // here as well, otherwise a slow database could grow an unbounded
@@ -465,11 +498,33 @@ impl LaunchDispatcher {
                     .unwrap_or(usize::MAX)
             })
             .unwrap_or(self.config.batch_size);
+        // Claim no more launches than the runner has run slots for. A claim
+        // the runner then refuses with `CapacityUnavailable` is leased,
+        // fenced, prepared and requeued only to be claimed again: while every
+        // slot is busy, each waiting launch went round that loop every
+        // `capacity_retry_delay`, several writes each, without a run ever
+        // starting sooner. Launches already in preparation will each take a
+        // slot, so they count against the free ones. A runner that reports no
+        // occupancy keeps the old bound.
+        let preparing = self
+            .config
+            .preparation_worker_limit
+            .saturating_sub(local_capacity);
+        let run_capacity = self
+            .runner
+            .occupancy()
+            .map(|occupancy| {
+                usize::try_from(occupancy.limit.saturating_sub(occupancy.held))
+                    .unwrap_or(usize::MAX)
+                    .saturating_sub(preparing)
+            })
+            .unwrap_or(usize::MAX);
         let claim_limit = self
             .config
             .batch_size
             .min(local_capacity)
-            .min(runner_capacity);
+            .min(runner_capacity)
+            .min(run_capacity);
         let launches = repository
             .claim_ready_for_preparation_of(
                 &self.owner,
@@ -487,7 +542,7 @@ impl LaunchDispatcher {
                     // capacity snapshot. The durable row has already been
                     // claimed, so return exactly this incarnation to queue.
                     self.requeue_owned_bounded(
-                        &repository,
+                        repository,
                         &launch,
                         self.config.preparation_retry_delay,
                         Some(PREPARATION_CAPACITY_UNAVAILABLE),
@@ -710,7 +765,7 @@ impl LaunchDispatcher {
 
         let promoted = tokio::time::timeout_at(
             preparation_deadline,
-            repository.promote_prepared(
+            repository.promote_to_start(
                 &launch.launch_id,
                 &self.owner,
                 launch.attempt_count,
@@ -784,7 +839,7 @@ impl LaunchDispatcher {
     }
 
     /// Perform the short start-gated handoff after preparation was durably
-    /// promoted from `preparing` to `leased`.
+    /// promoted from `preparing` to `starting` ([`LaunchRepository::promote_to_start`]).
     async fn dispatch_prepared(
         &self,
         launch: Launch,
@@ -802,13 +857,7 @@ impl LaunchDispatcher {
             .await?;
             return Ok(());
         }
-        let Some(starting) = repository
-            .begin_start(&launch.launch_id, &self.owner, launch.attempt_count)
-            .await?
-        else {
-            debug!(launch_id = %launch.launch_id, "Launch was cancelled or expired before runner handoff");
-            return Ok(());
-        };
+        let starting = launch.clone();
         // Align the in-process gate with the durable database lease rather
         // than starting a fresh timeout here. If this dispatcher pauses or
         // dies, recovery can reclaim `starting` at the same instant the old
@@ -841,27 +890,15 @@ impl LaunchDispatcher {
                             .expect("bounded execution timeout fits in database integer"),
                     ),
                 };
-                if let Err(error) = registry.register(&container).await {
-                    error!(
-                        launch_id = %launch.launch_id,
-                        error = %error,
-                        "Refusing unopened runner handoff after container registry registration failed"
-                    );
-                    self.stop_unopened_handoff(&registry, &handle, &gate).await;
-                    self.fail_before_runner(
-                        &launch,
-                        "container registry registration failed before start gate",
-                    )
-                    .await?;
-                    return Ok(());
-                }
-
+                // Registered and promoted in one transaction: the gate stays
+                // closed until both committed.
                 let running = match repository
-                    .mark_running(
+                    .mark_running_registered(
                         &launch.launch_id,
                         &self.owner,
                         launch.attempt_count,
                         &handle.handle_id,
+                        Some(&container),
                     )
                     .await
                 {
@@ -1098,6 +1135,16 @@ impl LaunchDispatcher {
         const CLAIM_WATCH_INTERVAL: Duration = Duration::from_millis(200);
 
         loop {
+            // The claim was just granted, so the first read waits an interval
+            // like the rest: most preparations finish before it, and are
+            // spared a read that their completion would cancel mid-acquire
+            // (closing the pooled connection).
+            if tokio::time::timeout_at(deadline, tokio::time::sleep(CLAIM_WATCH_INTERVAL))
+                .await
+                .is_err()
+            {
+                return PreparationClaimWatch::Deadline;
+            }
             match tokio::time::timeout_at(deadline, repository.get(&launch.launch_id)).await {
                 Ok(Ok(Some(current)))
                     if current.state == crate::launch_queue::LaunchState::Preparing
@@ -1117,13 +1164,6 @@ impl LaunchDispatcher {
                     );
                 }
                 Err(_) => return PreparationClaimWatch::Deadline,
-            }
-
-            if tokio::time::timeout_at(deadline, tokio::time::sleep(CLAIM_WATCH_INTERVAL))
-                .await
-                .is_err()
-            {
-                return PreparationClaimWatch::Deadline;
             }
         }
     }

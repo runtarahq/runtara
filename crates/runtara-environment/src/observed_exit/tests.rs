@@ -170,7 +170,15 @@ impl Fixture {
         let handle = self.container.runner_handle();
         let intent = self.intent();
         tokio::spawn(async move {
-            settle_with_retry(&pool, persistence.as_ref(), &handle, intent).await
+            let settled = settle_with_retry(
+                &pool,
+                persistence.as_ref(),
+                &handle,
+                intent,
+                Resources::default(),
+            )
+            .await;
+            !matches!(settled, Settled::NotOwned)
         })
     }
 }
@@ -205,9 +213,15 @@ async fn restart_recovery_closes_a_known_failure_instead_of_relaunching_its_wait
     let handle = fx.container.runner_handle();
     assert!(record(&fx.pool, &handle, &fx.intent()).await.unwrap());
     assert!(
-        settle(&fx.pool, fx.persistence.as_ref(), &handle)
-            .await
-            .is_err()
+        settle(
+            &fx.pool,
+            fx.persistence.as_ref(),
+            &handle,
+            None,
+            Resources::default()
+        )
+        .await
+        .is_err()
     );
     fx.restore().await;
     let outcome = crate::recovery::recover_registered_with(
@@ -267,5 +281,78 @@ async fn an_old_monitor_cannot_close_or_delete_a_replacement_during_retry() {
             .unwrap()
             .status,
         InstanceStatus::Running
+    );
+}
+
+/// A burst of lost runs, more than the pool has connections, settles in
+/// seconds: each settlement holds a guard connection while Core takes
+/// another from the same pool, and only a quarter of the pool may hold guards
+/// ([`crate::nested_guard`]). Without that bound every connection ended up a
+/// guard waiting for a second one until acquires timed out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_burst_of_lost_runs_settles_without_starving_the_pool() {
+    use runtara_store_postgres::PostgresPersistence;
+    const RUNS: usize = 24;
+    let pool = crate::test_support::pool().await;
+    let persistence: Arc<dyn Persistence> = Arc::new(PostgresPersistence::new(pool.clone()));
+    let mut handles = Vec::new();
+    for _ in 0..RUNS {
+        let instance = crate::test_support::unique_id("lost-burst");
+        persistence
+            .register_instance(&instance, "lost-burst-tenant")
+            .await
+            .unwrap();
+        persistence
+            .update_instance_status(&instance, InstanceStatus::Running, None)
+            .await
+            .unwrap();
+        let container = ContainerInfo {
+            container_id: uuid::Uuid::new_v4().to_string(),
+            launch_id: uuid::Uuid::new_v4().to_string(),
+            instance_id: instance,
+            tenant_id: "lost-burst-tenant".into(),
+            binary_path: "/fixture/lost.wasm".into(),
+            started_at: chrono::Utc::now(),
+            timeout_seconds: None,
+        };
+        ContainerRegistry::new(pool.clone())
+            .register(&container)
+            .await
+            .unwrap();
+        handles.push(container.runner_handle());
+    }
+    let started = std::time::Instant::now();
+    let settles: Vec<_> = handles
+        .into_iter()
+        .map(|handle| {
+            let (pool, persistence) = (pool.clone(), persistence.clone());
+            tokio::spawn(async move {
+                settle_with_retry(
+                    &pool,
+                    persistence.as_ref(),
+                    &handle,
+                    ObservedExit::lost("lost with its host".into()),
+                    Resources::default(),
+                )
+                .await
+            })
+        })
+        .collect();
+    let settled = tokio::time::timeout(Duration::from_secs(20), async {
+        let mut settled = Vec::new();
+        for settle in settles {
+            settled.push(settle.await.unwrap());
+        }
+        settled
+    })
+    .await
+    .expect("a burst of lost runs must settle without starving the pool");
+    for settled in settled {
+        assert!(!matches!(settled, Settled::NotOwned));
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "settled in {:?}",
+        started.elapsed()
     );
 }

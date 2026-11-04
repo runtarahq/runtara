@@ -885,6 +885,7 @@ pub fn instance_http_router(state: Arc<InstanceHandlerState>) -> Router {
         )
         .route("/health", get(health_handler))
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
+        .layer(crate::middleware::sensitive_headers::layer())
         .with_state(state)
 }
 

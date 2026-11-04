@@ -1415,6 +1415,50 @@ impl LaunchRepository {
             .transpose()
     }
 
+    /// [`Self::promote_prepared`] and [`Self::begin_start`] in one update: a
+    /// completed preparation goes straight to `starting` behind its start
+    /// gate, with a fresh handoff lease. The dispatcher does nothing durable
+    /// between the two, so one conditional update fences the same races.
+    pub async fn promote_to_start(
+        &self,
+        launch_id: &str,
+        lease_owner: &str,
+        preparation_attempt: i32,
+        handoff_lease_for: Duration,
+    ) -> Result<Option<Launch>, LaunchQueueError> {
+        if handoff_lease_for.is_zero() {
+            return Err(LaunchQueueError::ZeroLeaseDuration);
+        }
+        let handoff_lease_us = duration_to_micros(handoff_lease_for, "handoff_lease_for")?;
+        let query = format!(
+            r#"
+            UPDATE instance_launches
+            SET state = 'starting',
+                lease_expires_at = NOW() + ($4 * INTERVAL '1 microsecond'),
+                -- The start gate's rollout fence, as begin_start sets it.
+                start_gate_deadline_at = NOW() + ($4 * INTERVAL '1 microsecond'),
+                last_error = NULL,
+                updated_at = NOW()
+            WHERE launch_id = $1
+              AND state = 'preparing'
+              AND lease_owner = $2
+              AND attempt_count = $3
+              AND lease_expires_at > clock_timestamp()
+              AND deadline_at > clock_timestamp()
+            RETURNING {LAUNCH_COLUMNS}
+            "#
+        );
+        sqlx::query_as::<_, LaunchRow>(&query)
+            .bind(launch_id)
+            .bind(lease_owner)
+            .bind(preparation_attempt)
+            .bind(handoff_lease_us)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(|row| self.committed(row, "start", None))
+            .transpose()
+    }
+
     /// Requeue bounded handoffs whose dispatcher died before it opened the
     /// generation's start gate.
     ///
@@ -1544,6 +1588,22 @@ impl LaunchRepository {
         attempt_count: i32,
         root_owner: &str,
     ) -> Result<Option<RunningLaunch>, LaunchQueueError> {
+        self.mark_running_registered(launch_id, lease_owner, attempt_count, root_owner, None)
+            .await
+    }
+
+    /// [`Self::mark_running`], registering the generation's runner handle
+    /// (`registration`) in the same transaction: it is registered if and
+    /// only if it was promoted. Until then its start gate is closed, and
+    /// expires with the handoff lease that recovery reclaims.
+    pub async fn mark_running_registered(
+        &self,
+        launch_id: &str,
+        lease_owner: &str,
+        attempt_count: i32,
+        root_owner: &str,
+        registration: Option<&crate::container_registry::ContainerInfo>,
+    ) -> Result<Option<RunningLaunch>, LaunchQueueError> {
         let mut tx = self.pool.begin().await?;
         let query = format!(
             r#"
@@ -1643,6 +1703,9 @@ impl LaunchRepository {
             epoch,
         };
 
+        if let Some(registration) = registration {
+            crate::container_registry::insert_registration(&mut tx, registration).await?;
+        }
         tx.commit().await?;
         Ok(Some(RunningLaunch {
             launch: self.committed(running, "runner_handoff", None)?,
@@ -2073,6 +2136,48 @@ impl LaunchRepository {
             .bind(state.as_str())
             .bind(last_error)
             .fetch_optional(&self.pool)
+            .await?
+            .map(|row| self.committed(row, "terminal", None))
+            .transpose()
+    }
+
+    /// [`Self::mark_terminal`] on `db`: inside the caller's transaction.
+    pub(crate) async fn mark_terminal_in(
+        &self,
+        db: &mut sqlx::PgConnection,
+        launch_id: &str,
+        state: LaunchState,
+        last_error: Option<&str>,
+    ) -> Result<Option<Launch>, LaunchQueueError> {
+        if !state.is_terminal() || state == LaunchState::Suspended {
+            return Err(LaunchQueueError::NonTerminalCompletion { state });
+        }
+        let active_states = LaunchState::sql_list(LaunchState::ACTIVE);
+        let query = format!(
+            r#"
+            WITH previous AS MATERIALIZED (
+                SELECT launch_id,
+                    (state IN ('queued', 'preparing', 'leased', 'starting') OR start_gate_deadline_at IS NOT NULL) AS was_waiting
+                FROM instance_launches WHERE launch_id = $1 FOR UPDATE
+            )
+            UPDATE instance_launches AS launch
+            SET state = $2,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                start_gate_deadline_at = NULL,
+                last_error = $3,
+                updated_at = NOW()
+            FROM previous
+            WHERE launch.launch_id = previous.launch_id
+              AND launch.state IN ({active_states})
+            RETURNING {LAUNCH_RETURNING_COLUMNS}, previous.was_waiting
+            "#
+        );
+        sqlx::query_as::<_, LaunchRow>(&query)
+            .bind(launch_id)
+            .bind(state.as_str())
+            .bind(last_error)
+            .fetch_optional(db)
             .await?
             .map(|row| self.committed(row, "terminal", None))
             .transpose()

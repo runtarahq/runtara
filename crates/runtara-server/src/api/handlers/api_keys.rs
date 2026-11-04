@@ -370,15 +370,34 @@ pub async fn revoke_api_key(
 
 /// Validate an API key by hash. Returns the ApiKey if valid.
 /// Called by the auth middleware — not an HTTP handler.
+///
+/// `last_used_at` is kept to the minute: a key used again within a minute of
+/// its recorded use is only read, so a busy key's requests write nothing.
 pub async fn validate_api_key_by_hash(pool: &PgPool, key_hash: &str) -> Result<ApiKey, String> {
     sqlx::query_as::<_, ApiKey>(
         r#"
-        UPDATE public.api_keys
-        SET last_used_at = NOW()
-        WHERE key_hash = $1
-          AND is_revoked = FALSE
-          AND (expires_at IS NULL OR expires_at > NOW())
-        RETURNING id, org_id, name, key_prefix, key_hash, created_by, issuing_user_id, jti, scope, created_at, expires_at, last_used_at, is_revoked
+        WITH valid AS (
+            SELECT id, org_id, name, key_prefix, key_hash, created_by, issuing_user_id, jti,
+                   scope, created_at, expires_at, last_used_at, is_revoked
+            FROM public.api_keys
+            WHERE key_hash = $1
+              AND is_revoked = FALSE
+              AND (expires_at IS NULL OR expires_at > NOW())
+        ),
+        touched AS (
+            UPDATE public.api_keys AS k
+            SET last_used_at = NOW()
+            FROM valid
+            WHERE k.id = valid.id
+              AND (valid.last_used_at IS NULL OR valid.last_used_at < NOW() - INTERVAL '1 minute')
+            RETURNING k.id, k.last_used_at
+        )
+        SELECT valid.id, valid.org_id, valid.name, valid.key_prefix, valid.key_hash,
+               valid.created_by, valid.issuing_user_id, valid.jti, valid.scope,
+               valid.created_at, valid.expires_at,
+               COALESCE(touched.last_used_at, valid.last_used_at) AS last_used_at,
+               valid.is_revoked
+        FROM valid LEFT JOIN touched ON touched.id = valid.id
         "#,
     )
     .bind(key_hash)
