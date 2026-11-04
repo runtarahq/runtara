@@ -225,15 +225,17 @@ impl GeminiCompletionModel {
         let mut contents: Vec<AssistantContent> = Vec::new();
         let mut calls = 0usize;
         for part in parts {
+            let signature = part
+                .get("thoughtSignature")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+
+            // Each part stays its own item: Google rules out merging a signed
+            // part with another, and a signature can sit on an empty part.
             if let Some(text) = part.get("text").and_then(Value::as_str)
-                && !text.is_empty()
+                && (!text.is_empty() || signature.is_some())
             {
-                // Gemini can split one answer over several parts, and callers
-                // read a structured answer from a single text item.
-                match contents.last_mut() {
-                    Some(AssistantContent::Text(previous)) => previous.text.push_str(text),
-                    _ => contents.push(AssistantContent::text(text)),
-                }
+                contents.push(AssistantContent::signed_text(text, signature.clone()));
             }
 
             if let Some(call) = part.get("functionCall") {
@@ -247,10 +249,6 @@ impl GeminiCompletionModel {
                     .map(str::to_string)
                     .unwrap_or_else(|| format!("{GENERATED_ID_PREFIX}{calls}"));
                 let args = call.get("args").cloned().unwrap_or_else(|| json!({}));
-                let signature = part
-                    .get("thoughtSignature")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
                 contents.push(AssistantContent::signed_tool_call(
                     id, name, args, signature,
                 ));
@@ -258,11 +256,18 @@ impl GeminiCompletionModel {
             }
         }
 
-        let choice = OneOrMany::many(contents).map_err(|_| {
-            CompletionError::ResponseError(format!(
+        let has_answer = contents.iter().any(|item| match item {
+            AssistantContent::Text(text) => !text.text.is_empty(),
+            AssistantContent::ToolCall(_) => true,
+        });
+        if !has_answer {
+            return Err(CompletionError::ResponseError(format!(
                 "Gemini response contained neither text nor a function call ({})",
                 finish_detail(&resp)
-            ))
+            )));
+        }
+        let choice = OneOrMany::many(contents).map_err(|_| {
+            CompletionError::ResponseError("Gemini response contained no content".into())
         })?;
 
         let usage = resp.get("usageMetadata").map(|u| {
@@ -373,9 +378,13 @@ fn messages_to_contents<'a>(messages: impl Iterator<Item = &'a Message>) -> Vec<
                 for item in content.iter() {
                     match item {
                         AssistantContent::Text(t) => {
-                            if !t.text.trim().is_empty() {
-                                parts.push(json!({ "text": t.text }));
+                            let mut part = json!({ "text": t.text });
+                            if let Some(signature) = &t.signature {
+                                part["thoughtSignature"] = json!(signature);
+                            } else if t.text.trim().is_empty() {
+                                continue;
                             }
+                            parts.push(part);
                         }
                         AssistantContent::ToolCall(tc) => {
                             pending_calls.insert(&tc.id, &tc.function.name);
@@ -747,7 +756,55 @@ mod tests {
     }
 
     #[test]
-    fn text_split_over_parts_is_one_item_and_thoughts_are_skipped() {
+    fn a_signed_answer_goes_back_part_for_part_on_the_next_turn() {
+        let parts = json!([
+            {"text": "First part. "},
+            {"text": "Second part.", "thoughtSignature": "sig-1"},
+            {"text": "", "thoughtSignature": "sig-2"}
+        ]);
+        let parsed = model()
+            .parse_response(json!({
+                "candidates": [{"content": {"parts": parts}, "finishReason": "STOP"}]
+            }))
+            .unwrap();
+
+        // Conversation memory keeps the history as JSON between runs.
+        let saved = serde_json::to_value(Message::Assistant {
+            content: parsed.choice,
+        })
+        .unwrap();
+        let restored: Message = serde_json::from_value(saved).unwrap();
+
+        let body = body_for(vec![
+            Message::user("first question"),
+            restored,
+            Message::user("follow-up question"),
+        ]);
+        assert_eq!(
+            body["contents"],
+            json!([
+                {"role": "user", "parts": [{"text": "first question"}]},
+                {"role": "model", "parts": parts},
+                {"role": "user", "parts": [{"text": "follow-up question"}]}
+            ])
+        );
+    }
+
+    #[test]
+    fn an_unsigned_blank_text_item_is_not_replayed() {
+        let body = body_for(vec![
+            Message::user("hi"),
+            assistant(vec![
+                AssistantContent::text("  "),
+                AssistantContent::text("hello"),
+            ]),
+        ]);
+
+        assert_eq!(body["contents"][1]["parts"], json!([{"text": "hello"}]));
+    }
+
+    #[test]
+    fn each_text_part_stays_an_item_and_thoughts_are_skipped() {
         let parsed = model()
             .parse_response(json!({
                 "candidates": [{"content": {"parts": [
@@ -764,8 +821,17 @@ mod tests {
             }))
             .unwrap();
 
-        assert_eq!(parsed.choice.len(), 1);
-        assert_eq!(parsed.choice.first(), AssistantContent::text("{\"a\":1}"));
+        assert_eq!(
+            parsed.choice.iter().cloned().collect::<Vec<_>>(),
+            vec![
+                AssistantContent::text("{\"a\":"),
+                AssistantContent::signed_text("1}", Some("sig".to_string())),
+            ]
+        );
+        assert_eq!(
+            crate::message::assistant_text(parsed.choice.iter()).as_deref(),
+            Some("{\"a\":1}")
+        );
         let usage = parsed.usage.unwrap();
         assert_eq!(usage.prompt_tokens, 10);
         assert_eq!(usage.completion_tokens, 12);
@@ -827,6 +893,13 @@ mod tests {
                     "finishReason": "SAFETY"
                 }]}),
                 "finishReason SAFETY",
+            ),
+            (
+                json!({"candidates": [{
+                    "content": {"parts": [{"text": "", "thoughtSignature": "sig"}]},
+                    "finishReason": "STOP"
+                }]}),
+                "neither text nor a function call",
             ),
         ] {
             match model().parse_response(response) {

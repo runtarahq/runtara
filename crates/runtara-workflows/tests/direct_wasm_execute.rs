@@ -4460,6 +4460,36 @@ fn gemini_ok(parts: Value) -> Value {
     })
 }
 
+/// A single-shot step reads the answer from the `chat-completion` choice, where
+/// Gemini's parts stay separate items.
+#[test]
+fn direct_wasm_execute_ai_agent_single_shot_joins_gemini_text_parts() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = single_shot_ai_agent_graph_json("")
+        .replace("conn-1", "conn-gemini")
+        .replace("\"openai\"", "\"gemini\"")
+        .replace("gpt-4o", "gemini-3.6-flash");
+
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-single-shot-gemini",
+        &graph,
+        br#"{}"#,
+        vec![gemini_ok(serde_json::json!([
+            {"text": "hello "},
+            {"text": "from gemini", "thoughtSignature": "signature-1"}
+        ]))],
+    );
+
+    assert!(result.status_success, "stderr: {}", result.stderr);
+    let output = result.output_json.expect("workflow completes");
+    assert_eq!(
+        output.get("answer").and_then(Value::as_str),
+        Some("hello from gemini"),
+        "{output}"
+    );
+}
+
 /// Gemini rejects a tool loop's next turn unless the signature on its function
 /// call comes back. The history crosses the agent boundary as JSON between
 /// turns, so this runs the real component rather than the provider alone.
@@ -4483,12 +4513,28 @@ fn direct_wasm_execute_ai_agent_tool_loop_replays_gemini_thought_signatures() {
                 "functionCall": {"name": "echo", "args": {"value": 42}},
                 "thoughtSignature": "signature-1"
             }])),
-            gemini_ok(serde_json::json!([{"text": "loop finished"}])),
+            gemini_ok(serde_json::json!([
+                {"text": "loop "},
+                {"text": "finished", "thoughtSignature": "signature-2"}
+            ])),
         ],
         Vec::new(),
     );
 
     assert!(result.status_success, "stderr: {}", result.stderr);
+    let ai_end = result
+        .events
+        .iter()
+        .find(|event| {
+            event.subtype == "step_debug_end"
+                && event.payload_json.get("step_id").and_then(Value::as_str) == Some("ai")
+        })
+        .expect("AI step debug end");
+    assert_eq!(
+        ai_end.payload_json["outputs"]["outputs"]["response"],
+        serde_json::json!("loop finished"),
+        "an answer split over parts comes back whole"
+    );
     assert_eq!(
         result.llm_requests.len(),
         2,

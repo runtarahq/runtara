@@ -6751,22 +6751,20 @@ fn default_step_name(step_type: &str) -> &str {
 ///
 /// The choice is `runtara_ai::OneOrMany<AssistantContent>`, which serializes as
 /// a JSON array of untagged `AssistantContent`: a `Text` is `{"text": "..."}`
-/// and a `ToolCall` is `{"id": ..., "function": ...}`. This returns the first
-/// element carrying a `text` string — matching how the generated Ai Agent loop
-/// sets `__final_response` from `AssistantContent::Text`. Tool-call content is
-/// ignored (single-shot); returns an empty string when no text is present.
+/// and a `ToolCall` is `{"id": ..., "function": ...}`. This joins every element
+/// carrying a `text` string, because a provider can split one answer over several
+/// of them. Tool-call content is ignored (single-shot); returns an empty string
+/// when no text is present.
 ///
 /// Parsed by hand rather than via `runtara_ai` types: the direct-component
 /// stdlib build intentionally does not link `runtara-ai`.
 fn extract_ai_final_text(choice: &Value) -> String {
-    if let Some(items) = choice.as_array() {
-        for item in items {
-            if let Some(text) = item.get("text").and_then(Value::as_str) {
-                return text.to_string();
-            }
-        }
-    }
-    String::new()
+    choice
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .collect()
 }
 
 fn insert_step_output(
@@ -8733,6 +8731,29 @@ struct DirectJsonRequiredAgentInput {
     field_type: String,
     #[serde(default)]
     description: Option<String>,
+}
+
+#[cfg(test)]
+mod ai_final_text_tests {
+    use super::extract_ai_final_text;
+    use serde_json::json;
+
+    #[test]
+    fn joins_an_answer_split_over_several_text_items() {
+        let choice = json!([
+            {"text": "Hello"},
+            {"id": "a", "function": {"name": "f", "arguments": {}}},
+            {"text": " world", "signature": "sig"}
+        ]);
+
+        assert_eq!(extract_ai_final_text(&choice), "Hello world");
+    }
+
+    #[test]
+    fn an_answer_with_no_text_is_empty() {
+        assert_eq!(extract_ai_final_text(&json!([])), "");
+        assert_eq!(extract_ai_final_text(&json!(null)), "");
+    }
 }
 
 #[cfg(test)]

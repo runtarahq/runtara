@@ -862,14 +862,8 @@ pub async fn chat_completion(
     // than degrading to the raw text.
     let structured_output = match input.output_schema.as_ref() {
         Some(schema) => {
-            let final_text = response
-                .choice
-                .iter()
-                .find_map(|content| match content {
-                    runtara_ai::AssistantContent::Text(text) => Some(text.text.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default();
+            let final_text =
+                runtara_ai::message::assistant_text(response.choice.iter()).unwrap_or_default();
             Some(structured_response(&final_text, schema)?)
         }
         None => None,
@@ -1125,7 +1119,9 @@ pub async fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentErro
                 }));
             }
             AssistantContent::Text(text) => {
-                final_text = Some(text.text.clone());
+                final_text
+                    .get_or_insert_with(String::new)
+                    .push_str(&text.text);
                 assistant_contents.push(AssistantContent::Text(text.clone()));
             }
         }
@@ -1273,13 +1269,7 @@ pub async fn summarize_memory(
     // A summarization failure degrades like the generated path: keep the most
     // recent messages (sliding window) without an inserted summary.
     let summary_text = match runtara_ai::run_completion_async(req).await {
-        Ok(response) => response
-            .choice
-            .iter()
-            .find_map(|content| match content {
-                runtara_ai::AssistantContent::Text(text) => Some(text.text.clone()),
-                _ => None,
-            })
+        Ok(response) => runtara_ai::message::assistant_text(response.choice.iter())
             .unwrap_or_else(|| "[Summary unavailable]".to_string()),
         Err(_) => "[Summary unavailable]".to_string(),
     };
@@ -1300,8 +1290,8 @@ pub async fn summarize_memory(
     Ok(SummarizeMemoryOutput { state })
 }
 
-/// The prompt asking for a summary of `messages`. Tool-call signatures are
-/// opaque provider data, so they stay out of it.
+/// The prompt asking for a summary of `messages`. Text and tool-call signatures
+/// are opaque provider data, so they stay out of it.
 fn memory_summary_prompt(messages: &[Value]) -> String {
     let mut messages = messages.to_vec();
     for message in &mut messages {
@@ -3356,15 +3346,19 @@ mod tests {
     fn memory_summaries_leave_tool_call_signatures_out() {
         let messages = [json!({
             "role": "assistant",
-            "content": [{
-                "id": "a",
-                "function": {"name": "lookup", "arguments": {}},
-                "signature": "opaque-provider-data"
-            }]
+            "content": [
+                {"text": "checking", "signature": "opaque-provider-data"},
+                {
+                    "id": "a",
+                    "function": {"name": "lookup", "arguments": {}},
+                    "signature": "opaque-provider-data"
+                }
+            ]
         })];
 
         let prompt = memory_summary_prompt(&messages);
 
+        assert!(prompt.contains("checking"), "{prompt}");
         assert!(prompt.contains("lookup"), "{prompt}");
         assert!(!prompt.contains("opaque-provider-data"), "{prompt}");
     }

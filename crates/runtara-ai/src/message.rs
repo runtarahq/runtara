@@ -70,7 +70,7 @@ pub enum UserContent {
 impl UserContent {
     /// Create text content.
     pub fn text(text: impl Into<String>) -> Self {
-        UserContent::Text(Text { text: text.into() })
+        UserContent::Text(text.into().into())
     }
 
     /// Create tool-result content.
@@ -108,7 +108,15 @@ pub enum AssistantContent {
 impl AssistantContent {
     /// Create text content.
     pub fn text(text: impl Into<String>) -> Self {
-        AssistantContent::Text(Text { text: text.into() })
+        AssistantContent::Text(text.into().into())
+    }
+
+    /// Create text content carrying the provider's signature for it.
+    pub fn signed_text(text: impl Into<String>, signature: Option<String>) -> Self {
+        AssistantContent::Text(Text {
+            text: text.into(),
+            signature,
+        })
     }
 
     /// Create a tool-call content.
@@ -159,20 +167,39 @@ impl From<String> for AssistantContent {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Text {
     pub text: String,
+    /// Opaque value the provider wants back when this text is replayed in later
+    /// turns (Gemini's `thoughtSignature`). Absent for other providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 impl From<String> for Text {
     fn from(text: String) -> Self {
-        Text { text }
+        Text {
+            text,
+            signature: None,
+        }
     }
 }
 
 impl From<&str> for Text {
     fn from(text: &str) -> Self {
-        Text {
-            text: text.to_owned(),
+        text.to_owned().into()
+    }
+}
+
+/// The assistant's whole answer in `content`, or `None` when it has no text.
+/// A provider can split one answer over several text items.
+pub fn assistant_text<'a>(
+    content: impl IntoIterator<Item = &'a AssistantContent>,
+) -> Option<String> {
+    let mut answer = None;
+    for item in content {
+        if let AssistantContent::Text(text) = item {
+            answer.get_or_insert_with(String::new).push_str(&text.text);
         }
     }
+    answer
 }
 
 /// A tool/function call from the assistant.
@@ -210,7 +237,7 @@ pub enum ToolResultContent {
 impl ToolResultContent {
     /// Create text tool-result content.
     pub fn text(text: impl Into<String>) -> Self {
-        ToolResultContent::Text(Text { text: text.into() })
+        ToolResultContent::Text(text.into().into())
     }
 }
 
@@ -268,6 +295,39 @@ mod tests {
         let json = serde_json::to_value(&msg).unwrap();
         let msg2: Message = serde_json::from_value(json).unwrap();
         assert_eq!(msg, msg2);
+    }
+
+    #[test]
+    fn signed_text_keeps_its_signature_across_a_roundtrip() {
+        let msg = Message::Assistant {
+            content: OneOrMany::one(AssistantContent::signed_text(
+                "answer",
+                Some("c2lnbmF0dXJl".to_string()),
+            )),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        let msg2: Message = serde_json::from_value(json).unwrap();
+        assert_eq!(msg, msg2);
+    }
+
+    #[test]
+    fn unsigned_text_serializes_without_a_signature_field() {
+        let json = serde_json::to_value(Message::assistant("hello")).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"role": "assistant", "content": [{"text": "hello"}]})
+        );
+    }
+
+    #[test]
+    fn assistant_text_joins_every_text_item_in_order() {
+        let content = [
+            AssistantContent::text("Hello"),
+            AssistantContent::tool_call("a", "f", serde_json::json!({})),
+            AssistantContent::signed_text(" world", Some("sig".to_string())),
+        ];
+        assert_eq!(assistant_text(&content).as_deref(), Some("Hello world"));
+        assert_eq!(assistant_text(&content[1..2]), None);
     }
 
     #[test]

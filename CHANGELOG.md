@@ -19,7 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generation and editing, vision and embeddings. The AI Agent model picker lists
   the models the key can use. Gemini's temperature and top-p inputs are not sent,
   because Gemini ignores them from 3.6 on. Google's terms require a billed
-  project for apps used in the EEA, Switzerland or the UK.
+  project for apps used in the EEA, Switzerland or the UK. An AI step now returns
+  every text item of an answer, not just the first or last, which also applies
+  to a Bedrock answer split over several text blocks.
 
 - **Slack Web API agent, generated from Slack's spec.** Thirty-four
   capabilities on the existing `slack_bot` connection: messages (post, post
