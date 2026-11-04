@@ -765,7 +765,7 @@ impl LaunchDispatcher {
 
         let promoted = tokio::time::timeout_at(
             preparation_deadline,
-            repository.promote_prepared(
+            repository.promote_to_start(
                 &launch.launch_id,
                 &self.owner,
                 launch.attempt_count,
@@ -839,7 +839,7 @@ impl LaunchDispatcher {
     }
 
     /// Perform the short start-gated handoff after preparation was durably
-    /// promoted from `preparing` to `leased`.
+    /// promoted from `preparing` to `starting` ([`LaunchRepository::promote_to_start`]).
     async fn dispatch_prepared(
         &self,
         launch: Launch,
@@ -857,13 +857,7 @@ impl LaunchDispatcher {
             .await?;
             return Ok(());
         }
-        let Some(starting) = repository
-            .begin_start(&launch.launch_id, &self.owner, launch.attempt_count)
-            .await?
-        else {
-            debug!(launch_id = %launch.launch_id, "Launch was cancelled or expired before runner handoff");
-            return Ok(());
-        };
+        let starting = launch.clone();
         // Align the in-process gate with the durable database lease rather
         // than starting a fresh timeout here. If this dispatcher pauses or
         // dies, recovery can reclaim `starting` at the same instant the old
@@ -896,27 +890,15 @@ impl LaunchDispatcher {
                             .expect("bounded execution timeout fits in database integer"),
                     ),
                 };
-                if let Err(error) = registry.register(&container).await {
-                    error!(
-                        launch_id = %launch.launch_id,
-                        error = %error,
-                        "Refusing unopened runner handoff after container registry registration failed"
-                    );
-                    self.stop_unopened_handoff(&registry, &handle, &gate).await;
-                    self.fail_before_runner(
-                        &launch,
-                        "container registry registration failed before start gate",
-                    )
-                    .await?;
-                    return Ok(());
-                }
-
+                // Registered and promoted in one transaction: the gate stays
+                // closed until both committed.
                 let running = match repository
-                    .mark_running(
+                    .mark_running_registered(
                         &launch.launch_id,
                         &self.owner,
                         launch.attempt_count,
                         &handle.handle_id,
+                        Some(&container),
                     )
                     .await
                 {

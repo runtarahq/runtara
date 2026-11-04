@@ -63,38 +63,8 @@ impl ContainerRegistry {
     ///
     /// Should be called BEFORE spawning the container process.
     pub async fn register(&self, info: &ContainerInfo) -> Result<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO container_registry (
-                container_id, launch_id, instance_id, tenant_id, binary_path,
-                started_at, timeout_seconds
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (instance_id) DO UPDATE SET
-                container_id = EXCLUDED.container_id,
-                launch_id = EXCLUDED.launch_id,
-                binary_path = EXCLUDED.binary_path,
-                started_at = EXCLUDED.started_at,
-                timeout_seconds = EXCLUDED.timeout_seconds,
-                observed_exit = CASE WHEN container_registry.container_id = EXCLUDED.container_id
-                    AND container_registry.launch_id = EXCLUDED.launch_id
-                    THEN container_registry.observed_exit ELSE NULL END,
-                abort_deadline_at = CASE WHEN container_registry.container_id = EXCLUDED.container_id
-                    AND container_registry.launch_id = EXCLUDED.launch_id
-                    THEN container_registry.abort_deadline_at ELSE NULL END,
-                abort_armed_deadline_at = CASE WHEN container_registry.container_id = EXCLUDED.container_id
-                    AND container_registry.launch_id = EXCLUDED.launch_id
-                    THEN container_registry.abort_armed_deadline_at ELSE NULL END
-            "#,
-        )
-        .bind(&info.container_id)
-        .bind(&info.launch_id)
-        .bind(&info.instance_id)
-        .bind(&info.tenant_id)
-        .bind(&info.binary_path)
-        .bind(info.started_at)
-        .bind(info.timeout_seconds)
-        .execute(&self.pool)
-        .await?;
+        let mut conn = self.pool.acquire().await?;
+        insert_registration(&mut conn, info).await?;
 
         tracing::info!(
             container_id = %info.container_id,
@@ -352,4 +322,45 @@ impl ContainerRegistry {
 
         Ok(())
     }
+}
+
+/// Registers `info`'s generation on `db`: inside a caller's transaction, it
+/// commits or not with the rest of it.
+pub(crate) async fn insert_registration(
+    db: &mut sqlx::PgConnection,
+    info: &ContainerInfo,
+) -> std::result::Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO container_registry (
+            container_id, launch_id, instance_id, tenant_id, binary_path,
+            started_at, timeout_seconds
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (instance_id) DO UPDATE SET
+            container_id = EXCLUDED.container_id,
+            launch_id = EXCLUDED.launch_id,
+            binary_path = EXCLUDED.binary_path,
+            started_at = EXCLUDED.started_at,
+            timeout_seconds = EXCLUDED.timeout_seconds,
+            observed_exit = CASE WHEN container_registry.container_id = EXCLUDED.container_id
+                AND container_registry.launch_id = EXCLUDED.launch_id
+                THEN container_registry.observed_exit ELSE NULL END,
+            abort_deadline_at = CASE WHEN container_registry.container_id = EXCLUDED.container_id
+                AND container_registry.launch_id = EXCLUDED.launch_id
+                THEN container_registry.abort_deadline_at ELSE NULL END,
+            abort_armed_deadline_at = CASE WHEN container_registry.container_id = EXCLUDED.container_id
+                AND container_registry.launch_id = EXCLUDED.launch_id
+                THEN container_registry.abort_armed_deadline_at ELSE NULL END
+        "#,
+    )
+    .bind(&info.container_id)
+    .bind(&info.launch_id)
+    .bind(&info.instance_id)
+    .bind(&info.tenant_id)
+    .bind(&info.binary_path)
+    .bind(info.started_at)
+    .bind(info.timeout_seconds)
+    .execute(db)
+    .await?;
+    Ok(())
 }

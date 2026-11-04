@@ -140,6 +140,19 @@ pub async fn record_resources_returning_status(
     Ok(observed)
 }
 
+/// Reports a settled run's stored resource usage to the workflow metrics.
+pub async fn emit_resources(pool: &PgPool, instance_id: &str) -> Result<()> {
+    if let Some(metric) = InstanceRepository::new(pool.clone())
+        .completion_metrics(instance_id)
+        .await?
+    {
+        let metrics = workflow_metrics();
+        let attributes = metric_attributes(&metric);
+        record_resources(metrics, &metric, &attributes);
+    }
+    Ok(())
+}
+
 /// Store raw stderr captured from the runner, for debugging.
 pub async fn record_instance_stderr(pool: &PgPool, instance_id: &str, stderr: &str) -> Result<()> {
     InstanceRepository::new(pool.clone())

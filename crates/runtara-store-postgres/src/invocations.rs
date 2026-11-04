@@ -297,6 +297,17 @@ impl InvocationFences for PostgresPersistence {
     async fn revoke_invocation_lease(&self, token: &InvocationLease) -> FenceResult<()> {
         validate_identity(&token.tenant_id)?;
         validate_identity(&token.instance_id)?;
+        // Already inactive (a terminal transition deactivates its root's
+        // lease under the root's lock): every write presenting it is refused
+        // already, so there is nothing to revoke and nothing is written.
+        if let (_, Some(lease)) =
+            read_root(&self.pool, &token.tenant_id, &token.instance_id).await?
+            && lease.owner == token.owner
+            && lease.epoch == token.epoch
+            && !lease.active
+        {
+            return Ok(());
+        }
         // One statement, still taking the root row's lock first: a write that
         // checked this lease under that lock commits before the revocation,
         // and none after it.
