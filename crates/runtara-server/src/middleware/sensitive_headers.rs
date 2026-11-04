@@ -17,6 +17,7 @@ pub fn sensitive_header_names() -> Vec<HeaderName> {
         header::COOKIE,
         header::SET_COOKIE,
         HeaderName::from_static("x-api-key"),
+        HeaderName::from_static("x-goog-api-key"),
     ]
 }
 

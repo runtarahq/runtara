@@ -2,10 +2,11 @@
 //!
 //! Provider-router for deterministic AI capabilities (text completion, image
 //! generation, vision, embeddings) across multiple LLM providers (OpenAI, AWS
-//! Bedrock). Each capability routes from an explicit `provider` input; the
-//! outbound host service validates that provider against the selected connection,
-//! then handles credential injection and base-URL rewriting per provider (OpenAI:
-//! the connection's base URL; Bedrock: `https://bedrock-runtime.{region}.amazonaws.com`).
+//! Bedrock, Google Gemini). Each capability routes from an explicit `provider`
+//! input; the outbound host service validates that provider against the selected
+//! connection, then handles credential injection and base-URL rewriting per
+//! provider (OpenAI: the connection's base URL; Bedrock:
+//! `https://bedrock-runtime.{region}.amazonaws.com`; Gemini: the Gemini API).
 //!
 //! Capability metadata travels through `#[capability_input]` / `#[capability]` /
 //! `#[capability_output]` annotations on the same Rust types and functions that
@@ -126,15 +127,19 @@ pub struct RawConnection {
 
 const PROVIDER_OPENAI: &str = runtara_ai::provider::PROVIDER_OPENAI;
 const PROVIDER_BEDROCK: &str = runtara_ai::provider::PROVIDER_BEDROCK;
+const PROVIDER_GEMINI: &str = runtara_ai::provider::PROVIDER_GEMINI;
 const DEFAULT_OPENAI_MODEL: &str = runtara_ai::defaults::DEFAULT_OPENAI_MODEL;
 const DEFAULT_OPENAI_MINI_MODEL: &str = runtara_ai::defaults::DEFAULT_OPENAI_MINI_MODEL;
 const DEFAULT_BEDROCK_MODEL: &str = runtara_ai::defaults::DEFAULT_BEDROCK_MODEL;
+const DEFAULT_GEMINI_MODEL: &str = runtara_ai::defaults::DEFAULT_GEMINI_MODEL;
 // Only referenced from the host-only `agent_info()`; the wasm component
 // resolves integrations at runtime via the connection service.
 #[cfg(not(target_arch = "wasm32"))]
 const INTEGRATION_OPENAI_API_KEY: &str = "openai_api_key";
 #[cfg(not(target_arch = "wasm32"))]
 const INTEGRATION_AWS_CREDENTIALS: &str = "aws_credentials";
+#[cfg(not(target_arch = "wasm32"))]
+const INTEGRATION_GEMINI_API_KEY: &str = "gemini_api_key";
 
 fn require_connection(connection: Option<&RawConnection>) -> Result<&RawConnection, AgentError> {
     connection.ok_or_else(|| {
@@ -342,7 +347,7 @@ pub struct TextCompletionInput {
 
     #[field(
         display_name = "Provider",
-        description = "LLM provider id (\"openai\" or \"bedrock\"); selects provider behavior explicitly"
+        description = "LLM provider id (\"openai\", \"bedrock\" or \"gemini\"); selects provider behavior explicitly"
     )]
     #[serde(default)]
     pub provider: String,
@@ -453,7 +458,7 @@ pub struct TextCompletionOutput {
     module_description = "AI tools — deterministic AI capabilities for text completion, image generation, structured output, and vision across multiple LLM providers",
     module_has_side_effects = true,
     module_supports_connections = true,
-    module_integration_ids = "openai_api_key,aws_credentials",
+    module_integration_ids = "openai_api_key,aws_credentials,gemini_api_key",
     module_secure = true
 )]
 pub async fn text_completion(
@@ -463,6 +468,7 @@ pub async fn text_completion(
     match require_provider(&input.provider)? {
         PROVIDER_OPENAI => text_completion_openai(&input, connection).await,
         PROVIDER_BEDROCK => text_completion_bedrock(&input, connection).await,
+        PROVIDER_GEMINI => text_completion_gemini(&input, connection).await,
         other => Err(unsupported_provider(other)),
     }
 }
@@ -797,7 +803,7 @@ pub struct ChatCompletionOutput {
     module_description = "AI tools — deterministic AI capabilities for text completion, image generation, structured output, and vision across multiple LLM providers",
     module_has_side_effects = true,
     module_supports_connections = true,
-    module_integration_ids = "openai_api_key,aws_credentials",
+    module_integration_ids = "openai_api_key,aws_credentials,gemini_api_key",
     module_secure = true
 )]
 pub async fn chat_completion(
@@ -856,14 +862,8 @@ pub async fn chat_completion(
     // than degrading to the raw text.
     let structured_output = match input.output_schema.as_ref() {
         Some(schema) => {
-            let final_text = response
-                .choice
-                .iter()
-                .find_map(|content| match content {
-                    runtara_ai::AssistantContent::Text(text) => Some(text.text.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default();
+            let final_text =
+                runtara_ai::message::assistant_text(response.choice.iter()).unwrap_or_default();
             Some(structured_response(&final_text, schema)?)
         }
         None => None,
@@ -1010,7 +1010,7 @@ pub struct ChatTurnOutput {
     module_description = "AI tools — deterministic AI capabilities for text completion, image generation, structured output, and vision across multiple LLM providers",
     module_has_side_effects = true,
     module_supports_connections = true,
-    module_integration_ids = "openai_api_key,aws_credentials",
+    module_integration_ids = "openai_api_key,aws_credentials,gemini_api_key",
     module_secure = true
 )]
 pub async fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentError> {
@@ -1119,7 +1119,9 @@ pub async fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentErro
                 }));
             }
             AssistantContent::Text(text) => {
-                final_text = Some(text.text.clone());
+                final_text
+                    .get_or_insert_with(String::new)
+                    .push_str(&text.text);
                 assistant_contents.push(AssistantContent::Text(text.clone()));
             }
         }
@@ -1219,7 +1221,7 @@ pub struct SummarizeMemoryOutput {
     module_description = "AI tools — deterministic AI capabilities for text completion, image generation, structured output, and vision across multiple LLM providers",
     module_has_side_effects = true,
     module_supports_connections = true,
-    module_integration_ids = "openai_api_key,aws_credentials",
+    module_integration_ids = "openai_api_key,aws_credentials,gemini_api_key",
     module_secure = true
 )]
 pub async fn summarize_memory(
@@ -1244,11 +1246,7 @@ pub async fn summarize_memory(
     }
 
     let excess = history.len() - max;
-    let old_json = serde_json::to_string(&history[..excess]).unwrap_or_default();
-    let summary_prompt = format!(
-        "Summarize the following conversation history concisely, preserving key \
-         facts, decisions, and context:\n{old_json}"
-    );
+    let summary_prompt = memory_summary_prompt(&history[..excess]);
 
     let req = runtara_ai::CompletionInvokeRequest {
         integration_id: provider.to_string(),
@@ -1271,13 +1269,7 @@ pub async fn summarize_memory(
     // A summarization failure degrades like the generated path: keep the most
     // recent messages (sliding window) without an inserted summary.
     let summary_text = match runtara_ai::run_completion_async(req).await {
-        Ok(response) => response
-            .choice
-            .iter()
-            .find_map(|content| match content {
-                runtara_ai::AssistantContent::Text(text) => Some(text.text.clone()),
-                _ => None,
-            })
+        Ok(response) => runtara_ai::message::assistant_text(response.choice.iter())
             .unwrap_or_else(|| "[Summary unavailable]".to_string()),
         Err(_) => "[Summary unavailable]".to_string(),
     };
@@ -1298,6 +1290,30 @@ pub async fn summarize_memory(
     Ok(SummarizeMemoryOutput { state })
 }
 
+/// The prompt asking for a summary of `messages`. Text and tool-call signatures
+/// are opaque provider data, so they stay out of it.
+fn memory_summary_prompt(messages: &[Value]) -> String {
+    let mut messages = messages.to_vec();
+    for message in &mut messages {
+        match message.get_mut("content") {
+            Some(Value::Array(items)) => {
+                for item in items.iter_mut().filter_map(Value::as_object_mut) {
+                    item.remove("signature");
+                }
+            }
+            Some(Value::Object(item)) => {
+                item.remove("signature");
+            }
+            _ => {}
+        }
+    }
+    let old_json = serde_json::to_string(&messages).unwrap_or_default();
+    format!(
+        "Summarize the following conversation history concisely, preserving key \
+         facts, decisions, and context:\n{old_json}"
+    )
+}
+
 // ============================================================================
 // Capability 2: Image Generation
 // ============================================================================
@@ -1311,7 +1327,7 @@ pub struct ImageGenerationInput {
 
     #[field(
         display_name = "Provider",
-        description = "LLM provider id (\"openai\" or \"bedrock\"); selects provider behavior explicitly"
+        description = "LLM provider id (\"openai\", \"bedrock\" or \"gemini\"); selects provider behavior explicitly"
     )]
     #[serde(default)]
     pub provider: String,
@@ -1420,6 +1436,7 @@ pub async fn image_generation(
     match require_provider(&input.provider)? {
         PROVIDER_OPENAI => image_generation_openai(&input, connection).await,
         PROVIDER_BEDROCK => image_generation_bedrock(&input, connection).await,
+        PROVIDER_GEMINI => image_generation_gemini(&input, connection).await,
         other => Err(unsupported_provider(other)),
     }
 }
@@ -1556,7 +1573,7 @@ pub struct VisionToTextInput {
 
     #[field(
         display_name = "Provider",
-        description = "LLM provider id (\"openai\" or \"bedrock\"); selects provider behavior explicitly"
+        description = "LLM provider id (\"openai\", \"bedrock\" or \"gemini\"); selects provider behavior explicitly"
     )]
     #[serde(default)]
     pub provider: String,
@@ -1655,6 +1672,7 @@ pub async fn vision_to_text(input: VisionToTextInput) -> Result<VisionToTextOutp
     match require_provider(&input.provider)? {
         PROVIDER_OPENAI => vision_to_text_openai(&input, connection).await,
         PROVIDER_BEDROCK => vision_to_text_bedrock(&input, connection).await,
+        PROVIDER_GEMINI => vision_to_text_gemini(&input, connection).await,
         other => Err(unsupported_provider(other)),
     }
 }
@@ -1817,7 +1835,7 @@ pub struct VisionToImageInput {
 
     #[field(
         display_name = "Provider",
-        description = "LLM provider id (\"openai\" or \"bedrock\"); selects provider behavior explicitly"
+        description = "LLM provider id (\"openai\", \"bedrock\" or \"gemini\"); selects provider behavior explicitly"
     )]
     #[serde(default)]
     pub provider: String,
@@ -1915,6 +1933,7 @@ pub async fn vision_to_image(input: VisionToImageInput) -> Result<VisionToImageO
     match require_provider(&input.provider)? {
         PROVIDER_OPENAI => vision_to_image_openai(&input, connection).await,
         PROVIDER_BEDROCK => vision_to_image_bedrock(&input, connection).await,
+        PROVIDER_GEMINI => vision_to_image_gemini(&input, connection).await,
         other => Err(unsupported_provider(other)),
     }
 }
@@ -2033,14 +2052,14 @@ pub struct EmbedTextInput {
 
     #[field(
         display_name = "Provider",
-        description = "LLM provider id (\"openai\" or \"bedrock\"); selects provider behavior explicitly"
+        description = "LLM provider id (\"openai\", \"bedrock\" or \"gemini\"); selects provider behavior explicitly"
     )]
     #[serde(default)]
     pub provider: String,
 
     #[field(
         display_name = "Texts",
-        description = "Batch of input strings to embed. Provider-specific batch limits apply (OpenAI ≤2048; Bedrock Titan loops sequentially).",
+        description = "Batch of input strings to embed. Provider-specific batch limits apply (OpenAI ≤2048; Bedrock Titan loops sequentially; Gemini is sent in batches of 100).",
         example = "[\"hello\", \"world\"]"
     )]
     #[serde(default)]
@@ -2048,7 +2067,7 @@ pub struct EmbedTextInput {
 
     #[field(
         display_name = "Model",
-        description = "Embedding model override. Defaults: OpenAI = text-embedding-3-small, Bedrock = amazon.titan-embed-text-v2:0",
+        description = "Embedding model override. Defaults: OpenAI = text-embedding-3-small, Bedrock = amazon.titan-embed-text-v2:0, Gemini = gemini-embedding-2",
         example = "text-embedding-3-small"
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2138,6 +2157,7 @@ pub async fn embed_text(input: EmbedTextInput) -> Result<EmbedTextOutput, AgentE
     match provider {
         PROVIDER_OPENAI => embed_text_openai(&input, connection).await,
         PROVIDER_BEDROCK => embed_text_bedrock(&input, connection).await,
+        PROVIDER_GEMINI => embed_text_gemini(&input, connection).await,
         other => Err(unsupported_provider(other)),
     }
 }
@@ -2510,10 +2530,474 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        let mut t = s[..max].to_string();
+        // Provider error bodies can hold non-ASCII text: cut on a char boundary.
+        let end = (0..=max)
+            .rev()
+            .find(|&i| s.is_char_boundary(i))
+            .unwrap_or(0);
+        let mut t = s[..end].to_string();
         t.push('\u{2026}');
         t
     }
+}
+
+// ============================================================================
+// Gemini
+// ============================================================================
+//
+// `temperature` and `top_p` inputs are not sent: Gemini ignores them from 3.6
+// on, and Google has announced an error for them in later model generations.
+
+const DEFAULT_GEMINI_IMAGE_MODEL: &str = "gemini-nano-banana-2.1";
+const DEFAULT_GEMINI_EMBEDDING_MODEL: &str = "gemini-embedding-2";
+/// Requests per `batchEmbedContents` call; larger inputs are sent in several.
+const GEMINI_EMBED_BATCH_SIZE: usize = 100;
+/// Aspect ratios every Gemini image model accepts.
+const GEMINI_ASPECT_RATIOS: &[(i32, i32)] = &[
+    (1, 1),
+    (2, 3),
+    (3, 2),
+    (3, 4),
+    (4, 3),
+    (4, 5),
+    (5, 4),
+    (9, 16),
+    (16, 9),
+    (21, 9),
+];
+
+/// POST `body` to `{path}` under the Gemini connection's base URL via the
+/// outbound host service, which adds the API key.
+async fn gemini_post(
+    connection: &RawConnection,
+    path: &str,
+    body: Value,
+    timeout_ms: u64,
+) -> Result<Value, AgentError> {
+    let body_bytes = serde_json::to_vec(&body)
+        .map_err(|e| AgentError::permanent("SERIALIZATION_ERROR", e.to_string()))?;
+
+    let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(timeout_ms));
+    let response = client
+        .request("POST", path)
+        .header("Content-Type", "application/json")
+        .connection_id(&connection.connection_id)
+        .ai_provider(PROVIDER_GEMINI)
+        .body_bytes(&body_bytes)
+        .call_agent_async()
+        .await
+        .map_err(|e| {
+            AgentError::transient(
+                "NETWORK_ERROR",
+                format!("Gemini request to {path} failed: {e}"),
+            )
+        })?;
+
+    let status = response.status;
+    if !(200..300).contains(&status) {
+        let body_text = String::from_utf8_lossy(&response.body).to_string();
+        let (category, code) = classify_http_status(status);
+        let message = format!("Gemini HTTP {status}: {}", truncate(&body_text, 512));
+        let mut err = if category == "transient" {
+            AgentError::transient(code, message)
+        } else {
+            AgentError::permanent(code, message)
+        };
+        err = err
+            .with_attr("status_code", status.to_string())
+            .with_attr("path", path)
+            .with_attr("body", truncate(&body_text, 512));
+        if let Some(ms) = parse_retry_after(&response.headers) {
+            err = err.with_retry_after_ms(ms);
+        }
+        return Err(err);
+    }
+
+    serde_json::from_slice(&response.body).map_err(|e| {
+        AgentError::permanent(
+            "RESPONSE_PARSE_ERROR",
+            format!("Gemini response parse error: {e}"),
+        )
+    })
+}
+
+fn gemini_model_id(model: Option<&str>, default: &str) -> String {
+    let model = model.unwrap_or(default);
+    model.strip_prefix("models/").unwrap_or(model).to_string()
+}
+
+fn gemini_generate_path(model: &str) -> String {
+    format!("/models/{model}:generateContent")
+}
+
+/// A single-turn `generateContent` body.
+fn gemini_body(parts: Value, system: Option<&str>, generation_config: Value) -> Value {
+    let mut body = json!({ "contents": [{ "role": "user", "parts": parts }] });
+    if let Some(system) = system.filter(|s| !s.trim().is_empty()) {
+        body["systemInstruction"] = json!({ "parts": [{ "text": system }] });
+    }
+    if generation_config.as_object().is_some_and(|c| !c.is_empty()) {
+        body["generationConfig"] = generation_config;
+    }
+    body
+}
+
+fn gemini_text_config(
+    max_tokens: Option<i32>,
+    stop_sequences: Option<&Vec<String>>,
+    output_schema: Option<&Value>,
+) -> Value {
+    let mut config = json!({});
+    if let Some(max_tokens) = max_tokens {
+        config["maxOutputTokens"] = json!(max_tokens);
+    }
+    if let Some(stop_sequences) = stop_sequences {
+        config["stopSequences"] = json!(stop_sequences);
+    }
+    if let Some(schema) = output_schema {
+        config["responseMimeType"] = json!("application/json");
+        config["responseJsonSchema"] = schema.clone();
+    }
+    config
+}
+
+fn gemini_image_config(width: Option<i32>, height: Option<i32>) -> Value {
+    let mut config = json!({ "responseModalities": ["IMAGE"] });
+    if let Some(ratio) = gemini_aspect_ratio(width, height) {
+        config["imageConfig"] = json!({ "aspectRatio": ratio });
+    }
+    config
+}
+
+/// Gemini takes one of a fixed set of aspect ratios rather than a pixel size,
+/// so a requested size maps to the closest of them.
+fn gemini_aspect_ratio(width: Option<i32>, height: Option<i32>) -> Option<String> {
+    let (width, height) = (width?, height?);
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    let wanted = f64::from(width) / f64::from(height);
+    let distance = |&(w, h): &(i32, i32)| (f64::from(w) / f64::from(h) / wanted).ln().abs();
+    GEMINI_ASPECT_RATIOS
+        .iter()
+        .min_by(|a, b| distance(a).total_cmp(&distance(b)))
+        .map(|(w, h)| format!("{w}:{h}"))
+}
+
+fn gemini_image_part(image_data: &str) -> Value {
+    json!({
+        "inlineData": {
+            "mimeType": gemini_image_mime(image_data),
+            "data": image_data
+        }
+    })
+}
+
+/// The media type of a base64 image, from its first bytes. Callers only give
+/// us the data, and Gemini needs the type alongside it.
+fn gemini_image_mime(image_data: &str) -> &'static str {
+    if image_data.starts_with("/9j/") {
+        "image/jpeg"
+    } else if image_data.starts_with("R0lGOD") {
+        "image/gif"
+    } else if image_data.starts_with("UklGR") {
+        "image/webp"
+    } else {
+        "image/png"
+    }
+}
+
+fn gemini_answer(resp: &Value) -> Result<Vec<&Value>, AgentError> {
+    runtara_ai::providers::gemini::answer_parts(resp)
+        .map_err(|message| AgentError::permanent("GEMINI_INVALID_RESPONSE", message))
+}
+
+fn gemini_text(resp: &Value) -> Result<String, AgentError> {
+    let text: String = gemini_answer(resp)?
+        .iter()
+        .filter_map(|part| part["text"].as_str())
+        .collect();
+    if text.is_empty() {
+        return Err(AgentError::permanent(
+            "GEMINI_INVALID_RESPONSE",
+            "Missing text in Gemini response",
+        ));
+    }
+    Ok(text)
+}
+
+/// The first image in the answer, as base64 data and its media type.
+fn gemini_image(resp: &Value) -> Result<(String, String), AgentError> {
+    let parts = gemini_answer(resp)?;
+    parts
+        .iter()
+        .find_map(|part| {
+            let image = part.get("inlineData")?;
+            Some((
+                image["data"].as_str()?.to_string(),
+                image["mimeType"]
+                    .as_str()
+                    .unwrap_or("image/png")
+                    .to_string(),
+            ))
+        })
+        .ok_or_else(|| {
+            let text: String = parts.iter().filter_map(|p| p["text"].as_str()).collect();
+            AgentError::permanent(
+                "GEMINI_INVALID_RESPONSE",
+                format!("Gemini returned no image: {}", truncate(&text, 256)),
+            )
+        })
+}
+
+fn gemini_usage(resp: &Value) -> LlmUsage {
+    let usage = &resp["usageMetadata"];
+    let count = |key: &str| usage[key].as_i64().unwrap_or(0) as i32;
+    let prompt_tokens = count("promptTokenCount");
+    let completion_tokens = count("candidatesTokenCount") + count("thoughtsTokenCount");
+    LlmUsage {
+        prompt_tokens,
+        completion_tokens,
+        // Embedding responses report no total.
+        total_tokens: usage["totalTokenCount"]
+            .as_i64()
+            .map_or(prompt_tokens + completion_tokens, |total| total as i32),
+    }
+}
+
+fn gemini_model_used(resp: &Value, model: &str) -> String {
+    resp["modelVersion"].as_str().unwrap_or(model).to_string()
+}
+
+async fn text_completion_gemini(
+    input: &TextCompletionInput,
+    connection: &RawConnection,
+) -> Result<TextCompletionOutput, AgentError> {
+    let model = gemini_model_id(input.model.as_deref(), DEFAULT_GEMINI_MODEL);
+    let body = gemini_body(
+        json!([{ "text": input.prompt }]),
+        input.system_prompt.as_deref(),
+        gemini_text_config(
+            input.max_tokens,
+            input.stop_sequences.as_ref(),
+            input.output_schema.as_ref(),
+        ),
+    );
+
+    let resp = gemini_post(connection, &gemini_generate_path(&model), body, 120_000).await?;
+    let text = gemini_text(&resp)?;
+    let structured_output = input
+        .output_schema
+        .as_ref()
+        .map(|schema| structured_response(&text, schema))
+        .transpose()?;
+
+    Ok(TextCompletionOutput {
+        text,
+        model: gemini_model_used(&resp, &model),
+        usage: gemini_usage(&resp),
+        finish_reason: resp["candidates"][0]["finishReason"]
+            .as_str()
+            .unwrap_or("stop")
+            .to_lowercase(),
+        structured_output,
+    })
+}
+
+async fn image_generation_gemini(
+    input: &ImageGenerationInput,
+    connection: &RawConnection,
+) -> Result<ImageGenerationOutput, AgentError> {
+    let model = gemini_model_id(input.model.as_deref(), DEFAULT_GEMINI_IMAGE_MODEL);
+    let prompt = match &input.negative_prompt {
+        Some(negative) => format!("{}. Avoid: {negative}", input.prompt),
+        None => input.prompt.clone(),
+    };
+    let body = gemini_body(
+        json!([{ "text": prompt }]),
+        None,
+        gemini_image_config(input.width, input.height),
+    );
+
+    let resp = gemini_post(
+        connection,
+        &gemini_generate_path(&model),
+        body,
+        runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
+    )
+    .await?;
+    let (image_data, mime_type) = gemini_image(&resp)?;
+
+    Ok(ImageGenerationOutput {
+        image_data,
+        mime_type,
+        width: None,
+        height: None,
+        model,
+        revised_prompt: None,
+    })
+}
+
+async fn vision_to_text_gemini(
+    input: &VisionToTextInput,
+    connection: &RawConnection,
+) -> Result<VisionToTextOutput, AgentError> {
+    let Some(image_data) = input.image_data.as_deref() else {
+        return Err(AgentError::permanent(
+            "AI_TOOLS_INVALID_INPUT",
+            "Gemini vision requires base64-encoded image_data, not URLs",
+        ));
+    };
+
+    let model = gemini_model_id(input.model.as_deref(), DEFAULT_GEMINI_MODEL);
+    let body = gemini_body(
+        json!([{ "text": input.prompt }, gemini_image_part(image_data)]),
+        None,
+        gemini_text_config(input.max_tokens, None, input.output_schema.as_ref()),
+    );
+
+    let resp = gemini_post(connection, &gemini_generate_path(&model), body, 120_000).await?;
+    let text = gemini_text(&resp)?;
+    let structured_output = input
+        .output_schema
+        .as_ref()
+        .map(|schema| structured_response(&text, schema))
+        .transpose()?;
+
+    Ok(VisionToTextOutput {
+        text,
+        model: gemini_model_used(&resp, &model),
+        usage: gemini_usage(&resp),
+        structured_output,
+    })
+}
+
+async fn vision_to_image_gemini(
+    input: &VisionToImageInput,
+    connection: &RawConnection,
+) -> Result<VisionToImageOutput, AgentError> {
+    if input.mask_data.is_some() {
+        return Err(AgentError::permanent(
+            "AI_TOOLS_INVALID_INPUT",
+            "Gemini image editing does not support mask_data; describe the change in the prompt",
+        ));
+    }
+
+    let model = gemini_model_id(input.model.as_deref(), DEFAULT_GEMINI_IMAGE_MODEL);
+    let body = gemini_body(
+        json!([{ "text": input.prompt }, gemini_image_part(&input.image_data)]),
+        None,
+        gemini_image_config(input.width, input.height),
+    );
+
+    let resp = gemini_post(
+        connection,
+        &gemini_generate_path(&model),
+        body,
+        runtara_dsl::DEFAULT_STEP_TIMEOUT_MS,
+    )
+    .await?;
+    let (image_data, mime_type) = gemini_image(&resp)?;
+
+    Ok(VisionToImageOutput {
+        image_data,
+        mime_type,
+        width: None,
+        height: None,
+        model,
+    })
+}
+
+fn gemini_embed_body(model: &str, texts: &[String], dimension: Option<u32>) -> Value {
+    let requests: Vec<Value> = texts
+        .iter()
+        .map(|text| {
+            let mut request = json!({
+                "model": format!("models/{model}"),
+                "content": { "parts": [{ "text": text }] }
+            });
+            if let Some(dimension) = dimension {
+                request["outputDimensionality"] = json!(dimension);
+            }
+            request
+        })
+        .collect();
+    json!({ "requests": requests })
+}
+
+/// `gemini-embedding-001` leaves shortened vectors unnormalized, which distorts
+/// similarity search. For a vector that is already normalized this changes nothing.
+fn gemini_normalize(vector: &mut [f32]) {
+    let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        vector.iter_mut().for_each(|v| *v /= norm);
+    }
+}
+
+fn gemini_embeddings(resp: &Value) -> Result<Vec<Vec<f32>>, AgentError> {
+    let invalid = |message: &str| AgentError::permanent("GEMINI_INVALID_RESPONSE", message);
+    resp["embeddings"]
+        .as_array()
+        .ok_or_else(|| invalid("Missing embeddings array in Gemini response"))?
+        .iter()
+        .map(|item| {
+            let values = item["values"]
+                .as_array()
+                .ok_or_else(|| invalid("Missing values array in Gemini embedding"))?;
+            Ok(values
+                .iter()
+                .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+                .collect())
+        })
+        .collect()
+}
+
+async fn embed_text_gemini(
+    input: &EmbedTextInput,
+    connection: &RawConnection,
+) -> Result<EmbedTextOutput, AgentError> {
+    let model = gemini_model_id(input.model.as_deref(), DEFAULT_GEMINI_EMBEDDING_MODEL);
+    let path = format!("/models/{model}:batchEmbedContents");
+
+    let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(input.texts.len());
+    let mut usage = LlmUsage::default();
+    for texts in input.texts.chunks(GEMINI_EMBED_BATCH_SIZE) {
+        let body = gemini_embed_body(&model, texts, input.dimension);
+        let resp = gemini_post(connection, &path, body, 60_000).await?;
+        let batch = gemini_embeddings(&resp)?;
+        if batch.len() != texts.len() {
+            return Err(AgentError::permanent(
+                "GEMINI_INVALID_RESPONSE",
+                format!(
+                    "Gemini returned {} embeddings for {} texts",
+                    batch.len(),
+                    texts.len()
+                ),
+            ));
+        }
+        embeddings.extend(batch);
+        let batch_usage = gemini_usage(&resp);
+        usage.prompt_tokens += batch_usage.prompt_tokens;
+        usage.total_tokens += batch_usage.total_tokens;
+    }
+
+    let dimension = embeddings.first().map(|v| v.len() as u32).unwrap_or(0);
+    if let Some(requested) = input.dimension {
+        if dimension != requested {
+            return Err(AgentError::permanent(
+                "GEMINI_DIMENSION_MISMATCH",
+                format!("Requested dimension {requested} but Gemini returned {dimension}"),
+            ));
+        }
+        embeddings.iter_mut().for_each(|v| gemini_normalize(v));
+    }
+
+    Ok(EmbedTextOutput {
+        embeddings,
+        model,
+        dimension,
+        usage,
+    })
 }
 
 // ============================================================================
@@ -2602,6 +3086,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         integration_ids: vec![
             INTEGRATION_OPENAI_API_KEY.to_string(),
             INTEGRATION_AWS_CREDENTIALS.to_string(),
+            INTEGRATION_GEMINI_API_KEY.to_string(),
         ],
         capabilities,
     }
@@ -2660,6 +3145,271 @@ mod tests {
             parameters: serde_json::Value::Null,
             rate_limit_config: None,
         }
+    }
+
+    #[test]
+    fn truncate_cuts_on_a_char_boundary() {
+        assert_eq!(truncate("héllo", 2), "h\u{2026}");
+        assert_eq!(truncate("héllo", 3), "hé\u{2026}");
+        assert_eq!(truncate("héllo", 10), "héllo");
+    }
+
+    #[test]
+    fn gemini_integration_routes_to_the_gemini_provider() {
+        let connection = fake_connection("gemini_api_key");
+        assert_eq!(
+            require_provider_for_connection(&connection).unwrap(),
+            PROVIDER_GEMINI
+        );
+        assert_eq!(require_provider("gemini").unwrap(), PROVIDER_GEMINI);
+    }
+
+    #[test]
+    fn gemini_text_body_maps_config_and_leaves_sampling_out() {
+        let schema = json!({"type": "object"});
+        let stop = vec!["END".to_string()];
+        let body = gemini_body(
+            json!([{ "text": "hi" }]),
+            Some("be brief"),
+            gemini_text_config(Some(64), Some(&stop), Some(&schema)),
+        );
+
+        assert_eq!(
+            body,
+            json!({
+                "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                "systemInstruction": {"parts": [{"text": "be brief"}]},
+                "generationConfig": {
+                    "maxOutputTokens": 64,
+                    "stopSequences": ["END"],
+                    "responseMimeType": "application/json",
+                    "responseJsonSchema": {"type": "object"}
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn gemini_body_omits_a_blank_system_prompt_and_an_empty_config() {
+        let body = gemini_body(
+            json!([{ "text": "hi" }]),
+            Some(" "),
+            gemini_text_config(None, None, None),
+        );
+
+        assert!(body.get("systemInstruction").is_none());
+        assert!(body.get("generationConfig").is_none());
+    }
+
+    #[test]
+    fn gemini_model_ids_accept_the_api_resource_form() {
+        assert_eq!(gemini_model_id(None, "fallback"), "fallback");
+        assert_eq!(gemini_model_id(Some("a"), "fallback"), "a");
+        assert_eq!(gemini_model_id(Some("models/a"), "fallback"), "a");
+        assert_eq!(gemini_generate_path("a"), "/models/a:generateContent");
+    }
+
+    #[test]
+    fn gemini_image_config_maps_a_size_to_the_closest_supported_ratio() {
+        assert_eq!(
+            gemini_image_config(Some(1920), Some(1080)),
+            json!({"responseModalities": ["IMAGE"], "imageConfig": {"aspectRatio": "16:9"}})
+        );
+        for (width, height, ratio) in [
+            (1024, 1024, "1:1"),
+            (1792, 1024, "16:9"),
+            (1024, 1792, "9:16"),
+            (1000, 700, "3:2"),
+            (3000, 1000, "21:9"),
+        ] {
+            assert_eq!(
+                gemini_aspect_ratio(Some(width), Some(height)).as_deref(),
+                Some(ratio),
+                "{width}x{height}"
+            );
+        }
+        assert_eq!(
+            gemini_image_config(Some(1024), None),
+            json!({"responseModalities": ["IMAGE"]})
+        );
+        assert_eq!(gemini_aspect_ratio(Some(0), Some(10)), None);
+    }
+
+    #[test]
+    fn gemini_image_parts_name_the_media_type_of_the_data() {
+        for (data, mime) in [
+            ("/9j/4AAQ", "image/jpeg"),
+            ("iVBORw0K", "image/png"),
+            ("R0lGODlh", "image/gif"),
+            ("UklGRiQ", "image/webp"),
+        ] {
+            assert_eq!(
+                gemini_image_part(data),
+                json!({"inlineData": {"mimeType": mime, "data": data}})
+            );
+        }
+    }
+
+    #[test]
+    fn gemini_text_joins_parts_and_skips_thoughts() {
+        let resp = json!({"candidates": [{"content": {"parts": [
+            {"text": "thinking", "thought": true},
+            {"text": "{\"a\":"},
+            {"text": "1}"}
+        ]}}]});
+
+        assert_eq!(gemini_text(&resp).unwrap(), "{\"a\":1}");
+    }
+
+    #[test]
+    fn gemini_refusals_are_permanent_errors() {
+        let blocked = json!({"promptFeedback": {"blockReason": "SAFETY"}});
+
+        let error = gemini_text(&blocked).unwrap_err();
+
+        assert_eq!(error.code, "GEMINI_INVALID_RESPONSE");
+        assert_eq!(error.category, "permanent");
+        assert!(error.message.contains("SAFETY"), "{}", error.message);
+    }
+
+    #[test]
+    fn gemini_image_returns_the_data_and_its_real_media_type() {
+        let resp = json!({"candidates": [{"content": {"parts": [
+            {"text": "here you go"},
+            {"inlineData": {"mimeType": "image/jpeg", "data": "abc"}}
+        ]}}]});
+
+        assert_eq!(
+            gemini_image(&resp).unwrap(),
+            ("abc".to_string(), "image/jpeg".to_string())
+        );
+    }
+
+    #[test]
+    fn gemini_text_instead_of_an_image_is_an_error_that_quotes_it() {
+        let resp = json!({"candidates": [{"content": {"parts": [{"text": "I can't draw that"}]}}]});
+
+        let error = gemini_image(&resp).unwrap_err();
+
+        assert_eq!(error.code, "GEMINI_INVALID_RESPONSE");
+        assert!(
+            error.message.contains("I can't draw that"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn gemini_usage_counts_thinking_as_output() {
+        let usage = gemini_usage(&json!({"usageMetadata": {
+            "promptTokenCount": 10,
+            "candidatesTokenCount": 5,
+            "thoughtsTokenCount": 7,
+            "totalTokenCount": 22
+        }}));
+
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 12);
+        assert_eq!(usage.total_tokens, 22);
+    }
+
+    #[test]
+    fn gemini_usage_without_a_reported_total_adds_up_the_parts() {
+        let usage = gemini_usage(&json!({"usageMetadata": {"promptTokenCount": 2}}));
+
+        assert_eq!(usage.prompt_tokens, 2);
+        assert_eq!(usage.total_tokens, 2);
+    }
+
+    #[test]
+    fn gemini_embed_body_sends_one_request_per_text() {
+        let texts = vec!["a".to_string(), "b".to_string()];
+
+        assert_eq!(
+            gemini_embed_body("m", &texts, Some(256)),
+            json!({"requests": [
+                {
+                    "model": "models/m",
+                    "content": {"parts": [{"text": "a"}]},
+                    "outputDimensionality": 256
+                },
+                {
+                    "model": "models/m",
+                    "content": {"parts": [{"text": "b"}]},
+                    "outputDimensionality": 256
+                }
+            ]})
+        );
+    }
+
+    #[test]
+    fn memory_summaries_leave_tool_call_signatures_out() {
+        let messages = [json!({
+            "role": "assistant",
+            "content": [
+                {"text": "checking", "signature": "opaque-provider-data"},
+                {
+                    "id": "a",
+                    "function": {"name": "lookup", "arguments": {}},
+                    "signature": "opaque-provider-data"
+                }
+            ]
+        })];
+
+        let prompt = memory_summary_prompt(&messages);
+
+        assert!(prompt.contains("checking"), "{prompt}");
+        assert!(prompt.contains("lookup"), "{prompt}");
+        assert!(!prompt.contains("opaque-provider-data"), "{prompt}");
+    }
+
+    #[test]
+    fn gemini_normalize_scales_to_unit_length() {
+        let mut vector = vec![3.0, 4.0];
+        gemini_normalize(&mut vector);
+        assert_eq!(vector, vec![0.6, 0.8]);
+
+        let mut zero = vec![0.0, 0.0];
+        gemini_normalize(&mut zero);
+        assert_eq!(zero, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn gemini_embeddings_read_each_vector() {
+        let resp = json!({"embeddings": [{"values": [0.5, 1.0]}, {"values": [0.25, 0.0]}]});
+
+        assert_eq!(
+            gemini_embeddings(&resp).unwrap(),
+            vec![vec![0.5, 1.0], vec![0.25, 0.0]]
+        );
+        assert_eq!(
+            gemini_embeddings(&json!({})).unwrap_err().code,
+            "GEMINI_INVALID_RESPONSE"
+        );
+    }
+
+    #[tokio::test]
+    async fn gemini_vision_refuses_inputs_it_cannot_send() {
+        let connection = fake_connection("gemini_api_key");
+
+        let url_only = VisionToTextInput {
+            image_url: Some("https://example.com/a.png".into()),
+            ..Default::default()
+        };
+        let error = vision_to_text_gemini(&url_only, &connection)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "AI_TOOLS_INVALID_INPUT");
+
+        let masked = VisionToImageInput {
+            image_data: "abc".into(),
+            mask_data: Some("def".into()),
+            ..Default::default()
+        };
+        let error = vision_to_image_gemini(&masked, &connection)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "AI_TOOLS_INVALID_INPUT");
     }
 
     /// The JSON Schema an AiAgent step actually sends, as produced by

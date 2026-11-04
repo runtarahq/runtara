@@ -66,6 +66,16 @@ pub fn get_default_rate_limit_config(integration_id: &str) -> Option<RateLimitCo
             max_retries: 3,
             max_wait_ms: 60000,
         }),
+        // Google Gemini: limits vary by model and billing tier, and the free tier
+        // sits well below paid ones. 2 req/s with burst of 5 keeps a paid project
+        // comfortable; a free-tier 429 is still retried.
+        "gemini_api_key" => Some(RateLimitConfigDto {
+            requests_per_second: 2,
+            burst_size: 5,
+            retry_on_limit: true,
+            max_retries: 3,
+            max_wait_ms: 60000,
+        }),
         // AWS Bedrock: per-model invocation throttling.
         // 2 req/s with burst of 5 is conservative for most models.
         "aws_credentials" => Some(RateLimitConfigDto {
@@ -183,6 +193,13 @@ mod tests {
         let config = get_default_rate_limit_config("stripe_api_key").unwrap();
         assert_eq!(config.requests_per_second, 20);
         assert_eq!(config.burst_size, 40);
+    }
+
+    #[test]
+    fn test_gemini_defaults() {
+        let config = get_default_rate_limit_config("gemini_api_key").unwrap();
+        assert_eq!(config.requests_per_second, 2);
+        assert_eq!(config.burst_size, 5);
     }
 
     #[test]

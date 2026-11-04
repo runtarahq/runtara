@@ -10,6 +10,11 @@
 /// Default Amazon Bedrock model for AI Agent and agent-capability calls.
 pub const DEFAULT_BEDROCK_MODEL: &str = "anthropic.claude-sonnet-4-6";
 
+/// Default Google Gemini model for AI Agent and agent-capability calls. Not the
+/// newest Flash: Google's capacity for `gemini-3.8-flash` is short enough that
+/// a call left on the default would often fail with a 503.
+pub const DEFAULT_GEMINI_MODEL: &str = "gemini-3.6-flash";
+
 /// Default OpenAI model for text/chat completion calls.
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-4o";
 
@@ -20,7 +25,7 @@ pub const DEFAULT_OPENAI_MINI_MODEL: &str = "gpt-4o-mini";
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::{bedrock_models, openai_models};
+    use crate::providers::{bedrock_models, gemini_models, openai_models};
     use serde_json::Value;
 
     fn assert_recommended(catalog: &Value, model_id: &str) {
@@ -39,6 +44,11 @@ mod tests {
     #[test]
     fn bedrock_default_is_in_catalog_and_recommended() {
         assert_recommended(&bedrock_models::catalog_json(), DEFAULT_BEDROCK_MODEL);
+    }
+
+    #[test]
+    fn gemini_default_is_in_catalog_and_recommended() {
+        assert_recommended(&gemini_models::catalog_json(), DEFAULT_GEMINI_MODEL);
     }
 
     #[test]

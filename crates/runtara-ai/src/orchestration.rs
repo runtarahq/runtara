@@ -22,7 +22,7 @@ use crate::types::ToolDefinition;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompletionInvokeRequest {
-    /// Provider integration id (e.g. `"openai"`, `"bedrock"`).
+    /// Provider integration id (e.g. `"openai"`, `"bedrock"`, `"gemini"`).
     pub integration_id: String,
     /// Connection parameters JSON (provider-specific).
     #[serde(default)]

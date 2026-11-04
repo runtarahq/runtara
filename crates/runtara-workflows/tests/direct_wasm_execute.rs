@@ -658,6 +658,13 @@ impl runtara_component_host::ConnectionResolverHost for FixtureConnectionResolve
                     {"name": "sqs.queues", "description": "Available Amazon SQS queues"}
                 ]),
             )
+        } else if connection_id == "conn-gemini" {
+            (
+                "gemini_api_key",
+                serde_json::json!([
+                    {"name": "models", "description": "Available Google Gemini models"}
+                ]),
+            )
         } else if connection_id == "s3-connection" {
             ("s3_compatible", serde_json::json!([]))
         } else {
@@ -4447,6 +4454,145 @@ fn direct_wasm_execute_ai_agent_tool_loop_without_next_edge_runs_loop() {
     assert_eq!(
         ai_end.payload_json["outputs"]["outputs"]["toolCalls"][0]["tool_name"],
         serde_json::json!("echo")
+    );
+}
+
+fn gemini_ok(parts: Value) -> Value {
+    serde_json::json!({
+        "status": 200,
+        "headers": {},
+        "body": {
+            "candidates": [{
+                "content": {"role": "model", "parts": parts},
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 1,
+                "candidatesTokenCount": 1,
+                "totalTokenCount": 2
+            }
+        }
+    })
+}
+
+/// A single-shot step reads the answer from the `chat-completion` choice, where
+/// Gemini's parts stay separate items.
+#[test]
+fn direct_wasm_execute_ai_agent_single_shot_joins_gemini_text_parts() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = single_shot_ai_agent_graph_json("")
+        .replace("conn-1", "conn-gemini")
+        .replace("\"openai\"", "\"gemini\"")
+        .replace("gpt-4o", "gemini-3.6-flash");
+
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-single-shot-gemini",
+        &graph,
+        br#"{}"#,
+        vec![gemini_ok(serde_json::json!([
+            {"text": "hello "},
+            {"text": "from gemini", "thoughtSignature": "signature-1"}
+        ]))],
+    );
+
+    assert!(result.status_success, "stderr: {}", result.stderr);
+    let output = result.output_json.expect("workflow completes");
+    assert_eq!(
+        output.get("answer").and_then(Value::as_str),
+        Some("hello from gemini"),
+        "{output}"
+    );
+}
+
+/// Gemini rejects a tool loop's next turn unless the signature on its function
+/// call comes back. The history crosses the agent boundary as JSON between
+/// turns, so this runs the real component rather than the provider alone.
+#[test]
+fn direct_wasm_execute_ai_agent_tool_loop_replays_gemini_thought_signatures() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = ai_agent_tool_only_no_next_graph_json()
+        .replace("conn-1", "conn-gemini")
+        .replace("\"openai\"", "\"gemini\"")
+        .replace("gpt-4o", "gemini-3.8-flash");
+
+    let result = run_direct_workflow_capture_full(
+        &components_dir,
+        "ai-loop-gemini",
+        &graph,
+        br#"{}"#,
+        true,
+        Vec::new(),
+        vec![
+            gemini_ok(serde_json::json!([{
+                "functionCall": {"name": "echo", "args": {"value": 42}},
+                "thoughtSignature": "signature-1"
+            }])),
+            gemini_ok(serde_json::json!([
+                {"text": "loop "},
+                {"text": "finished", "thoughtSignature": "signature-2"}
+            ])),
+        ],
+        Vec::new(),
+    );
+
+    assert!(result.status_success, "stderr: {}", result.stderr);
+    let ai_end = result
+        .events
+        .iter()
+        .find(|event| {
+            event.subtype == "step_debug_end"
+                && event.payload_json.get("step_id").and_then(Value::as_str) == Some("ai")
+        })
+        .expect("AI step debug end");
+    assert_eq!(
+        ai_end.payload_json["outputs"]["outputs"]["response"],
+        serde_json::json!("loop finished"),
+        "an answer split over parts comes back whole"
+    );
+    assert_eq!(
+        result.llm_requests.len(),
+        2,
+        "tool-call turn + completing turn; stderr: {}",
+        result.stderr
+    );
+    for request in &result.llm_requests {
+        assert_eq!(
+            request["url"],
+            serde_json::json!("/models/gemini-3.8-flash:generateContent")
+        );
+        assert_eq!(request["ai_provider"], serde_json::json!("gemini"));
+        assert!(!request["body"].to_string().contains("temperature"));
+    }
+
+    let contents = &result.llm_requests[1]["body"]["contents"];
+    assert_eq!(
+        contents[0],
+        serde_json::json!({
+            "role": "user",
+            "parts": [{"text": "List all tools you have"}]
+        })
+    );
+    assert_eq!(
+        contents[1],
+        serde_json::json!({
+            "role": "model",
+            "parts": [{
+                "functionCall": {"name": "echo", "args": {"value": 42}},
+                "thoughtSignature": "signature-1"
+            }]
+        })
+    );
+    assert_eq!(contents[2]["role"], serde_json::json!("user"));
+    assert_eq!(
+        contents[2]["parts"][0]["functionResponse"]["name"],
+        serde_json::json!("echo")
+    );
+    assert!(
+        contents[2]["parts"][0]["functionResponse"]
+            .get("id")
+            .is_none(),
+        "an id Gemini did not assign must not be sent back"
     );
 }
 

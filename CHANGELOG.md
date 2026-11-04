@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Google Gemini is a new AI provider.** A `gemini_api_key` connection (an API
+  key from Google AI Studio) works with the AI Agent step and with every
+  `ai_tools` capability: text completion with structured output, image
+  generation and editing, vision and embeddings. The AI Agent model picker lists
+  the models the key can use. Gemini's temperature and top-p inputs are not sent,
+  because Gemini ignores them from 3.6 on. Google's terms require a billed
+  project for apps used in the EEA, Switzerland or the UK. An AI step now returns
+  every text item of an answer, not just the first or last, which also applies
+  to a Bedrock answer split over several text blocks.
+
 - **Per-tenant metrics in a shared process.** With
   `RUNTARA_METRICS_TENANT_LABEL=1`, HTTP request, admission, trigger and
   launch metrics carry a `tenant_id` attribute (the name the workflow metrics use): the served tenant the request or
