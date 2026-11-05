@@ -120,8 +120,23 @@ the server in anything but a throwaway setup.
 Keys the installer manages: `TENANT_ID`, `SERVER_HOST`, `SERVER_PORT` (7001),
 the three database URLs, `VALKEY_HOST` / `VALKEY_PORT` / `VALKEY_PASSWORD`, the
 `RUNTARA_MCP_*` session settings, `AUTH_PROVIDER` and its mode-specific vars,
-`RUNTARA_AGENT_COMPONENTS_DIR` (points at the bundle's `agents/`), `DATA_DIR`,
-and `RUST_LOG`.
+`RUNTARA_CONNECTIONS_ENCRYPTION_KEY`, `RUNTARA_AGENT_COMPONENTS_DIR` (points at
+the bundle's `agents/`), `DATA_DIR`, and `RUST_LOG`.
+
+### Credential encryption key
+
+Connection credentials are always encrypted at rest (AES-256-GCM), and the
+server refuses to start without `RUNTARA_CONNECTIONS_ENCRYPTION_KEY`, a
+base64-encoded 32-byte key. A fresh install generates one into the config
+file, unless you export your own first (`openssl rand -base64 32`). **Back it
+up**: credentials stored under a lost key cannot be recovered.
+
+An update keeps the existing config. If that config has no key, the installer
+warns: add one, restart, then run `runtara-server reencrypt-connections` with
+the service's environment to encrypt the credentials stored before. To rotate,
+set the new key (and `RUNTARA_CONNECTIONS_ENCRYPTION_KEY_ID`), list the old one
+in `RUNTARA_CONNECTIONS_RETIRED_KEYS` (`kid:base64,…`), re-encrypt, then drop
+it.
 
 ### Authentication
 
