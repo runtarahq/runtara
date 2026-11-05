@@ -293,7 +293,8 @@ crates/agents/runtara-agent-<id>/
   for). The function rebuilds the body from those fields. A body composed with
   `allOf` is merged into one object first, and a `oneOf`/`anyOf` of objects
   (Shippo's label purchase: from a rate, or instant) offers the fields of every
-  shape, all optional, for the vendor to validate. A body that is not an object,
+  shape, optional unless every shape requires them, for the vendor to validate;
+  `fetch` warns when shapes disagree on a field. A body that is not an object,
   or is composed of anything but objects, stays a single `body` input. Non-GET
   operations are marked `side_effects`.
 - An exploded array query parameter (the OpenAPI default) is sent as

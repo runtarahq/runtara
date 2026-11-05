@@ -23,12 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SHIPPO_OUTCOME_UNKNOWN` instead of being retried: Shippo documents no
   idempotency key, and sending a label purchase again could buy a second label.
   Shippo answers a label it could not buy with a success and `status: ERROR`,
-  so a workflow should branch on the step's `status`.
+  so a workflow should branch on the step's `status`. Its spec also defaults
+  `async` to true on a label purchase, which leaves the label queued: set
+  `async` to false to wait for the result, or read it with `get-transaction`.
 
 - **The connector generator flattens composed request bodies.** A body built
   with `allOf` is merged into one object, and a `oneOf` or `anyOf` of objects
-  offers the fields of every shape as optional inputs, so each field is a step
-  input instead of one JSON `body`.
+  offers the fields of every shape, optional unless every shape requires them,
+  so each field is a step input instead of one JSON `body`.
 
 - **Google Gemini is a new AI provider.** A `gemini_api_key` connection (an API
   key from Google AI Studio) works with the AI Agent step and with every

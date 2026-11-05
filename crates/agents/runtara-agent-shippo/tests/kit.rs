@@ -102,6 +102,42 @@ fn a_write_whose_outcome_is_unknown_is_not_retried() {
 }
 
 #[test]
+fn a_write_whose_answer_cannot_be_read_may_have_been_carried_out() {
+    #[derive(Debug, serde::Deserialize)]
+    struct Strict {
+        #[allow(dead_code)]
+        count: u32,
+    }
+    let json = [("content-type", "application/json")];
+    // Valid JSON of another shape keeps the id of what was created.
+    let err = kit::decode::<Strict>(
+        &response(201, r#"{"object_id": "a6b427"}"#, &json),
+        "POST",
+        "/transactions",
+        "SHIPPO",
+    )
+    .unwrap_err();
+    assert_eq!(
+        (err.code.as_str(), err.category),
+        ("SHIPPO_OUTCOME_UNKNOWN", "permanent")
+    );
+    assert_eq!(
+        err.attributes.get("object_id").and_then(Value::as_str),
+        Some("a6b427")
+    );
+    // Broken JSON has no id to offer, and the outcome is just as unknown.
+    let err = kit::decode::<Strict>(
+        &response(201, "{", &json),
+        "POST",
+        "/transactions",
+        "SHIPPO",
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "SHIPPO_OUTCOME_UNKNOWN");
+    assert!(!err.attributes.contains_key("object_id"));
+}
+
+#[test]
 fn reads_and_refused_writes_are_still_retried() {
     let err = kit::network_error("GET", "/tracks/usps/1Z", "SHIPPO", "timed out");
     assert_eq!(

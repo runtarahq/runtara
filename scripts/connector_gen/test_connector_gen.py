@@ -7,7 +7,9 @@ repository's rustfmt; they are skipped when the generator is not installed.
     python scripts/connector_gen/test_connector_gen.py
 """
 
+import contextlib
 import copy
+import io
 import json
 import re
 import sys
@@ -301,15 +303,15 @@ class NormalizeTest(unittest.TestCase):
         named = {"allOf": [{"$ref": "#/components/schemas/Base"}]}
         body = json_body({"allOf": [
             {"$ref": "#/components/schemas/Named"},
-            {"required": ["to"], "properties": {"to": {"type": "string"}, "note": {"type": "string"}}},
+            {"required": ["to"], "properties": {"to": {"type": "string"}, "note": {"description": "Refined"}}},
         ]})
         sliced = cg.slice_spec(spec_with(body, {"Base": base, "Named": named}), ["op"])
         schema = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
         self.assertEqual(schema["type"], "object")
         self.assertEqual(list(schema["properties"]), ["currency", "note", "to"])
         self.assertEqual(schema["required"], ["currency", "to"])
-        # The later part refines the base.
-        self.assertNotIn("description", schema["properties"]["note"])
+        # The later part refines the base: the description changes, the type stays.
+        self.assertEqual(schema["properties"]["note"], {"type": "string", "description": "Refined"})
         self.assertNotIn("allOf", schema)
 
     def test_one_of_body_offers_the_fields_of_every_shape(self):
@@ -325,6 +327,37 @@ class NormalizeTest(unittest.TestCase):
         self.assertEqual(list(schema["properties"]), ["rate", "label", "shipment"])
         self.assertNotIn("required", schema)
         self.assertNotIn("oneOf", schema)
+
+    def test_one_of_body_keeps_what_every_shape_requires(self):
+        body = json_body({"oneOf": [
+            {"type": "object", "required": ["a", "b"], "properties": {"a": {"type": "string"}, "b": {"type": "string"}}},
+            {"type": "object", "required": ["a", "c"], "properties": {"a": {"type": "string"}, "c": {"type": "string"}}},
+        ]})
+        sliced = cg.slice_spec(spec_with(body), ["op"])
+        schema = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(schema["required"], ["a"])
+
+    def test_required_field_of_every_shape_beside_an_envelope_fails(self):
+        shape = {"type": "object", "required": ["note"], "properties": {
+            "note": {"type": "string"}, "ticket": {"type": "object", "properties": {"s": {"type": "string"}}}}}
+        with self.assertRaises(SystemExit) as raised:
+            cg.slice_spec(spec_with(json_body({"oneOf": [shape, copy.deepcopy(shape)]})), ["op"],
+                          body_envelopes=["ticket"])
+        self.assertIn("note", str(raised.exception))
+
+    def test_shapes_that_disagree_on_a_field_warn(self):
+        body = json_body({"oneOf": [
+            {"type": "object", "properties": {"ref": {"type": "string"}, "same": {"type": "string"}}},
+            {"type": "object", "properties": {"ref": {"type": "object"},
+                                              "same": {"type": "string", "description": "Reads differently"}}},
+        ]})
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            sliced = cg.slice_spec(spec_with(body), ["op"])
+        self.assertIn("disagree on `ref`", printed.getvalue())
+        self.assertNotIn("`same`", printed.getvalue())
+        schema = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(schema["properties"]["ref"]["type"], "string")
 
     def test_composed_body_with_a_part_that_is_no_object_stays_as_it_is(self):
         for schema in (
@@ -366,6 +399,16 @@ class NormalizeTest(unittest.TestCase):
         body = operation(sliced, "op")["requestBody"]
         self.assertEqual(body["x-runtara-body-envelope"], "ticket")
         self.assertEqual(body["content"]["application/json"]["schema"], {"$ref": "#/components/schemas/Ticket"})
+
+    def test_envelope_shape_may_constrain_its_fields_with_one_of(self):
+        body = json_body({"type": "object", "properties": {"user": {"anyOf": [
+            {"type": "object", "properties": {"name": {"type": "string"}, "id": {"type": "string"}},
+             "oneOf": [{"required": ["name"]}, {"required": ["id"]}]},
+            {"type": "object", "properties": {"email": {"type": "string"}}},
+        ]}}})
+        sliced = cg.slice_spec(spec_with(body), ["op"], body_envelopes=["user"])
+        schema = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(list(schema["properties"]), ["name", "id", "email"])
 
     def test_envelope_shapes_may_be_composed(self):
         base = {"type": "object", "properties": {"name": {"type": "string"}}}

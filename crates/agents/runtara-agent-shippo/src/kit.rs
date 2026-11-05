@@ -9,10 +9,11 @@
 //! agents (e.g. `runtara-agent-stripe`) carry. Meant to move into a crate shared
 //! by every generated agent.
 //!
-//! Unlike the other generated agents' copies, a request that is not a read is
-//! never reported as worth retrying when its outcome is unknown: Shippo documents no
-//! idempotency key, so a label purchase sent again after a timeout or a 5xx
-//! can buy a second label. See [`outcome_unknown`].
+//! As in the UPS agent's copy, a request that is not a read is never reported
+//! as worth retrying when its outcome is unknown: Shippo documents no
+//! idempotency key, so a label purchase sent again after a timeout or a 5xx can
+//! buy a second label. A write whose answer cannot be read counts as unknown
+//! too, because the label may be bought. See [`outcome_unknown`].
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -414,10 +415,18 @@ pub fn decode<T: DeserializeOwned>(
     }
 
     let invalid = |e: serde_json::Error| {
-        AgentError::permanent(
-            format!("{prefix}_INVALID_RESPONSE"),
-            format!("{prefix} {method} {path}: {e}"),
-        )
+        let message = format!("{prefix} {method} {path}: {e}");
+        if is_read(method) {
+            return AgentError::permanent(format!("{prefix}_INVALID_RESPONSE"), message);
+        }
+        // Shippo accepted the write; the object's id is what lets a workflow find it.
+        let id = serde_json::from_slice::<Value>(&response.body)
+            .ok()
+            .and_then(|body| body.get("object_id")?.as_str().map(str::to_string));
+        match id {
+            Some(id) => outcome_unknown(prefix, message).with_attr("object_id", id),
+            None => outcome_unknown(prefix, message),
+        }
     };
     let text = String::from_utf8_lossy(&response.body);
     if text.trim().is_empty() {
