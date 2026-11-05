@@ -83,6 +83,11 @@ services:
       OBJECT_MODEL_DATABASE_URL: postgres://runtara_objects:runtara_objects@postgres/runtara_objects
       VALKEY_HOST: valkey
       VALKEY_PORT: "6379"
+      # Connection credentials are always encrypted at rest. Pass your own
+      # key (openssl rand -base64 32) or leave it unset: the entrypoint below
+      # then generates one into the runtara_data volume on first start and
+      # reuses it after. Deleting that volume loses the key along with the data.
+      RUNTARA_CONNECTIONS_ENCRYPTION_KEY: "${RUNTARA_CONNECTIONS_ENCRYPTION_KEY:-}"
       # On stop, give running workflows time to reach a checkpoint and suspend
       # (clean recovery) instead of being killed mid-step. `stop_grace_period`
       # below must stay >= this, or `docker compose down/stop` SIGKILLs the
@@ -113,6 +118,21 @@ services:
     # to move too, or SIGKILL lands mid-drain — the abrupt restart this is here
     # to avoid.
     stop_grace_period: 40s
+    # `exec` keeps runtara-server as PID 1, so it still gets SIGTERM directly.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        if [ -z "$${RUNTARA_CONNECTIONS_ENCRYPTION_KEY}" ]; then
+          key_file=/data/credential-encryption.key
+          if [ ! -s "$$key_file" ]; then
+            (umask 077 && head -c 32 /dev/urandom | base64 > "$$key_file")
+            echo "Generated a credential encryption key at $$key_file"
+          fi
+          RUNTARA_CONNECTIONS_ENCRYPTION_KEY="$$(cat "$$key_file")"
+          export RUNTARA_CONNECTIONS_ENCRYPTION_KEY
+        fi
+        exec runtara-server
     # Publish the *proxy's* listen port (8080). Ports must be declared on the
     # network-namespace owner, which the sidecar joins via network_mode below.
     ports:

@@ -380,6 +380,13 @@ write_config() {
 
     if [ -f "$conf_file" ]; then
         info "Keeping existing config: ${conf_file}"
+        if ! grep -q '^RUNTARA_CONNECTIONS_ENCRYPTION_KEY=.' "$conf_file"; then
+            warn "${conf_file} sets no RUNTARA_CONNECTIONS_ENCRYPTION_KEY."
+            warn "runtara-server now refuses to start without one (credentials are always encrypted at rest)."
+            warn "Unless you supply it another way, add one and re-encrypt what is stored:"
+            warn "  echo \"RUNTARA_CONNECTIONS_ENCRYPTION_KEY=\$(openssl rand -base64 32)\" >> ${conf_file}"
+            warn "  runtara-server reencrypt-connections   # with the same environment as the service"
+        fi
         return
     fi
 
@@ -398,6 +405,15 @@ write_config() {
     local valkey_port="${VALKEY_PORT:-6379}"
     local valkey_pass="${VALKEY_PASSWORD:-}"
     local jwks_uri="${OAUTH2_JWKS_URI:-}"
+    # Credentials are always encrypted at rest; a fresh install gets its own key.
+    local credential_key="${RUNTARA_CONNECTIONS_ENCRYPTION_KEY:-}"
+    if [ -z "$credential_key" ]; then
+        if command -v openssl >/dev/null 2>&1; then
+            credential_key="$(openssl rand -base64 32)"
+        else
+            credential_key="$(head -c 32 /dev/urandom | base64)"
+        fi
+    fi
     local issuer="${OAUTH2_ISSUER:-}"
     local audience="${OAUTH2_AUDIENCE:-}"
     local tenant_id="${TENANT_ID:-}"
@@ -466,6 +482,11 @@ VALKEY_HOST=${valkey_host}
 VALKEY_PORT=${valkey_port}
 $([ -n "$valkey_pass" ] && echo "VALKEY_PASSWORD=${valkey_pass}" || echo "# VALKEY_PASSWORD=")
 
+# Encrypts connection credentials at rest (AES-256-GCM). Back it up: credentials
+# stored under a lost key cannot be recovered. To rotate, see
+# RUNTARA_CONNECTIONS_RETIRED_KEYS and \`runtara-server reencrypt-connections\`.
+RUNTARA_CONNECTIONS_ENCRYPTION_KEY=${credential_key}
+
 ${auth_lines}
 
 # Pre-built agent components plus direct workflow stdlib/runtime components
@@ -479,6 +500,7 @@ CONFEOF
 
     chmod 640 "$conf_file"
     info "Wrote ${conf_file}"
+    info "It holds the credential encryption key: back it up."
     if [ "$auth_provider" != "oidc" ]; then
         info "AUTH_PROVIDER=${auth_provider}: see docs/deployment/auth-modes.md"
     fi

@@ -129,6 +129,13 @@ stop_services() {
 
 start_server() {
     print_status "Starting runtara-server..."
+
+    # Credentials are always encrypted at rest. Without a key in the
+    # environment or .env, keep one under DATA_DIR so restarts can still read
+    # what earlier runs stored.
+    # shellcheck source=scripts/credential-key.sh
+    source "$(dirname "${BASH_SOURCE[0]}")/scripts/credential-key.sh"
+    ensure_credential_key "${DATA_DIR}/credential-encryption.key"
     print_status "  API + UI port:    ${SERVER_PORT}"
     print_status "  Core instance API: RUNTARA_CORE_INSTANCE_API=${CORE_INSTANCE_API} (test-only; port ${CORE_PORT} when enabled)"
 
@@ -206,6 +213,9 @@ usage() {
     echo "  OBJECT_MODEL_DATABASE_URL    Object model database (default: postgres://localhost/runtara_objects)"
     echo "  VALKEY_HOST / VALKEY_PORT    Valkey for checkpoint storage (default: 127.0.0.1:6379)"
     echo "  DATA_DIR                     Data directory (default: .data)"
+    echo "  RUNTARA_CONNECTIONS_ENCRYPTION_KEY"
+    echo "                               Credential encryption key, base64 32 bytes"
+    echo "                               (default: generated once into DATA_DIR/credential-encryption.key)"
     echo "  RUNTARA_CORE_INSTANCE_API    Serve Core's test-only HTTP instance API (default: false)"
     echo "  RUNTARA_CORE_HTTP_PORT       Port for that API, when served (default: 8003)"
     echo "  RUST_LOG                     Log level (default: runtara_*=info)"

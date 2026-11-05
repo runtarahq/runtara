@@ -106,6 +106,16 @@ volumes:
         vk_volume=""
     fi
 
+    # Credentials are always encrypted at rest. The key lives beside the
+    # compose file and is reused on every run, so re-running this installer
+    # doesn't lock the stored credentials away.
+    if [ ! -s "${dir}/runtara.env" ]; then
+        (umask 077 && printf 'RUNTARA_CONNECTIONS_ENCRYPTION_KEY=%s\n' \
+            "${RUNTARA_CONNECTIONS_ENCRYPTION_KEY:-$(head -c 32 /dev/urandom | base64)}" \
+            > "${dir}/runtara.env")
+        info "Wrote the credential encryption key to ${dir}/runtara.env (back it up)"
+    fi
+
     # init SQL
     cat > "${dir}/init-db.sql" <<'SQLEOF'
 -- Raw SQL (sql/execute, MCP execute_sql) runs as the object-model role, so it
@@ -193,6 +203,8 @@ $([ -n "$vk_volume" ] && printf '        volumes:\n            - %s\n' "$vk_volu
                 condition: service_healthy
             valkey:
                 condition: service_healthy
+        env_file:
+            - ./runtara.env
         environment:
             RUNTARA_SERVER_DATABASE_URL: postgres://runtara:runtara@postgres/runtara_server
             RUNTARA_DATABASE_URL: postgres://runtara:runtara@postgres/runtara
