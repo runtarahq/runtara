@@ -19,16 +19,16 @@
 //! }
 //! ```
 //!
-//! # Rollout / mixed state
+//! # Plaintext from before encryption was mandatory
 //!
-//! [`CredentialCipher::decrypt`] passes plaintext through unchanged when it
-//! does not recognize the envelope shape. This lets the system be deployed
-//! against existing plaintext data without a hard migration — new writes
-//! encrypt, old plaintext is returned as-is. Run
-//! `runtara-server reencrypt-connections` (which calls
-//! [`ConnectionRepository::reencrypt_all`]) to eagerly convert existing
-//! plaintext to ciphertext.
+//! [`CredentialCipher::decrypt`] refuses a value that is not an envelope.
+//! Rows stored as plaintext by older releases are encrypted when the server
+//! starts ([`ConnectionRepository::encrypt_plaintext`]) and by
+//! `runtara-server reencrypt-connections`
+//! ([`ConnectionRepository::reencrypt_all`]), which also moves envelopes to
+//! the current key.
 //!
+//! [`ConnectionRepository::encrypt_plaintext`]: crate::repository::connections::ConnectionRepository::encrypt_plaintext
 //! [`ConnectionRepository::reencrypt_all`]: crate::repository::connections::ConnectionRepository::reencrypt_all
 //!
 //! # Pluggable backends
@@ -48,7 +48,7 @@ pub mod tenant_keyed;
 
 pub use cipher::{
     BOUND_ENVELOPE_VERSION, CipherContext, CipherError, CredentialCipher, ENVELOPE_ALG,
-    ENVELOPE_VERSION,
+    ENVELOPE_VERSION, is_envelope,
 };
 pub use factory::{ENCRYPTION_KEY_ENV, cipher_from_env};
 pub use tenant_keyed::TenantKeyedCipher;

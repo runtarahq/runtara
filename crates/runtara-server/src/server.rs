@@ -590,6 +590,41 @@ fn credential_cipher(
     Ok(cipher)
 }
 
+/// Encrypt connection credentials still stored as plaintext. A row that
+/// cannot be sealed is logged and left as it is (unreadable until fixed), so
+/// one bad row does not keep every tenant from starting.
+async fn encrypt_plaintext_credentials(
+    pool: &PgPool,
+    cipher: Arc<dyn runtara_connections::CredentialCipher>,
+) {
+    let repository = runtara_connections::repository::connections::ConnectionRepository::new(
+        pool.clone(),
+        cipher,
+    );
+    match repository.encrypt_plaintext().await {
+        Ok(stats) if stats.scanned == 0 => {}
+        Ok(stats) => {
+            tracing::info!(
+                encrypted = stats.reencrypted,
+                failed = stats.failed,
+                "Encrypted connection credentials stored as plaintext"
+            );
+            if stats.failed > 0 {
+                tracing::error!(
+                    failed = stats.failed,
+                    "Some plaintext connection credentials could not be encrypted; \
+                     those connections fail until `runtara-server reencrypt-connections` succeeds"
+                );
+            }
+        }
+        Err(e) => tracing::error!(
+            error = %e,
+            "Could not encrypt plaintext connection credentials; \
+             run `runtara-server reencrypt-connections`"
+        ),
+    }
+}
+
 /// Readiness, as distinct from liveness: can this process actually validate the tokens it is
 /// about to be presented?
 ///
@@ -1256,6 +1291,9 @@ pub async fn start_with(
             std::process::exit(1);
         }
     };
+    // Releases before encryption was mandatory could store credentials as
+    // plaintext, which the cipher now refuses to read: seal them first.
+    encrypt_plaintext_credentials(&pool, cipher.clone()).await;
 
     // Used to build the OAuth callback redirect_uri. Production sets this
     // explicitly; for local dev, default it to the port THIS server actually

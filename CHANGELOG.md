@@ -673,13 +673,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with only a log line. A cipher supplied through
   `ServerOptions::credential_cipher` must encrypt too, for every tenant.
   `NoOpCipher` is now test-only (the `test-util` feature of
-  `runtara-connections`). To upgrade a deployment that ran without a key: set
-  one (`openssl rand -base64 32`) and back it up, since credentials stored
-  under a lost key cannot be recovered; restart; then run
-  `runtara-server reencrypt-connections` to encrypt the rows stored as
-  plaintext, which keep decrypting until then. `start.sh`, the evaluation
-  `docker-compose.yml`, the installers and the e2e scripts provision a key on
-  their own.
+  `runtara-connections`). Stored plaintext is no longer read as it is: the
+  AES-GCM cipher refuses a value that is not an envelope, so a credential
+  written straight into `connection_data_entity` is not trusted. Instead the
+  server encrypts any rows left as plaintext by earlier releases when it
+  starts (`ConnectionRepository::encrypt_plaintext`), and
+  `reencrypt-connections` converts them too. To upgrade a deployment that ran
+  without a key: set one (`openssl rand -base64 32`), back it up (credentials
+  stored under a lost key cannot be recovered) and restart. During a rolling
+  upgrade, a connection an old replica writes as plaintext fails on the new
+  ones until the next start or `reencrypt-connections`. `start.sh`, the
+  evaluation `docker-compose.yml`, the installers and the e2e scripts
+  provision a key on their own.
 
 - A warm compiler told to deflate deflates what it posts with its outcome (`compressed=deflate`), which the host inflates, bounded, before reading it: the workflow's code and its outcome shrink to about a fifth, so the call takes fewer round trips on a fresh connection.
 

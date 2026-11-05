@@ -383,9 +383,8 @@ write_config() {
         if ! grep -q '^RUNTARA_CONNECTIONS_ENCRYPTION_KEY=.' "$conf_file"; then
             warn "${conf_file} sets no RUNTARA_CONNECTIONS_ENCRYPTION_KEY."
             warn "runtara-server now refuses to start without one (credentials are always encrypted at rest)."
-            warn "Unless you supply it another way, add one and re-encrypt what is stored:"
+            warn "Unless you supply it another way, add one (the server encrypts stored plaintext on start):"
             warn "  echo \"RUNTARA_CONNECTIONS_ENCRYPTION_KEY=\$(openssl rand -base64 32)\" >> ${conf_file}"
-            warn "  runtara-server reencrypt-connections   # with the same environment as the service"
         fi
         return
     fi

@@ -75,10 +75,11 @@ pub trait CredentialCipher: Send + Sync {
     /// A fresh random nonce must be generated for every call — never reuse.
     fn encrypt(&self, plaintext: &Value, context: &CipherContext) -> Result<Value, CipherError>;
 
-    /// Decrypt an envelope JSON value. If the input is not a recognized
-    /// envelope (no `"v"` + `"alg"` fields), return it unchanged — this
-    /// supports the gradual-rollout workflow where existing rows are still
-    /// plaintext.
+    /// Decrypt an envelope JSON value. A value that is not an envelope (see
+    /// [`is_envelope`]) is an error for any cipher that encrypts: stored
+    /// plaintext is converted by
+    /// [`ConnectionRepository::encrypt_plaintext`](crate::repository::connections::ConnectionRepository::encrypt_plaintext),
+    /// never read as it is.
     fn decrypt(&self, stored: &Value, context: &CipherContext) -> Result<Value, CipherError>;
 
     /// Identifier for the key currently in use. Stored in the envelope's
@@ -103,8 +104,8 @@ pub trait CredentialCipher: Send + Sync {
 
 /// Returns `true` if `value` looks like one of our encrypted envelopes.
 ///
-/// Used by [`CredentialCipher::decrypt`] implementations to distinguish
-/// envelopes from plaintext during the rollout window.
+/// Used to find rows stored as plaintext before encryption was mandatory, so
+/// they can be encrypted; [`CredentialCipher::decrypt`] refuses them.
 pub fn is_envelope(value: &Value) -> bool {
     let Some(obj) = value.as_object() else {
         return false;

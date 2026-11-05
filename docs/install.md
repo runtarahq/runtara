@@ -132,8 +132,9 @@ file, unless you export your own first (`openssl rand -base64 32`). **Back it
 up**: credentials stored under a lost key cannot be recovered.
 
 An update keeps the existing config. If that config has no key, the installer
-warns: add one, restart, then run `runtara-server reencrypt-connections` with
-the service's environment to encrypt the credentials stored before. To rotate,
+warns: add one and restart. On start the server encrypts the credentials an
+earlier release stored as plaintext (`runtara-server reencrypt-connections`,
+run with the service's environment, does the same by hand). To rotate,
 set the new key (and `RUNTARA_CONNECTIONS_ENCRYPTION_KEY_ID`), list the old one
 in `RUNTARA_CONNECTIONS_RETIRED_KEYS` (`kid:base64,…`), re-encrypt, then drop
 it.

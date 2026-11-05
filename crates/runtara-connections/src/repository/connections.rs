@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::crypto::{CipherContext, CredentialCipher};
+use crate::crypto::{CipherContext, CredentialCipher, is_envelope};
 use crate::types::*;
 use sqlx::PgPool;
 
@@ -68,8 +68,7 @@ impl ConnectionRepository {
 
     /// Decrypt connection parameters after retrieval. `None` in → `None` out.
     ///
-    /// Plaintext values (e.g., rows written before encryption was enabled)
-    /// pass through unchanged — the cipher handles the envelope check.
+    /// A plaintext value is an error: see [`Self::encrypt_plaintext`].
     fn unseal(
         &self,
         tenant_id: &str,
@@ -1116,21 +1115,45 @@ impl ConnectionRepository {
         &self,
         tenant_id: Option<&str>,
     ) -> Result<ReencryptionStats, sqlx::Error> {
-        // Stream all rows with non-null parameters. We process row-by-row to
-        // keep memory flat on large deployments.
+        self.reencrypt_rows(tenant_id, false).await
+    }
+
+    /// Encrypt every row still stored as plaintext, across all tenants,
+    /// leaving envelopes untouched. Run at server start: releases before
+    /// encryption was mandatory could store credentials as plaintext, and
+    /// [`CredentialCipher::decrypt`] refuses to read them. Cheap when there
+    /// is nothing to do, because the database picks out the plaintext rows.
+    pub async fn encrypt_plaintext(&self) -> Result<ReencryptionStats, sqlx::Error> {
+        self.reencrypt_rows(None, true).await
+    }
+
+    async fn reencrypt_rows(
+        &self,
+        tenant_id: Option<&str>,
+        plaintext_only: bool,
+    ) -> Result<ReencryptionStats, sqlx::Error> {
+        // The same shape test as `is_envelope`, so only plaintext rows are
+        // loaded. COALESCE because a missing key makes the test NULL, not false.
+        const PLAINTEXT_ONLY: &str = " AND NOT COALESCE(\
+             jsonb_typeof(connection_parameters) = 'object' \
+             AND jsonb_typeof(connection_parameters->'v') = 'number' \
+             AND jsonb_typeof(connection_parameters->'alg') = 'string' \
+             AND jsonb_typeof(connection_parameters->'nonce') = 'string' \
+             AND jsonb_typeof(connection_parameters->'ct') = 'string', false)";
+        let filter = if plaintext_only { PLAINTEXT_ONLY } else { "" };
         let rows: Vec<(String, String, Option<serde_json::Value>)> = if let Some(tid) = tenant_id {
-            sqlx::query_as(
+            sqlx::query_as(&format!(
                 "SELECT id, tenant_id, connection_parameters FROM connection_data_entity \
-                 WHERE tenant_id = $1 AND connection_parameters IS NOT NULL",
-            )
+                 WHERE tenant_id = $1 AND connection_parameters IS NOT NULL{filter}"
+            ))
             .bind(tid)
             .fetch_all(&self.pool)
             .await?
         } else {
-            sqlx::query_as(
+            sqlx::query_as(&format!(
                 "SELECT id, tenant_id, connection_parameters FROM connection_data_entity \
-                 WHERE connection_parameters IS NOT NULL",
-            )
+                 WHERE connection_parameters IS NOT NULL{filter}"
+            ))
             .fetch_all(&self.pool)
             .await?
         };
@@ -1147,22 +1170,32 @@ impl ConnectionRepository {
                 stats.unchanged += 1;
                 continue;
             };
-            // Decrypt (or passthrough if plaintext), then encrypt with the current cipher.
+            let stored_plaintext = !is_envelope(&stored_value);
+            if plaintext_only && !stored_plaintext {
+                stats.unchanged += 1;
+                continue;
+            }
             let context = CipherContext {
                 tenant_id: &tid,
                 connection_id: &id,
             };
-            let plaintext = match self.cipher.decrypt(&stored_value, &context) {
-                Ok(v) => v,
-                Err(e) => {
-                    stats.failed += 1;
-                    tracing::error!(
-                        connection_id = %id,
-                        tenant_id = %tid,
-                        error = %e,
-                        "reencrypt_all: decrypt failed, skipping row"
-                    );
-                    continue;
+            // Plaintext is the one thing `decrypt` refuses; this is where it
+            // gets converted.
+            let plaintext = if stored_plaintext {
+                stored_value.clone()
+            } else {
+                match self.cipher.decrypt(&stored_value, &context) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        stats.failed += 1;
+                        tracing::error!(
+                            connection_id = %id,
+                            tenant_id = %tid,
+                            error = %e,
+                            "reencrypt: decrypt failed, skipping row"
+                        );
+                        continue;
+                    }
                 }
             };
             let new_envelope = match self.cipher.encrypt(&plaintext, &context) {
@@ -1173,21 +1206,29 @@ impl ConnectionRepository {
                         connection_id = %id,
                         tenant_id = %tid,
                         error = %e,
-                        "reencrypt_all: encrypt failed, skipping row"
+                        "reencrypt: encrypt failed, skipping row"
                     );
                     continue;
                 }
             };
-            sqlx::query(
+            // Only overwrite the value that was read: a concurrent writer (or
+            // another replica doing the same at boot) wins, and its row is
+            // already sealed.
+            let updated = sqlx::query(
                 "UPDATE connection_data_entity SET connection_parameters = $3 \
-                 WHERE id = $1 AND tenant_id = $2",
+                 WHERE id = $1 AND tenant_id = $2 AND connection_parameters = $4",
             )
             .bind(&id)
             .bind(&tid)
             .bind(&new_envelope)
+            .bind(&stored_value)
             .execute(&self.pool)
             .await?;
-            stats.reencrypted += 1;
+            if updated.rows_affected() == 0 {
+                stats.unchanged += 1;
+            } else {
+                stats.reencrypted += 1;
+            }
         }
 
         Ok(stats)
