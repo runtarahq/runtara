@@ -17,6 +17,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# runtara-server needs a credential encryption key; a throwaway one per run.
+# shellcheck source=../scripts/credential-key.sh
+source "${PROJECT_ROOT}/scripts/credential-key.sh"
+ensure_credential_key
 SUITES=("$@")
 [ ${#SUITES[@]} -gt 0 ] || SUITES=(workflow_agent_parity child_run_fan_out child_run_deadline)
 

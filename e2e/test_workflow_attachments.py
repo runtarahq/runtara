@@ -161,6 +161,8 @@ def main():
     env = os.environ.copy()
     # Never read the workspace .env; the server runs from the isolated directory.
     env.update({"POSTGRES_PASSWORD": secrets.token_hex(24)})
+    # runtara-server refuses to start without a credential encryption key.
+    env.setdefault("RUNTARA_CONNECTIONS_ENCRYPTION_KEY", base64.b64encode(os.urandom(32)).decode())
     try:
         subprocess.run(["docker", "run", "--rm", "-d", "--name", container, "-p", "127.0.0.1::5432", "-e", "POSTGRES_PASSWORD", "pgvector/pgvector:pg18"], env=env, check=True, stdout=subprocess.DEVNULL)
         port = subprocess.check_output(["docker", "port", container, "5432"], text=True).strip().rsplit(":", 1)[1]
