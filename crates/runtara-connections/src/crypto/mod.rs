@@ -40,6 +40,9 @@
 pub mod aes_gcm;
 pub mod cipher;
 pub mod factory;
+/// Plaintext passthrough for tests only. Production builds cannot construct
+/// it: credentials are always encrypted at rest.
+#[cfg(any(test, feature = "test-util"))]
 pub mod noop;
 pub mod tenant_keyed;
 

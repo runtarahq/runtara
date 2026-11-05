@@ -13,6 +13,9 @@ categories = ["web-programming"]
 [features]
 default = []
 utoipa = ["dep:utoipa"]
+# Exposes `crypto::noop::NoOpCipher`, a plaintext passthrough, to dependents'
+# tests. Enable it only from `[dev-dependencies]`, never for a production build.
+test-util = []
 
 [dependencies]
 # Database
@@ -69,6 +72,8 @@ runtara-agents = { path = "../runtara-agents", default-features = false }
 utoipa = { version = "5", optional = true }
 
 [dev-dependencies]
+# Integration tests under tests/ build the library without cfg(test).
+runtara-connections = { path = ".", features = ["test-util"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
 testcontainers = "0.27"

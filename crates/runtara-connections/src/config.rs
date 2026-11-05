@@ -36,8 +36,9 @@ pub struct ConnectionsConfig {
 
     /// Cipher for at-rest encryption of `connection_parameters`.
     ///
-    /// Typically constructed via [`crate::crypto::cipher_from_env`]. Use
-    /// [`crate::crypto::noop::NoOpCipher`] for local development only.
+    /// Typically constructed via [`crate::crypto::cipher_from_env`]. Must
+    /// encrypt: the server refuses to start with a cipher whose
+    /// [`CredentialCipher::is_encrypting`] is false.
     pub cipher: Arc<dyn CredentialCipher>,
 
     /// Maps each `default_for` bucket (agent id, or virtual platform

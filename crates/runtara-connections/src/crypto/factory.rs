@@ -11,7 +11,6 @@ use zeroize::Zeroizing;
 
 use super::aes_gcm::AesGcmCipher;
 use super::cipher::CredentialCipher;
-use super::noop::NoOpCipher;
 
 /// Name of the environment variable that supplies the AES-256 data key.
 ///
@@ -26,74 +25,29 @@ pub const ENCRYPTION_KEY_ENV: &str = "RUNTARA_CONNECTIONS_ENCRYPTION_KEY";
 /// Defaults to `"env"`.
 pub const ENCRYPTION_KEY_ID_ENV: &str = "RUNTARA_CONNECTIONS_ENCRYPTION_KEY_ID";
 
-/// When set to a truthy value (`true`/`1`/`yes`/`on`, case-insensitive),
-/// [`cipher_from_env`] refuses to fall back to [`NoOpCipher`] and returns an
-/// error instead — plaintext-at-rest becomes a boot failure rather than a
-/// log line.
 /// Retired keys that still decrypt (`kid:base64,kid:base64`), kept until
 /// `runtara-server reencrypt-connections` has moved every credential to the
 /// current key.
 pub const RETIRED_KEYS_ENV: &str = "RUNTARA_CONNECTIONS_RETIRED_KEYS";
 
-pub const REQUIRE_ENCRYPTION_ENV: &str = "RUNTARA_REQUIRE_CREDENTIAL_ENCRYPTION";
-
-/// Deployment-environment signal this crate understands. `RUNTARA_ENV=production`
-/// implies the same requirement as [`REQUIRE_ENCRYPTION_ENV`] — a deployment that
-/// has already declared itself production shouldn't need a second opt-in to
-/// refuse plaintext credential storage.
-pub const DEPLOYMENT_ENV_VAR: &str = "RUNTARA_ENV";
-
-/// Whether a missing/invalid encryption key should hard-fail [`cipher_from_env`]
-/// instead of falling back to [`NoOpCipher`].
-fn encryption_is_required() -> bool {
-    let explicitly_required = std::env::var(REQUIRE_ENCRYPTION_ENV)
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "true" | "1" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false);
-
-    let is_production = std::env::var(DEPLOYMENT_ENV_VAR)
-        .map(|v| v.trim().eq_ignore_ascii_case("production"))
-        .unwrap_or(false);
-
-    explicitly_required || is_production
-}
-
 /// Build a cipher by reading [`ENCRYPTION_KEY_ENV`].
 ///
-/// Returns:
-/// - `Ok(`[`AesGcmCipher`]`)` if the env var is set and valid
-/// - `Ok(`[`NoOpCipher`]`)` with a prominent warning log if the key is missing or
-///   invalid and encryption isn't required (the default — local/dev deployments
-///   without the key configured keep working, just with plaintext at rest)
-/// - `Err` if the key is missing or invalid *and* [`REQUIRE_ENCRYPTION_ENV`] or
-///   `RUNTARA_ENV=production` is set — the caller is expected to hard-fail
-///   startup rather than silently store credentials in cleartext
+/// Connection parameters are always encrypted at rest: there is no plaintext
+/// fallback. Returns:
+/// - `Ok(`[`AesGcmCipher`]`)` if the env var is set and valid (plus any
+///   [`RETIRED_KEYS_ENV`] keys, which still decrypt)
+/// - `Err` if the key is missing, empty or invalid, or a retired key is
+///   malformed. The caller is expected to refuse to start.
 pub fn cipher_from_env() -> Result<Arc<dyn CredentialCipher>, String> {
-    let required = encryption_is_required();
-
     let key_b64 = match std::env::var(ENCRYPTION_KEY_ENV) {
         Ok(v) if !v.trim().is_empty() => v,
         _ => {
-            if required {
-                return Err(format!(
-                    "Connection parameter encryption is required ({} or {}=production is \
-                     set) but {} is not set. Set it to a base64-encoded 32-byte key \
-                     (openssl rand -base64 32).",
-                    REQUIRE_ENCRYPTION_ENV, DEPLOYMENT_ENV_VAR, ENCRYPTION_KEY_ENV,
-                ));
-            }
-            tracing::warn!(
-                env_var = ENCRYPTION_KEY_ENV,
-                "Connection parameter encryption DISABLED — env var not set. \
-                 Credentials will be stored as plaintext in the database. \
-                 Set {} to a base64-encoded 32-byte key to enable AES-256-GCM.",
-                ENCRYPTION_KEY_ENV,
-            );
-            return Ok(Arc::new(NoOpCipher));
+            return Err(format!(
+                "{ENCRYPTION_KEY_ENV} is not set. Connection credentials are always \
+                 encrypted at rest; set it to a base64-encoded 32-byte key \
+                 (openssl rand -base64 32) and keep a backup of it — credentials \
+                 stored under a lost key cannot be recovered."
+            ));
         }
     };
 
@@ -102,47 +56,29 @@ pub fn cipher_from_env() -> Result<Arc<dyn CredentialCipher>, String> {
     let key_material = Zeroizing::new(key_b64);
     let key_id = std::env::var(ENCRYPTION_KEY_ID_ENV).unwrap_or_else(|_| "env".to_string());
 
-    let built = AesGcmCipher::from_base64_key(&key_material, &key_id).and_then(|cipher| {
-        let retired = Zeroizing::new(std::env::var(RETIRED_KEYS_ENV).unwrap_or_default());
-        retired
-            .split(',')
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .try_fold(cipher, |cipher, entry| {
-                let (retired_id, retired_key) = entry.split_once(':').ok_or_else(|| {
-                    super::cipher::CipherError::InvalidKey(format!(
-                        "{RETIRED_KEYS_ENV} entries are kid:base64"
-                    ))
-                })?;
-                cipher.with_retired_base64_key(retired_key, retired_id)
-            })
-    });
-    match built {
-        Ok(cipher) => {
-            tracing::info!(
-                key_id = %key_id,
-                "Connection parameter encryption ENABLED (AES-256-GCM)"
-            );
-            Ok(Arc::new(cipher))
-        }
-        Err(e) => {
-            if required {
-                return Err(format!(
-                    "Connection parameter encryption is required ({} or {}=production is \
-                     set) but {} is invalid: {}",
-                    REQUIRE_ENCRYPTION_ENV, DEPLOYMENT_ENV_VAR, ENCRYPTION_KEY_ENV, e,
-                ));
-            }
-            tracing::error!(
-                env_var = ENCRYPTION_KEY_ENV,
-                error = %e,
-                "Failed to initialize AES-GCM cipher from {}; falling back to NO-OP (plaintext at rest). \
-                 This is a MISCONFIGURATION — fix the key and restart.",
-                ENCRYPTION_KEY_ENV,
-            );
-            Ok(Arc::new(NoOpCipher))
-        }
-    }
+    let cipher = AesGcmCipher::from_base64_key(&key_material, &key_id)
+        .and_then(|cipher| {
+            let retired = Zeroizing::new(std::env::var(RETIRED_KEYS_ENV).unwrap_or_default());
+            retired
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .try_fold(cipher, |cipher, entry| {
+                    let (retired_id, retired_key) = entry.split_once(':').ok_or_else(|| {
+                        super::cipher::CipherError::InvalidKey(format!(
+                            "{RETIRED_KEYS_ENV} entries are kid:base64"
+                        ))
+                    })?;
+                    cipher.with_retired_base64_key(retired_key, retired_id)
+                })
+        })
+        .map_err(|e| format!("{ENCRYPTION_KEY_ENV} is invalid: {e}"))?;
+
+    tracing::info!(
+        key_id = %key_id,
+        "Connection parameter encryption ENABLED (AES-256-GCM)"
+    );
+    Ok(Arc::new(cipher))
 }
 
 #[cfg(test)]
@@ -154,87 +90,38 @@ mod tests {
     /// Serialize env-var tests so parallel execution doesn't race on the same var.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// Sets (or clears, for `None`) all four env vars this module reads, runs
-    /// `f`, then clears all four again — so a test that sets
-    /// `REQUIRE_ENCRYPTION_ENV`/`DEPLOYMENT_ENV_VAR` can't leak into a later
-    /// test that doesn't go through this helper for them.
+    /// Sets (or clears, for `None`) every env var this module reads, runs
+    /// `f`, then clears them all again so nothing leaks into a later test.
     fn with_env<T>(
         key: Option<&str>,
         key_id: Option<&str>,
-        require_encryption: Option<&str>,
-        deployment_env: Option<&str>,
+        retired: Option<&str>,
         f: impl FnOnce() -> T,
     ) -> T {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let vars = [
+            (ENCRYPTION_KEY_ENV, key),
+            (ENCRYPTION_KEY_ID_ENV, key_id),
+            (RETIRED_KEYS_ENV, retired),
+        ];
         // SAFETY: protected by ENV_LOCK. Tests that touch env vars are serialized.
         unsafe {
-            match key {
-                Some(v) => std::env::set_var(ENCRYPTION_KEY_ENV, v),
-                None => std::env::remove_var(ENCRYPTION_KEY_ENV),
-            }
-            match key_id {
-                Some(v) => std::env::set_var(ENCRYPTION_KEY_ID_ENV, v),
-                None => std::env::remove_var(ENCRYPTION_KEY_ID_ENV),
-            }
-            match require_encryption {
-                Some(v) => std::env::set_var(REQUIRE_ENCRYPTION_ENV, v),
-                None => std::env::remove_var(REQUIRE_ENCRYPTION_ENV),
-            }
-            match deployment_env {
-                Some(v) => std::env::set_var(DEPLOYMENT_ENV_VAR, v),
-                None => std::env::remove_var(DEPLOYMENT_ENV_VAR),
+            for (name, value) in vars {
+                match value {
+                    Some(v) => std::env::set_var(name, v),
+                    None => std::env::remove_var(name),
+                }
             }
         }
         let result = f();
         // SAFETY: same as above.
         unsafe {
-            std::env::remove_var(ENCRYPTION_KEY_ENV);
-            std::env::remove_var(ENCRYPTION_KEY_ID_ENV);
-            std::env::remove_var(REQUIRE_ENCRYPTION_ENV);
-            std::env::remove_var(DEPLOYMENT_ENV_VAR);
+            for (name, _) in vars {
+                std::env::remove_var(name);
+            }
         }
         result
     }
-
-    #[test]
-    fn falls_back_to_noop_when_env_missing() {
-        with_env(None, None, None, None, || {
-            let cipher = cipher_from_env().expect("not required, so this can't fail");
-            assert!(!cipher.is_encrypting());
-            assert_eq!(cipher.key_id(), "noop");
-        });
-    }
-
-    #[test]
-    fn falls_back_to_noop_on_empty_env() {
-        with_env(Some(""), None, None, None, || {
-            let cipher = cipher_from_env().expect("not required, so this can't fail");
-            assert!(!cipher.is_encrypting());
-        });
-    }
-
-    #[test]
-    fn enables_aes_gcm_with_valid_key() {
-        let key = BASE64.encode(vec![0u8; 32]);
-        with_env(Some(&key), Some("prod-1"), None, None, || {
-            let cipher = cipher_from_env().expect("valid key always succeeds");
-            assert!(cipher.is_encrypting());
-            assert_eq!(cipher.key_id(), "prod-1");
-        });
-    }
-
-    #[test]
-    fn falls_back_to_noop_on_invalid_key_material() {
-        with_env(Some("not-valid-base64!!!!"), None, None, None, || {
-            let cipher = cipher_from_env().expect("not required, so this can't fail");
-            assert!(!cipher.is_encrypting());
-        });
-    }
-
-    // Regression coverage for the silent-plaintext-fallback gap (SYN-461): a
-    // deployment that has opted into requiring encryption — explicitly, or by
-    // declaring itself production — must fail to boot rather than quietly
-    // store credentials in cleartext.
 
     /// `Result::expect_err` needs `T: Debug`, which `Arc<dyn CredentialCipher>`
     /// doesn't implement — sensibly, for a type that can hold raw key
@@ -246,50 +133,85 @@ mod tests {
         }
     }
 
+    // There is no plaintext fallback: a missing or bad key must stop the
+    // process from starting rather than store credentials in cleartext.
+
     #[test]
-    fn hard_fails_when_required_and_key_missing() {
-        with_env(None, None, Some("true"), None, || {
-            let err = expect_err(cipher_from_env(), "required + missing key must fail");
-            assert!(err.contains(REQUIRE_ENCRYPTION_ENV), "{err}");
+    fn fails_when_key_missing() {
+        with_env(None, None, None, || {
+            let err = expect_err(cipher_from_env(), "missing key must fail");
             assert!(err.contains(ENCRYPTION_KEY_ENV), "{err}");
         });
     }
 
     #[test]
-    fn hard_fails_when_required_and_key_invalid() {
-        with_env(Some("not-valid-base64!!!!"), None, Some("1"), None, || {
-            let err = expect_err(cipher_from_env(), "required + invalid key must fail");
+    fn fails_when_key_empty() {
+        with_env(Some("   "), None, None, || {
+            let err = expect_err(cipher_from_env(), "blank key must fail");
             assert!(err.contains(ENCRYPTION_KEY_ENV), "{err}");
         });
     }
 
     #[test]
-    fn production_deployment_env_requires_encryption_without_explicit_flag() {
-        with_env(None, None, None, Some("production"), || {
-            let err = expect_err(
-                cipher_from_env(),
-                "RUNTARA_ENV=production must require encryption",
-            );
-            assert!(err.contains(DEPLOYMENT_ENV_VAR), "{err}");
+    fn fails_on_invalid_key_material() {
+        with_env(Some("not-valid-base64!!!!"), None, None, || {
+            let err = expect_err(cipher_from_env(), "invalid key must fail");
+            assert!(err.contains(ENCRYPTION_KEY_ENV), "{err}");
         });
     }
 
     #[test]
-    fn non_production_deployment_env_does_not_require_encryption() {
-        with_env(None, None, None, Some("development"), || {
-            let cipher =
-                cipher_from_env().expect("non-production RUNTARA_ENV must not require encryption");
-            assert!(!cipher.is_encrypting());
+    fn fails_on_wrong_key_length() {
+        let short = BASE64.encode(vec![0u8; 16]);
+        with_env(Some(&short), None, None, || {
+            expect_err(cipher_from_env(), "a 16-byte key must fail");
         });
     }
 
     #[test]
-    fn required_flag_does_not_block_a_valid_key() {
+    fn fails_on_malformed_retired_key() {
         let key = BASE64.encode(vec![0u8; 32]);
-        with_env(Some(&key), Some("prod-1"), Some("true"), None, || {
-            let cipher = cipher_from_env().expect("a valid key satisfies the requirement");
+        with_env(Some(&key), None, Some("no-colon-here"), || {
+            let err = expect_err(cipher_from_env(), "malformed retired key must fail");
+            assert!(err.contains(RETIRED_KEYS_ENV), "{err}");
+        });
+    }
+
+    #[test]
+    fn enables_aes_gcm_with_valid_key() {
+        let key = BASE64.encode(vec![0u8; 32]);
+        with_env(Some(&key), Some("prod-1"), None, || {
+            let cipher = cipher_from_env().expect("valid key always succeeds");
             assert!(cipher.is_encrypting());
             assert_eq!(cipher.key_id(), "prod-1");
         });
+    }
+
+    #[test]
+    fn defaults_key_id_to_env() {
+        let key = BASE64.encode(vec![0u8; 32]);
+        with_env(Some(&key), None, None, || {
+            let cipher = cipher_from_env().expect("valid key always succeeds");
+            assert_eq!(cipher.key_id(), "env");
+        });
+    }
+
+    /// Variables from the removed opt-in no longer bring the fallback back.
+    #[test]
+    fn legacy_opt_out_variables_do_not_disable_encryption() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: protected by ENV_LOCK.
+        unsafe {
+            std::env::remove_var(ENCRYPTION_KEY_ENV);
+            std::env::set_var("RUNTARA_REQUIRE_CREDENTIAL_ENCRYPTION", "false");
+            std::env::set_var("RUNTARA_ENV", "development");
+        }
+        let result = cipher_from_env();
+        // SAFETY: same as above.
+        unsafe {
+            std::env::remove_var("RUNTARA_REQUIRE_CREDENTIAL_ENCRYPTION");
+            std::env::remove_var("RUNTARA_ENV");
+        }
+        expect_err(result, "no variable may opt back into plaintext");
     }
 }
