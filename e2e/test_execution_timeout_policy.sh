@@ -19,6 +19,10 @@ fail() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# runtara-server needs a credential encryption key; a throwaway one per run.
+# shellcheck source=../scripts/credential-key.sh
+source "${PROJECT_ROOT}/scripts/credential-key.sh"
+ensure_credential_key
 
 POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
 POSTGRES_PORT="${POSTGRES_PORT:-5432}"

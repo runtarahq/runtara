@@ -1,9 +1,9 @@
-//! Passthrough cipher used when encryption is not configured.
+//! Passthrough cipher for tests.
 //!
-//! This is **not secure** and is only appropriate for local development or
-//! the initial rollout window before a key is provisioned.
-//! [`crate::crypto::factory::cipher_from_env`] emits a warning log when it
-//! falls back to this cipher so misconfigurations are visible.
+//! Stores credentials as plaintext, so it is compiled only for this crate's
+//! tests and for dependents that enable the `test-util` feature (as a
+//! dev-dependency). Production code has no way to build one, and
+//! [`crate::crypto::factory::cipher_from_env`] never returns one.
 
 use serde_json::Value;
 

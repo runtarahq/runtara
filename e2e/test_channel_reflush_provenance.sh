@@ -39,6 +39,10 @@ set -euo pipefail
 RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# runtara-server needs a credential encryption key; a throwaway one per run.
+# shellcheck source=../scripts/credential-key.sh
+source "${PROJECT_ROOT}/scripts/credential-key.sh"
+ensure_credential_key
 
 POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
 POSTGRES_PORT="${POSTGRES_PORT:-5432}"

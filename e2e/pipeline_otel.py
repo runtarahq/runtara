@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise real admission, launch, runner and step instrumentation over OTLP."""
+import base64
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,8 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS = Path(tempfile.mkdtemp(prefix="runtara-otel-e2e-"))
 ENV = os.environ.copy()
+# runtara-server refuses to start without a credential encryption key.
+ENV.setdefault("RUNTARA_CONNECTIONS_ENCRYPTION_KEY", base64.b64encode(os.urandom(32)).decode())
 ENV.setdefault("PGHOST", "127.0.0.1")
 ENV.setdefault("PGPORT", "5432")
 ENV.setdefault("PGUSER", "postgres")

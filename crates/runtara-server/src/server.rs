@@ -557,22 +557,72 @@ struct HealthResponse {
     status: String,
     version: String,
     commit: String,
-    /// Whether `connection_parameters` are actually encrypted at rest, or
-    /// running on the plaintext `NoOpCipher` fallback. `false` here is
-    /// expected in local/dev; an operator dashboard alerting on this in a
-    /// production environment is the readiness surface this was missing —
-    /// `is_encryption_enabled()` was previously only checked internally by
-    /// the re-encryption maintenance job.
-    encryption_enabled: bool,
 }
 
-async fn health_handler(encryption_enabled: bool) -> Json<HealthResponse> {
+/// Liveness. Public and unauthenticated, so it must not describe how the
+/// deployment is configured.
+async fn health_handler() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "healthy".to_string(),
         version: env!("BUILD_VERSION").to_string(),
         commit: env!("BUILD_COMMIT").to_string(),
-        encryption_enabled,
     })
+}
+
+/// The cipher that seals connection credentials: the host's, else the AES-GCM
+/// keyring from `RUNTARA_CONNECTIONS_ENCRYPTION_KEY`. Credentials are always
+/// encrypted at rest, so a cipher that would store plaintext — a host's, or
+/// a per-tenant keyring with a tenant left unencrypted — is an error too.
+fn credential_cipher(
+    supplied: Option<Arc<dyn runtara_connections::CredentialCipher>>,
+) -> Result<Arc<dyn runtara_connections::CredentialCipher>, String> {
+    let cipher = match supplied {
+        Some(cipher) => cipher,
+        None => runtara_connections::cipher_from_env()?,
+    };
+    if !cipher.is_encrypting() {
+        return Err(
+            "The credential cipher does not encrypt. Connection credentials must be \
+             encrypted at rest; supply a cipher that encrypts for every tenant."
+                .to_string(),
+        );
+    }
+    Ok(cipher)
+}
+
+/// Encrypt connection credentials still stored as plaintext. A row that
+/// cannot be sealed is logged and left as it is (unreadable until fixed), so
+/// one bad row does not keep every tenant from starting.
+async fn encrypt_plaintext_credentials(
+    pool: &PgPool,
+    cipher: Arc<dyn runtara_connections::CredentialCipher>,
+) {
+    let repository = runtara_connections::repository::connections::ConnectionRepository::new(
+        pool.clone(),
+        cipher,
+    );
+    match repository.encrypt_plaintext().await {
+        Ok(stats) if stats.scanned == 0 => {}
+        Ok(stats) => {
+            tracing::info!(
+                encrypted = stats.reencrypted,
+                failed = stats.failed,
+                "Encrypted connection credentials stored as plaintext"
+            );
+            if stats.failed > 0 {
+                tracing::error!(
+                    failed = stats.failed,
+                    "Some plaintext connection credentials could not be encrypted; \
+                     those connections fail until `runtara-server reencrypt-connections` succeeds"
+                );
+            }
+        }
+        Err(e) => tracing::error!(
+            error = %e,
+            "Could not encrypt plaintext connection credentials; \
+             run `runtara-server reencrypt-connections`"
+        ),
+    }
 }
 
 /// Readiness, as distinct from liveness: can this process actually validate the tokens it is
@@ -1233,25 +1283,17 @@ pub async fn start_with(
         }
     }
 
-    // Cipher is built from RUNTARA_CONNECTIONS_ENCRYPTION_KEY env var — falls back to
-    // NoOp (plaintext at rest) with a loud warning if missing, unless
-    // RUNTARA_REQUIRE_CREDENTIAL_ENCRYPTION or RUNTARA_ENV=production is set, in which
-    // case a missing/invalid key hard-fails startup instead of silently degrading. See
-    // runtara_connections::crypto::cipher_from_env for details.
-    let cipher = match options.credential_cipher.clone() {
-        Some(cipher) => cipher,
-        None => match runtara_connections::cipher_from_env() {
-            Ok(cipher) => cipher,
-            Err(e) => {
-                eprintln!("❌ {}", e);
-                std::process::exit(1);
-            }
-        },
+    // Credentials are always encrypted at rest: no key, no server.
+    let cipher = match credential_cipher(options.credential_cipher.clone()) {
+        Ok(cipher) => cipher,
+        Err(e) => {
+            eprintln!("❌ {}", e);
+            std::process::exit(1);
+        }
     };
-    // Fixed for the process lifetime — captured here for the `/health` readiness
-    // response rather than threading connections-crate state through the public
-    // router just for this one field.
-    let encryption_enabled = cipher.is_encrypting();
+    // Releases before encryption was mandatory could store credentials as
+    // plaintext, which the cipher now refuses to read: seal them first.
+    encrypt_plaintext_credentials(&pool, cipher.clone()).await;
 
     // Used to build the OAuth callback redirect_uri. Production sets this
     // explicitly; for local dev, default it to the port THIS server actually
@@ -2673,10 +2715,7 @@ pub async fn start_with(
     // Create router for public/global endpoints (no tenant auth required)
     let readiness_providers = auth_providers.clone();
     let public_routes = Router::new()
-        .route(
-            "/health",
-            get(move || async move { health_handler(encryption_enabled).await }),
-        )
+        .route("/health", get(health_handler))
         .route(
             "/ready",
             get(move || {
@@ -3213,20 +3252,54 @@ pub(crate) async fn run_server_migrations(pool: &PgPool) -> Result<(), Box<dyn s
 mod health_handler_tests {
     use super::*;
 
-    /// The readiness gap this closes: `is_encryption_enabled()` existed but was
-    /// only ever checked internally by the re-encryption maintenance job, so
-    /// there was no way to observe encryption status from outside the process.
-    /// This exercises `health_handler` directly rather than through the full
-    /// router — it's a plain function, so no need for the `Router` +
-    /// `tower::ServiceExt::oneshot` machinery the auth/entitlement middleware
-    /// tests use for testing actual route composition.
+    /// `/health` is unauthenticated: it says the process is up and which
+    /// build it is, and nothing about how the deployment is configured.
     #[tokio::test]
-    async fn reports_the_encryption_state_it_was_given() {
-        let Json(resp) = health_handler(true).await;
-        assert_eq!(resp.status, "healthy");
-        assert!(resp.encryption_enabled);
+    async fn reports_liveness_and_build_only() {
+        let Json(resp) = health_handler().await;
+        let body = serde_json::to_value(&resp).expect("serializes");
+        let mut keys: Vec<_> = body.as_object().expect("object").keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, ["commit", "status", "version"]);
+        assert_eq!(body["status"], "healthy");
+    }
+}
 
-        let Json(resp) = health_handler(false).await;
-        assert!(!resp.encryption_enabled);
+#[cfg(test)]
+mod credential_cipher_tests {
+    use super::*;
+    use runtara_connections::crypto::aes_gcm::AesGcmCipher;
+    use runtara_connections::crypto::noop::NoOpCipher;
+
+    fn expect_err(
+        result: Result<Arc<dyn runtara_connections::CredentialCipher>, String>,
+    ) -> String {
+        match result {
+            Err(e) => e,
+            Ok(_) => panic!("a plaintext cipher must be refused"),
+        }
+    }
+
+    #[test]
+    fn refuses_a_supplied_plaintext_cipher() {
+        let err = expect_err(credential_cipher(Some(Arc::new(NoOpCipher))));
+        assert!(err.contains("does not encrypt"), "{err}");
+    }
+
+    #[test]
+    fn refuses_a_tenant_keyring_with_an_unencrypted_default() {
+        let keyring = runtara_connections::TenantKeyedCipher::new(Arc::new(NoOpCipher));
+        expect_err(credential_cipher(Some(Arc::new(keyring))));
+    }
+
+    #[test]
+    fn accepts_a_supplied_encrypting_cipher() {
+        // 32 zero bytes, base64.
+        let cipher =
+            AesGcmCipher::from_base64_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "host")
+                .expect("valid key");
+        let resolved =
+            credential_cipher(Some(Arc::new(cipher))).expect("encrypting cipher is accepted");
+        assert_eq!(resolved.key_id(), "host");
     }
 }

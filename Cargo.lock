@@ -4785,6 +4785,7 @@ dependencies = [
  "redis",
  "reqwest 0.12.28",
  "runtara-agents",
+ "runtara-connections",
  "runtara-dsl",
  "serde",
  "serde_json",

@@ -37,6 +37,10 @@ NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# runtara-server needs a credential encryption key; a throwaway one per run.
+# shellcheck source=../scripts/credential-key.sh
+source "${PROJECT_ROOT}/scripts/credential-key.sh"
+ensure_credential_key
 
 # Postgres / Valkey defaults (override via env when running outside the dev compose).
 POSTGRES_HOST="${POSTGRES_HOST:-localhost}"

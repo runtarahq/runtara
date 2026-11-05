@@ -146,8 +146,14 @@ To run the full application server directly:
 export RUNTARA_DATABASE_URL=postgres://localhost/runtara
 export OBJECT_MODEL_DATABASE_URL=postgres://localhost/runtara_object_model
 export VALKEY_HOST=localhost
+# Credentials are always encrypted at rest; the server won't start without a
+# key. Keep it: what is stored under a lost key cannot be recovered.
+export RUNTARA_CONNECTIONS_ENCRYPTION_KEY="$(openssl rand -base64 32)"
 cargo run -p runtara-server --release
 ```
+
+`./start.sh` does this for you, keeping a key in
+`.data/credential-encryption.key`.
 
 Valkey supports auth (`VALKEY_USER` / `VALKEY_PASSWORD`) and TLS: set
 `VALKEY_TLS=1`, plus `VALKEY_TLS_CA_CERT=/path/cert.pem` to trust a

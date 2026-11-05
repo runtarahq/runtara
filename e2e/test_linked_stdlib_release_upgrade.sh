@@ -29,6 +29,10 @@ print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# runtara-server needs a credential encryption key; a throwaway one per run.
+# shellcheck source=../scripts/credential-key.sh
+source "${PROJECT_ROOT}/scripts/credential-key.sh"
+ensure_credential_key
 
 DELAY_MS="${DELAY_MS:-45000}"
 POSTGRES_HOST="${POSTGRES_HOST:-localhost}"

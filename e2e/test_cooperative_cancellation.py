@@ -187,6 +187,8 @@ class TestServer:
         database_url = lambda name: "postgresql://postgres@127.0.0.1:" + str(pg_port) + "/" + name
         env = {name: os.environ[name] for name in ["PATH", "HOME", "TMPDIR"] if name in os.environ}
         env.update({
+            # The server refuses to start without one; a throwaway key per run.
+            "RUNTARA_CONNECTIONS_ENCRYPTION_KEY": base64.b64encode(os.urandom(32)).decode(),
             "RUNTARA_SERVER_DATABASE_URL": database_url("server"),
             "RUNTARA_DATABASE_URL": database_url("runtime"),
             "OBJECT_MODEL_DATABASE_URL": database_url("objects"),

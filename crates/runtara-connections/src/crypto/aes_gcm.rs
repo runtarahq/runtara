@@ -140,9 +140,16 @@ impl CredentialCipher for AesGcmCipher {
     }
 
     fn decrypt(&self, stored: &Value, context: &CipherContext) -> Result<Value, CipherError> {
-        // Rollout passthrough: plaintext values flow through unchanged.
+        // Credentials are always encrypted at rest. A row stored as plaintext
+        // (before that was mandatory) is converted at boot or by
+        // `reencrypt-connections`; it is never served as it is, so a
+        // plaintext value written straight into the table is not trusted.
         if !is_envelope(stored) {
-            return Ok(stored.clone());
+            return Err(CipherError::InvalidEnvelope(
+                "stored credentials are not encrypted; run \
+                 `runtara-server reencrypt-connections`"
+                    .into(),
+            ));
         }
 
         let obj = stored
@@ -308,11 +315,15 @@ mod tests {
     }
 
     #[test]
-    fn decrypt_passes_through_plaintext_for_rollout() {
+    fn decrypt_refuses_plaintext() {
         let cipher = AesGcmCipher::new(test_key(), "k").unwrap();
+        // A row written before encryption was mandatory, or injected into the
+        // table by hand: not served until it has been encrypted.
         let plaintext = json!({"api_key": "sk-123", "base_url": "https://x"});
-        // Simulates reading a row that was written before encryption was enabled.
-        assert_eq!(cipher.decrypt(&plaintext, &CTX).unwrap(), plaintext);
+        assert!(matches!(
+            cipher.decrypt(&plaintext, &CTX),
+            Err(CipherError::InvalidEnvelope(_))
+        ));
     }
 
     #[test]

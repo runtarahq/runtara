@@ -314,6 +314,8 @@ runtara-dsl = { path = "../runtara-dsl" }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+# Tests store connections with the plaintext `NoOpCipher`.
+runtara-connections = { path = "../runtara-connections", features = ["utoipa", "test-util"] }
 opentelemetry-proto = { version = "0.32", features = ["gen-tonic", "with-serde", "metrics", "trace", "logs"] }
 tonic = { version = "0.14", features = ["transport"] }
 opentelemetry_sdk = { version = "0.32", features = ["metrics", "testing"] }
