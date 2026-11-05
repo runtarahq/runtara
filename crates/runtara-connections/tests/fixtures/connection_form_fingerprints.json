@@ -108,6 +108,12 @@
     "fnv1a64": "e14014babfd945a5"
   },
   {
+    "integrationId": "shippo_api_token",
+    "fieldCount": 1,
+    "serializedBytes": 547,
+    "fnv1a64": "2d66583b0af8c0c2"
+  },
+  {
     "integrationId": "shopify_access_token",
     "fieldCount": 3,
     "serializedBytes": 1129,

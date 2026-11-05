@@ -34,6 +34,7 @@ runtara-agent-pipedrive = { path = "../agents/runtara-agent-pipedrive" }
 runtara-agent-s3-storage = { path = "../agents/runtara-agent-s3-storage" }
 runtara-agent-sqs = { path = "../agents/runtara-agent-sqs" }
 runtara-agent-sharepoint = { path = "../agents/runtara-agent-sharepoint" }
+runtara-agent-shippo = { path = "../agents/runtara-agent-shippo" }
 runtara-agent-shopify = { path = "../agents/runtara-agent-shopify" }
 runtara-agent-slack = { path = "../agents/runtara-agent-slack" }
 runtara-agent-slack-web-api = { path = "../agents/runtara-agent-slack-web-api" }

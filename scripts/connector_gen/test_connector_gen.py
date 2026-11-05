@@ -7,7 +7,9 @@ repository's rustfmt; they are skipped when the generator is not installed.
     python scripts/connector_gen/test_connector_gen.py
 """
 
+import contextlib
 import copy
+import io
 import json
 import re
 import sys
@@ -293,6 +295,244 @@ class NormalizeTest(unittest.TestCase):
         body = json_body({"type": "object", "properties": {"user": {"oneOf": [{"type": "object"}]}}})
         sliced = cg.slice_spec(spec_with(body), ["op"], body_envelopes=["user"])
         self.assertNotIn("x-runtara-body-envelope", operation(sliced, "op")["requestBody"])
+
+    def test_all_of_body_merges_its_parts(self):
+        # Shippo's `ShipmentCreateRequest`: a shared base and the fields of creation.
+        base = {"type": "object", "required": ["currency"], "properties": {
+            "currency": {"type": "string"}, "note": {"type": "string", "description": "Base"}}}
+        named = {"allOf": [{"$ref": "#/components/schemas/Base"}]}
+        body = json_body({"allOf": [
+            {"$ref": "#/components/schemas/Named"},
+            {"required": ["to"], "properties": {"to": {"type": "string"}, "note": {"description": "Refined"}}},
+        ]})
+        sliced = cg.slice_spec(spec_with(body, {"Base": base, "Named": named}), ["op"])
+        schema = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(schema["type"], "object")
+        self.assertEqual(list(schema["properties"]), ["currency", "note", "to"])
+        self.assertEqual(schema["required"], ["currency", "to"])
+        # The later part refines the base: the description changes, the type stays.
+        self.assertEqual(schema["properties"]["note"], {"type": "string", "description": "Refined"})
+        self.assertNotIn("allOf", schema)
+
+    def test_one_of_body_offers_the_fields_of_every_shape(self):
+        # Shippo's transaction: from a rate, or instant from a shipment.
+        base = {"type": "object", "properties": {"label": {"type": "string"}}}
+        instant = {"allOf": [{"$ref": "#/components/schemas/Base"}], "required": ["shipment"], "properties": {
+            "shipment": {"type": "string"}}}
+        rated = {"type": "object", "required": ["rate"], "properties": {
+            "rate": {"type": "string"}, "label": {"type": "string"}}}
+        body = json_body({"oneOf": [{"$ref": "#/components/schemas/Rated"}, {"$ref": "#/components/schemas/Instant"}]})
+        sliced = cg.slice_spec(spec_with(body, {"Base": base, "Instant": instant, "Rated": rated}), ["op"])
+        schema = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(list(schema["properties"]), ["rate", "label", "shipment"])
+        self.assertNotIn("required", schema)
+        self.assertNotIn("oneOf", schema)
+
+    def test_one_of_body_keeps_what_every_shape_requires(self):
+        body = json_body({"oneOf": [
+            {"type": "object", "required": ["a", "b"], "properties": {"a": {"type": "string"}, "b": {"type": "string"}}},
+            {"type": "object", "required": ["a", "c"], "properties": {"a": {"type": "string"}, "c": {"type": "string"}}},
+        ]})
+        sliced = cg.slice_spec(spec_with(body), ["op"])
+        schema = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(schema["required"], ["a"])
+
+    def test_shapes_beside_fields_add_their_own(self):
+        email = {"required": ["email"], "properties": {"email": {"type": "string"}}}
+        phone = {"required": ["phone"], "properties": {"phone": {"type": "string"}}}
+        common = {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}
+        for label, schema in (
+            ("beside the fields", {**common, "oneOf": [email, phone]}),
+            ("any of", {**common, "anyOf": [email, phone]}),
+            ("one of and any of", {**common, "oneOf": [email], "anyOf": [phone]}),
+            ("in an all of part", {"allOf": [{**common, "oneOf": [email, phone]}]}),
+            ("an all of part of their own", {"allOf": [common, {"oneOf": [email, phone]}]}),
+            ("beside an all of", {"allOf": [common], "oneOf": [email, phone]}),
+        ):
+            with self.subTest(label):
+                sliced = cg.slice_spec(spec_with(json_body(copy.deepcopy(schema))), ["op"])
+                flat = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+                self.assertEqual(list(flat["properties"]), ["name", "email", "phone"])
+                self.assertEqual(flat["required"], ["name"])
+                self.assertEqual(sorted(flat), ["properties", "required", "type"])
+
+    def test_shape_with_a_union_of_its_own_adds_its_fields(self):
+        body = json_body({"oneOf": [
+            {"type": "object", "properties": {"name": {"type": "string"}}, "oneOf": [
+                {"properties": {"email": {"type": "string"}}}, {"properties": {"phone": {"type": "string"}}},
+            ]},
+            {"type": "object", "properties": {"id": {"type": "string"}}},
+        ]})
+        schema = operation(cg.slice_spec(spec_with(body), ["op"]), "op")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(list(schema["properties"]), ["name", "email", "phone", "id"])
+
+    def test_shape_narrowing_a_field_beside_it_leaves_it_as_it_is(self):
+        kind = {"type": "string", "enum": ["a", "b"]}
+        body = json_body({"type": "object", "properties": {"kind": kind}, "oneOf": [
+            {"properties": {"kind": {"type": "string", "enum": ["a"]}, "email": {"type": "string"}}},
+            {"properties": {"kind": {"type": "string", "enum": ["b"]}, "phone": {"type": "string"}}},
+        ]})
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            sliced = cg.slice_spec(spec_with(body), ["op"])
+        schema = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(schema["properties"]["kind"], kind)
+        self.assertNotIn("disagree", printed.getvalue())
+
+    def test_union_that_only_constrains_a_plain_object_keeps_its_reference(self):
+        item = {"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+                "oneOf": [{"required": ["a"]}, {"required": ["b"]}]}
+        sliced = cg.slice_spec(spec_with(json_body({"$ref": "#/components/schemas/Item"}), {"Item": item}), ["op"])
+        schema = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(schema, {"$ref": "#/components/schemas/Item"})
+
+    def test_union_may_constrain_fields_a_sibling_part_declares(self):
+        body = json_body({"allOf": [
+            {"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}},
+            {"oneOf": [{"required": ["a"]}, {"required": ["b"]}]},
+        ]})
+        schema = operation(cg.slice_spec(spec_with(body), ["op"]), "op")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(list(schema["properties"]), ["a", "b"])
+        self.assertNotIn("required", schema)
+
+    def test_shapes_that_cannot_be_flattened_leave_one_raw_body(self):
+        common = {"type": "object", "properties": {"name": {"type": "string"}}}
+        email = {"properties": {"email": {"type": "string"}}}
+        for label, schema in (
+            ("free-form shape", {**common, "oneOf": [email, {"type": "object"}]}),
+            ("shape that is no object", {**common, "oneOf": [email, {"type": "string"}]}),
+            ("shape requiring an undeclared field", {**common, "oneOf": [{"required": ["email"]}, {"required": ["name"]}]}),
+            ("beside an all of", {"allOf": [common], "oneOf": [email, {"type": "object"}]}),
+        ):
+            with self.subTest(label):
+                sliced = cg.slice_spec(spec_with(json_body(copy.deepcopy(schema))), ["op"])
+                kept = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+                self.assertEqual(kept, {"type": "object"})
+
+    def test_all_of_requiring_an_undeclared_field_stays_as_it_is(self):
+        schema = {"allOf": [{"type": "object", "properties": {"a": {"type": "string"}}}, {"required": ["b"]}]}
+        sliced = cg.slice_spec(spec_with(json_body(copy.deepcopy(schema))), ["op"])
+        kept = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(sorted(kept), ["allOf"])
+
+    def test_required_field_of_every_shape_beside_an_envelope_fails(self):
+        shape = {"type": "object", "required": ["note"], "properties": {
+            "note": {"type": "string"}, "ticket": {"type": "object", "properties": {"s": {"type": "string"}}}}}
+        with self.assertRaises(SystemExit) as raised:
+            cg.slice_spec(spec_with(json_body({"oneOf": [shape, copy.deepcopy(shape)]})), ["op"],
+                          body_envelopes=["ticket"])
+        self.assertIn("note", str(raised.exception))
+
+    def test_shapes_that_disagree_on_a_field_warn(self):
+        body = json_body({"oneOf": [
+            {"type": "object", "properties": {"ref": {"type": "string"}, "same": {"type": "string"}}},
+            {"type": "object", "properties": {"ref": {"type": "object"},
+                                              "same": {"type": "string", "description": "Reads differently"}}},
+        ]})
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            sliced = cg.slice_spec(spec_with(body), ["op"])
+        self.assertIn("disagree on `ref`", printed.getvalue())
+        self.assertNotIn("`same`", printed.getvalue())
+        schema = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(schema["properties"]["ref"]["type"], "string")
+
+    def test_composed_body_with_a_part_that_is_no_object_stays_as_it_is(self):
+        for schema in (
+            {"oneOf": [{"type": "object", "properties": {"a": {"type": "string"}}}, {"type": "array", "items": {}}]},
+            {"oneOf": [{"type": "object", "properties": {"a": {"type": "string"}}}, {"type": "object"}]},
+            {"allOf": [{"type": "object", "properties": {"a": {"type": "string"}}}, {"oneOf": [{"type": "object"}]}]},
+        ):
+            sliced = cg.slice_spec(spec_with(json_body(copy.deepcopy(schema))), ["op"])
+            kept = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+            self.assertEqual(sorted(kept), sorted(schema))
+
+    def test_plain_object_body_keeps_its_reference(self):
+        item = {"type": "object", "properties": {"a": {"type": "string"}}}
+        sliced = cg.slice_spec(spec_with(json_body({"$ref": "#/components/schemas/Item"}), {"Item": item}), ["op"])
+        schema = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(schema, {"$ref": "#/components/schemas/Item"})
+
+    def test_shared_composed_body_is_flattened_per_operation(self):
+        shared = {"content": {"application/json": {"schema": {"allOf": [
+            {"type": "object", "properties": {"a": {"type": "string"}}},
+            {"type": "object", "properties": {"b": {"type": "string"}}},
+        ]}}}}
+        spec = spec_with({"requestBody": {"$ref": "#/components/requestBodies/Shared"}},
+                         requestBodies={"Shared": shared})
+        spec["paths"]["/y"] = {"post": {"operationId": "other", "responses": {"204": {"description": "ok"}},
+                                        "requestBody": {"$ref": "#/components/requestBodies/Shared"}}}
+        sliced = cg.slice_spec(spec, ["op", "other"])
+        for name in ("op", "other"):
+            schema = operation(sliced, name)["requestBody"]["content"]["application/json"]["schema"]
+            self.assertEqual(list(schema["properties"]), ["a", "b"])
+
+    def test_composed_body_can_hold_an_envelope(self):
+        ticket = {"type": "object", "properties": {"subject": {"type": "string"}}}
+        body = json_body({"allOf": [
+            {"type": "object", "properties": {"ticket": {"$ref": "#/components/schemas/Ticket"}}},
+            {"type": "object", "properties": {"note": {"type": "string"}}},
+        ]})
+        sliced = cg.slice_spec(spec_with(body, {"Ticket": ticket}), ["op"], body_envelopes=["ticket"])
+        body = operation(sliced, "op")["requestBody"]
+        self.assertEqual(body["x-runtara-body-envelope"], "ticket")
+        self.assertEqual(body["content"]["application/json"]["schema"], {"$ref": "#/components/schemas/Ticket"})
+
+    def test_envelope_shape_may_constrain_its_fields_with_one_of(self):
+        body = json_body({"type": "object", "properties": {"user": {"anyOf": [
+            {"type": "object", "properties": {"name": {"type": "string"}, "id": {"type": "string"}},
+             "oneOf": [{"required": ["name"]}, {"required": ["id"]}]},
+            {"type": "object", "properties": {"email": {"type": "string"}}},
+        ]}}})
+        sliced = cg.slice_spec(spec_with(body), ["op"], body_envelopes=["user"])
+        schema = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(list(schema["properties"]), ["name", "id", "email"])
+
+    def test_envelope_shapes_beside_fields_add_their_own(self):
+        ticket = {"type": "object", "required": ["subject"], "properties": {"subject": {"type": "string"}}, "oneOf": [
+            {"properties": {"email": {"type": "string"}}}, {"properties": {"phone": {"type": "string"}}},
+        ]}
+        body = json_body({"type": "object", "properties": {"ticket": {"$ref": "#/components/schemas/Ticket"}}})
+        sliced = cg.slice_spec(spec_with(body, {"Ticket": ticket}), ["op"], body_envelopes=["ticket"])
+        body = operation(sliced, "op")["requestBody"]
+        self.assertEqual(body["x-runtara-body-envelope"], "ticket")
+        schema = body["content"]["application/json"]["schema"]
+        self.assertEqual(list(schema["properties"]), ["subject", "email", "phone"])
+        self.assertEqual(schema["required"], ["subject"])
+
+    def test_envelope_that_only_constrains_its_fields_keeps_its_reference(self):
+        ticket = {"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+                  "oneOf": [{"required": ["a"]}, {"required": ["b"]}]}
+        body = json_body({"type": "object", "properties": {"ticket": {"$ref": "#/components/schemas/Ticket"}}})
+        sliced = cg.slice_spec(spec_with(body, {"Ticket": ticket}), ["op"], body_envelopes=["ticket"])
+        schema = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(schema, {"$ref": "#/components/schemas/Ticket"})
+
+    def test_envelope_that_cannot_be_flattened_stays_one_raw_input(self):
+        ticket = {"type": "object", "properties": {"a": {"type": "string"}},
+                  "oneOf": [{"properties": {"b": {"type": "string"}}}, {"type": "object"}]}
+        body = json_body({"type": "object", "properties": {"ticket": {"$ref": "#/components/schemas/Ticket"}}})
+        sliced = cg.slice_spec(spec_with(body, {"Ticket": ticket}), ["op"], body_envelopes=["ticket"])
+        body = operation(sliced, "op")["requestBody"]
+        self.assertNotIn("x-runtara-body-envelope", body)
+        self.assertEqual(body["content"]["application/json"]["schema"]["properties"]["ticket"], {"type": "object"})
+
+    def test_envelope_shape_requiring_an_undeclared_field_stays_one_input(self):
+        body = json_body({"type": "object", "properties": {"user": {"anyOf": [
+            {"type": "object", "properties": {"name": {"type": "string"}}}, {"required": ["id"]},
+        ]}}})
+        sliced = cg.slice_spec(spec_with(body), ["op"], body_envelopes=["user"])
+        self.assertNotIn("x-runtara-body-envelope", operation(sliced, "op")["requestBody"])
+
+    def test_envelope_shapes_may_be_composed(self):
+        base = {"type": "object", "properties": {"name": {"type": "string"}}}
+        body = json_body({"type": "object", "properties": {"user": {"anyOf": [
+            {"allOf": [{"$ref": "#/components/schemas/Base"}]},
+            {"type": "object", "properties": {"email": {"type": "string"}}},
+        ]}}})
+        sliced = cg.slice_spec(spec_with(body, {"Base": base}), ["op"], body_envelopes=["user"])
+        schema = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(list(schema["properties"]), ["name", "email"])
 
     def test_unmatched_envelope_fails(self):
         with self.assertRaises(SystemExit) as raised:
@@ -888,6 +1128,70 @@ class EnvelopeRenderTest(unittest.TestCase):
     def test_several_integrations(self):
         self.assertIn('module_integration_ids = "sample_oauth,sample_token"', self.text)
         self.assertIn('integration_ids: vec!["sample_oauth".to_string(), "sample_token".to_string()]', self.text)
+
+
+@unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
+class ComposedBodyRenderTest(unittest.TestCase):
+    @staticmethod
+    def render(body: dict, schemas: dict) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            write_crate(Path(tmp), spec_with(json_body(body), schemas), ["op"])
+            return cg.render(Path(tmp))
+
+    def test_all_of_fields_are_inputs_and_a_required_one_stays_required(self):
+        base = {"type": "object", "properties": {"note": {"type": "string"}}}
+        text = self.render({"allOf": [
+            {"$ref": "#/components/schemas/Base"},
+            {"required": ["to"], "properties": {"to": {"type": "string"}}},
+        ]}, {"Base": base})
+        self.assertIn("pub to: String,", text)
+        self.assertIn("pub note: Option<String>,", text)
+        self.assertIn('.field("to", &self.to)', text)
+        self.assertIn('.field_opt("note", &self.note)', text)
+        self.assertNotIn("pub body:", text)
+
+    def test_one_of_fields_are_all_optional_inputs(self):
+        rated = {"type": "object", "required": ["rate"], "properties": {"rate": {"type": "string"}}}
+        instant = {"type": "object", "required": ["shipment"], "properties": {"shipment": {"type": "string"}}}
+        text = self.render(
+            {"oneOf": [{"$ref": "#/components/schemas/Rated"}, {"$ref": "#/components/schemas/Instant"}]},
+            {"Rated": rated, "Instant": instant},
+        )
+        self.assertIn("pub rate: Option<String>,", text)
+        self.assertIn("pub shipment: Option<String>,", text)
+        self.assertNotIn("pub body:", text)
+
+    def test_fields_of_shapes_beside_common_ones_are_inputs(self):
+        email = {"required": ["email"], "properties": {"email": {"type": "string"}}}
+        phone = {"required": ["phone"], "properties": {"phone": {"type": "string"}}}
+        text = self.render({"allOf": [
+            {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}},
+             "oneOf": [email, phone]},
+        ]}, {})
+        self.assertIn("pub name: String,", text)
+        self.assertIn("pub email: Option<String>,", text)
+        self.assertIn("pub phone: Option<String>,", text)
+        self.assertIn('.field("name", &self.name)', text)
+        self.assertIn('.field_opt("email", &self.email)', text)
+        self.assertIn('.field_opt("phone", &self.phone)', text)
+        self.assertNotIn("pub body:", text)
+
+    def test_shapes_that_cannot_be_flattened_leave_a_body_input(self):
+        text = self.render({"type": "object", "properties": {"name": {"type": "string"}}, "oneOf": [
+            {"properties": {"email": {"type": "string"}}}, {"type": "object"},
+        ]}, {})
+        self.assertIn("pub body: Option<serde_json::Value>,", text)
+        self.assertNotIn("pub name:", text)
+
+    def test_field_that_is_an_object_or_an_id_stays_raw_json(self):
+        address = {"type": "object", "properties": {"city": {"type": "string"}}}
+        text = self.render({"allOf": [
+            {"type": "object", "required": ["address_to"], "properties": {"address_to": {"oneOf": [
+                {"$ref": "#/components/schemas/Address"}, {"type": "string"},
+            ]}}},
+        ]}, {"Address": address})
+        self.assertRegex(text, r"pub address_to: \w+,")
+        self.assertRegex(text, r"pub type \w*AddressTo = Value;")
 
 
 @unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")

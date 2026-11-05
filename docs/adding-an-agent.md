@@ -84,7 +84,10 @@ workspace `Cargo.toml` (it includes `crates/agents/*`).
      operationIds;
    - `src/lib.rs` with `pub mod kit; mod generated; pub use generated::*;`;
    - `src/kit.rs`, the request builder and error envelope the generated code
-     calls.
+     calls. When a repeated write can cost money and the vendor has no
+     idempotency key (a shipping label, say), copy it from
+     `runtara-agent-shippo` instead: a write that gets no answer or a 5xx fails
+     as `<PREFIX>_OUTCOME_UNKNOWN` and is not retried.
 3. **Fetch and generate:**
    ```bash
    PY=scripts/connector_gen/.venv/bin/python

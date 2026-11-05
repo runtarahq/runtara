@@ -9,10 +9,11 @@
 //! agents (e.g. `runtara-agent-stripe`) carry. Meant to move into a crate shared
 //! by every generated agent.
 //!
-//! Unlike the other generated agents' copies, a request that is not a read is
-//! never reported as worth retrying when its outcome is unknown: UPS has no
+//! Unlike most generated agents' copies, a request that is not a read is never
+//! reported as worth retrying when its outcome is unknown: UPS has no
 //! idempotency key, so a shipment request sent again after a timeout or a 5xx
-//! can buy a second label. See [`outcome_unknown`].
+//! can buy a second label. A write whose answer cannot be read counts as
+//! unknown too, because the label may be bought. See [`outcome_unknown`].
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -414,10 +415,12 @@ pub fn decode<T: DeserializeOwned>(
     }
 
     let invalid = |e: serde_json::Error| {
-        AgentError::permanent(
-            format!("{prefix}_INVALID_RESPONSE"),
-            format!("{prefix} {method} {path}: {e}"),
-        )
+        let message = format!("{prefix} {method} {path}: {e}");
+        if is_read(method) {
+            AgentError::permanent(format!("{prefix}_INVALID_RESPONSE"), message)
+        } else {
+            outcome_unknown(prefix, message)
+        }
     };
     let text = String::from_utf8_lossy(&response.body);
     if text.trim().is_empty() {

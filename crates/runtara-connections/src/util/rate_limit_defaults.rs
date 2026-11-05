@@ -147,6 +147,16 @@ pub fn get_default_rate_limit_config(integration_id: &str) -> Option<RateLimitCo
             max_retries: 3,
             max_wait_ms: 60000,
         }),
+        // Shippo: limits are per minute and per endpoint. Live tokens get 500 writes
+        // and 50 list reads, test tokens 50 and 10. 5 req/s with burst 10 stays under
+        // the live write limit; heavy listing or a test token relies on the 429 retry.
+        "shippo_api_token" => Some(RateLimitConfigDto {
+            requests_per_second: 5,
+            burst_size: 10,
+            retry_on_limit: true,
+            max_retries: 3,
+            max_wait_ms: 60000,
+        }),
         // Mailgun: per-plan sending/API limits vary; 5 req/s with burst 10 is a
         // conservative floor that suits transactional sending without 429s.
         "mailgun" => Some(RateLimitConfigDto {
@@ -221,6 +231,14 @@ mod tests {
         let config = get_default_rate_limit_config("ups_client_credentials").unwrap();
         assert_eq!(config.requests_per_second, 5);
         assert_eq!(config.burst_size, 10);
+        assert!(config.retry_on_limit);
+    }
+
+    #[test]
+    fn test_shippo_defaults_stay_under_the_live_write_limit() {
+        let config = get_default_rate_limit_config("shippo_api_token").unwrap();
+        // At most burst + rate × 60 requests in any minute; live writes allow 500.
+        assert!(config.burst_size + config.requests_per_second * 60 <= 500);
         assert!(config.retry_on_limit);
     }
 
