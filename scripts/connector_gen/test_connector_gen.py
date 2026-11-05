@@ -294,6 +294,89 @@ class NormalizeTest(unittest.TestCase):
         sliced = cg.slice_spec(spec_with(body), ["op"], body_envelopes=["user"])
         self.assertNotIn("x-runtara-body-envelope", operation(sliced, "op")["requestBody"])
 
+    def test_all_of_body_merges_its_parts(self):
+        # Shippo's `ShipmentCreateRequest`: a shared base and the fields of creation.
+        base = {"type": "object", "required": ["currency"], "properties": {
+            "currency": {"type": "string"}, "note": {"type": "string", "description": "Base"}}}
+        named = {"allOf": [{"$ref": "#/components/schemas/Base"}]}
+        body = json_body({"allOf": [
+            {"$ref": "#/components/schemas/Named"},
+            {"required": ["to"], "properties": {"to": {"type": "string"}, "note": {"type": "string"}}},
+        ]})
+        sliced = cg.slice_spec(spec_with(body, {"Base": base, "Named": named}), ["op"])
+        schema = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(schema["type"], "object")
+        self.assertEqual(list(schema["properties"]), ["currency", "note", "to"])
+        self.assertEqual(schema["required"], ["currency", "to"])
+        # The later part refines the base.
+        self.assertNotIn("description", schema["properties"]["note"])
+        self.assertNotIn("allOf", schema)
+
+    def test_one_of_body_offers_the_fields_of_every_shape(self):
+        # Shippo's transaction: from a rate, or instant from a shipment.
+        base = {"type": "object", "properties": {"label": {"type": "string"}}}
+        instant = {"allOf": [{"$ref": "#/components/schemas/Base"}], "required": ["shipment"], "properties": {
+            "shipment": {"type": "string"}}}
+        rated = {"type": "object", "required": ["rate"], "properties": {
+            "rate": {"type": "string"}, "label": {"type": "string"}}}
+        body = json_body({"oneOf": [{"$ref": "#/components/schemas/Rated"}, {"$ref": "#/components/schemas/Instant"}]})
+        sliced = cg.slice_spec(spec_with(body, {"Base": base, "Instant": instant, "Rated": rated}), ["op"])
+        schema = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(list(schema["properties"]), ["rate", "label", "shipment"])
+        self.assertNotIn("required", schema)
+        self.assertNotIn("oneOf", schema)
+
+    def test_composed_body_with_a_part_that_is_no_object_stays_as_it_is(self):
+        for schema in (
+            {"oneOf": [{"type": "object", "properties": {"a": {"type": "string"}}}, {"type": "array", "items": {}}]},
+            {"oneOf": [{"type": "object", "properties": {"a": {"type": "string"}}}, {"type": "object"}]},
+            {"allOf": [{"type": "object", "properties": {"a": {"type": "string"}}}, {"oneOf": [{"type": "object"}]}]},
+        ):
+            sliced = cg.slice_spec(spec_with(json_body(copy.deepcopy(schema))), ["op"])
+            kept = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+            self.assertEqual(sorted(kept), sorted(schema))
+
+    def test_plain_object_body_keeps_its_reference(self):
+        item = {"type": "object", "properties": {"a": {"type": "string"}}}
+        sliced = cg.slice_spec(spec_with(json_body({"$ref": "#/components/schemas/Item"}), {"Item": item}), ["op"])
+        schema = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(schema, {"$ref": "#/components/schemas/Item"})
+
+    def test_shared_composed_body_is_flattened_per_operation(self):
+        shared = {"content": {"application/json": {"schema": {"allOf": [
+            {"type": "object", "properties": {"a": {"type": "string"}}},
+            {"type": "object", "properties": {"b": {"type": "string"}}},
+        ]}}}}
+        spec = spec_with({"requestBody": {"$ref": "#/components/requestBodies/Shared"}},
+                         requestBodies={"Shared": shared})
+        spec["paths"]["/y"] = {"post": {"operationId": "other", "responses": {"204": {"description": "ok"}},
+                                        "requestBody": {"$ref": "#/components/requestBodies/Shared"}}}
+        sliced = cg.slice_spec(spec, ["op", "other"])
+        for name in ("op", "other"):
+            schema = operation(sliced, name)["requestBody"]["content"]["application/json"]["schema"]
+            self.assertEqual(list(schema["properties"]), ["a", "b"])
+
+    def test_composed_body_can_hold_an_envelope(self):
+        ticket = {"type": "object", "properties": {"subject": {"type": "string"}}}
+        body = json_body({"allOf": [
+            {"type": "object", "properties": {"ticket": {"$ref": "#/components/schemas/Ticket"}}},
+            {"type": "object", "properties": {"note": {"type": "string"}}},
+        ]})
+        sliced = cg.slice_spec(spec_with(body, {"Ticket": ticket}), ["op"], body_envelopes=["ticket"])
+        body = operation(sliced, "op")["requestBody"]
+        self.assertEqual(body["x-runtara-body-envelope"], "ticket")
+        self.assertEqual(body["content"]["application/json"]["schema"], {"$ref": "#/components/schemas/Ticket"})
+
+    def test_envelope_shapes_may_be_composed(self):
+        base = {"type": "object", "properties": {"name": {"type": "string"}}}
+        body = json_body({"type": "object", "properties": {"user": {"anyOf": [
+            {"allOf": [{"$ref": "#/components/schemas/Base"}]},
+            {"type": "object", "properties": {"email": {"type": "string"}}},
+        ]}}})
+        sliced = cg.slice_spec(spec_with(body, {"Base": base}), ["op"], body_envelopes=["user"])
+        schema = operation(sliced, "op")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(list(schema["properties"]), ["name", "email"])
+
     def test_unmatched_envelope_fails(self):
         with self.assertRaises(SystemExit) as raised:
             cg.slice_spec(spec_with(json_body({"type": "object"})), ["op"], body_envelopes=["tikcet"])
@@ -888,6 +971,48 @@ class EnvelopeRenderTest(unittest.TestCase):
     def test_several_integrations(self):
         self.assertIn('module_integration_ids = "sample_oauth,sample_token"', self.text)
         self.assertIn('integration_ids: vec!["sample_oauth".to_string(), "sample_token".to_string()]', self.text)
+
+
+@unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
+class ComposedBodyRenderTest(unittest.TestCase):
+    @staticmethod
+    def render(body: dict, schemas: dict) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            write_crate(Path(tmp), spec_with(json_body(body), schemas), ["op"])
+            return cg.render(Path(tmp))
+
+    def test_all_of_fields_are_inputs_and_a_required_one_stays_required(self):
+        base = {"type": "object", "properties": {"note": {"type": "string"}}}
+        text = self.render({"allOf": [
+            {"$ref": "#/components/schemas/Base"},
+            {"required": ["to"], "properties": {"to": {"type": "string"}}},
+        ]}, {"Base": base})
+        self.assertIn("pub to: String,", text)
+        self.assertIn("pub note: Option<String>,", text)
+        self.assertIn('.field("to", &self.to)', text)
+        self.assertIn('.field_opt("note", &self.note)', text)
+        self.assertNotIn("pub body:", text)
+
+    def test_one_of_fields_are_all_optional_inputs(self):
+        rated = {"type": "object", "required": ["rate"], "properties": {"rate": {"type": "string"}}}
+        instant = {"type": "object", "required": ["shipment"], "properties": {"shipment": {"type": "string"}}}
+        text = self.render(
+            {"oneOf": [{"$ref": "#/components/schemas/Rated"}, {"$ref": "#/components/schemas/Instant"}]},
+            {"Rated": rated, "Instant": instant},
+        )
+        self.assertIn("pub rate: Option<String>,", text)
+        self.assertIn("pub shipment: Option<String>,", text)
+        self.assertNotIn("pub body:", text)
+
+    def test_field_that_is_an_object_or_an_id_stays_raw_json(self):
+        address = {"type": "object", "properties": {"city": {"type": "string"}}}
+        text = self.render({"allOf": [
+            {"type": "object", "required": ["address_to"], "properties": {"address_to": {"oneOf": [
+                {"$ref": "#/components/schemas/Address"}, {"type": "string"},
+            ]}}},
+        ]}, {"Address": address})
+        self.assertRegex(text, r"pub address_to: \w+,")
+        self.assertRegex(text, r"pub type \w*AddressTo = Value;")
 
 
 @unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")

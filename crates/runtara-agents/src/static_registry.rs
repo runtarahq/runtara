@@ -27,6 +27,7 @@ pub static CONNECTION_TYPES: &[&ConnectionTypeMeta] = &[
     &crate::extractors::connection_types::__CONNECTION_META_AzureBlobStorageParams,
     &crate::extractors::connection_types::__CONNECTION_META_StripeApiKeyParams,
     &crate::extractors::connection_types::__CONNECTION_META_PipedriveApiTokenParams,
+    &crate::extractors::connection_types::__CONNECTION_META_ShippoApiTokenParams,
     &crate::extractors::connection_types::__CONNECTION_META_GeminiApiKeyParams,
     &crate::extractors::connection_types::__CONNECTION_META_ZendeskClientCredentialsParams,
     &crate::extractors::connection_types::__CONNECTION_META_UpsClientCredentialsParams,

@@ -1,7 +1,8 @@
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use reqwest::Client;
 use runtara_agents::extractors::connection_types::{
-    GEMINI_API_BASE_URL, ZENDESK_DEFAULT_SCOPE, ups_base_url, zendesk_base_url,
+    GEMINI_API_BASE_URL, SHIPPO_API_BASE_URL, SHIPPO_API_VERSION, ZENDESK_DEFAULT_SCOPE,
+    ups_base_url, zendesk_base_url,
 };
 use runtara_agents::registry::find_connection_type;
 use runtara_dsl::agent_meta::{OAuthConfig, TokenEndpointAuth};
@@ -227,6 +228,20 @@ fn describe_connection_auth(
             }
             ConnectionAuthDescriptor {
                 base_url: Some("https://api.pipedrive.com".into()),
+                aws_signing: None,
+                azure_signing: None,
+                deferred_auth: None,
+            }
+        }
+        // Shippo: the token picks test or live on the one host. Every request pins
+        // the API version the agent's generated types describe.
+        "shippo_api_token" => {
+            if let Some(token) = params["api_token"].as_str() {
+                headers.insert("Authorization".into(), format!("ShippoToken {token}"));
+            }
+            headers.insert("SHIPPO-API-VERSION".into(), SHIPPO_API_VERSION.into());
+            ConnectionAuthDescriptor {
+                base_url: Some(SHIPPO_API_BASE_URL.into()),
                 aws_signing: None,
                 azure_signing: None,
                 deferred_auth: None,
@@ -1310,6 +1325,29 @@ mod tests {
         assert_eq!(
             descriptor.base_url.as_deref(),
             Some("https://api.pipedrive.com")
+        );
+    }
+
+    #[test]
+    fn shippo_token_uses_its_own_scheme_and_pins_host_and_version() {
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "shippo_api_token",
+            &json!({ "api_token": "token-value" }),
+            &mut headers,
+        );
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("ShippoToken token-value")
+        );
+        assert_eq!(
+            headers.get("SHIPPO-API-VERSION").map(String::as_str),
+            Some(SHIPPO_API_VERSION)
+        );
+        assert_eq!(
+            descriptor.base_url.as_deref(),
+            Some("https://api.goshippo.com")
         );
     }
 

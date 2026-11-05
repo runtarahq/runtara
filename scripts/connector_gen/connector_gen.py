@@ -493,6 +493,63 @@ def expand_object_parameter(spec: dict, name: str, parameter: dict, schema: dict
     return expanded
 
 
+def merged_object(spec: dict, schema: dict) -> dict:
+    """`schema` as one plain object with its `allOf` parts merged in, a later
+    part's field winning as it refines an earlier one. None unless every part
+    is an object."""
+    schema = deref(spec, schema)
+    if schema.get("oneOf") or schema.get("anyOf") or schema.get("type") not in (None, "object"):
+        return None
+    parts = [merged_object(spec, part) for part in schema.get("allOf") or []]
+    if None in parts:
+        return None
+    properties, required = {}, []
+    for part in [*parts, schema]:
+        properties.update(part.get("properties") or {})
+        if isinstance(part.get("required"), list):
+            required += [field for field in part["required"] if field not in required]
+    merged = {"type": "object", "properties": properties}
+    if required:
+        merged["required"] = required
+    return merged
+
+
+def shape_fields(spec: dict, shapes: list) -> dict:
+    """Every field of every shape of a `oneOf`/`anyOf` (create or merge, say),
+    or None when a shape declares no fields. The fields are offered as optional
+    inputs, and the vendor validates the mix."""
+    fields = {}
+    for shape in shapes:
+        merged = merged_object(spec, shape)
+        if not merged or not merged["properties"]:
+            return None
+        for field, field_schema in merged["properties"].items():
+            fields.setdefault(field, field_schema)
+    return fields
+
+
+def flat_body(spec: dict, name: str, media: dict) -> dict:
+    """The plain object a composed request body becomes, so its fields are step
+    inputs: the generator lists no fields for a composed schema, which would
+    leave one `body` input. None for a body that stays as it is."""
+    schema = deref(spec, media.get("schema") or {})
+    shapes = schema.get("oneOf") or schema.get("anyOf")
+    if schema.get("allOf"):
+        merged = merged_object(spec, schema)
+        if merged and merged["properties"]:
+            return merged
+    elif shapes and not schema.get("properties"):
+        fields = shape_fields(spec, shapes)
+        if fields:
+            print(f"note: {name}: the request body is one of {len(shapes)} shapes; "
+                  "the fields of all of them are optional inputs")
+            return {"type": "object", "properties": fields}
+    else:
+        return None
+    print(f"note: {name}: the request body is not made of objects alone, so it stays one `body` input")
+    return None
+
+
 def envelope_of(spec: dict, name: str, media: dict, envelopes: list) -> str:
     """The `body_envelopes` name that wraps this request body, if any."""
     properties = deref(spec, media.get("schema") or {}).get("properties") or {}
@@ -513,21 +570,16 @@ def unwrap_envelope(spec: dict, name: str, body: dict, media: dict, envelopes: l
     properties = wrapper["properties"]
     envelope = deref(spec, properties[key])
     schema = properties[key]
-    alternatives = [deref(spec, s) for s in envelope.get("anyOf") or envelope.get("oneOf") or []]
-    if not envelope.get("properties") and (not alternatives or not all(s.get("properties") for s in alternatives)):
+    alternatives = envelope.get("anyOf") or envelope.get("oneOf") or []
+    fields = None if envelope.get("properties") else shape_fields(spec, alternatives)
+    if not envelope.get("properties") and not fields:
         print(f"note: {name}: `{key}` declares no fields, so it stays one `{key}` input")
         return key
     dropped = [other for other in properties if other != key]
     required = [field for field in dropped if field in (wrapper.get("required") or [])]
     if required:
         sys.exit(f"{name}: unwrapping `{key}` would drop the required body fields {required}")
-    if not envelope.get("properties"):
-        # One of several shapes (create or merge, say): offer every field of
-        # every shape, all optional, and let the vendor validate the mix.
-        fields = {}
-        for alternative in alternatives:
-            for field, field_schema in alternative["properties"].items():
-                fields.setdefault(field, field_schema)
+    if fields:
         print(f"note: {name}: `{key}` is one of {len(alternatives)} shapes; "
               "the fields of all of them are optional inputs")
         schema = {"type": "object", "properties": fields}
@@ -561,7 +613,13 @@ def check_operation(spec: dict, path: str, method: str, op: dict, item: dict, en
                 "only JSON bodies are (form and multipart bodies need template support)"
             )
         body["content"] = json_types
-        if any(envelope_of(spec, name, media, envelopes) for media in json_types.values()):
+        flat = {key: schema for key, media in json_types.items() if (schema := flat_body(spec, name, media))}
+        if flat:
+            body = copy.deepcopy(body)
+            op["requestBody"] = body
+            for key, schema in flat.items():
+                body["content"][key]["schema"] = schema
+        if any(envelope_of(spec, name, media, envelopes) for media in body["content"].values()):
             # The body may be a `#/components/requestBodies` entry other operations
             # share: unwrap this operation's own copy, or the next one would unwrap
             # the already unwrapped fields again.

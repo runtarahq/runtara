@@ -13,6 +13,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Shippo agent, generated from Shippo's API spec.** Nineteen capabilities:
+  validate addresses, create shipments and read their rates, buy labels, track
+  packages, refund labels, manage orders and list carrier accounts. The new
+  `shippo_api_token` connection type sends a Shippo API token (a test token
+  buys free test labels, a live token real ones), pins the API version the
+  capabilities describe, and is limited by default to 5 requests/s with a burst
+  of 10. A request that is not a read and gets no answer or a 5xx fails with
+  `SHIPPO_OUTCOME_UNKNOWN` instead of being retried: Shippo documents no
+  idempotency key, and sending a label purchase again could buy a second label.
+  Shippo answers a label it could not buy with a success and `status: ERROR`,
+  so a workflow should branch on the step's `status`.
+
+- **The connector generator flattens composed request bodies.** A body built
+  with `allOf` is merged into one object, and a `oneOf` or `anyOf` of objects
+  offers the fields of every shape as optional inputs, so each field is a step
+  input instead of one JSON `body`.
+
 - **Google Gemini is a new AI provider.** A `gemini_api_key` connection (an API
   key from Google AI Studio) works with the AI Agent step and with every
   `ai_tools` capability: text completion with structured output, image

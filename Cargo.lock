@@ -4193,6 +4193,7 @@ dependencies = [
  "runtara-agent-quickbooks",
  "runtara-agent-s3-storage",
  "runtara-agent-sharepoint",
+ "runtara-agent-shippo",
  "runtara-agent-shopify",
  "runtara-agent-slack",
  "runtara-agent-slack-web-api",
@@ -4445,6 +4446,18 @@ name = "runtara-agent-sharepoint"
 version = "10.0.0"
 dependencies = [
  "base64 0.22.1",
+ "runtara-agent-macro",
+ "runtara-dsl",
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.58.0",
+]
+
+[[package]]
+name = "runtara-agent-shippo"
+version = "10.0.0"
+dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
  "runtara-http",

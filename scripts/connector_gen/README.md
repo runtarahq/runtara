@@ -290,9 +290,12 @@ crates/agents/runtara-agent-<id>/
   `#[capability]` function. Path, query and header parameters are inputs, and
   so is every writable field of an object request body: the step takes `title`,
   `value`, … rather than one JSON `body` (that is what the generic HTTP agent is
-  for). The function rebuilds the body from those fields. A body that is not an
-  object stays a single `body` input. Non-GET operations are marked
-  `side_effects`.
+  for). The function rebuilds the body from those fields. A body composed with
+  `allOf` is merged into one object first, and a `oneOf`/`anyOf` of objects
+  (Shippo's label purchase: from a rate, or instant) offers the fields of every
+  shape, all optional, for the vendor to validate. A body that is not an object,
+  or is composed of anything but objects, stays a single `body` input. Non-GET
+  operations are marked `side_effects`.
 - An exploded array query parameter (the OpenAPI default) is sent as
   `ids=1&ids=2`; with `explode: false` it is sent as `ids=1,2`. Optional cookie
   parameters are dropped by `fetch`.

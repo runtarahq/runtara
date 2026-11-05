@@ -612,6 +612,47 @@ fn test_pipedrive_connection_type_is_registered() {
 }
 
 // ============================================================================
+// ShippoExtractor Tests
+// ============================================================================
+
+#[test]
+fn test_shippo_extractor_sends_the_token_and_pins_the_api_version() {
+    let config = extract_http_config(
+        "shippo_api_token",
+        &json!({ "api_token": "token-value" }),
+        None,
+    )
+    .expect("Should extract config");
+
+    assert_eq!(
+        config.headers.get("Authorization"),
+        Some(&"ShippoToken token-value".to_string())
+    );
+    assert_eq!(
+        config.headers.get("SHIPPO-API-VERSION"),
+        Some(&connection_types::SHIPPO_API_VERSION.to_string())
+    );
+    assert_eq!(config.url_prefix, "https://api.goshippo.com");
+}
+
+#[test]
+fn test_shippo_extractor_requires_token() {
+    let err = extract_http_config("shippo_api_token", &json!({}), None)
+        .expect_err("missing api_token should fail");
+    assert!(err.contains("shippo_api_token"), "{err}");
+}
+
+#[test]
+fn test_shippo_connection_type_is_registered() {
+    assert!(get_http_extractor_ids().contains(&"shippo_api_token"));
+    let meta = crate::registry::find_connection_type("shippo_api_token")
+        .expect("shippo_api_token is in the static registry");
+    assert_eq!(meta.display_name, "Shippo");
+    let token = meta.fields.iter().find(|f| f.name == "api_token").unwrap();
+    assert!(token.is_secret);
+}
+
+// ============================================================================
 // Zendesk Extractor Tests
 // ============================================================================
 

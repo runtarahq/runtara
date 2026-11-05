@@ -1,0 +1,36 @@
+# Input to scripts/connector_gen/connector_gen.py; see its README.md.
+agent:
+  id: shippo
+  name: Shippo
+  description: Shippo — multi-carrier rates, labels, tracking, refunds, orders and address validation.
+  integration_id: shippo_api_token
+  error_prefix: SHIPPO
+spec:
+  url: https://docs.goshippo.com/spec/shippoapi/public-api.yaml
+  sha256: faa31b2d81826108ad9fe513d9447e355b02772feeea4906c12e45fc03bd28ba
+# The shippo_api_token connection pins the API version the generated types
+# describe; without the header, Shippo uses the account's default.
+connection_headers:
+  - SHIPPO-API-VERSION
+labels:
+  SHIPPO-ACCOUNT-ID: Shippo Account ID
+operations:
+  - CreateAddress
+  - GetAddress
+  - ValidateAddress
+  - CreateShipment
+  - GetShipment
+  - ListShipments
+  - GetRate
+  - ListShipmentRates
+  - CreateTransaction
+  - GetTransaction
+  - ListTransactions
+  - CreateRefund
+  - GetRefund
+  - CreateTrack
+  - GetTrack
+  - CreateOrder
+  - GetOrder
+  - ListOrders
+  - ListCarrierAccounts

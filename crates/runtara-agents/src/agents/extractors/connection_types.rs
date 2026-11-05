@@ -1362,6 +1362,67 @@ impl HttpConnectionExtractor for PipedriveExtractor {
 }
 
 // ============================================================================
+// Shippo Connection Type
+// ============================================================================
+
+/// Shippo's API origin. A test token and a live token use the same host.
+pub const SHIPPO_API_BASE_URL: &str = "https://api.goshippo.com";
+
+/// The API version every request pins: the one the agent's generated types
+/// describe. Without the header, Shippo uses the account's default version.
+pub const SHIPPO_API_VERSION: &str = "2018-02-08";
+
+/// Parameters for Shippo API token authentication
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "shippo_api_token",
+    display_name = "Shippo",
+    description = "Connect to the Shippo shipping API with an API token",
+    category = "ecommerce",
+    auth_type = "api_key"
+)]
+pub struct ShippoApiTokenParams {
+    /// Shippo API token
+    #[field(
+        display_name = "API Token",
+        description = "API token from the API configuration page of the Shippo portal. A test token (starting `shippo_test_`) buys free test labels; a live token buys real ones",
+        secret
+    )]
+    pub api_token: String,
+}
+
+/// HTTP extractor for Shippo connections.
+pub struct ShippoExtractor;
+
+impl HttpConnectionExtractor for ShippoExtractor {
+    fn integration_id(&self) -> &'static str {
+        "shippo_api_token"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        let p: ShippoApiTokenParams = serde_json::from_value(params.clone())
+            .map_err(|e| format!("Invalid shippo_api_token connection parameters: {}", e))?;
+
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            format!("ShippoToken {}", p.api_token),
+        );
+        headers.insert(
+            "SHIPPO-API-VERSION".to_string(),
+            SHIPPO_API_VERSION.to_string(),
+        );
+
+        Ok(HttpConnectionConfig {
+            headers,
+            query_parameters: HashMap::new(),
+            url_prefix: SHIPPO_API_BASE_URL.to_string(),
+            rate_limit_config: None,
+        })
+    }
+}
+
+// ============================================================================
 // Zendesk Connection Types
 // ============================================================================
 
