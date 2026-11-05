@@ -31,7 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The connector generator flattens composed request bodies.** A body built
   with `allOf` is merged into one object, and a `oneOf` or `anyOf` of objects
   offers the fields of every shape, optional unless every shape requires them,
-  so each field is a step input instead of one JSON `body`.
+  so each field is a step input instead of one JSON `body`. Shapes beside
+  declared fields add theirs to those, where they used to be lost. A body whose
+  shapes cannot be flattened stays one `body` input.
 
 - **Google Gemini is a new AI provider.** A `gemini_api_key` connection (an API
   key from Google AI Studio) works with the AI Agent step and with every

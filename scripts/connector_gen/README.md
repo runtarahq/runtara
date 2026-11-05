@@ -175,7 +175,9 @@ body_envelopes:
 `fetch` notes what it did per operation: other optional body fields beside the
 envelope are dropped (a required one is an error), and an envelope that is one
 of several shapes (`anyOf` of create and merge fields, say) offers the fields
-of all of them, all optional. Each operation unwraps its own copy of a shared
+of all of them, all optional. Shapes beside the envelope's own fields add
+theirs, as they do on a body, and an envelope whose shapes cannot be flattened
+stays one input. Each operation unwraps its own copy of a shared
 `#/components/requestBodies` entry. A listed name that wraps no request body
 is an error.
 
@@ -294,9 +296,11 @@ crates/agents/runtara-agent-<id>/
   `allOf` is merged into one object first, and a `oneOf`/`anyOf` of objects
   (Shippo's label purchase: from a rate, or instant) offers the fields of every
   shape, optional unless every shape requires them, for the vendor to validate;
-  `fetch` warns when shapes disagree on a field. A body that is not an object,
-  or is composed of anything but objects, stays a single `body` input. Non-GET
-  operations are marked `side_effects`.
+  `fetch` warns when shapes disagree on a field. Shapes beside declared fields
+  add theirs to those, and leave the declared ones as they are. A body that is
+  not an object, is composed of anything but objects, or requires a field it
+  does not declare stays a single `body` input. Non-GET operations are marked
+  `side_effects`.
 - An exploded array query parameter (the OpenAPI default) is sent as
   `ids=1&ids=2`; with `explode: false` it is sent as `ids=1,2`. Optional cookie
   parameters are dropped by `fetch`.

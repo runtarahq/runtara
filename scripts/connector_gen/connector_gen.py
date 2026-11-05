@@ -496,17 +496,28 @@ def expand_object_parameter(spec: dict, name: str, parameter: dict, schema: dict
     return expanded
 
 
-def merged_object(spec: dict, schema: dict) -> dict:
-    """`schema` as one plain object with its `allOf` parts merged in, a later
-    part refining a field an earlier one declares. None unless every part is an
-    object. A `oneOf` beside declared fields only constrains them (one of two
-    required, say), so it does not count against that."""
+def union_shapes(schema: dict) -> list:
+    """The shapes of a schema's `oneOf` and `anyOf`."""
+    return [*(schema.get("oneOf") or []), *(schema.get("anyOf") or [])]
+
+
+def required_names(spec: dict, schema: dict) -> set:
+    """Every field `schema` requires, in any of its parts and shapes."""
+    schema = deref(spec, schema)
+    names = set(schema["required"]) if isinstance(schema.get("required"), list) else set()
+    for part in [*(schema.get("allOf") or []), *union_shapes(schema)]:
+        names |= required_names(spec, part)
+    return names
+
+
+def merged_object(spec: dict, name: str, schema: dict) -> dict:
+    """`schema` as one plain object: its `allOf` parts merged in, a later part
+    refining a field an earlier one declares, and the fields its `oneOf`/`anyOf`
+    shapes add to those. None unless every part and shape is an object."""
     schema = deref(spec, schema)
     if schema.get("type") not in (None, "object"):
         return None
-    if (schema.get("oneOf") or schema.get("anyOf")) and not schema.get("properties"):
-        return None
-    parts = [merged_object(spec, part) for part in schema.get("allOf") or []]
+    parts = [merged_object(spec, name, part) for part in schema.get("allOf") or []]
     if None in parts:
         return None
     properties, required = {}, []
@@ -517,6 +528,13 @@ def merged_object(spec: dict, schema: dict) -> dict:
             properties[field] = field_schema
         if isinstance(part.get("required"), list):
             required += [field for field in part["required"] if field not in required]
+    shapes = union_shapes(schema)
+    if shapes:
+        fields, wanted = shape_fields(spec, name, shapes, properties)
+        if fields is None:
+            return None
+        properties.update(fields)
+        required += [field for field in wanted if field not in required]
     merged = {"type": "object", "properties": properties}
     if required:
         merged["required"] = required
@@ -531,16 +549,20 @@ def same_values(spec: dict, one: dict, other: dict) -> bool:
     return canonical(bare(one)) == canonical(bare(other))
 
 
-def shape_fields(spec: dict, name: str, shapes: list) -> tuple:
+def shape_fields(spec: dict, name: str, shapes: list, declared: dict = ()) -> tuple:
     """Every field of every shape of a `oneOf`/`anyOf` (create or merge, say), and
-    the fields every shape requires; `(None, [])` when a shape declares no fields.
-    The fields are offered as inputs, and the vendor validates the mix."""
+    the fields every shape requires. The fields are offered as inputs, and the
+    vendor validates the mix. A field `declared` beside the shapes stays as it is
+    there, however a shape narrows it. A shape may declare no fields and only
+    require some (one of two, say); any other without fields gives `(None, [])`."""
     fields, required = {}, None
     for shape in shapes:
-        merged = merged_object(spec, shape)
-        if not merged or not merged["properties"]:
+        merged = merged_object(spec, name, shape)
+        if not merged or not (merged["properties"] or merged.get("required")):
             return None, []
         for field, field_schema in merged["properties"].items():
+            if field in declared:
+                continue
             known = fields.setdefault(field, field_schema)
             if not same_values(spec, known, field_schema):
                 print(f"warning: {name}: the shapes disagree on `{field}`; it keeps the type of the first")
@@ -549,29 +571,29 @@ def shape_fields(spec: dict, name: str, shapes: list) -> tuple:
     return fields, required
 
 
-def flat_body(spec: dict, name: str, media: dict) -> dict:
+def flat_body(spec: dict, name: str, media: dict, what: str = "the request body") -> dict:
     """The plain object a composed request body becomes, so its fields are step
     inputs: the generator lists no fields for a composed schema, which would
-    leave one `body` input. None for a body that stays as it is."""
+    leave one `body` input, and only the declared ones beside a `oneOf`/`anyOf`,
+    which would lose what its shapes add. None for a body that stays as it is."""
     schema = deref(spec, media.get("schema") or {})
-    shapes = schema.get("oneOf") or schema.get("anyOf")
-    if schema.get("allOf"):
-        merged = merged_object(spec, schema)
-        if merged and merged["properties"]:
-            return merged
-    elif shapes and not schema.get("properties"):
-        fields, required = shape_fields(spec, name, shapes)
-        if fields:
-            print(f"note: {name}: the request body is one of {len(shapes)} shapes; the fields of "
-                  "all of them are inputs, optional unless every shape requires them")
-            flat = {"type": "object", "properties": fields}
-            if required:
-                flat["required"] = required
-            return flat
-    else:
+    shapes = union_shapes(schema)
+    if not shapes and not schema.get("allOf"):
         return None
-    print(f"note: {name}: the request body is not made of objects alone, so it stays one `body` input")
-    return None
+    merged = merged_object(spec, name, schema)
+    fields = set(merged["properties"]) if merged else set()
+    if not fields or required_names(spec, schema) - fields:
+        print(f"note: {name}: {what} cannot be flattened, so it stays one input")
+        # Beside shapes the declared fields would be the only inputs, leaving
+        # no way to send the rest.
+        return {"type": "object"} if shapes and (schema.get("properties") or schema.get("allOf")) else None
+    if fields == set(schema.get("properties") or {}) and not schema.get("allOf"):
+        # The shapes only constrain the fields the object declares.
+        return None
+    if shapes:
+        print(f"note: {name}: {what} is one of {len(shapes)} shapes; the fields of "
+              "all of them are inputs, optional unless every shape requires them")
+    return merged
 
 
 def envelope_of(spec: dict, name: str, media: dict, envelopes: list) -> str:
@@ -594,8 +616,14 @@ def unwrap_envelope(spec: dict, name: str, body: dict, media: dict, envelopes: l
     properties = wrapper["properties"]
     envelope = deref(spec, properties[key])
     schema = properties[key]
-    alternatives = envelope.get("anyOf") or envelope.get("oneOf") or []
+    alternatives = union_shapes(envelope)
+    flat = flat_body(spec, name, {"schema": schema}, f"`{key}`") if envelope.get("properties") else None
+    if flat and not flat.get("properties"):
+        media["schema"] = {**wrapper, "properties": {**properties, key: flat}}
+        return key
     fields = None if envelope.get("properties") else shape_fields(spec, name, alternatives)[0]
+    if fields and required_names(spec, envelope) - set(fields):
+        fields = None
     if not envelope.get("properties") and not fields:
         print(f"note: {name}: `{key}` declares no fields, so it stays one `{key}` input")
         return key
@@ -607,6 +635,8 @@ def unwrap_envelope(spec: dict, name: str, body: dict, media: dict, envelopes: l
         print(f"note: {name}: `{key}` is one of {len(alternatives)} shapes; "
               "the fields of all of them are optional inputs")
         schema = {"type": "object", "properties": fields}
+    if flat:
+        schema = flat
     if dropped:
         print(f"note: {name}: dropped the body fields {dropped} beside the `{key}` envelope")
     media["schema"] = schema
