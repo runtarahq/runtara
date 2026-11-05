@@ -19,8 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `shippo_api_token` connection type sends a Shippo API token (a test token
   buys free test labels, a live token real ones), pins the API version the
   capabilities describe, and is limited by default to 5 requests/s with a burst
-  of 10. A request that is not a read and gets no answer or a 5xx fails with
-  `SHIPPO_OUTCOME_UNKNOWN` instead of being retried: Shippo documents no
+  of 10. A request that is not a read and gets no answer, a 5xx or an answer it
+  cannot read fails with `SHIPPO_OUTCOME_UNKNOWN` instead of being retried:
+  Shippo documents no
   idempotency key, and sending a label purchase again could buy a second label.
   Shippo answers a label it could not buy with a success and `status: ERROR`,
   so a workflow should branch on the step's `status`. Its spec also defaults
@@ -88,8 +89,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `wwwcie.ups.com`), refuses any other environment, sends the `transId`
   (fresh per request) and `transactionSrc` headers UPS asks for, and is
   limited by default to 5 requests/s with a burst of 10, as UPS does not
-  publish its limits. A request that is not a read and gets no answer or a
-  5xx fails with `UPS_OUTCOME_UNKNOWN` instead of being retried: UPS has no
+  publish its limits. A request that is not a read and gets no answer, a 5xx
+  or an answer it cannot read fails with `UPS_OUTCOME_UNKNOWN` instead of being
+  retried: UPS has no
   idempotency key, and sending a shipment again could buy a second label.
 
 - **The connector generator takes an API the vendor splits into several

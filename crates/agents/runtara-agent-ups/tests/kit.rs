@@ -102,6 +102,21 @@ fn a_write_whose_outcome_is_unknown_is_not_retried() {
 }
 
 #[test]
+fn a_write_whose_answer_cannot_be_read_may_have_been_carried_out() {
+    let err = kit::decode::<Value>(
+        &response(200, "{", &[("content-type", "application/json")]),
+        "POST",
+        "/api/shipments/v2409/ship",
+        "UPS",
+    )
+    .unwrap_err();
+    assert_eq!(
+        (err.code.as_str(), err.category),
+        ("UPS_OUTCOME_UNKNOWN", "permanent")
+    );
+}
+
+#[test]
 fn reads_and_refused_writes_are_still_retried() {
     let err = kit::network_error("GET", "/api/track/v1/details/1Z", "UPS", "timed out");
     assert_eq!(
