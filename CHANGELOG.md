@@ -1175,6 +1175,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Pipedrive and Zendesk agents no longer repeat a write that may have
+  gone through.** A network error, a timeout or a 5xx was retried for every
+  HTTP method, so a deal, ticket or user whose answer was lost could be created
+  twice. Such a write now fails with `PIPEDRIVE_OUTCOME_UNKNOWN` or
+  `ZENDESK_OUTCOME_UNKNOWN` instead of being retried, and a workflow should
+  check before sending it again. Any write whose answer cannot be read fails
+  the same way, with the record's `id` as an attribute when the answer has one.
+  Reads, a 429 on any request, and writes that are safe to send twice are still
+  retried: Pipedrive's deal update and delete, and Zendesk's ticket delete.
+  Zendesk's updates are not retried, because updating a ticket adds its comment
+  again, and that includes the user and organization updates.
+
 - **An OAuth token whose `expires_in` is a string expires on time.** The
   token cache read only a number, so a provider sending `"14399"` (UPS) had
   its token cached for the 24-hour default, past its real lifetime. A numeric

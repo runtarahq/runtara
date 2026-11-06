@@ -8,6 +8,12 @@
 //! secret. The error envelope and `RawConnection` mirror the shims hand-written
 //! agents (e.g. `runtara-agent-stripe`) carry. Meant to move into a crate shared
 //! by every generated agent.
+//!
+//! As in the Shippo agent's copy, a write that cannot safely be sent twice is
+//! never reported as worth retrying when its outcome is unknown: Pipedrive
+//! documents no idempotency key, so a deal sent again after a timeout or a 5xx
+//! can be created twice. A write whose answer cannot be read counts as unknown
+//! too, because the deal may be created. See [`outcome_unknown`].
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -334,20 +340,60 @@ impl Request {
                 .header("Content-Type", "application/json")
                 .body_bytes(body);
         }
-        let response = builder.call_agent_async().await.map_err(|e| {
-            AgentError::transient(
-                format!("{prefix}_NETWORK_ERROR"),
-                format!("{prefix} {} {} failed: {e}", self.method, self.path),
-            )
-        })?;
+        let response = builder
+            .call_agent_async()
+            .await
+            .map_err(|e| network_error(self.method, &self.path, prefix, &e.to_string()))?;
 
         decode(&response, self.method, &self.path, prefix)
     }
 }
 
+/// A request that got no response (a network error or the timeout). Retried
+/// only if `safe_to_repeat`; anything else may have been carried out.
+pub fn network_error(method: &str, path: &str, prefix: &str, cause: &str) -> AgentError {
+    let message = format!("{prefix} {method} {path} failed: {cause}");
+    if safe_to_repeat(method) {
+        AgentError::transient(format!("{prefix}_NETWORK_ERROR"), message)
+    } else {
+        outcome_unknown(prefix, message)
+    }
+}
+
+fn is_read(method: &str) -> bool {
+    method.eq_ignore_ascii_case("GET")
+}
+
+/// Whether sending a request twice leaves the same result as sending it once,
+/// so it can be retried when its outcome is unknown.
+///
+/// `updateDeal` (PATCH) can be: every field it takes sets a value, none adds to
+/// one. So can `deleteDeal` (DELETE): a second send finds the deal gone, and the
+/// worst it does is fail with a 404. `addDeal` (POST) cannot, and neither can a
+/// method not named here, until someone has checked it.
+fn safe_to_repeat(method: &str) -> bool {
+    is_read(method) || method.eq_ignore_ascii_case("PATCH") || method.eq_ignore_ascii_case("DELETE")
+}
+
+/// A request that is not `safe_to_repeat` and got no answer or a 5xx, or a write
+/// whose answer cannot be read: Pipedrive may or may not have carried it out.
+/// Permanent, so the step is not sent again; the workflow decides (search for
+/// the deal) before retrying.
+pub fn outcome_unknown(prefix: &str, message: String) -> AgentError {
+    AgentError::permanent(
+        format!("{prefix}_OUTCOME_UNKNOWN"),
+        format!(
+            "{message}. It may have been carried out (a deal created, changed or deleted); \
+             check before sending it again"
+        ),
+    )
+}
+
 /// Turns a response into the capability's output.
 ///
-/// - A non-2xx status is an error: 429 and 5xx are transient, the rest permanent.
+/// - A non-2xx status is an error: 429 is transient (Pipedrive refused the
+///   request), a 5xx is transient if the request is `safe_to_repeat` and
+///   [`outcome_unknown`] otherwise, and the rest are permanent.
 /// - An empty 2xx body (e.g. 204) decodes as JSON `null`, so an operation
 ///   without a response body returns `Value::Null`.
 /// - A 2xx body that is not JSON (text, binary) decodes as a JSON string of its
@@ -368,7 +414,10 @@ pub fn decode<T: DeserializeOwned>(
         let err = match status {
             429 => AgentError::transient(format!("{prefix}_RATE_LIMITED"), message)
                 .with_retry_after_ms(retry_after_ms(&response.headers)),
-            500..=599 => AgentError::transient(format!("{prefix}_UPSTREAM_ERROR"), message),
+            500..=599 if safe_to_repeat(method) => {
+                AgentError::transient(format!("{prefix}_UPSTREAM_ERROR"), message)
+            }
+            500..=599 => outcome_unknown(prefix, message),
             401 | 403 => AgentError::permanent(format!("{prefix}_UNAUTHORIZED"), message),
             _ => AgentError::permanent(format!("{prefix}_REQUEST_FAILED"), message),
         };
@@ -378,10 +427,18 @@ pub fn decode<T: DeserializeOwned>(
     }
 
     let invalid = |e: serde_json::Error| {
-        AgentError::permanent(
-            format!("{prefix}_INVALID_RESPONSE"),
-            format!("{prefix} {method} {path}: {e}"),
-        )
+        let message = format!("{prefix} {method} {path}: {e}");
+        if is_read(method) {
+            return AgentError::permanent(format!("{prefix}_INVALID_RESPONSE"), message);
+        }
+        // Pipedrive accepted the write; the deal's id is what lets a workflow find it.
+        let id = serde_json::from_slice::<Value>(&response.body)
+            .ok()
+            .and_then(|body| body.pointer("/data/id")?.as_u64());
+        match id {
+            Some(id) => outcome_unknown(prefix, message).with_attr("id", id.to_string()),
+            None => outcome_unknown(prefix, message),
+        }
     };
     let text = String::from_utf8_lossy(&response.body);
     if text.trim().is_empty() {

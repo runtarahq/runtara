@@ -5,6 +5,8 @@
 #![allow(clippy::result_large_err)]
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::task::{Context, Poll, Waker};
 
 use runtara_agent_zendesk::{TicketResponse, kit};
 use serde_json::{Value, json};
@@ -24,6 +26,70 @@ fn decode<T: serde::de::DeserializeOwned>(
     response: runtara_http::HttpResponse,
 ) -> Result<T, kit::AgentError> {
     kit::decode(&response, "GET", "/api/v2/tickets", "ZENDESK")
+}
+
+/// What `send` reports when its request gets no response: outside the host, a
+/// request through a connection fails at once, so one poll finishes it.
+fn send_without_a_response(method: &'static str, path: &str) -> kit::AgentError {
+    let connection = kit::RawConnection {
+        connection_id: "connection".into(),
+        connection_subtype: None,
+        integration_id: "zendesk_client_credentials".into(),
+        parameters: Value::Null,
+        rate_limit_config: None,
+    };
+    let request = kit::Request::new(method, path.into());
+    let mut send = std::pin::pin!(request.send::<Value>(&connection, "ZENDESK"));
+    match send.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(result) => result.unwrap_err(),
+        Poll::Pending => panic!("{method} {path} was left waiting"),
+    }
+}
+
+/// Every way a request can end without a usable answer, as `decode` and `send`
+/// report them: the 502 is what the host answers when the vendor cannot be reached.
+fn unanswered(method: &'static str, path: &str) -> Vec<kit::AgentError> {
+    let mut errors: Vec<_> = [500, 502, 503]
+        .into_iter()
+        .map(|status| {
+            kit::decode::<Value>(&response(status, "busy", &[]), method, path, "ZENDESK")
+                .unwrap_err()
+        })
+        .collect();
+    errors.push(kit::network_error(method, path, "ZENDESK", "timed out"));
+    errors.push(send_without_a_response(method, path));
+    errors
+}
+
+fn assert_not_retried(method: &'static str, path: &str) {
+    for err in unanswered(method, path) {
+        assert_eq!(
+            (err.code.as_str(), err.category),
+            ("ZENDESK_OUTCOME_UNKNOWN", "permanent"),
+            "{method} {path}: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("check before sending it again"),
+            "{}",
+            err.message
+        );
+    }
+}
+
+fn assert_retried(method: &'static str, path: &str) {
+    for err in unanswered(method, path) {
+        assert_eq!(
+            err.category, "transient",
+            "{method} {path}: {}",
+            err.message
+        );
+        assert!(
+            ["ZENDESK_NETWORK_ERROR", "ZENDESK_UPSTREAM_ERROR"].contains(&err.code.as_str()),
+            "{method} {path}: {}",
+            err.code
+        );
+    }
 }
 
 #[test]
@@ -69,6 +135,99 @@ fn status_codes_map_to_error_categories() {
     for (status, code, category) in cases {
         let err = decode::<Value>(response(status, "nope", &[])).unwrap_err();
         assert_eq!((err.code.as_str(), err.category), (code, category));
+    }
+}
+
+#[test]
+fn a_write_whose_outcome_is_unknown_is_not_retried() {
+    // This agent sends no idempotency key: a ticket sent again could be created twice.
+    for path in [
+        "/api/v2/tickets",
+        "/api/v2/users",
+        "/api/v2/users/create_or_update",
+        "/api/v2/organizations",
+    ] {
+        assert_not_retried("POST", path);
+    }
+}
+
+#[test]
+fn a_put_is_not_retried_because_updating_a_ticket_adds_its_comment_again() {
+    for path in [
+        "/api/v2/tickets/1",
+        "/api/v2/users/1",
+        "/api/v2/organizations/1",
+    ] {
+        assert_not_retried("PUT", path);
+    }
+}
+
+#[test]
+fn a_delete_is_still_retried() {
+    // A ticket can only be deleted once.
+    assert_retried("DELETE", "/api/v2/tickets/1");
+}
+
+#[test]
+fn a_method_nobody_has_checked_is_not_retried() {
+    assert_not_retried("PATCH", "/api/v2/tickets/1");
+}
+
+#[test]
+fn a_write_whose_answer_cannot_be_read_may_have_been_carried_out() {
+    #[derive(Debug, serde::Deserialize)]
+    struct Strict {
+        #[allow(dead_code)]
+        count: u32,
+    }
+    let json = [("content-type", "application/json")];
+    // Valid JSON of another shape keeps the id of what was created.
+    for (path, body) in [
+        ("/api/v2/tickets", r#"{"ticket": {"id": 3000000000}}"#),
+        ("/api/v2/users", r#"{"user": {"id": 3000000000}}"#),
+        (
+            "/api/v2/organizations",
+            r#"{"organization": {"id": 3000000000}}"#,
+        ),
+    ] {
+        let err = kit::decode::<Strict>(&response(201, body, &json), "POST", path, "ZENDESK")
+            .unwrap_err();
+        assert_eq!(
+            (err.code.as_str(), err.category),
+            ("ZENDESK_OUTCOME_UNKNOWN", "permanent")
+        );
+        assert_eq!(
+            err.attributes.get("id").and_then(Value::as_str),
+            Some("3000000000"),
+            "{path}"
+        );
+    }
+    // Broken JSON has no id to offer, and the outcome is just as unknown, even
+    // for a write that could have been sent again.
+    for method in ["POST", "PUT", "DELETE"] {
+        let err = kit::decode::<Strict>(
+            &response(200, "{", &json),
+            method,
+            "/api/v2/tickets/1",
+            "ZENDESK",
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "ZENDESK_OUTCOME_UNKNOWN", "{method}");
+        assert!(!err.attributes.contains_key("id"));
+    }
+}
+
+#[test]
+fn reads_and_refused_writes_are_still_retried() {
+    assert_retried("GET", "/api/v2/tickets");
+    // A 429 means Zendesk refused the request, so nothing was created or added.
+    for (method, path) in [("POST", "/api/v2/tickets"), ("PUT", "/api/v2/tickets/1")] {
+        let err =
+            kit::decode::<Value>(&response(429, "", &[]), method, path, "ZENDESK").unwrap_err();
+        assert_eq!(
+            (err.code.as_str(), err.category),
+            ("ZENDESK_RATE_LIMITED", "transient")
+        );
     }
 }
 
