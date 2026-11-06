@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Atlassian's API gateway when the connection has a Cloud ID. It is limited by
   default to 5 requests/s with a burst of 10, which stays within Jira's limit of
   20 writes to one issue in 2 seconds. API tokens last at most a year.
+  A request that is not a read and gets no answer, a 5xx or an answer it cannot
+  read fails with `JIRA_OUTCOME_UNKNOWN` instead of being retried: Jira has no
+  idempotency key, so sending it again could create a second issue or comment.
+  Credentials Jira rejects fail with `JIRA_UNAUTHORIZED` even on a 200, which is
+  how Jira answers a bad token wherever anonymous access is allowed.
   Attachments are not included: they need a multipart request, which generated
   agents cannot send yet.
 - **Shippo agent, generated from Shippo's API spec.** Nineteen capabilities:
