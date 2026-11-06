@@ -10,6 +10,11 @@ spec:
   # Atlassian Document Format. dac-static.atlassian.com serves another build.
   url: https://developer.atlassian.com/cloud/jira/platform/swagger.v3.json
   sha256: 4b33075c94afc43f8cae76b231a093522c6228b22d63bb7fcec881e4259a4bfb
+# The spec does not mark it nullable, but assignIssue documents null as unassign.
+input_types:
+  accountId:
+    type: string
+    nullable: true
 operations:
   - getIssue
   - createIssue

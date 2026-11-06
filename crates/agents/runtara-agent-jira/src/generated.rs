@@ -5155,8 +5155,13 @@ pub struct AssignIssueInput {
         display_name = r##"Account ID"##,
         description = r##"The account ID of the user, which uniquely identifies the user across all Atlassian products. For example, *5b10ac8d82e05b22cc7d4ef5*. Required in requests."##
     )]
-    #[serde(rename = "accountId", default, skip_serializing_if = "Option::is_none")]
-    pub account_id: Option<String>,
+    #[serde(
+        rename = "accountId",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub account_id: Option<Option<String>>,
     #[field(
         display_name = r##"Key"##,
         description = r##"This property is no longer available and will be removed from the documentation soon. See the [deprecation notice](https://developer.atlassian.com/cloud/jira/platform/deprecation-notice-user-privacy-api-migration-guide/) for details."##
@@ -6594,8 +6599,7 @@ pub struct GetUserInput {
     pub _connection: Option<RawConnection>,
     #[field(
         display_name = r##"Account ID"##,
-        description = r##"The account ID of the user, which uniquely identifies the user across all Atlassian products. For example, *5b10ac8d82e05b22cc7d4ef5*. Required."##,
-        example = r##"5b10ac8d82e05b22cc7d4ef5"##
+        description = r##"The account ID of the user, which uniquely identifies the user across all Atlassian products. For example, *5b10ac8d82e05b22cc7d4ef5*. Required."##
     )]
     #[serde(rename = "accountId", default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,

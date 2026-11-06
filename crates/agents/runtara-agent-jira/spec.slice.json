@@ -3329,7 +3329,7 @@
         "properties": {
           "accountId": {
             "description": "The account ID of the user, which uniquely identifies the user across all Atlassian products. For example, *5b10ac8d82e05b22cc7d4ef5*. Required in requests.",
-            "maxLength": 128,
+            "nullable": true,
             "type": "string",
             "x-runtara-label": "Account ID"
           },
@@ -7820,11 +7820,9 @@
             "in": "query",
             "name": "accountId",
             "schema": {
-              "example": "5b10ac8d82e05b22cc7d4ef5",
-              "maxLength": 128,
+              "nullable": true,
               "type": "string"
             },
-            "x-runtara-example": "5b10ac8d82e05b22cc7d4ef5",
             "x-runtara-label": "Account ID",
             "x-showInExample": "true"
           },
@@ -7952,7 +7950,7 @@
             "in": "query",
             "name": "accountId",
             "schema": {
-              "maxLength": 128,
+              "nullable": true,
               "type": "string"
             },
             "x-runtara-label": "Account ID"

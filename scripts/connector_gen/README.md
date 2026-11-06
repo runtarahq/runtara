@@ -383,8 +383,8 @@ crates/agents/runtara-agent-<id>/
 - `fetch` refuses, naming the operation, what the templates cannot send yet:
   request bodies that are not JSON (form-encoded, multipart), object query
   parameters without declared scalar fields or in a style other than
-  `deepObject` or exploded `form`, array query parameters in a style other than
-  `form`, and required cookie parameters. A Swagger 2.0 operation that
+  `deepObject` or exploded `form`, array query parameters of objects or in a
+  style other than `form`, and required cookie parameters. A Swagger 2.0 operation that
   `consumes` only form data is such a form body.
 - An input typed by a schema (a ticket's `comment`, say) is described to the
   step editor as `any`, without its fields.

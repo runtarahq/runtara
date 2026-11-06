@@ -1540,9 +1540,10 @@ impl HttpConnectionExtractor for ZendeskClientCredentialsExtractor {
 /// The origin of a Jira Cloud site's REST API.
 ///
 /// A token without scopes is sent to the site itself. `site` is its bare name
-/// (`acme`) or the URL people copy from the browser
-/// (`https://acme.atlassian.net/`); whatever is left must be a single DNS label,
-/// so credentialed requests can only ever go to a host under atlassian.net.
+/// (`acme`) or any URL people copy from the browser
+/// (`https://acme.atlassian.net/jira/your-work`), whose path is ignored; what is
+/// left must be a single DNS label, so credentialed requests can only ever go to
+/// a host under atlassian.net.
 ///
 /// A token with scopes only works through Atlassian's API gateway, which names
 /// the site by its Cloud ID, so a `cloud_id` wins over `site`. The ID is part of
@@ -1564,9 +1565,9 @@ pub fn jira_base_url(site: &str, cloud_id: Option<&str>) -> Result<String, Strin
     }
 
     let raw = site.trim().to_ascii_lowercase();
-    let label = raw.strip_prefix("https://").unwrap_or(&raw);
-    let label = label.trim_end_matches('/');
-    let label = label.strip_suffix(".atlassian.net").unwrap_or(label);
+    let host = raw.strip_prefix("https://").unwrap_or(&raw);
+    let host = host.split('/').next().unwrap_or(host);
+    let label = host.strip_suffix(".atlassian.net").unwrap_or(host);
     let valid = !label.is_empty()
         && label.len() <= 63
         && !label.starts_with('-')
@@ -1583,6 +1584,16 @@ pub fn jira_base_url(site: &str, cloud_id: Option<&str>) -> Result<String, Strin
     Ok(format!("https://{label}.atlassian.net"))
 }
 
+/// The `Authorization` value of a Jira API token: HTTP Basic with
+/// `email:api_token`. Both are trimmed, as a pasted value often ends in a newline.
+pub fn jira_basic_auth(email: &str, api_token: &str) -> String {
+    let credentials = format!("{}:{}", email.trim(), api_token.trim());
+    format!(
+        "Basic {}",
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, credentials)
+    )
+}
+
 /// Parameters for Jira Cloud API token authentication
 #[derive(Debug, Deserialize, ConnectionParams)]
 #[connection(
@@ -1597,7 +1608,8 @@ pub struct JiraApiTokenParams {
     #[field(
         display_name = "Site",
         description = "Your Jira site: 'acme' for acme.atlassian.net",
-        placeholder = "acme"
+        placeholder = "acme",
+        is_required
     )]
     pub site: String,
 
@@ -1605,7 +1617,8 @@ pub struct JiraApiTokenParams {
     #[field(
         display_name = "Email",
         description = "Email of the Atlassian account that created the token. Steps act with that account's Jira permissions",
-        placeholder = "user@example.com"
+        placeholder = "user@example.com",
+        is_required
     )]
     pub email: String,
 
@@ -1613,7 +1626,8 @@ pub struct JiraApiTokenParams {
     #[field(
         display_name = "API Token",
         description = "API token from id.atlassian.com/manage-profile/security/api-tokens. Tokens last at most a year; replace it here before it expires",
-        secret
+        secret,
+        is_required
     )]
     pub api_token: String,
 
@@ -1639,13 +1653,11 @@ impl HttpConnectionExtractor for JiraExtractor {
         let p: JiraApiTokenParams = serde_json::from_value(params.clone())
             .map_err(|e| format!("Invalid jira_api_token connection parameters: {}", e))?;
 
-        let auth = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            format!("{}:{}", p.email.trim(), p.api_token),
-        );
-
         let mut headers = HashMap::new();
-        headers.insert("Authorization".to_string(), format!("Basic {}", auth));
+        headers.insert(
+            "Authorization".to_string(),
+            jira_basic_auth(&p.email, &p.api_token),
+        );
 
         Ok(HttpConnectionConfig {
             headers,

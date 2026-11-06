@@ -8,6 +8,15 @@
 //! secret. The error envelope and `RawConnection` mirror the shims hand-written
 //! agents (e.g. `runtara-agent-stripe`) carry. Meant to move into a crate shared
 //! by every generated agent.
+//!
+//! As in the Shippo and UPS agents' copies, a request that is not a read is never
+//! reported as worth retrying when its outcome is unknown: Jira has no idempotency
+//! key, so an issue, comment or worklog sent again after a timeout or a 5xx can be
+//! created twice. See [`outcome_unknown`].
+//!
+//! Jira also answers a rejected credential as an anonymous request wherever
+//! anonymous access is allowed, so `decode` checks more than the status. See
+//! [`login_failed`].
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -334,20 +343,58 @@ impl Request {
                 .header("Content-Type", "application/json")
                 .body_bytes(body);
         }
-        let response = builder.call_agent_async().await.map_err(|e| {
-            AgentError::transient(
-                format!("{prefix}_NETWORK_ERROR"),
-                format!("{prefix} {} {} failed: {e}", self.method, self.path),
-            )
-        })?;
+        let response = builder
+            .call_agent_async()
+            .await
+            .map_err(|e| network_error(self.method, &self.path, prefix, &e.to_string()))?;
 
         decode(&response, self.method, &self.path, prefix)
     }
 }
 
+/// A request that got no response (a network error or the timeout). Only a
+/// read is worth retrying; anything else may have been carried out.
+pub fn network_error(method: &str, path: &str, prefix: &str, cause: &str) -> AgentError {
+    let message = format!("{prefix} {method} {path} failed: {cause}");
+    if is_read(method) {
+        AgentError::transient(format!("{prefix}_NETWORK_ERROR"), message)
+    } else {
+        outcome_unknown(prefix, message)
+    }
+}
+
+fn is_read(method: &str) -> bool {
+    method.eq_ignore_ascii_case("GET")
+}
+
+/// A request that is not a read and got no answer, or a 5xx: Jira may or may
+/// not have carried it out. Permanent, so the step is not sent again; the
+/// workflow decides (search for the issue, read its comments) before retrying.
+pub fn outcome_unknown(prefix: &str, message: String) -> AgentError {
+    AgentError::permanent(
+        format!("{prefix}_OUTCOME_UNKNOWN"),
+        format!(
+            "{message}. It may have been carried out (an issue, comment or worklog created); \
+             check before sending it again"
+        ),
+    )
+}
+
+/// Whether Jira rejected the connection's credentials. It then treats the
+/// request as anonymous: where anonymous access is allowed the status is 200,
+/// and a search may simply find nothing, so only this header tells the two apart.
+fn login_failed(headers: &HashMap<String, String>) -> bool {
+    header(headers, "x-seraph-loginreason").is_some_and(|reason| {
+        reason.contains("AUTHENTICATED_FAILED") || reason.contains("AUTHENTICATION_DENIED")
+    })
+}
+
 /// Turns a response into the capability's output.
 ///
-/// - A non-2xx status is an error: 429 and 5xx are transient, the rest permanent.
+/// - Credentials Jira rejected are an error whatever the status.
+/// - A non-2xx status is an error: 429 and 409 are transient (Jira refused the
+///   request), a 5xx is transient for a read and [`outcome_unknown`] otherwise,
+///   and the rest are permanent.
 /// - An empty 2xx body (e.g. 204) decodes as JSON `null`, so an operation
 ///   without a response body returns `Value::Null`.
 /// - A 2xx body that is not JSON (text, binary) decodes as a JSON string of its
@@ -359,6 +406,17 @@ pub fn decode<T: DeserializeOwned>(
     prefix: &str,
 ) -> Result<T, AgentError> {
     let status = response.status;
+    if login_failed(&response.headers) {
+        return Err(AgentError::permanent(
+            format!("{prefix}_UNAUTHORIZED"),
+            format!(
+                "{prefix} rejected the connection's credentials at {path}: \
+                 check its email and API token, which may have expired"
+            ),
+        )
+        .with_attr("status_code", status.to_string())
+        .with_attr("path", path));
+    }
     if !(200..300).contains(&status) {
         let body: String = String::from_utf8_lossy(&response.body)
             .chars()
@@ -368,7 +426,11 @@ pub fn decode<T: DeserializeOwned>(
         let err = match status {
             429 => AgentError::transient(format!("{prefix}_RATE_LIMITED"), message)
                 .with_retry_after_ms(retry_after_ms(&response.headers)),
-            500..=599 => AgentError::transient(format!("{prefix}_UPSTREAM_ERROR"), message),
+            409 => AgentError::transient(format!("{prefix}_CONFLICT"), message),
+            500..=599 if is_read(method) => {
+                AgentError::transient(format!("{prefix}_UPSTREAM_ERROR"), message)
+            }
+            500..=599 => outcome_unknown(prefix, message),
             401 | 403 => AgentError::permanent(format!("{prefix}_UNAUTHORIZED"), message),
             _ => AgentError::permanent(format!("{prefix}_REQUEST_FAILED"), message),
         };
@@ -378,10 +440,13 @@ pub fn decode<T: DeserializeOwned>(
     }
 
     let invalid = |e: serde_json::Error| {
-        AgentError::permanent(
-            format!("{prefix}_INVALID_RESPONSE"),
-            format!("{prefix} {method} {path}: {e}"),
-        )
+        let message = format!("{prefix} {method} {path}: {e}");
+        if is_read(method) {
+            AgentError::permanent(format!("{prefix}_INVALID_RESPONSE"), message)
+        } else {
+            // Jira accepted the write, so sending it again would repeat it.
+            outcome_unknown(prefix, message)
+        }
     };
     let text = String::from_utf8_lossy(&response.body);
     if text.trim().is_empty() {

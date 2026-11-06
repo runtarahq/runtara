@@ -2,7 +2,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use reqwest::Client;
 use runtara_agents::extractors::connection_types::{
     GEMINI_API_BASE_URL, SHIPPO_API_BASE_URL, SHIPPO_API_VERSION, ZENDESK_DEFAULT_SCOPE,
-    jira_base_url, ups_base_url, zendesk_base_url,
+    jira_base_url, jira_basic_auth, ups_base_url, zendesk_base_url,
 };
 use runtara_agents::registry::find_connection_type;
 use runtara_dsl::agent_meta::{OAuthConfig, TokenEndpointAuth};
@@ -256,18 +256,17 @@ fn describe_connection_auth(
             deferred_auth: describe_zendesk_client_credentials_auth(connection_id, params),
         },
         // Jira: HTTP Basic with the account's email and API token. Every site has
-        // its own host, or a gateway path for a token with scopes; an invalid
-        // value leaves no base URL, so a credentialed request fails closed at the
-        // proxy's pin step.
+        // its own host, or a gateway path for a token with scopes. An invalid
+        // value or missing credentials leave no base URL, so the request fails
+        // closed at the proxy's pin step instead of going out anonymously.
         "jira_api_token" => {
-            if let (Some(email), Some(token)) =
-                (params["email"].as_str(), params["api_token"].as_str())
-            {
-                let encoded = BASE64.encode(format!("{}:{}", email.trim(), token));
-                headers.insert("Authorization".into(), format!("Basic {encoded}"));
+            let filled = |name: &str| params[name].as_str().filter(|v| !v.trim().is_empty());
+            let credentials = filled("email").zip(filled("api_token"));
+            if let Some((email, token)) = credentials {
+                headers.insert("Authorization".into(), jira_basic_auth(email, token));
             }
             ConnectionAuthDescriptor {
-                base_url: jira_account_url(params),
+                base_url: credentials.and_then(|_| jira_account_url(params)),
                 aws_signing: None,
                 azure_signing: None,
                 deferred_auth: None,
@@ -1422,6 +1421,10 @@ mod tests {
         for params in [
             json!({ "site": "acme.evil.com", "email": "e", "api_token": "t" }),
             json!({ "site": "acme", "cloud_id": "../../evil", "email": "e", "api_token": "t" }),
+            json!({ "site": "acme", "email": "e" }),
+            json!({ "site": "acme", "api_token": "t" }),
+            json!({ "site": "acme", "email": " ", "api_token": "t" }),
+            json!({ "site": "acme", "email": "e", "api_token": "" }),
         ] {
             let descriptor =
                 describe_connection_auth("conn-1", "jira_api_token", &params, &mut HashMap::new());

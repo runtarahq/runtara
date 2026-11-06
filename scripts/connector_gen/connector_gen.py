@@ -427,7 +427,9 @@ def check_parameter(spec: dict, name: str, parameter: dict) -> list:
                  "is not supported")
     if resolved.get("in") == "query" and schema.get("type") == "array":
         items = deref(spec, schema.get("items") or {})
-        if is_object(items) and not items.get("properties"):
+        if is_object(items):
+            if any(items.get(key) for key in ("properties", "additionalProperties", "allOf", "oneOf", "anyOf")):
+                sys.exit(f"{name}: array query parameter `{resolved['name']}` of objects is not supported")
             # Nothing says what the items are, and a query string only carries text.
             print(f"note: {name}: array query parameter `{resolved['name']}` declares no item fields; "
                   "sending its items as strings")

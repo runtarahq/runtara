@@ -666,6 +666,8 @@ fn test_jira_base_url_accepts_a_site_name_or_its_url() {
         "ACME",
         "acme.atlassian.net",
         "https://acme.atlassian.net/",
+        "https://acme.atlassian.net/jira/software/projects/RT/boards/1",
+        "acme.atlassian.net/browse/RT-1?filter=1",
     ] {
         assert_eq!(
             jira_base_url(input, None).as_deref(),
@@ -685,10 +687,12 @@ fn test_jira_base_url_cannot_leave_atlassian_net() {
         "acme-",
         "evil.com",
         "acme.atlassian.net.evil.com",
-        "acme.atlassian.net/path",
+        "acme.atlassian.net.evil.com/path",
+        "evil.com/acme.atlassian.net",
         "acme@evil.com",
         "acme.evil.com/",
         "http://acme.atlassian.net",
+        "https://acme.atlassian.net?x=/",
     ] {
         assert!(
             jira_base_url(input, None).is_err(),
@@ -746,7 +750,7 @@ fn test_jira_cloud_id_cannot_leave_the_gateway_path() {
 fn test_jira_extractor_sends_basic_auth_to_the_site() {
     let config = extract_http_config(
         "jira_api_token",
-        &json!({ "site": "acme", "email": " me@example.com ", "api_token": "token-value" }),
+        &json!({ "site": "acme", "email": " me@example.com ", "api_token": "token-value\n" }),
         None,
     )
     .expect("Should extract config");
@@ -812,6 +816,9 @@ fn test_jira_connection_type_is_registered() {
     assert!(field("api_token").is_secret);
     assert!(!field("email").is_secret);
     assert!(field("cloud_id").is_optional);
+    for name in ["site", "email", "api_token"] {
+        assert!(field(name).is_required, "{name}");
+    }
 }
 
 // ============================================================================

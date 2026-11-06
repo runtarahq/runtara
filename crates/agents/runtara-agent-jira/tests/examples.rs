@@ -332,6 +332,19 @@ fn assign_issue_sends_the_account_id() {
 }
 
 #[test]
+fn assign_issue_can_unassign_with_a_null_account() {
+    let input: AssignIssueInput = serde_json::from_value(json!({
+        "issueIdOrKey": "RT-1",
+        "accountId": null,
+    }))
+    .unwrap();
+    assert_eq!(
+        input.request().unwrap().body_json(),
+        Some(json!({ "accountId": null }))
+    );
+}
+
+#[test]
 fn add_watcher_body_is_the_bare_account_id() {
     let input: AddWatcherInput = serde_json::from_value(json!({
         "issueIdOrKey": "RT-1",

@@ -229,12 +229,6 @@ class NormalizeTest(unittest.TestCase):
         self.assertNotIn("StringList", sliced["components"].get("schemas", {}))
         self.assertIn("`properties`", out.getvalue())
 
-    def test_array_query_parameter_of_declared_objects_is_left_alone(self):
-        items = {"type": "object", "properties": {"id": {"type": "string"}}}
-        ids = {"in": "query", "name": "ids", "schema": {"type": "array", "items": items}}
-        sliced = cg.slice_spec(spec_with({"parameters": [ids]}, method="get"), ["op"])
-        self.assertEqual(operation(sliced, "op")["parameters"][0]["schema"]["items"]["properties"].keys(), {"id"})
-
     def test_shared_request_body_is_unwrapped_once_per_operation(self):
         user = {"type": "object", "properties": {
             "name": {"type": "string"},
@@ -994,6 +988,14 @@ class RefusalTest(unittest.TestCase):
         }}})
         sliced = cg.slice_spec(spec, ["op"])
         self.assertEqual(list(operation(sliced, "op")["requestBody"]["content"]), ["application/json"])
+
+    def test_array_query_parameter_of_objects(self):
+        for items in ({"type": "object", "properties": {"id": {"type": "string"}}},
+                      {"type": "object", "additionalProperties": {"type": "string"}},
+                      {"type": "object", "additionalProperties": True},
+                      {"type": "object", "oneOf": [{"type": "string"}]}):
+            ids = {"in": "query", "name": "ids", "schema": {"type": "array", "items": items}}
+            self.assert_refused(self.spec_with({"parameters": [ids]}), "array query parameter `ids` of objects")
 
     def test_object_query_parameter(self):
         spec = self.spec_with({"parameters": [{"in": "query", "name": "filter", "style": "deepObject",
