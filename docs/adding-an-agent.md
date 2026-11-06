@@ -62,7 +62,7 @@ Written by hand for each new agent:
 | What | Where |
 | -- | -- |
 | `connector.yaml`: agent id, name, description, `integration_id` (one connection type or a list), error prefix, spec URL and sha256 (or several specs, as UPS publishes them), operations, label overrides, body envelopes, headers and credential parameters the connection sends, pinned path parameters, input types the spec gets wrong | the crate |
-| `Cargo.toml`, `src/lib.rs`, `src/kit.rs` (copied from `runtara-agent-pipedrive`) | the crate |
+| `Cargo.toml`, `src/lib.rs` (copied from `runtara-agent-pipedrive`), `src/kit.rs` (copied from `runtara-agent-shippo`) | the crate |
 | Tests: response examples round-trip, metadata lists the capabilities and inputs, inputs build the expected requests | `tests/*.rs` in the crate (`runtara-agent-zendesk` shows envelopes and pagination) |
 | Registration: path dependency and `agents()` entry | `crates/runtara-agent-bundle-emit/Cargo.toml`, `src/main.rs` |
 | A [connection type](#connection-type), unless an existing one fits | `runtara-agents` (params, extractor, two registries, tests), `runtara-connections` (auth arm, rate-limit default, tests), form snapshot |
@@ -84,10 +84,16 @@ workspace `Cargo.toml` (it includes `crates/agents/*`).
      operationIds;
    - `src/lib.rs` with `pub mod kit; mod generated; pub use generated::*;`;
    - `src/kit.rs`, the request builder and error envelope the generated code
-     calls. When a repeated write can cost money and the vendor has no
-     idempotency key (a shipping label, say), copy it from
-     `runtara-agent-shippo` instead: a write that gets no answer or a 5xx fails
-     as `<PREFIX>_OUTCOME_UNKNOWN` and is not retried.
+     calls, copied from `runtara-agent-shippo` with Shippo's wording and id
+     field replaced. A request that is not a read and gets no answer, a 5xx or
+     an answer it cannot read fails as `<PREFIX>_OUTCOME_UNKNOWN` and is not
+     retried: the vendor may have carried it out, and sending it again can
+     create a second record. A 429 is still retried, because the vendor refused
+     the request. Retry a write only if sending it twice leaves the same result
+     as sending it once, and say why in the kit. Check each capability, not just
+     its HTTP method: `runtara-agent-pipedrive` retries PATCH and DELETE, but
+     `runtara-agent-zendesk` retries only DELETE, because updating a ticket adds
+     its comment again.
 3. **Fetch and generate:**
    ```bash
    PY=scripts/connector_gen/.venv/bin/python
