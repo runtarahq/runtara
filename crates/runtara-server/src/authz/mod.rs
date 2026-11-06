@@ -19,7 +19,7 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
-pub use scope::ApiKeyScope;
+pub use scope::{ApiKeyScope, PermissionSet};
 
 /// Built-in tenant roles, most- to least-privileged.
 ///
@@ -342,6 +342,16 @@ const VIEWER_ACCESS: &[(Permission, Access)] = &[
     (ConnectionRead, Allow),
     (AnalyticsRead, Allow),
 ];
+
+/// The set of permissions `role` grants (anything not [`Access::Deny`] — i.e. `Allow` or `Own`).
+///
+/// This is the ceiling a credential issued by a user with this role may be scoped to: an API
+/// key's requested scope is intersected with it at creation (SYN-939), so a key can never name
+/// a permission its issuer does not hold. `Own`-access permissions are included — the key
+/// inherits the same per-row ownership narrowing at the role gate.
+pub fn permissions_for_role(role: Role) -> PermissionSet {
+    PermissionSet::from_permissions(role.grants().iter().map(|(permission, _)| *permission))
+}
 
 /// The [`Access`] `role` has for `permission`, per the static map. A permission a role does
 /// not grant is [`Access::Deny`].
