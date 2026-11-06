@@ -4185,6 +4185,7 @@ dependencies = [
  "runtara-agent-datetime",
  "runtara-agent-http",
  "runtara-agent-hubspot",
+ "runtara-agent-jira",
  "runtara-agent-mailgun",
  "runtara-agent-mcp",
  "runtara-agent-object-model",
@@ -4313,6 +4314,18 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-hubspot"
+version = "10.0.0"
+dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.58.0",
+]
+
+[[package]]
+name = "runtara-agent-jira"
 version = "10.0.0"
 dependencies = [
  "runtara-agent-macro",

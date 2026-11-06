@@ -2,7 +2,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use reqwest::Client;
 use runtara_agents::extractors::connection_types::{
     GEMINI_API_BASE_URL, SHIPPO_API_BASE_URL, SHIPPO_API_VERSION, ZENDESK_DEFAULT_SCOPE,
-    ups_base_url, zendesk_base_url,
+    jira_base_url, ups_base_url, zendesk_base_url,
 };
 use runtara_agents::registry::find_connection_type;
 use runtara_dsl::agent_meta::{OAuthConfig, TokenEndpointAuth};
@@ -255,6 +255,24 @@ fn describe_connection_auth(
             azure_signing: None,
             deferred_auth: describe_zendesk_client_credentials_auth(connection_id, params),
         },
+        // Jira: HTTP Basic with the account's email and API token. Every site has
+        // its own host, or a gateway path for a token with scopes; an invalid
+        // value leaves no base URL, so a credentialed request fails closed at the
+        // proxy's pin step.
+        "jira_api_token" => {
+            if let (Some(email), Some(token)) =
+                (params["email"].as_str(), params["api_token"].as_str())
+            {
+                let encoded = BASE64.encode(format!("{}:{}", email.trim(), token));
+                headers.insert("Authorization".into(), format!("Basic {encoded}"));
+            }
+            ConnectionAuthDescriptor {
+                base_url: jira_account_url(params),
+                aws_signing: None,
+                azure_signing: None,
+                deferred_auth: None,
+            }
+        }
         // UPS: the environment picks the host (an unknown one leaves no base URL,
         // so a credentialed request fails closed at the proxy's pin step). Every
         // request carries the transaction headers UPS asks for: an id unique to
@@ -505,6 +523,10 @@ fn describe_shopify_client_credentials_auth(
 
 fn zendesk_account_url(params: &Value) -> Option<String> {
     zendesk_base_url(params["subdomain"].as_str()?).ok()
+}
+
+fn jira_account_url(params: &Value) -> Option<String> {
+    jira_base_url(params["site"].as_str()?, params["cloud_id"].as_str()).ok()
 }
 
 /// Zendesk mints client-credentials tokens on the account's own host from a
@@ -1349,6 +1371,62 @@ mod tests {
             descriptor.base_url.as_deref(),
             Some("https://api.goshippo.com")
         );
+    }
+
+    #[test]
+    fn jira_token_is_basic_auth_on_the_site() {
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "jira_api_token",
+            &json!({ "site": "acme", "email": "me@example.com", "api_token": "token-value" }),
+            &mut headers,
+        );
+        assert_eq!(
+            headers.get("Authorization"),
+            Some(&format!(
+                "Basic {}",
+                BASE64.encode("me@example.com:token-value")
+            ))
+        );
+        assert_eq!(
+            descriptor.base_url.as_deref(),
+            Some("https://acme.atlassian.net")
+        );
+    }
+
+    #[test]
+    fn jira_scoped_token_goes_through_the_gateway() {
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "jira_api_token",
+            &json!({
+                "site": "acme",
+                "email": "me@example.com",
+                "api_token": "token-value",
+                "cloud_id": "fff89a1a-52c8-11e5-91b2-3c15c2bd8caa-ecosystem",
+            }),
+            &mut headers,
+        );
+        assert_eq!(
+            descriptor.base_url.as_deref(),
+            Some(
+                "https://api.atlassian.com/ex/jira/fff89a1a-52c8-11e5-91b2-3c15c2bd8caa-ecosystem"
+            )
+        );
+    }
+
+    #[test]
+    fn jira_invalid_site_or_cloud_id_leaves_no_base_url() {
+        for params in [
+            json!({ "site": "acme.evil.com", "email": "e", "api_token": "t" }),
+            json!({ "site": "acme", "cloud_id": "../../evil", "email": "e", "api_token": "t" }),
+        ] {
+            let descriptor =
+                describe_connection_auth("conn-1", "jira_api_token", &params, &mut HashMap::new());
+            assert_eq!(descriptor.base_url, None, "{params}");
+        }
     }
 
     #[test]

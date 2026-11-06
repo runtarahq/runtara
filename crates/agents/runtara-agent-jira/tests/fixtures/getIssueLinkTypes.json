@@ -1,0 +1,18 @@
+{
+  "issueLinkTypes": [
+    {
+      "id": "1000",
+      "inward": "Duplicated by",
+      "name": "Duplicate",
+      "outward": "Duplicates",
+      "self": "https://your-domain.atlassian.net/rest/api/2/issueLinkType/1000"
+    },
+    {
+      "id": "1010",
+      "inward": "Blocked by",
+      "name": "Blocks",
+      "outward": "Blocks",
+      "self": "https://your-domain.atlassian.net/rest/api/2/issueLinkType/1010"
+    }
+  ]
+}

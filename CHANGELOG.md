@@ -13,6 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Jira agent, generated from Atlassian's API spec.** Thirty-two capabilities
+  for Jira Cloud: create, read, edit, assign, transition and delete issues,
+  search with JQL, manage comments, log work, link issues, watch them, and read
+  projects, fields, statuses, priorities and users. The agent uses REST API v2,
+  so descriptions and comments are plain text rather than Atlassian Document
+  Format. The new `jira_api_token` connection type sends an Atlassian account's
+  email and API token, to the site or, for a token with scopes, through
+  Atlassian's API gateway when the connection has a Cloud ID. It is limited by
+  default to 5 requests/s with a burst of 10, which stays within Jira's limit of
+  20 writes to one issue in 2 seconds. API tokens last at most a year.
+  Attachments are not included: they need a multipart request, which generated
+  agents cannot send yet.
 - **Shippo agent, generated from Shippo's API spec.** Nineteen capabilities:
   validate addresses, create shipments and read their rates, buy labels, track
   packages, refund labels, manage orders and list carrier accounts. The new

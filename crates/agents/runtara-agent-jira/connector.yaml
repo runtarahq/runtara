@@ -1,0 +1,45 @@
+# Input to scripts/connector_gen/connector_gen.py; see its README.md.
+agent:
+  id: jira
+  name: Jira
+  description: Jira Cloud — issues, JQL search, transitions, comments, worklogs, links, watchers, projects and users.
+  integration_id: jira_api_token
+  error_prefix: JIRA
+spec:
+  # REST API v2 in OpenAPI 3 form: v2 takes and returns plain text where v3 uses
+  # Atlassian Document Format. dac-static.atlassian.com serves another build.
+  url: https://developer.atlassian.com/cloud/jira/platform/swagger.v3.json
+  sha256: 4b33075c94afc43f8cae76b231a093522c6228b22d63bb7fcec881e4259a4bfb
+operations:
+  - getIssue
+  - createIssue
+  - editIssue
+  - deleteIssue
+  - assignIssue
+  - getTransitions
+  - doTransition
+  - getChangeLogs
+  - searchAndReconsileIssuesUsingJql
+  - getComments
+  - getComment
+  - addComment
+  - updateComment
+  - deleteComment
+  - getIssueWorklog
+  - addWorklog
+  - linkIssues
+  - getIssueLinkTypes
+  - getIssueWatchers
+  - addWatcher
+  - searchProjects
+  - getProject
+  - getProjectComponents
+  - getProjectVersions
+  - getAllStatuses
+  - getCreateIssueMetaIssueTypes
+  - getCreateIssueMetaIssueTypeId
+  - getFields
+  - searchPriorities
+  - getCurrentUser
+  - findUsers
+  - getUser

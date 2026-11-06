@@ -653,6 +653,168 @@ fn test_shippo_connection_type_is_registered() {
 }
 
 // ============================================================================
+// Jira Extractor Tests
+// ============================================================================
+
+#[test]
+fn test_jira_base_url_accepts_a_site_name_or_its_url() {
+    use connection_types::jira_base_url;
+
+    for input in [
+        "acme",
+        " acme ",
+        "ACME",
+        "acme.atlassian.net",
+        "https://acme.atlassian.net/",
+    ] {
+        assert_eq!(
+            jira_base_url(input, None).as_deref(),
+            Ok("https://acme.atlassian.net"),
+            "{input:?}"
+        );
+    }
+}
+
+#[test]
+fn test_jira_base_url_cannot_leave_atlassian_net() {
+    use connection_types::jira_base_url;
+
+    for input in [
+        "",
+        "-acme",
+        "acme-",
+        "evil.com",
+        "acme.atlassian.net.evil.com",
+        "acme.atlassian.net/path",
+        "acme@evil.com",
+        "acme.evil.com/",
+        "http://acme.atlassian.net",
+    ] {
+        assert!(
+            jira_base_url(input, None).is_err(),
+            "{input:?} was accepted"
+        );
+    }
+}
+
+#[test]
+fn test_jira_cloud_id_selects_the_gateway() {
+    use connection_types::jira_base_url;
+
+    // Older sites have a suffix after the UUID.
+    for id in [
+        "11223344-a1b2-3b33-c444-def123456789",
+        "fff89a1a-52c8-11e5-91b2-3c15c2bd8caa-ecosystem",
+    ] {
+        assert_eq!(
+            jira_base_url("acme", Some(id)),
+            Ok(format!("https://api.atlassian.com/ex/jira/{id}"))
+        );
+    }
+    // The form sends an empty field for a token without scopes.
+    for id in ["", "  "] {
+        assert_eq!(
+            jira_base_url("acme", Some(id)).as_deref(),
+            Ok("https://acme.atlassian.net"),
+            "{id:?}"
+        );
+    }
+}
+
+#[test]
+fn test_jira_cloud_id_cannot_leave_the_gateway_path() {
+    use connection_types::jira_base_url;
+
+    let too_long = "a".repeat(65);
+    for id in [
+        "../evil",
+        "a/b",
+        "a?b",
+        "a#b",
+        "a b",
+        "a.b",
+        too_long.as_str(),
+    ] {
+        assert!(
+            jira_base_url("acme", Some(id)).is_err(),
+            "{id:?} was accepted"
+        );
+    }
+}
+
+#[test]
+fn test_jira_extractor_sends_basic_auth_to_the_site() {
+    let config = extract_http_config(
+        "jira_api_token",
+        &json!({ "site": "acme", "email": " me@example.com ", "api_token": "token-value" }),
+        None,
+    )
+    .expect("Should extract config");
+
+    // base64("me@example.com:token-value")
+    assert_eq!(
+        config.headers.get("Authorization"),
+        Some(&"Basic bWVAZXhhbXBsZS5jb206dG9rZW4tdmFsdWU=".to_string())
+    );
+    assert_eq!(config.url_prefix, "https://acme.atlassian.net");
+}
+
+#[test]
+fn test_jira_extractor_uses_the_gateway_with_a_cloud_id() {
+    let config = extract_http_config(
+        "jira_api_token",
+        &json!({
+            "site": "acme",
+            "email": "me@example.com",
+            "api_token": "token-value",
+            "cloud_id": "11223344-a1b2-3b33-c444-def123456789",
+        }),
+        None,
+    )
+    .expect("Should extract config");
+
+    assert_eq!(
+        config.url_prefix,
+        "https://api.atlassian.com/ex/jira/11223344-a1b2-3b33-c444-def123456789"
+    );
+}
+
+#[test]
+fn test_jira_extractor_rejects_a_foreign_host() {
+    let err = extract_http_config(
+        "jira_api_token",
+        &json!({ "site": "evil.com", "email": "e", "api_token": "t" }),
+        None,
+    )
+    .expect_err("a foreign host should fail");
+    assert!(err.contains("Invalid Jira site"), "{err}");
+}
+
+#[test]
+fn test_jira_extractor_requires_email_and_token() {
+    for params in [
+        json!({ "site": "acme", "email": "e" }),
+        json!({ "site": "acme", "api_token": "t" }),
+    ] {
+        let err = extract_http_config("jira_api_token", &params, None)
+            .expect_err("missing credentials should fail");
+        assert!(err.contains("jira_api_token"), "{err}");
+    }
+}
+
+#[test]
+fn test_jira_connection_type_is_registered() {
+    assert!(get_http_extractor_ids().contains(&"jira_api_token"));
+    let meta = crate::registry::find_connection_type("jira_api_token")
+        .expect("jira_api_token is in the static registry");
+    assert_eq!(meta.display_name, "Jira (API Token)");
+    let field = |name: &str| meta.fields.iter().find(|f| f.name == name).unwrap();
+    assert!(field("api_token").is_secret);
+    assert!(!field("email").is_secret);
+    assert!(field("cloud_id").is_optional);
+}
+
+// ============================================================================
 // Zendesk Extractor Tests
 // ============================================================================
 

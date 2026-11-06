@@ -1,0 +1,15 @@
+{
+  "issueTypes": [
+    {
+      "description": "An error in the code",
+      "iconUrl": "https://your-domain.atlassian.net/images/icons/issuetypes/bug.png",
+      "id": "1",
+      "name": "Bug",
+      "self": "https://your-domain.atlassian.net/rest/api/2/issueType/1",
+      "subtask": false
+    }
+  ],
+  "maxResults": 1,
+  "startAt": 0,
+  "total": 1
+}

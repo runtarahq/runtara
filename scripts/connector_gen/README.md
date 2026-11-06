@@ -302,8 +302,9 @@ crates/agents/runtara-agent-<id>/
   does not declare stays a single `body` input. Non-GET operations are marked
   `side_effects`.
 - An exploded array query parameter (the OpenAPI default) is sent as
-  `ids=1&ids=2`; with `explode: false` it is sent as `ids=1,2`. Optional cookie
-  parameters are dropped by `fetch`.
+  `ids=1&ids=2`; with `explode: false` it is sent as `ids=1,2`. Items typed as
+  an object with no declared fields (Jira's `StringList`) are sent as strings.
+  Optional cookie parameters are dropped by `fetch`.
 - An object query parameter is one input per field, named as its style sends
   it: with `style: deepObject`, `page` with `size` and `after` becomes
   `page[size]` and `page[after]` (Rust fields `page_size`, `page_after`); with

@@ -1,0 +1,17 @@
+{
+  "fields": [
+    {
+      "fieldId": "assignee",
+      "hasDefaultValue": false,
+      "key": "assignee",
+      "name": "Assignee",
+      "operations": [
+        "set"
+      ],
+      "required": true
+    }
+  ],
+  "maxResults": 1,
+  "startAt": 0,
+  "total": 1
+}
