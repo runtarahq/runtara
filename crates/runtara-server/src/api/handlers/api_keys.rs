@@ -12,7 +12,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::auth::AuthContext;
-use crate::authz::ApiKeyScope;
+use crate::authz::{ApiKeyScope, Permission, Role, permissions_for_role};
 use crate::middleware::tenant_auth::{CallerId, OrgId, Source};
 use crate::product_events::{EventType, ProductEvent, ProductEventSink};
 
@@ -73,6 +73,15 @@ pub struct CreateApiKeyResponse {
 
 fn sha256_hex(input: &str) -> String {
     hex::encode(sha2::Sha256::digest(input.as_bytes()))
+}
+
+/// Whether a caller with this resolved role may revoke *another* user's API keys
+/// (`revoke_user_keys`). Owner/Admin only, and fail-closed when the role is unknown (`None` —
+/// the role gate did not resolve a role, e.g. membership policy dormant), so an unverified
+/// caller cannot off-board others. Extracted as a pure function so the authorization decision is
+/// unit-tested without a database.
+fn may_revoke_user_keys(role: Option<Role>) -> bool {
+    matches!(role, Some(Role::Owner | Role::Admin))
 }
 
 /// `true` when an org id is safe to embed in a structured API key
@@ -195,9 +204,53 @@ pub async fn create_api_key(
         plaintext_key[..12].to_string()
     };
     let key_hash = sha256_hex(&plaintext_key);
+
+    // Resolve the requested scope and bound it to what the creator may actually grant.
+    //
+    // 1. An `Unrecognized` scope (a column form this build can't represent) is never acceptable
+    //    as *input* — a client asking for one is a 400, not a silently-denied key.
+    // 2. `user_management:access` is a UI-only capability (keys have no UI); it is never
+    //    grantable to a key.
+    // 3. Owner-bounded (SYN-939): a restricted scope is clamped to the creator's own current
+    //    permissions. Naming a permission the creator does not hold is a 403 that lists exactly
+    //    what exceeded — not a silent drop. The clamp only runs when the creator's role is known
+    //    (OIDC with membership resolved); when it is not, the request-time role gate remains the
+    //    backstop and the scope is stored as requested (it can still only narrow).
+    let requested = request.scope.unwrap_or_default();
+    if matches!(requested, ApiKeyScope::Unrecognized) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Invalid scope", "message": "unrecognized api key scope"})),
+        );
+    }
+    if let ApiKeyScope::Restricted(set) = requested {
+        if set.contains(Permission::UserManagementAccess) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "Invalid scope",
+                    "message": "user_management:access cannot be granted to an API key"
+                })),
+            );
+        }
+        if let Some(role) = ctx.role {
+            let ceiling = permissions_for_role(role);
+            let exceeds: Vec<&str> = set.difference(ceiling).map(|p| p.as_str()).collect();
+            if !exceeds.is_empty() {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({
+                        "error": "Scope exceeds your permissions",
+                        "message": "an API key cannot grant permissions you do not hold",
+                        "exceeds": exceeds,
+                    })),
+                );
+            }
+        }
+    }
     // `Full` persists as NULL, so an unscoped key created today is indistinguishable from one
     // created before scopes existed — there is exactly one representation of "no narrowing".
-    let scope = request.scope.unwrap_or_default().to_column();
+    let scope = requested.to_column();
 
     match sqlx::query_as::<_, ApiKey>(
         r#"
@@ -368,6 +421,121 @@ pub async fn revoke_api_key(
     }
 }
 
+/// Revoke **every** API key issued by a given user in this tenant — the authoritative action for
+/// deactivating a departing member's keys (SYN-939, §6.2). Owner/Admin only.
+///
+/// Unlike [`revoke_api_key`] (a caller revoking their *own* key, gated by ownership), this
+/// deactivates another user's keys, so it is gated on the caller's role. It is the durable
+/// counterpart to the live membership gate: the membership gate denies a removed user's key while
+/// the `member:{sub}` entry is absent; this flips `is_revoked` and writes the Valkey denylist so
+/// the keys stay dead regardless of membership-policy mode, and show as revoked in listings.
+/// smo-management (which observes removals) is the intended caller on a member-remove event; an
+/// Owner/Admin can also invoke it directly to off-board someone immediately.
+///
+/// Inferring removal inside runtara (auto-revoking on a `NOT_A_MEMBER` lookup) is deliberately
+/// avoided — a transient Valkey miss during a membership rewrite would permanently kill a valid
+/// key — so revocation is only ever driven by this explicit, authorized action.
+#[utoipa::path(
+    post,
+    path = "/api/runtime/api-keys/users/{user_id}/revoke",
+    params(("user_id" = String, Path, description = "Auth0 `sub` whose keys to revoke")),
+    responses(
+        (status = 200, description = "Keys revoked"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Caller is not an owner or admin"),
+        (status = 500, description = "Internal server error")
+    ),
+    tag = "api-keys-controller",
+    security(("bearer_auth" = []))
+)]
+#[allow(clippy::too_many_arguments)]
+pub async fn revoke_user_keys(
+    OrgId(tenant_id): OrgId,
+    CallerId(caller_id): CallerId,
+    State(pool): State<PgPool>,
+    State(valkey): State<Option<redis::aio::ConnectionManager>>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(user_id): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    // Deactivating *another* user's credentials is an administrative action, so it is gated on
+    // the caller's role rather than ownership. A caller whose role has not resolved (role gate
+    // dormant) cannot be confirmed as an admin, so this fails closed with a 403.
+    if !may_revoke_user_keys(ctx.role) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "Forbidden",
+                "message": "Only an owner or admin may revoke another user's API keys"
+            })),
+        );
+    }
+
+    match revoke_user_keys_before(&pool, valkey.as_ref(), &tenant_id, &user_id, None).await {
+        Ok(count) => {
+            crate::audit::emit(
+                &pool,
+                &tenant_id,
+                Some(&caller_id),
+                crate::audit::AuditEvent::new("token.revoke_user").resource("user", user_id),
+            )
+            .await;
+            (StatusCode::OK, Json(json!({ "revoked": count })))
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "Failed to revoke user API keys", "message": e.to_string()})),
+        ),
+    }
+}
+
+/// Terminally revoke every not-yet-revoked API key a user issued in `tenant_id` — flipping
+/// `is_revoked` and writing each key's `jti` to the Valkey denylist.
+///
+/// `before` optionally bounds the set to keys created at or before that instant: the
+/// member-removed stream consumer passes the removal timestamp (so a fast remove → re-add → new
+/// key does NOT catch the new key — only keys that existed at removal are revoked), while the
+/// admin endpoint passes `None` (every current key). Idempotent and terminal: reprocessing
+/// revokes the same closed set — a no-op the second time — and nothing is ever un-revoked. A
+/// Valkey denylist failure is logged, not fatal: the DB `is_revoked` flag is the authoritative
+/// block (mirrors `revoke_api_key`). Shared by [`revoke_user_keys`] and the control-event consumer.
+pub(crate) async fn revoke_user_keys_before(
+    pool: &PgPool,
+    valkey: Option<&redis::aio::ConnectionManager>,
+    tenant_id: &str,
+    user_id: &str,
+    before: Option<DateTime<Utc>>,
+) -> Result<usize, sqlx::Error> {
+    let rows = sqlx::query_as::<_, (Option<String>, Option<DateTime<Utc>>)>(
+        r#"
+        UPDATE public.api_keys
+        SET is_revoked = TRUE
+        WHERE org_id = $1 AND issuing_user_id = $2
+          AND ($3::timestamptz IS NULL OR created_at <= $3)
+          AND is_revoked = FALSE
+        RETURNING jti, expires_at
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(user_id)
+    .bind(before)
+    .fetch_all(pool)
+    .await?;
+    let count = rows.len();
+    if let Some(manager) = valkey {
+        for (jti, expires_at) in rows {
+            if let Some(jti) = jti.as_deref() {
+                let ttl = expires_at.map(|exp| (exp - Utc::now()).num_seconds().max(0) as u64);
+                if let Err(e) =
+                    crate::valkey::auth::revoke_token(manager, tenant_id, jti, ttl).await
+                {
+                    tracing::warn!(error = %e, "failed to write token revocation to Valkey");
+                }
+            }
+        }
+    }
+    Ok(count)
+}
+
 /// Validate an API key by hash. Returns the ApiKey if valid.
 /// Called by the auth middleware — not an HTTP handler.
 ///
@@ -410,6 +578,23 @@ pub async fn validate_api_key_by_hash(pool: &PgPool, key_hash: &str) -> Result<A
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── may_revoke_user_keys: who can off-board another user's keys ─────
+
+    #[test]
+    fn only_owner_and_admin_may_revoke_other_users_keys() {
+        assert!(may_revoke_user_keys(Some(Role::Owner)));
+        assert!(may_revoke_user_keys(Some(Role::Admin)));
+        assert!(!may_revoke_user_keys(Some(Role::Member)));
+        assert!(!may_revoke_user_keys(Some(Role::Viewer)));
+    }
+
+    #[test]
+    fn revoke_user_keys_fails_closed_when_role_unknown() {
+        // A caller whose role did not resolve (membership gate dormant) must not be able to
+        // deactivate someone else's credentials.
+        assert!(!may_revoke_user_keys(None));
+    }
 
     // ── parse_org_segment: reference implementation for edge routing ────
 

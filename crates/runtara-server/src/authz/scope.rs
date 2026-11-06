@@ -16,93 +16,207 @@
 //!   itself, so it is enforced in every mode. That is what makes it meaningful in the
 //!   non-OIDC self-hosted modes, where an API key acts as `Role::Owner` outright.
 //!
-//! Adding a scope later (`execute`, `data_read`, …) is a variant, an arm in [`ApiKeyScope::permits`],
-//! and a choice in the create dialog — the column stores a name, so no migration is involved.
+//! The scope is one of three shapes:
+//!
+//! - [`ApiKeyScope::Full`] — no narrowing (a `NULL` column); every pre-scope key keeps this.
+//! - [`ApiKeyScope::ReadOnly`] — a named preset: every `*:read` permission and nothing else.
+//! - [`ApiKeyScope::Restricted`] — an explicit [`PermissionSet`]: the key may exercise exactly
+//!   the listed permissions (still intersected with its issuing user's live role). This is what
+//!   granular, least-privilege keys use (SYN-939).
+//! - [`ApiKeyScope::Unrecognized`] — a row this build cannot parse (written by a newer server,
+//!   seen after a rollback). It denies everything, so an unknown narrowing fails closed.
 
 use axum::http::Method;
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::Error as _,
+    ser::{Error as _, SerializeSeq},
+};
 
 use super::Permission;
 
+/// A set of [`Permission`]s, stored as a bitset over [`Permission::ALL`] (21 variants fit in a
+/// `u32`). Kept `Copy` so [`ApiKeyScope`] — and everything that embeds it ([`crate::middleware`]
+/// `ScopeDenial`, [`crate::auth::AuthContext`]) — stays `Copy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct PermissionSet(u32);
+
+impl PermissionSet {
+    /// The empty set — grants nothing.
+    pub const EMPTY: PermissionSet = PermissionSet(0);
+
+    /// The bit index of a permission: its position in [`Permission::ALL`]. Total order is fixed
+    /// by the enum, so the bit layout is stable across builds (only ever appended to).
+    fn bit(permission: Permission) -> u32 {
+        Permission::ALL
+            .iter()
+            .position(|p| *p == permission)
+            .expect("every Permission is in Permission::ALL") as u32
+    }
+
+    /// This set with `permission` added.
+    pub fn with(mut self, permission: Permission) -> PermissionSet {
+        self.0 |= 1 << Self::bit(permission);
+        self
+    }
+
+    /// Build a set from an iterator of permissions.
+    pub fn from_permissions(iter: impl IntoIterator<Item = Permission>) -> PermissionSet {
+        let mut bits = 0u32;
+        for p in iter {
+            bits |= 1 << Self::bit(p);
+        }
+        PermissionSet(bits)
+    }
+
+    /// Whether `permission` is in the set.
+    pub fn contains(self, permission: Permission) -> bool {
+        self.0 & (1 << Self::bit(permission)) != 0
+    }
+
+    /// The intersection of two sets — the clamp used to bound a requested scope to the issuing
+    /// user's own permissions at create time.
+    pub const fn intersect(self, other: PermissionSet) -> PermissionSet {
+        PermissionSet(self.0 & other.0)
+    }
+
+    /// Whether the set grants nothing.
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The granted permissions, in [`Permission::ALL`] order.
+    pub fn iter(self) -> impl Iterator<Item = Permission> {
+        Permission::ALL
+            .into_iter()
+            .filter(move |p| self.contains(*p))
+    }
+
+    /// The permissions this set grants that are *not* in `other` — i.e. what a requested scope
+    /// asked for beyond the clamp. Used to build an actionable 403 at key creation.
+    pub fn difference(self, other: PermissionSet) -> impl Iterator<Item = Permission> {
+        PermissionSet(self.0 & !other.0).iter()
+    }
+}
+
 /// How much of its issuing user's role a key may actually exercise.
 ///
-/// The wire and column form is the snake_case name ([`ApiKeyScope::as_str`]), matching the
-/// colon-free half of the [`Permission`] wire convention.
+/// The wire and column form is the snake_case name ([`ApiKeyScope::as_str`]) for the presets, or
+/// a JSON array of permission wire-names for [`ApiKeyScope::Restricted`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ApiKeyScope {
     /// No narrowing: the key exercises its issuing user's role in full. This is what a `NULL`
     /// column means, so every key issued before scopes existed keeps its behavior.
     #[default]
     Full,
-    /// Read-only: the key may perform read operations and nothing else. See
+    /// Read-only preset: the key may perform read operations and nothing else. See
     /// [`ApiKeyScope::permits`] for what "read" means at a route level.
     ReadOnly,
-    /// A scope name this build does not recognize — a row written by a newer server, seen after
-    /// a rollback. Never selectable and never parsed from the wire; it denies everything, so an
-    /// unknown narrowing fails closed rather than silently degrading to `Full`.
+    /// An explicit permission set (SYN-939): the key may exercise exactly these permissions,
+    /// still intersected with its issuing user's live role by the role gate that runs after.
+    Restricted(PermissionSet),
+    /// A scope this build does not recognize — a row written by a newer server, seen after a
+    /// rollback. Never selectable and never parsed from a column into anything permissive; it
+    /// denies everything, so an unknown narrowing fails closed rather than degrading to `Full`.
     Unrecognized,
 }
 
 impl ApiKeyScope {
-    /// The scopes a caller may choose when creating a key, in narrowing order. `Unrecognized` is
-    /// deliberately absent — it is a read-path artifact, not a choice.
+    /// The preset scope *names* a caller may choose as a keyword (presets). `Restricted` is
+    /// chosen by sending an explicit permission array instead, and `Unrecognized` is a read-path
+    /// artifact, never a choice.
     pub const SELECTABLE: [ApiKeyScope; 2] = [ApiKeyScope::Full, ApiKeyScope::ReadOnly];
 
-    /// The wire/column identifier. `Unrecognized` renders as `unknown` for logs and metrics; it
-    /// is never persisted or accepted as input under that name.
+    /// A short, stable label for logs, metrics and denial bodies. `Restricted` renders as
+    /// `restricted` (the specific permission is already carried alongside in a denial);
+    /// `Unrecognized` as `unknown`.
     pub const fn as_str(self) -> &'static str {
         match self {
             ApiKeyScope::Full => "full",
             ApiKeyScope::ReadOnly => "read_only",
+            ApiKeyScope::Restricted(_) => "restricted",
             ApiKeyScope::Unrecognized => "unknown",
         }
     }
 
-    /// Parse a selectable scope name; `None` for anything else (including `unknown`).
-    pub fn from_wire(s: &str) -> Option<ApiKeyScope> {
-        Self::SELECTABLE.into_iter().find(|s2| s2.as_str() == s)
+    /// Parse a preset keyword; `None` for anything else (including `unknown` and `restricted`,
+    /// which are never accepted as a bare keyword).
+    pub fn keyword_from_wire(s: &str) -> Option<ApiKeyScope> {
+        match s {
+            "full" => Some(ApiKeyScope::Full),
+            "read_only" => Some(ApiKeyScope::ReadOnly),
+            _ => None,
+        }
     }
 
     /// Read the scope off an `api_keys.scope` column value.
     ///
     /// `NULL` is [`ApiKeyScope::Full`] — the pre-scope behavior every existing key keeps. A
-    /// value this build cannot parse becomes [`ApiKeyScope::Unrecognized`] (denies everything)
-    /// rather than falling back to `Full`, so a downgrade cannot widen a key that was created
-    /// narrow.
+    /// `read_only` keyword is the read preset. A JSON array of permission wire-names
+    /// (`["workflow:read", …]`) is a [`ApiKeyScope::Restricted`] set. Anything this build cannot
+    /// parse — an unknown keyword, or an array naming a permission this build doesn't know —
+    /// becomes [`ApiKeyScope::Unrecognized`] (denies everything) rather than falling back to
+    /// `Full`, so a downgrade cannot widen a key that was created narrow.
     pub fn from_column(value: Option<&str>) -> ApiKeyScope {
-        match value {
-            None => ApiKeyScope::Full,
-            Some(s) => ApiKeyScope::from_wire(s).unwrap_or(ApiKeyScope::Unrecognized),
+        let Some(s) = value else {
+            return ApiKeyScope::Full;
+        };
+        let s = s.trim();
+        if s.starts_with('[') {
+            // JSON array of permission wire-names.
+            match serde_json::from_str::<Vec<String>>(s) {
+                Ok(names) => match names
+                    .iter()
+                    .map(|n| Permission::from_wire(n))
+                    .collect::<Option<Vec<_>>>()
+                {
+                    Some(perms) => ApiKeyScope::Restricted(PermissionSet::from_permissions(perms)),
+                    None => ApiKeyScope::Unrecognized,
+                },
+                Err(_) => ApiKeyScope::Unrecognized,
+            }
+        } else {
+            ApiKeyScope::keyword_from_wire(s).unwrap_or(ApiKeyScope::Unrecognized)
         }
     }
 
     /// The column value to persist: `None` for [`ApiKeyScope::Full`], so "no narrowing" is a
-    /// `NULL` and every unscoped key — old or new — is represented identically.
-    pub const fn to_column(self) -> Option<&'static str> {
+    /// `NULL` and every unscoped key — old or new — is represented identically. `ReadOnly`
+    /// persists as the keyword; `Restricted` as a JSON array of permission wire-names.
+    pub fn to_column(self) -> Option<String> {
         match self {
             ApiKeyScope::Full => None,
-            other => Some(other.as_str()),
+            ApiKeyScope::ReadOnly => Some("read_only".to_string()),
+            ApiKeyScope::Restricted(set) => {
+                let names: Vec<&str> = set.iter().map(|p| p.as_str()).collect();
+                Some(serde_json::to_string(&names).expect("Vec<&str> serializes"))
+            }
+            // Never actually persisted (not selectable), but round-trips to itself if it were.
+            ApiKeyScope::Unrecognized => Some("unknown".to_string()),
         }
     }
 
     /// Whether this scope permits a request, given the [`Permission`] the route maps to (`None`
     /// for an ungated route) and the request method.
     ///
-    /// [`ApiKeyScope::ReadOnly`] answers the two cases differently, and both halves matter:
-    ///
-    /// - **Mapped route** → the permission must be a read ([`Permission::is_read`]). Keying on
-    ///   the permission rather than the method is what keeps POST-shaped reads working — SQL
-    ///   `query`, report `preview`/`render`, graph `validate`, CSV export are all `POST` and all
-    ///   map to a `*:read` permission.
+    /// - **Mapped route** → the permission must be granted. For [`ApiKeyScope::ReadOnly`] that
+    ///   means [`Permission::is_read`]; for [`ApiKeyScope::Restricted`] it means membership in
+    ///   the set. Keying on the permission rather than the method is what keeps POST-shaped reads
+    ///   working — SQL `query`, report `preview`/`render`, graph `validate`, CSV export are all
+    ///   `POST` and all map to a `*:read` permission.
     /// - **Ungated route** (`permission == None`) → the method must be safe. The ungated set is
     ///   mostly metadata, but it also includes the API-key management routes, which are gated by
-    ///   ownership in their handlers rather than by role. Without this arm a read-only key could
+    ///   ownership in their handlers rather than by role. Without this arm a narrowed key could
     ///   `POST /api/runtime/api-keys` and mint itself an unscoped one.
     pub fn permits(self, permission: Option<Permission>, method: &Method) -> bool {
         match self {
             ApiKeyScope::Full => true,
             ApiKeyScope::ReadOnly => match permission {
                 Some(permission) => permission.is_read(),
+                None => method.is_safe(),
+            },
+            ApiKeyScope::Restricted(set) => match permission {
+                Some(permission) => set.contains(permission),
                 None => method.is_safe(),
             },
             ApiKeyScope::Unrecognized => false,
@@ -116,37 +230,97 @@ impl ApiKeyScope {
     }
 }
 
-// Custom serde so the wire form is the snake_case name and unknown values are a hard error
-// rather than a silent `Full`. `Unrecognized` can be serialized (it appears in denial bodies)
-// but never deserialized.
+// Custom serde so the wire form is a preset keyword string *or* a JSON array of permission
+// wire-names (for `Restricted`). Unknown keywords and unknown permission names are a hard error
+// on deserialize (the API boundary), never a silent `Full`. `Unrecognized` serializes to
+// `"unknown"` and deserializes back from it, so an `AuthContext` carrying it round-trips.
 impl Serialize for ApiKeyScope {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
+        match self {
+            ApiKeyScope::Restricted(set) => {
+                if set.is_empty() {
+                    return Err(S::Error::custom(
+                        "a restricted scope must grant at least one permission",
+                    ));
+                }
+                let perms: Vec<Permission> = set.iter().collect();
+                let mut seq = serializer.serialize_seq(Some(perms.len()))?;
+                for p in perms {
+                    seq.serialize_element(p.as_str())?;
+                }
+                seq.end()
+            }
+            other => serializer.serialize_str(other.as_str()),
+        }
     }
 }
 
 impl<'de> Deserialize<'de> for ApiKeyScope {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        ApiKeyScope::from_wire(&s)
-            .ok_or_else(|| D::Error::custom(format!("unknown api key scope: {s}")))
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Keyword(String),
+            List(Vec<String>),
+        }
+        match Wire::deserialize(deserializer)? {
+            Wire::Keyword(s) => match s.as_str() {
+                "unknown" => Ok(ApiKeyScope::Unrecognized),
+                other => ApiKeyScope::keyword_from_wire(other)
+                    .ok_or_else(|| D::Error::custom(format!("unknown api key scope: {other}"))),
+            },
+            Wire::List(names) => {
+                let perms = names
+                    .iter()
+                    .map(|n| {
+                        Permission::from_wire(n)
+                            .ok_or_else(|| D::Error::custom(format!("unknown permission: {n}")))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if perms.is_empty() {
+                    return Err(D::Error::custom(
+                        "a restricted scope must grant at least one permission",
+                    ));
+                }
+                Ok(ApiKeyScope::Restricted(PermissionSet::from_permissions(
+                    perms,
+                )))
+            }
+        }
     }
 }
 
-// utoipa sees the scope as a string enum of the selectable names, so the generated OpenAPI (and
-// the TypeScript client generated from it) offers exactly what the API accepts.
+// utoipa advertises the two accepted shapes as a `oneOf`: a preset keyword (`full` / `read_only`)
+// or an array of permission wire-names (an explicit `Restricted` set). The generated OpenAPI —
+// and the TypeScript client generated from it — then types the field as `"full" | "read_only" |
+// Permission[]`, matching what deserialize accepts.
 impl utoipa::PartialSchema for ApiKeyScope {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        utoipa::openapi::ObjectBuilder::new()
-            .schema_type(utoipa::openapi::schema::SchemaType::Type(
-                utoipa::openapi::schema::Type::String,
-            ))
+        use utoipa::openapi::schema::{
+            ArrayBuilder, ObjectBuilder, OneOfBuilder, SchemaType, Type,
+        };
+        use utoipa::openapi::{RefOr, Schema};
+
+        let keyword: RefOr<Schema> = ObjectBuilder::new()
+            .schema_type(SchemaType::Type(Type::String))
             .enum_values(Some(
                 ApiKeyScope::SELECTABLE.into_iter().map(|s| s.as_str()),
             ))
+            .into();
+        let permission: RefOr<Schema> = ObjectBuilder::new()
+            .schema_type(SchemaType::Type(Type::String))
+            .enum_values(Some(Permission::ALL.into_iter().map(|p| p.as_str())))
+            .into();
+        let permission_array: RefOr<Schema> = ArrayBuilder::new().items(permission).into();
+
+        OneOfBuilder::new()
+            .item(keyword)
+            .item(permission_array)
             .description(Some(
-                "How much of the issuing user's role the key may exercise. \
-                 Omitted or `full` means no narrowing.",
+                "How much of the issuing user's role the key may exercise. Omitted or `full` \
+                 means no narrowing; `read_only` is every read permission; an array of \
+                 permission wire-names (e.g. [\"workflow:read\",\"workflow:execute\"]) is an \
+                 explicit least-privilege set.",
             ))
             .into()
     }
@@ -162,10 +336,14 @@ impl utoipa::ToSchema for ApiKeyScope {
 mod tests {
     use super::*;
 
+    fn reads() -> PermissionSet {
+        PermissionSet::from_permissions(Permission::ALL.into_iter().filter(|p| p.is_read()))
+    }
+
     #[test]
-    fn wire_form_round_trips_for_selectable_scopes() {
+    fn keyword_wire_form_round_trips() {
         for scope in ApiKeyScope::SELECTABLE {
-            assert_eq!(ApiKeyScope::from_wire(scope.as_str()), Some(scope));
+            assert_eq!(ApiKeyScope::keyword_from_wire(scope.as_str()), Some(scope));
             assert_eq!(
                 serde_json::to_value(scope).unwrap(),
                 serde_json::json!(scope.as_str())
@@ -178,12 +356,10 @@ mod tests {
     }
 
     #[test]
-    fn unknown_wire_value_is_rejected_not_defaulted() {
-        // A typo or a scope from a newer build must be a 400 at the API boundary, never a
-        // silent `Full`.
-        assert!(ApiKeyScope::from_wire("readonly").is_none());
+    fn unknown_keyword_is_rejected_not_defaulted() {
+        assert!(ApiKeyScope::keyword_from_wire("readonly").is_none());
         assert!(serde_json::from_value::<ApiKeyScope>(serde_json::json!("readonly")).is_err());
-        assert!(serde_json::from_value::<ApiKeyScope>(serde_json::json!("unknown")).is_err());
+        assert!(serde_json::from_value::<ApiKeyScope>(serde_json::json!("restricted")).is_err());
     }
 
     #[test]
@@ -200,20 +376,58 @@ mod tests {
             ApiKeyScope::from_column(Some("read_only")),
             ApiKeyScope::ReadOnly
         );
-        assert_eq!(ApiKeyScope::ReadOnly.to_column(), Some("read_only"));
+        assert_eq!(
+            ApiKeyScope::ReadOnly.to_column(),
+            Some("read_only".to_string())
+        );
         assert!(ApiKeyScope::ReadOnly.is_narrowing());
+    }
+
+    #[test]
+    fn restricted_column_round_trips() {
+        let scope = ApiKeyScope::Restricted(PermissionSet::from_permissions([
+            Permission::WorkflowRead,
+            Permission::WorkflowExecute,
+        ]));
+        let col = scope.to_column().expect("restricted persists");
+        assert_eq!(ApiKeyScope::from_column(Some(&col)), scope);
+        assert!(scope.is_narrowing());
+    }
+
+    #[test]
+    fn restricted_wire_round_trips_as_array() {
+        let scope = ApiKeyScope::Restricted(PermissionSet::from_permissions([
+            Permission::ConnectionRead,
+            Permission::WorkflowRead,
+        ]));
+        let v = serde_json::to_value(scope).unwrap();
+        // Serialized in Permission::ALL order (workflow:read before connection:read).
+        assert_eq!(v, serde_json::json!(["workflow:read", "connection:read"]));
+        assert_eq!(serde_json::from_value::<ApiKeyScope>(v).unwrap(), scope);
+    }
+
+    #[test]
+    fn restricted_rejects_unknown_permission_on_the_wire() {
+        assert!(
+            serde_json::from_value::<ApiKeyScope>(serde_json::json!(["workflow:teleport"]))
+                .is_err()
+        );
+        // An empty set is not a meaningful scope.
+        assert!(serde_json::from_value::<ApiKeyScope>(serde_json::json!([])).is_err());
     }
 
     #[test]
     fn unparseable_column_denies_everything() {
         // Rollback safety: a row written by a newer server must not widen to `Full`.
-        let scope = ApiKeyScope::from_column(Some("execute"));
-        assert_eq!(scope, ApiKeyScope::Unrecognized);
-        assert!(scope.is_narrowing());
-        for permission in Permission::ALL {
-            assert!(!scope.permits(Some(permission), &Method::GET));
+        for col in ["execute", "[\"workflow:teleport\"]", "{not json"] {
+            let scope = ApiKeyScope::from_column(Some(col));
+            assert_eq!(scope, ApiKeyScope::Unrecognized, "col = {col}");
+            assert!(scope.is_narrowing());
+            for permission in Permission::ALL {
+                assert!(!scope.permits(Some(permission), &Method::GET));
+            }
+            assert!(!scope.permits(None, &Method::GET));
         }
-        assert!(!scope.permits(None, &Method::GET));
     }
 
     #[test]
@@ -228,9 +442,6 @@ mod tests {
 
     #[test]
     fn read_only_permits_exactly_the_read_permissions() {
-        // Method is irrelevant on a mapped route: a POST-shaped read (SQL query, report render)
-        // passes, and a GET-shaped write (the OAuth authorize redirect, gated at
-        // `connection:update`) does not.
         for permission in Permission::ALL {
             let want = permission.is_read();
             for method in [Method::GET, Method::POST, Method::DELETE] {
@@ -246,14 +457,65 @@ mod tests {
     }
 
     #[test]
+    fn restricted_permits_exactly_its_set() {
+        let scope = ApiKeyScope::Restricted(PermissionSet::from_permissions([
+            Permission::WorkflowRead,
+            Permission::WorkflowExecute,
+        ]));
+        assert!(scope.permits(Some(Permission::WorkflowRead), &Method::GET));
+        assert!(scope.permits(Some(Permission::WorkflowExecute), &Method::POST));
+        // A write not in the set is denied even on a safe method...
+        assert!(!scope.permits(Some(Permission::WorkflowDelete), &Method::GET));
+        // ...and a read not in the set is denied too (unlike ReadOnly, membership is explicit).
+        assert!(!scope.permits(Some(Permission::ConnectionRead), &Method::GET));
+    }
+
+    #[test]
     fn read_only_permits_ungated_reads_but_not_ungated_writes() {
         // The escalation case: API-key management is ungated (ownership-gated in the handler),
-        // so only the safe-method rule stops a read-only key minting an unscoped one.
-        assert!(ApiKeyScope::ReadOnly.permits(None, &Method::GET));
-        assert!(ApiKeyScope::ReadOnly.permits(None, &Method::HEAD));
-        assert!(!ApiKeyScope::ReadOnly.permits(None, &Method::POST));
-        assert!(!ApiKeyScope::ReadOnly.permits(None, &Method::DELETE));
-        assert!(!ApiKeyScope::ReadOnly.permits(None, &Method::PUT));
-        assert!(!ApiKeyScope::ReadOnly.permits(None, &Method::PATCH));
+        // so only the safe-method rule stops a narrowed key minting an unscoped one. Holds for
+        // both ReadOnly and an explicit Restricted set.
+        for scope in [
+            ApiKeyScope::ReadOnly,
+            ApiKeyScope::Restricted(PermissionSet::from_permissions([Permission::WorkflowRead])),
+        ] {
+            assert!(scope.permits(None, &Method::GET));
+            assert!(scope.permits(None, &Method::HEAD));
+            assert!(!scope.permits(None, &Method::POST));
+            assert!(!scope.permits(None, &Method::DELETE));
+            assert!(!scope.permits(None, &Method::PUT));
+            assert!(!scope.permits(None, &Method::PATCH));
+        }
+    }
+
+    #[test]
+    fn permission_set_basics() {
+        let set = PermissionSet::from_permissions([
+            Permission::WorkflowRead,
+            Permission::WorkflowExecute,
+        ]);
+        assert!(set.contains(Permission::WorkflowRead));
+        assert!(!set.contains(Permission::WorkflowDelete));
+        assert!(!set.is_empty());
+        assert!(PermissionSet::EMPTY.is_empty());
+        let got: Vec<_> = set.iter().collect();
+        assert_eq!(
+            got,
+            vec![Permission::WorkflowRead, Permission::WorkflowExecute]
+        );
+    }
+
+    #[test]
+    fn permission_set_intersect_and_difference() {
+        let requested = PermissionSet::from_permissions([
+            Permission::WorkflowRead,
+            Permission::WorkflowFolderRename,
+        ]);
+        let allowed = reads(); // owner-less example: just the reads
+        let clamped = requested.intersect(allowed);
+        assert!(clamped.contains(Permission::WorkflowRead));
+        assert!(!clamped.contains(Permission::WorkflowFolderRename));
+        let dropped: Vec<_> = requested.difference(allowed).collect();
+        assert_eq!(dropped, vec![Permission::WorkflowFolderRename]);
     }
 }

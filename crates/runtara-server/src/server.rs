@@ -176,6 +176,7 @@ use runtime_client::RuntimeClient;
         api::handlers::api_keys::create_api_key,
         api::handlers::api_keys::list_api_keys,
         api::handlers::api_keys::revoke_api_key,
+        api::handlers::api_keys::revoke_user_keys,
         // Entitlements endpoint
         api::handlers::entitlements::get_entitlements_handler,
         // Event Capture endpoints
@@ -1950,6 +1951,27 @@ pub async fn start_with(
             }));
         }
 
+        // Control-event consumer, one per served tenant (SYN-939): revokes a removed/disabled
+        // member's API keys when `runtara-cloud` appends a `member_removed` event to the tenant's
+        // `{tenant}:control` stream. Scoped to the tenant (row-level security) like the trigger
+        // worker, and joined on shutdown via the same intake coordinator.
+        for control_tenant in config::served_tenants() {
+            let control_pool = pool.clone();
+            let control_config = config.clone();
+            let control_shutdown = shutdown_signal.clone();
+            let control_tenant = control_tenant.clone();
+            let scope = control_tenant.clone();
+            shutdown_coordinator.spawn_intake(scoped(scope, async move {
+                crate::valkey::control_events::run(
+                    control_pool,
+                    control_config,
+                    control_tenant,
+                    control_shutdown,
+                )
+                .await;
+            }));
+        }
+
         // Start compilation worker (processes compilation queue)
         // This worker handles async compilation requests queued by save operations.
         // We hand it the runtime agent catalog so compiled workflows see the
@@ -2155,6 +2177,10 @@ pub async fn start_with(
         .route(
             "/api/runtime/api-keys/{id}",
             delete(api::handlers::api_keys::revoke_api_key),
+        )
+        .route(
+            "/api/runtime/api-keys/users/{user_id}/revoke",
+            post(api::handlers::api_keys::revoke_user_keys),
         )
         .route_layer(from_fn(middleware::entitlement::require_api));
 

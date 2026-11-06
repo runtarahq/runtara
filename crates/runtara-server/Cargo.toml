@@ -49,6 +49,11 @@ path = "tests/outbox_claim_scope.rs"
 required-features = ["db-integration-tests", "valkey-integration-tests"]
 
 [[test]]
+name = "control_events_revocation"
+path = "tests/control_events_revocation.rs"
+required-features = ["db-integration-tests", "valkey-integration-tests"]
+
+[[test]]
 name = "tenant_row_security"
 path = "tests/tenant_row_security.rs"
 required-features = ["db-integration-tests"]

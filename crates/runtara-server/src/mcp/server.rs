@@ -5,7 +5,8 @@ use dashmap::DashMap;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+    CallToolResult, Implementation, ListToolsResult, PaginatedRequestParams, ProtocolVersion,
+    ServerCapabilities, ServerInfo,
 };
 use rmcp::transport::streamable_http_server::session::{SessionStore, local::LocalSessionManager};
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
@@ -1119,6 +1120,27 @@ impl ServerHandler for SmoMcpServer {
             .and_then(|parts| parts.extensions.get::<crate::auth::AuthContext>())
             .cloned();
 
+        // Credential-scope gate on the tool itself (SYN-939): when the caller's API key is
+        // scoped, fail fast with a clear message before dispatch if the scope does not permit
+        // this tool. The in-process route gate on `internal_router` remains the authoritative
+        // backstop, so this is an early, friendlier denial rather than the only check.
+        if let Some(auth) = &caller
+            && auth.api_key_scope.is_narrowing()
+            && !super::tool_permissions::scope_allows_tool(
+                auth.api_key_scope,
+                request.name.as_ref(),
+            )
+        {
+            return Err(rmcp::ErrorData::invalid_request(
+                format!(
+                    "API key scope '{}' does not permit tool '{}'",
+                    auth.api_key_scope.as_str(),
+                    request.name
+                ),
+                None,
+            ));
+        }
+
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         match caller {
             // rmcp runs the call on a task of its own, outside the request's
@@ -1145,6 +1167,35 @@ impl ServerHandler for SmoMcpServer {
             }
             None => self.tool_router.call(tcc).await,
         }
+    }
+
+    /// List the tools visible to this session, filtered by the caller's API-key scope
+    /// (SYN-939). A `Full` scope (or a JWT / no bound credential) sees every tool; a scoped key
+    /// is shown only the tools its scope permits, so the key's scope is also its MCP toolset.
+    /// Metadata tools (static schemas/catalogs) are always visible. Enforcement does not depend
+    /// on this filter — `call_tool` and the route gate still apply — it only hides what a
+    /// session could not use anyway.
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<ListToolsResult, rmcp::ErrorData> {
+        let scope = context
+            .extensions
+            .get::<axum::http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<crate::auth::AuthContext>())
+            .map(|auth| auth.api_key_scope)
+            .unwrap_or(crate::authz::ApiKeyScope::Full);
+        let tools = self
+            .tool_router
+            .list_all()
+            .into_iter()
+            .filter(|tool| super::tool_permissions::scope_allows_tool(scope, tool.name.as_ref()))
+            .collect();
+        Ok(ListToolsResult {
+            tools,
+            ..Default::default()
+        })
     }
 
     fn get_info(&self) -> ServerInfo {
