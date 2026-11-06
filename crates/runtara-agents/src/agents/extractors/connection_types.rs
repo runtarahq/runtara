@@ -1534,6 +1534,141 @@ impl HttpConnectionExtractor for ZendeskClientCredentialsExtractor {
 }
 
 // ============================================================================
+// Jira Connection Types
+// ============================================================================
+
+/// The origin of a Jira Cloud site's REST API.
+///
+/// A token without scopes is sent to the site itself. `site` is its bare name
+/// (`acme`) or any URL people copy from the browser
+/// (`https://acme.atlassian.net/jira/your-work`), whose path is ignored; what is
+/// left must be a single DNS label, so credentialed requests can only ever go to
+/// a host under atlassian.net.
+///
+/// A token with scopes only works through Atlassian's API gateway, which names
+/// the site by its Cloud ID, so a `cloud_id` wins over `site`. The ID is part of
+/// the path and may be more than a UUID (older sites add a suffix): only
+/// letters, digits and hyphens pass, so it cannot leave the gateway's Jira path.
+pub fn jira_base_url(site: &str, cloud_id: Option<&str>) -> Result<String, String> {
+    if let Some(id) = cloud_id.map(str::trim).filter(|id| !id.is_empty()) {
+        let id = id.to_ascii_lowercase();
+        let valid = id.len() <= 64
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        if !valid {
+            return Err(format!(
+                "Invalid Jira Cloud ID `{id}`: use the cloudId from https://<site>.atlassian.net/_edge/tenant_info"
+            ));
+        }
+        return Ok(format!("https://api.atlassian.com/ex/jira/{id}"));
+    }
+
+    let raw = site.trim().to_ascii_lowercase();
+    let host = raw.strip_prefix("https://").unwrap_or(&raw);
+    let host = host.split('/').next().unwrap_or(host);
+    let label = host.strip_suffix(".atlassian.net").unwrap_or(host);
+    let valid = !label.is_empty()
+        && label.len() <= 63
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    if !valid {
+        return Err(format!(
+            "Invalid Jira site `{}`: use the part before .atlassian.net, e.g. `acme` for acme.atlassian.net",
+            site.trim()
+        ));
+    }
+    Ok(format!("https://{label}.atlassian.net"))
+}
+
+/// The `Authorization` value of a Jira API token: HTTP Basic with
+/// `email:api_token`. Both are trimmed, as a pasted value often ends in a newline.
+pub fn jira_basic_auth(email: &str, api_token: &str) -> String {
+    let credentials = format!("{}:{}", email.trim(), api_token.trim());
+    format!(
+        "Basic {}",
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, credentials)
+    )
+}
+
+/// Parameters for Jira Cloud API token authentication
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "jira_api_token",
+    display_name = "Jira (API Token)",
+    description = "Connect to Jira Cloud with an Atlassian account's email and API token",
+    category = "api",
+    auth_type = "api_key"
+)]
+pub struct JiraApiTokenParams {
+    /// Jira site name
+    #[field(
+        display_name = "Site",
+        description = "Your Jira site: 'acme' for acme.atlassian.net",
+        placeholder = "acme",
+        is_required
+    )]
+    pub site: String,
+
+    /// Email of the Atlassian account the token belongs to
+    #[field(
+        display_name = "Email",
+        description = "Email of the Atlassian account that created the token. Steps act with that account's Jira permissions",
+        placeholder = "user@example.com",
+        is_required
+    )]
+    pub email: String,
+
+    /// Atlassian API token
+    #[field(
+        display_name = "API Token",
+        description = "API token from id.atlassian.com/manage-profile/security/api-tokens. Tokens last at most a year; replace it here before it expires",
+        secret,
+        is_required
+    )]
+    pub api_token: String,
+
+    /// Cloud ID of the site, for a token with scopes
+    #[serde(default)]
+    #[field(
+        display_name = "Cloud ID",
+        description = "Only for a token with scopes, which works through Atlassian's API gateway instead of the site: the cloudId from https://<site>.atlassian.net/_edge/tenant_info"
+    )]
+    pub cloud_id: Option<String>,
+}
+
+/// HTTP extractor for Jira API token connections. Jira takes HTTP Basic auth
+/// with `email:api_token`.
+pub struct JiraExtractor;
+
+impl HttpConnectionExtractor for JiraExtractor {
+    fn integration_id(&self) -> &'static str {
+        "jira_api_token"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        let p: JiraApiTokenParams = serde_json::from_value(params.clone())
+            .map_err(|e| format!("Invalid jira_api_token connection parameters: {}", e))?;
+
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            jira_basic_auth(&p.email, &p.api_token),
+        );
+
+        Ok(HttpConnectionConfig {
+            headers,
+            query_parameters: HashMap::new(),
+            url_prefix: jira_base_url(&p.site, p.cloud_id.as_deref())?,
+            rate_limit_config: None,
+        })
+    }
+}
+
+// ============================================================================
 // UPS Connection Types
 // ============================================================================
 

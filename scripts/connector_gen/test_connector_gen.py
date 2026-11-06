@@ -165,6 +165,15 @@ class NormalizeTest(unittest.TestCase):
         self.assertEqual(cg.response_examples(sliced), {"op": {"id": 1}})
         self.assertNotIn("examples", sliced["components"])
 
+    def test_example_given_as_a_json_string_is_decoded(self):
+        sliced = cg.slice_spec(spec_with(ok_json({"type": "object"}, example='{"id": 1}')), ["op"])
+        self.assertEqual(cg.response_examples(sliced), {"op": {"id": 1}})
+
+    def test_plain_string_examples_stay_strings(self):
+        for example in ("done", "12", "{not json"):
+            sliced = cg.slice_spec(spec_with(ok_json({"type": "string"}, example=example)), ["op"])
+            self.assertEqual(cg.response_examples(sliced), {"op": example})
+
     def test_deep_object_query_parameter_is_one_parameter_per_field(self):
         page = {"in": "query", "name": "page", "style": "deepObject", "description": "Pagination", "schema": {
             "oneOf": [
@@ -205,6 +214,20 @@ class NormalizeTest(unittest.TestCase):
             "status": {"type": "string"}, "owner": {"type": "string"}}}}
         sliced = cg.slice_spec(spec_with({"parameters": [flt]}, method="get"), ["op"])
         self.assertEqual([p["name"] for p in operation(sliced, "op")["parameters"]], ["status", "owner"])
+
+    def test_array_query_parameter_of_undeclared_objects_is_sent_as_strings(self):
+        # Jira's `properties` on project search: items are a `StringList` with no fields.
+        names = {"in": "query", "name": "properties", "description": "Property names",
+                 "schema": {"type": "array", "items": {"$ref": "#/components/schemas/StringList"}}}
+        spec = spec_with({"parameters": [names]}, method="get",
+                         schemas={"StringList": {"type": "object", "additionalProperties": False}})
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            sliced = cg.slice_spec(spec, ["op"])
+        param = operation(sliced, "op")["parameters"][0]
+        self.assertEqual(param["schema"], {"type": "array", "items": {"type": "string"}})
+        self.assertEqual(param["description"], "Property names")
+        self.assertNotIn("StringList", sliced["components"].get("schemas", {}))
+        self.assertIn("`properties`", out.getvalue())
 
     def test_shared_request_body_is_unwrapped_once_per_operation(self):
         user = {"type": "object", "properties": {
@@ -965,6 +988,14 @@ class RefusalTest(unittest.TestCase):
         }}})
         sliced = cg.slice_spec(spec, ["op"])
         self.assertEqual(list(operation(sliced, "op")["requestBody"]["content"]), ["application/json"])
+
+    def test_array_query_parameter_of_objects(self):
+        for items in ({"type": "object", "properties": {"id": {"type": "string"}}},
+                      {"type": "object", "additionalProperties": {"type": "string"}},
+                      {"type": "object", "additionalProperties": True},
+                      {"type": "object", "oneOf": [{"type": "string"}]}):
+            ids = {"in": "query", "name": "ids", "schema": {"type": "array", "items": items}}
+            self.assert_refused(self.spec_with({"parameters": [ids]}), "array query parameter `ids` of objects")
 
     def test_object_query_parameter(self):
         spec = self.spec_with({"parameters": [{"in": "query", "name": "filter", "style": "deepObject",

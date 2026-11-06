@@ -15,8 +15,8 @@ Written for people and coding assistants alike; the rules in
 `fetch` refuses operations the generator cannot send correctly: form-encoded or
 multipart request bodies (a Swagger 2.0 operation that also `consumes` JSON is
 sent JSON), object query parameters without declared scalar fields or in a
-style other than `deepObject` or exploded `form`, array query parameters in a
-style other than `form`, and required cookie parameters. Such an operation
+style other than `deepObject` or exploded `form`, array query parameters of
+objects or in a style other than `form`, and required cookie parameters. Such an operation
 needs a hand-written capability, or the generic `http` agent.
 
 ## For coding assistants

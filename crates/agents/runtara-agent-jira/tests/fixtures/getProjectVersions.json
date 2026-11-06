@@ -1,0 +1,34 @@
+[
+  {
+    "archived": false,
+    "description": "An excellent version",
+    "id": "10000",
+    "name": "New Version 1",
+    "overdue": true,
+    "projectId": 10000,
+    "releaseDate": 1278385482288,
+    "releaseDateSet": true,
+    "released": true,
+    "self": "https://your-domain.atlassian.net/rest/api/2/version/10000",
+    "startDateSet": false,
+    "userReleaseDate": "6/Jul/2010"
+  },
+  {
+    "archived": false,
+    "description": "Minor Bugfix version",
+    "id": "10010",
+    "issuesStatusForFixVersion": {
+      "done": 100,
+      "inProgress": 20,
+      "toDo": 10,
+      "unmapped": 0
+    },
+    "name": "Next Version",
+    "overdue": false,
+    "projectId": 10000,
+    "releaseDateSet": false,
+    "released": false,
+    "self": "https://your-domain.atlassian.net/rest/api/2/version/10010",
+    "startDateSet": false
+  }
+]

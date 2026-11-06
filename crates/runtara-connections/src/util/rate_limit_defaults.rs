@@ -137,6 +137,17 @@ pub fn get_default_rate_limit_config(integration_id: &str) -> Option<RateLimitCo
             max_retries: 3,
             max_wait_ms: 60000,
         }),
+        // Jira: API-token traffic has no hourly quota, only burst limits of 50 to
+        // 100 requests/s per endpoint and, on one issue, 20 writes per 2 seconds
+        // and 100 per 30 seconds. 5 req/s with burst 10 stays within 20 in any
+        // 2 seconds; a long run of writes to one issue relies on the 429 retry.
+        "jira_api_token" => Some(RateLimitConfigDto {
+            requests_per_second: 5,
+            burst_size: 10,
+            retry_on_limit: true,
+            max_retries: 3,
+            max_wait_ms: 60000,
+        }),
         // UPS: each app has a throttle limit UPS does not publish; over it, the
         // API answers 429 (error 10429). 5 req/s with burst 10 is a conservative
         // floor for order-volume tracking and label creation.
@@ -224,6 +235,14 @@ mod tests {
         let config = get_default_rate_limit_config("zendesk_client_credentials").unwrap();
         // At most burst + rate × 60 requests in any minute; Team allows 200.
         assert!(config.burst_size + config.requests_per_second * 60 <= 200);
+    }
+
+    #[test]
+    fn test_jira_defaults_stay_under_the_per_issue_write_limit() {
+        let config = get_default_rate_limit_config("jira_api_token").unwrap();
+        // At most burst + rate × 2 requests in any 2 seconds; one issue allows 20.
+        assert!(config.burst_size + config.requests_per_second * 2 <= 20);
+        assert!(config.retry_on_limit);
     }
 
     #[test]

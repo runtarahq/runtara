@@ -1,0 +1,24 @@
+[
+  {
+    "id": "3",
+    "name": "Task",
+    "self": "https://your-domain.atlassian.net/rest/api/2/issueType/3",
+    "statuses": [
+      {
+        "description": "The issue is currently being worked on.",
+        "iconUrl": "https://your-domain.atlassian.net/images/icons/progress.gif",
+        "id": "10000",
+        "name": "In Progress",
+        "self": "https://your-domain.atlassian.net/rest/api/2/status/10000"
+      },
+      {
+        "description": "The issue is closed.",
+        "iconUrl": "https://your-domain.atlassian.net/images/icons/closed.gif",
+        "id": "5",
+        "name": "Closed",
+        "self": "https://your-domain.atlassian.net/rest/api/2/status/5"
+      }
+    ],
+    "subtask": false
+  }
+]

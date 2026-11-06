@@ -302,8 +302,9 @@ crates/agents/runtara-agent-<id>/
   does not declare stays a single `body` input. Non-GET operations are marked
   `side_effects`.
 - An exploded array query parameter (the OpenAPI default) is sent as
-  `ids=1&ids=2`; with `explode: false` it is sent as `ids=1,2`. Optional cookie
-  parameters are dropped by `fetch`.
+  `ids=1&ids=2`; with `explode: false` it is sent as `ids=1,2`. Items typed as
+  an object with no declared fields (Jira's `StringList`) are sent as strings.
+  Optional cookie parameters are dropped by `fetch`.
 - An object query parameter is one input per field, named as its style sends
   it: with `style: deepObject`, `page` with `size` and `after` becomes
   `page[size]` and `page[after]` (Rust fields `page_size`, `page_after`); with
@@ -382,11 +383,13 @@ crates/agents/runtara-agent-<id>/
 - `fetch` refuses, naming the operation, what the templates cannot send yet:
   request bodies that are not JSON (form-encoded, multipart), object query
   parameters without declared scalar fields or in a style other than
-  `deepObject` or exploded `form`, array query parameters in a style other than
-  `form`, and required cookie parameters. A Swagger 2.0 operation that
+  `deepObject` or exploded `form`, array query parameters of objects or in a
+  style other than `form`, and required cookie parameters. A Swagger 2.0 operation that
   `consumes` only form data is such a form body.
-- An input typed by a schema (a ticket's `comment`, say) is described to the
-  step editor as `any`, without its fields.
+- An input typed by a schema (a ticket's `comment`, say) is described to the step
+  editor as `any`, without its fields, and an explicit `null` inside it is dropped.
+  Where that `null` means something, as in Jira's `update` (`{"set": null}`
+  clears a field), type the input as a plain object with `input_types`.
 - Hand-written extra capabilities cannot be added to a generated agent yet.
 - A request-body field named like a path or query parameter of the same
   operation produces a compile error.

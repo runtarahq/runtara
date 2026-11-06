@@ -1,0 +1,12 @@
+{
+  "id": "10000",
+  "key": "ED-24",
+  "self": "https://your-domain.atlassian.net/rest/api/2/issue/10000",
+  "transition": {
+    "errorCollection": {
+      "errorMessages": [],
+      "errors": {}
+    },
+    "status": 200
+  }
+}

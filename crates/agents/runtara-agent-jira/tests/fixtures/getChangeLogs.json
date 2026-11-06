@@ -1,0 +1,68 @@
+{
+  "isLast": false,
+  "maxResults": 2,
+  "nextPage": "https://your-domain.atlassian.net/rest/api/2/issue/TT-1/changelog?&startAt=4&maxResults=2",
+  "self": "https://your-domain.atlassian.net/rest/api/2/issue/TT-1/changelog?startAt=2&maxResults=2",
+  "startAt": 2,
+  "total": 5,
+  "values": [
+    {
+      "author": {
+        "accountId": "5b10a2844c20165700ede21g",
+        "active": true,
+        "avatarUrls": {
+          "16x16": "https://avatar-management--avatars.server-location.prod.public.atl-paas.net/initials/MK-5.png?size=16&s=16",
+          "24x24": "https://avatar-management--avatars.server-location.prod.public.atl-paas.net/initials/MK-5.png?size=24&s=24",
+          "32x32": "https://avatar-management--avatars.server-location.prod.public.atl-paas.net/initials/MK-5.png?size=32&s=32",
+          "48x48": "https://avatar-management--avatars.server-location.prod.public.atl-paas.net/initials/MK-5.png?size=48&s=48"
+        },
+        "displayName": "Mia Krystof",
+        "emailAddress": "mia@example.com",
+        "self": "https://your-domain.atlassian.net/rest/api/2/user?accountId=5b10a2844c20165700ede21g",
+        "timeZone": "Australia/Sydney"
+      },
+      "created": "1970-01-18T06:27:50.429+0000",
+      "id": "10001",
+      "items": [
+        {
+          "field": "fields",
+          "fieldId": "fieldId",
+          "fieldtype": "jira",
+          "from": null,
+          "fromString": "",
+          "to": null,
+          "toString": "label-1"
+        }
+      ]
+    },
+    {
+      "author": {
+        "accountId": "5b10a2844c20165700ede21g",
+        "active": true,
+        "avatarUrls": {
+          "16x16": "https://avatar-management--avatars.server-location.prod.public.atl-paas.net/initials/MK-5.png?size=16&s=16",
+          "24x24": "https://avatar-management--avatars.server-location.prod.public.atl-paas.net/initials/MK-5.png?size=24&s=24",
+          "32x32": "https://avatar-management--avatars.server-location.prod.public.atl-paas.net/initials/MK-5.png?size=32&s=32",
+          "48x48": "https://avatar-management--avatars.server-location.prod.public.atl-paas.net/initials/MK-5.png?size=48&s=48"
+        },
+        "displayName": "Mia Krystof",
+        "emailAddress": "mia@example.com",
+        "self": "https://your-domain.atlassian.net/rest/api/2/user?accountId=5b10a2844c20165700ede21g",
+        "timeZone": "Australia/Sydney"
+      },
+      "created": "1970-01-18T06:27:51.429+0000",
+      "id": "10002",
+      "items": [
+        {
+          "field": "fields",
+          "fieldId": "fieldId",
+          "fieldtype": "jira",
+          "from": null,
+          "fromString": "label-1",
+          "to": null,
+          "toString": "label-1 label-2"
+        }
+      ]
+    }
+  ]
+}

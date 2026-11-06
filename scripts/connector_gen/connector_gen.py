@@ -425,6 +425,15 @@ def check_parameter(spec: dict, name: str, parameter: dict) -> list:
         # The templates send an array repeated or comma-separated, nothing else.
         sys.exit(f"{name}: array query parameter `{resolved['name']}` with style `{resolved['style']}` "
                  "is not supported")
+    if resolved.get("in") == "query" and schema.get("type") == "array":
+        items = deref(spec, schema.get("items") or {})
+        if is_object(items):
+            if any(items.get(key) for key in ("properties", "additionalProperties", "allOf", "oneOf", "anyOf")):
+                sys.exit(f"{name}: array query parameter `{resolved['name']}` of objects is not supported")
+            # Nothing says what the items are, and a query string only carries text.
+            print(f"note: {name}: array query parameter `{resolved['name']}` declares no item fields; "
+                  "sending its items as strings")
+            return [{**resolved, "schema": {**schema, "items": {"type": "string"}}}]
     if resolved.get("in") == "query" and (
         resolved.get("style") == "deepObject" or schema.get("type") == "object"
     ):
@@ -1310,6 +1319,19 @@ def describe_fields(node, labels: dict) -> None:
             describe_fields(value, labels)
 
 
+def decoded_example(example):
+    """A response example, with the JSON document decoded when the spec gives it
+    as a string (Jira's are all written this way)."""
+    if isinstance(example, str):
+        try:
+            decoded = json.loads(example)
+        except ValueError:
+            return example
+        if isinstance(decoded, (dict, list)):
+            return decoded
+    return example
+
+
 def response_examples(spec: dict) -> dict:
     """operationId -> the JSON example of its first 2xx response, if any."""
     examples = {}
@@ -1323,7 +1345,7 @@ def response_examples(spec: dict) -> dict:
                 if example is None and media.get("examples"):
                     example = next(iter(media["examples"].values())).get("value")
                 if code.startswith("2") and example is not None:
-                    examples[op["operationId"]] = example
+                    examples[op["operationId"]] = decoded_example(example)
                     break
     return examples
 

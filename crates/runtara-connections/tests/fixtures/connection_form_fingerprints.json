@@ -60,6 +60,12 @@
     "fnv1a64": "25adcacdae7d3cfd"
   },
   {
+    "integrationId": "jira_api_token",
+    "fieldCount": 4,
+    "serializedBytes": 1529,
+    "fnv1a64": "edbfa6eb6da9906b"
+  },
+  {
     "integrationId": "mailgun",
     "fieldCount": 4,
     "serializedBytes": 1402,
