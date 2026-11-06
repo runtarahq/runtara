@@ -15,6 +15,11 @@ input_types:
   accountId:
     type: string
     nullable: true
+  # A plain object, as the typed operations would drop the null in {"set": null},
+  # which clears a field. The step editor shows either form as one object.
+  update:
+    type: object
+    additionalProperties: {}
 operations:
   - getIssue
   - createIssue

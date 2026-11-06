@@ -1560,7 +1560,7 @@ pub struct IssueUpdateDetails {
         description = r##"A Map containing the field field name and a list of operations to perform on the issue screen field. Note that fields included in here cannot be included in `fields`."##
     )]
     #[serde(rename = "update", default, skip_serializing_if = "Option::is_none")]
-    pub update: Option<HashMap<String, Vec<FieldUpdateOperation>>>,
+    pub update: Option<HashMap<String, Value>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -5276,7 +5276,7 @@ pub struct CreateIssueInput {
         description = r##"A Map containing the field field name and a list of operations to perform on the issue screen field. Note that fields included in here cannot be included in `fields`."##
     )]
     #[serde(rename = "update", default, skip_serializing_if = "Option::is_none")]
-    pub update: Option<HashMap<String, Vec<FieldUpdateOperation>>>,
+    pub update: Option<HashMap<String, Value>>,
 }
 
 #[capability(
@@ -5430,7 +5430,7 @@ pub struct DoTransitionInput {
         description = r##"A Map containing the field field name and a list of operations to perform on the issue screen field. Note that fields included in here cannot be included in `fields`."##
     )]
     #[serde(rename = "update", default, skip_serializing_if = "Option::is_none")]
-    pub update: Option<HashMap<String, Vec<FieldUpdateOperation>>>,
+    pub update: Option<HashMap<String, Value>>,
 }
 
 #[capability(
@@ -5578,7 +5578,7 @@ pub struct EditIssueInput {
         description = r##"A Map containing the field field name and a list of operations to perform on the issue screen field. Note that fields included in here cannot be included in `fields`."##
     )]
     #[serde(rename = "update", default, skip_serializing_if = "Option::is_none")]
-    pub update: Option<HashMap<String, Vec<FieldUpdateOperation>>>,
+    pub update: Option<HashMap<String, Value>>,
 }
 
 #[capability(

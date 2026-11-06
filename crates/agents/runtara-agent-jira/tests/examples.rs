@@ -235,6 +235,26 @@ fn edit_issue_can_clear_a_field_and_silence_notifications() {
 }
 
 #[test]
+fn update_operations_keep_an_explicit_null() {
+    // `{"set": null}` clears a field; dropping the null would leave `{}`.
+    let update = json!({
+        "duedate": [{ "set": null }],
+        "labels": [{ "add": "triaged" }, { "remove": "blocker" }],
+    });
+    let body = json!({ "update": update });
+
+    let input: CreateIssueInput = serde_json::from_value(body.clone()).unwrap();
+    assert_eq!(input.request().unwrap().body_json(), Some(body.clone()));
+
+    let keyed = json!({ "issueIdOrKey": "RT-1", "update": update });
+    let input: EditIssueInput = serde_json::from_value(keyed.clone()).unwrap();
+    assert_eq!(input.request().unwrap().body_json(), Some(body.clone()));
+
+    let input: DoTransitionInput = serde_json::from_value(keyed).unwrap();
+    assert_eq!(input.request().unwrap().body_json(), Some(body));
+}
+
+#[test]
 fn get_issue_repeats_the_fields_it_asks_for() {
     let input: GetIssueInput = serde_json::from_value(json!({
         "issueIdOrKey": "RT-1",

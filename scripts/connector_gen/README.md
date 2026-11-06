@@ -386,8 +386,10 @@ crates/agents/runtara-agent-<id>/
   `deepObject` or exploded `form`, array query parameters of objects or in a
   style other than `form`, and required cookie parameters. A Swagger 2.0 operation that
   `consumes` only form data is such a form body.
-- An input typed by a schema (a ticket's `comment`, say) is described to the
-  step editor as `any`, without its fields.
+- An input typed by a schema (a ticket's `comment`, say) is described to the step
+  editor as `any`, without its fields, and an explicit `null` inside it is dropped.
+  Where that `null` means something, as in Jira's `update` (`{"set": null}`
+  clears a field), type the input as a plain object with `input_types`.
 - Hand-written extra capabilities cannot be added to a generated agent yet.
 - A request-body field named like a path or query parameter of the same
   operation produces a compile error.
