@@ -1124,22 +1124,21 @@ impl ServerHandler for SmoMcpServer {
         // scoped, fail fast with a clear message before dispatch if the scope does not permit
         // this tool. The in-process route gate on `internal_router` remains the authoritative
         // backstop, so this is an early, friendlier denial rather than the only check.
-        if let Some(auth) = &caller {
-            if auth.api_key_scope.is_narrowing()
-                && !super::tool_permissions::scope_allows_tool(
-                    auth.api_key_scope,
-                    request.name.as_ref(),
-                )
-            {
-                return Err(rmcp::ErrorData::invalid_request(
-                    format!(
-                        "API key scope '{}' does not permit tool '{}'",
-                        auth.api_key_scope.as_str(),
-                        request.name
-                    ),
-                    None,
-                ));
-            }
+        if let Some(auth) = &caller
+            && auth.api_key_scope.is_narrowing()
+            && !super::tool_permissions::scope_allows_tool(
+                auth.api_key_scope,
+                request.name.as_ref(),
+            )
+        {
+            return Err(rmcp::ErrorData::invalid_request(
+                format!(
+                    "API key scope '{}' does not permit tool '{}'",
+                    auth.api_key_scope.as_str(),
+                    request.name
+                ),
+                None,
+            ));
         }
 
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);

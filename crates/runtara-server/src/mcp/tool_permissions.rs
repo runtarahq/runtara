@@ -50,44 +50,94 @@ pub(crate) fn tool_authz(tool: &str) -> ToolAuthz {
         | "get_capability" => ToolAuthz::Metadata,
 
         // ── Workflow reads ──────────────────────────────────────────────────────────────
-        "list_workflows" | "get_workflow" | "list_workflow_folders" | "summarize_workflow"
-        | "get_workflow_metadata" | "get_workflow_slice" | "diff_workflow_versions"
-        | "find_references" | "list_references" | "list_unmapped_inputs" | "list_edges"
-        | "list_steps" | "get_step" | "get_step_edges" | "get_step_mappings"
-        | "get_input_schema" | "get_output_schema" | "get_state_schema" | "get_signal_schema"
-        | "list_variables" | "validate_graph" | "validate_mappings" | "preflight_compile" => {
-            ToolAuthz::Needs(WorkflowRead)
-        }
+        "list_workflows"
+        | "get_workflow"
+        | "list_workflow_folders"
+        | "summarize_workflow"
+        | "get_workflow_metadata"
+        | "get_workflow_slice"
+        | "diff_workflow_versions"
+        | "find_references"
+        | "list_references"
+        | "list_unmapped_inputs"
+        | "list_edges"
+        | "list_steps"
+        | "get_step"
+        | "get_step_edges"
+        | "get_step_mappings"
+        | "get_input_schema"
+        | "get_output_schema"
+        | "get_state_schema"
+        | "get_signal_schema"
+        | "list_variables"
+        | "validate_graph"
+        | "validate_mappings"
+        | "preflight_compile" => ToolAuthz::Needs(WorkflowRead),
 
         // ── Workflow create ─────────────────────────────────────────────────────────────
         "create_workflow" => ToolAuthz::Needs(WorkflowCreate),
 
         // ── Workflow update: graph mutations, metadata, versioning, deploy ──────────────
-        "update_workflow" | "compile_workflow" | "deploy_workflow" | "deploy_latest"
-        | "set_current_version" | "set_workflow_slug" | "set_workflow_metadata" | "move_workflow"
-        | "publish_workflow_agent" | "add_agent_step" | "add_step" | "remove_step" | "update_step"
-        | "patch_step" | "connect_steps" | "disconnect_steps" | "set_entry_point" | "set_mapping"
-        | "remove_mapping" | "set_input_schema" | "set_input_schema_field"
-        | "remove_input_schema_field" | "set_output_schema" | "set_state_schema" | "set_variable"
-        | "remove_variable" | "apply_graph_mutations" => ToolAuthz::Needs(WorkflowUpdate),
+        "update_workflow"
+        | "compile_workflow"
+        | "deploy_workflow"
+        | "deploy_latest"
+        | "set_current_version"
+        | "set_workflow_slug"
+        | "set_workflow_metadata"
+        | "move_workflow"
+        | "publish_workflow_agent"
+        | "add_agent_step"
+        | "add_step"
+        | "remove_step"
+        | "update_step"
+        | "patch_step"
+        | "connect_steps"
+        | "disconnect_steps"
+        | "set_entry_point"
+        | "set_mapping"
+        | "remove_mapping"
+        | "set_input_schema"
+        | "set_input_schema_field"
+        | "remove_input_schema_field"
+        | "set_output_schema"
+        | "set_state_schema"
+        | "set_variable"
+        | "remove_variable"
+        | "apply_graph_mutations" => ToolAuthz::Needs(WorkflowUpdate),
 
         // ── Workflow delete ─────────────────────────────────────────────────────────────
         "delete_workflow" => ToolAuthz::Needs(WorkflowDelete),
 
         // ── Workflow execute: runs + lifecycle + answering a running run's waits ─────────
-        "execute_workflow" | "execute_workflow_sync" | "execute_workflow_wait" | "stop_execution"
-        | "pause_execution" | "resume_execution" | "submit_signal_response"
-        | "submit_action_response" | "test_capability" => ToolAuthz::Needs(WorkflowExecute),
+        "execute_workflow"
+        | "execute_workflow_sync"
+        | "execute_workflow_wait"
+        | "stop_execution"
+        | "pause_execution"
+        | "resume_execution"
+        | "submit_signal_response"
+        | "submit_action_response"
+        | "test_capability" => ToolAuthz::Needs(WorkflowExecute),
 
         // ── Invocation history reads (executions, steps, pending signals) ───────────────
-        "list_executions" | "get_execution" | "get_step_events" | "get_step_summaries"
-        | "inspect_step" | "why_execution_failed" | "trace_reference" | "list_pending_signals" => {
-            ToolAuthz::Needs(InvocationHistoryRead)
-        }
+        "list_executions"
+        | "get_execution"
+        | "get_step_events"
+        | "get_step_summaries"
+        | "inspect_step"
+        | "why_execution_failed"
+        | "trace_reference"
+        | "list_pending_signals" => ToolAuthz::Needs(InvocationHistoryRead),
 
         // ── Object model / database ─────────────────────────────────────────────────────
-        "list_object_schemas" | "get_object_schema" | "list_object_instances"
-        | "query_object_instances" | "query_aggregate" | "query_sql" | "query_sql_one"
+        "list_object_schemas"
+        | "get_object_schema"
+        | "list_object_instances"
+        | "query_object_instances"
+        | "query_aggregate"
+        | "query_sql"
+        | "query_sql_one"
         | "query_sql_raw" => ToolAuthz::Needs(DatabaseRead),
         "create_object_schema" | "create_object_instance" | "bulk_create_instances" => {
             ToolAuthz::Needs(DatabaseCreate)
@@ -107,8 +157,11 @@ pub(crate) fn tool_authz(tool: &str) -> ToolAuthz {
         "delete_trigger" => ToolAuthz::Needs(TriggerDelete),
 
         // ── Connections ─────────────────────────────────────────────────────────────────
-        "list_connections" | "describe_connection" | "resolve_connection_resource"
-        | "get_integration" | "list_integrations" => ToolAuthz::Needs(ConnectionRead),
+        "list_connections"
+        | "describe_connection"
+        | "resolve_connection_resource"
+        | "get_integration"
+        | "list_integrations" => ToolAuthz::Needs(ConnectionRead),
         // Starting an OAuth authorization mutates connection state (mirrors the REST
         // `connection:update`-gated authorize route).
         "start_connection_authorization" => ToolAuthz::Needs(ConnectionUpdate),
@@ -139,31 +192,109 @@ mod tests {
     /// route gate alone and showing up for every scoped session). Keep this list in sync with
     /// the `#[tool]` functions in `mcp::server`.
     const ALL_TOOLS: &[&str] = &[
-        "add_agent_step", "add_step", "apply_graph_mutations", "bulk_create_instances",
-        "bulk_delete_instances", "bulk_update_instances", "compile_workflow", "connect_steps",
-        "create_object_instance", "create_object_schema", "create_trigger", "create_workflow",
-        "delete_object_schema", "delete_trigger", "delete_workflow", "deploy_latest",
-        "deploy_workflow", "describe_connection", "diff_workflow_versions", "disconnect_steps",
-        "execute_sql", "execute_workflow", "execute_workflow_sync", "execute_workflow_wait",
-        "find_references", "get_agent", "get_capability", "get_execution", "get_input_schema",
-        "get_integration", "get_object_schema", "get_output_schema", "get_signal_schema",
-        "get_state_schema", "get_step", "get_step_edges", "get_step_events", "get_step_mappings",
-        "get_step_summaries", "get_step_type_schema", "get_trigger", "get_workflow",
-        "get_workflow_authoring_schema", "get_workflow_metadata", "get_workflow_slice",
-        "inspect_step", "list_agents", "list_connections", "list_edges", "list_executions",
-        "list_integrations", "list_object_instances", "list_object_schemas", "list_pending_signals",
-        "list_references", "list_steps", "list_step_types", "list_triggers", "list_unmapped_inputs",
-        "list_variables", "list_workflow_folders", "list_workflows", "move_workflow", "patch_step",
-        "pause_execution", "preflight_compile", "publish_workflow_agent", "query_aggregate",
-        "query_object_instances", "query_sql", "query_sql_one", "query_sql_raw",
-        "remove_input_schema_field", "remove_mapping", "remove_step", "remove_variable",
-        "resolve_connection_resource", "resume_execution", "set_current_version", "set_entry_point",
-        "set_input_schema", "set_input_schema_field", "set_mapping", "set_output_schema",
-        "set_state_schema", "set_variable", "set_workflow_metadata", "set_workflow_slug",
-        "start_connection_authorization", "stop_execution", "submit_action_response",
-        "submit_signal_response", "summarize_workflow", "test_capability", "trace_reference",
-        "update_object_instance", "update_object_schema", "update_step", "update_trigger",
-        "update_workflow", "validate_graph", "validate_mappings", "why_execution_failed",
+        "add_agent_step",
+        "add_step",
+        "apply_graph_mutations",
+        "bulk_create_instances",
+        "bulk_delete_instances",
+        "bulk_update_instances",
+        "compile_workflow",
+        "connect_steps",
+        "create_object_instance",
+        "create_object_schema",
+        "create_trigger",
+        "create_workflow",
+        "delete_object_schema",
+        "delete_trigger",
+        "delete_workflow",
+        "deploy_latest",
+        "deploy_workflow",
+        "describe_connection",
+        "diff_workflow_versions",
+        "disconnect_steps",
+        "execute_sql",
+        "execute_workflow",
+        "execute_workflow_sync",
+        "execute_workflow_wait",
+        "find_references",
+        "get_agent",
+        "get_capability",
+        "get_execution",
+        "get_input_schema",
+        "get_integration",
+        "get_object_schema",
+        "get_output_schema",
+        "get_signal_schema",
+        "get_state_schema",
+        "get_step",
+        "get_step_edges",
+        "get_step_events",
+        "get_step_mappings",
+        "get_step_summaries",
+        "get_step_type_schema",
+        "get_trigger",
+        "get_workflow",
+        "get_workflow_authoring_schema",
+        "get_workflow_metadata",
+        "get_workflow_slice",
+        "inspect_step",
+        "list_agents",
+        "list_connections",
+        "list_edges",
+        "list_executions",
+        "list_integrations",
+        "list_object_instances",
+        "list_object_schemas",
+        "list_pending_signals",
+        "list_references",
+        "list_steps",
+        "list_step_types",
+        "list_triggers",
+        "list_unmapped_inputs",
+        "list_variables",
+        "list_workflow_folders",
+        "list_workflows",
+        "move_workflow",
+        "patch_step",
+        "pause_execution",
+        "preflight_compile",
+        "publish_workflow_agent",
+        "query_aggregate",
+        "query_object_instances",
+        "query_sql",
+        "query_sql_one",
+        "query_sql_raw",
+        "remove_input_schema_field",
+        "remove_mapping",
+        "remove_step",
+        "remove_variable",
+        "resolve_connection_resource",
+        "resume_execution",
+        "set_current_version",
+        "set_entry_point",
+        "set_input_schema",
+        "set_input_schema_field",
+        "set_mapping",
+        "set_output_schema",
+        "set_state_schema",
+        "set_variable",
+        "set_workflow_metadata",
+        "set_workflow_slug",
+        "start_connection_authorization",
+        "stop_execution",
+        "submit_action_response",
+        "submit_signal_response",
+        "summarize_workflow",
+        "test_capability",
+        "trace_reference",
+        "update_object_instance",
+        "update_object_schema",
+        "update_step",
+        "update_trigger",
+        "update_workflow",
+        "validate_graph",
+        "validate_mappings",
+        "why_execution_failed",
     ];
 
     #[test]
@@ -190,7 +321,10 @@ mod tests {
         assert!(scope_allows_tool(ApiKeyScope::ReadOnly, "list_step_types")); // metadata
         assert!(!scope_allows_tool(ApiKeyScope::ReadOnly, "create_workflow"));
         assert!(!scope_allows_tool(ApiKeyScope::ReadOnly, "execute_sql"));
-        assert!(!scope_allows_tool(ApiKeyScope::ReadOnly, "execute_workflow"));
+        assert!(!scope_allows_tool(
+            ApiKeyScope::ReadOnly,
+            "execute_workflow"
+        ));
     }
 
     #[test]

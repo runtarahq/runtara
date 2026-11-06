@@ -239,7 +239,9 @@ impl Serialize for ApiKeyScope {
         match self {
             ApiKeyScope::Restricted(set) => {
                 if set.is_empty() {
-                    return Err(S::Error::custom("a restricted scope must grant at least one permission"));
+                    return Err(S::Error::custom(
+                        "a restricted scope must grant at least one permission",
+                    ));
                 }
                 let perms: Vec<Permission> = set.iter().collect();
                 let mut seq = serializer.serialize_seq(Some(perms.len()))?;
@@ -280,7 +282,9 @@ impl<'de> Deserialize<'de> for ApiKeyScope {
                         "a restricted scope must grant at least one permission",
                     ));
                 }
-                Ok(ApiKeyScope::Restricted(PermissionSet::from_permissions(perms)))
+                Ok(ApiKeyScope::Restricted(PermissionSet::from_permissions(
+                    perms,
+                )))
             }
         }
     }
@@ -292,12 +296,16 @@ impl<'de> Deserialize<'de> for ApiKeyScope {
 // Permission[]`, matching what deserialize accepts.
 impl utoipa::PartialSchema for ApiKeyScope {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        use utoipa::openapi::schema::{ArrayBuilder, ObjectBuilder, OneOfBuilder, SchemaType, Type};
+        use utoipa::openapi::schema::{
+            ArrayBuilder, ObjectBuilder, OneOfBuilder, SchemaType, Type,
+        };
         use utoipa::openapi::{RefOr, Schema};
 
         let keyword: RefOr<Schema> = ObjectBuilder::new()
             .schema_type(SchemaType::Type(Type::String))
-            .enum_values(Some(ApiKeyScope::SELECTABLE.into_iter().map(|s| s.as_str())))
+            .enum_values(Some(
+                ApiKeyScope::SELECTABLE.into_iter().map(|s| s.as_str()),
+            ))
             .into();
         let permission: RefOr<Schema> = ObjectBuilder::new()
             .schema_type(SchemaType::Type(Type::String))
@@ -368,7 +376,10 @@ mod tests {
             ApiKeyScope::from_column(Some("read_only")),
             ApiKeyScope::ReadOnly
         );
-        assert_eq!(ApiKeyScope::ReadOnly.to_column(), Some("read_only".to_string()));
+        assert_eq!(
+            ApiKeyScope::ReadOnly.to_column(),
+            Some("read_only".to_string())
+        );
         assert!(ApiKeyScope::ReadOnly.is_narrowing());
     }
 
@@ -398,7 +409,8 @@ mod tests {
     #[test]
     fn restricted_rejects_unknown_permission_on_the_wire() {
         assert!(
-            serde_json::from_value::<ApiKeyScope>(serde_json::json!(["workflow:teleport"])).is_err()
+            serde_json::from_value::<ApiKeyScope>(serde_json::json!(["workflow:teleport"]))
+                .is_err()
         );
         // An empty set is not a meaningful scope.
         assert!(serde_json::from_value::<ApiKeyScope>(serde_json::json!([])).is_err());
@@ -478,13 +490,19 @@ mod tests {
 
     #[test]
     fn permission_set_basics() {
-        let set = PermissionSet::from_permissions([Permission::WorkflowRead, Permission::WorkflowExecute]);
+        let set = PermissionSet::from_permissions([
+            Permission::WorkflowRead,
+            Permission::WorkflowExecute,
+        ]);
         assert!(set.contains(Permission::WorkflowRead));
         assert!(!set.contains(Permission::WorkflowDelete));
         assert!(!set.is_empty());
         assert!(PermissionSet::EMPTY.is_empty());
         let got: Vec<_> = set.iter().collect();
-        assert_eq!(got, vec![Permission::WorkflowRead, Permission::WorkflowExecute]);
+        assert_eq!(
+            got,
+            vec![Permission::WorkflowRead, Permission::WorkflowExecute]
+        );
     }
 
     #[test]

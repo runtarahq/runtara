@@ -29,10 +29,10 @@ use std::time::Duration;
 use chrono::Utc;
 use redis::aio::ConnectionManager;
 use runtara_server::shutdown::ShutdownSignal;
-use runtara_server::valkey::control_events::{self, control_stream_key, CONTROL_CONSUMER_GROUP};
-use runtara_server::valkey::{open_client, ValkeyConfig};
+use runtara_server::valkey::control_events::{self, CONTROL_CONSUMER_GROUP, control_stream_key};
+use runtara_server::valkey::{ValkeyConfig, open_client};
 use sqlx::PgPool;
-use tokio::time::{sleep, timeout, Instant};
+use tokio::time::{Instant, sleep, timeout};
 use uuid::Uuid;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
@@ -117,16 +117,18 @@ async fn key_exists(conn: &mut ConnectionManager, key: &str) -> bool {
         .expect("EXISTS")
 }
 
+/// XPENDING summary reply: `[count, min-id, max-id, consumers]` (ids/consumers are nil when the
+/// count is 0). `consumers` is kept as a raw `Value` since we only read the count.
+type XPendingSummary = (i64, Option<String>, Option<String>, Option<redis::Value>);
+
 /// Count of entries still pending (delivered but un-acked) for the control consumer group.
 async fn group_pending_count(conn: &mut ConnectionManager, stream: &str) -> i64 {
-    // XPENDING <stream> <group> summary form: [count, min-id, max-id, consumers]. When the group
-    // doesn't exist yet Valkey errors with NOGROUP — treat that as "nothing pending".
-    let reply: redis::RedisResult<(i64, Option<String>, Option<String>, Option<redis::Value>)> =
-        redis::cmd("XPENDING")
-            .arg(stream)
-            .arg(CONTROL_CONSUMER_GROUP)
-            .query_async(conn)
-            .await;
+    // When the group doesn't exist yet Valkey errors with NOGROUP — treat that as "nothing pending".
+    let reply: redis::RedisResult<XPendingSummary> = redis::cmd("XPENDING")
+        .arg(stream)
+        .arg(CONTROL_CONSUMER_GROUP)
+        .query_async(conn)
+        .await;
     match reply {
         Ok((count, _, _, _)) => count,
         Err(_) => 0,

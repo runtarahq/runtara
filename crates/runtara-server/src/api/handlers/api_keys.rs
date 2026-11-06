@@ -525,7 +525,8 @@ pub(crate) async fn revoke_user_keys_before(
         for (jti, expires_at) in rows {
             if let Some(jti) = jti.as_deref() {
                 let ttl = expires_at.map(|exp| (exp - Utc::now()).num_seconds().max(0) as u64);
-                if let Err(e) = crate::valkey::auth::revoke_token(manager, tenant_id, jti, ttl).await
+                if let Err(e) =
+                    crate::valkey::auth::revoke_token(manager, tenant_id, jti, ttl).await
                 {
                     tracing::warn!(error = %e, "failed to write token revocation to Valkey");
                 }

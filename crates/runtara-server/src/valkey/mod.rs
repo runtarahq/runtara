@@ -1,9 +1,9 @@
 pub mod auth;
 pub mod cleanup;
 pub mod client;
-pub mod control_events;
 pub mod compilation_progress;
 pub mod compilation_queue;
+pub mod control_events;
 pub mod events;
 pub mod stream;
 
