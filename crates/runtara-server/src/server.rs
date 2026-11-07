@@ -3300,6 +3300,19 @@ mod credential_cipher_tests {
             credential_cipher(Some(Arc::new(cipher))).expect("encrypting cipher is accepted");
         assert_eq!(resolved.key_id(), "host");
     }
+
+    /// A host that keys every tenant it serves needs no default key of its
+    /// own (no RUNTARA_CONNECTIONS_ENCRYPTION_KEY): it boots, refusing any
+    /// tenant without keys.
+    #[test]
+    fn accepts_a_tenant_keyring_without_a_default() {
+        let acme =
+            AesGcmCipher::from_base64_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "acme-1")
+                .expect("valid key");
+        let keyring = runtara_connections::TenantKeyedCipher::without_default()
+            .with_tenant("acme", Arc::new(acme));
+        credential_cipher(Some(Arc::new(keyring))).expect("every tenant it seals is encrypted");
+    }
 }
 
 /// [`runtara_connections::AgentAccess`] from each tenant's entitlements.
