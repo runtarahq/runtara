@@ -108,6 +108,9 @@ pub mod agent_meta;
 // Connection types agents declare as presets of generic types
 pub mod derived_connection;
 
+// `{param}` templates filled from connection parameters
+pub mod url_template;
+
 // Where operation-scoped (suspending or control) Agent steps may appear.
 pub mod step_context_rules;
 

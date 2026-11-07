@@ -51,6 +51,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::url_template::{self, Segment};
+
 /// The generic connection types a derived type may be based on: those that
 /// authenticate with headers against one base URL.
 pub const DERIVABLE_BASES: &[&str] = &["http_basic", "http_api_key", "http_bearer"];
@@ -67,7 +69,6 @@ pub const PARAM_VALUE_CHARSET: &str = "^[A-Za-z0-9_-]{1,63}$";
 static ID: LazyLock<Regex> = LazyLock::new(|| Regex::new("^[a-z][a-z0-9_]{1,62}$").unwrap());
 static PARAM_NAME: LazyLock<Regex> =
     LazyLock::new(|| Regex::new("^[a-z][a-z0-9_]{0,62}$").unwrap());
-static PLACEHOLDER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{([^{}]*)\}").unwrap());
 static VALUE_CHARSET: LazyLock<Regex> = LazyLock::new(|| Regex::new(PARAM_VALUE_CHARSET).unwrap());
 static LITERAL_LABEL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new("^[a-z0-9]([a-z0-9-]*[a-z0-9])?$").unwrap());
@@ -194,10 +195,15 @@ impl DerivedConnectionType {
         let Some(rest) = self.base_url.strip_prefix("https://") else {
             return fail("must start with https://".into());
         };
-        let used: Vec<&str> = PLACEHOLDER
-            .captures_iter(&self.base_url)
-            .map(|c| c.get(1).unwrap().as_str())
-            .collect();
+        let segments = url_template::segments(&self.base_url);
+        let unbalanced = segments.iter().any(|segment| match segment {
+            Segment::Literal(text) => text.contains('}'),
+            Segment::Placeholder { name, closed } => !closed || name.contains('{'),
+        });
+        if unbalanced {
+            return fail("has an unbalanced brace".into());
+        }
+        let used = url_template::placeholders(&self.base_url);
         for name in &used {
             if !self.params.iter().any(|p| p.name == *name) {
                 return fail(format!("uses `{{{name}}}`, which is not a declared param"));
@@ -207,10 +213,6 @@ impl DerivedConnectionType {
             if !used.contains(&param.name.as_str()) {
                 return fail(format!("does not use param `{}`", param.name));
             }
-        }
-        let stripped = PLACEHOLDER.replace_all(&self.base_url, "");
-        if stripped.contains('{') || stripped.contains('}') {
-            return fail("has an unbalanced brace".into());
         }
 
         let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
@@ -229,7 +231,14 @@ impl DerivedConnectionType {
             );
         }
         for label in &labels[..labels.len() - literal_suffix] {
-            let filled = PLACEHOLDER.replace_all(label, "x");
+            // A label with each placeholder standing in for one character.
+            let filled: String = url_template::segments(label)
+                .into_iter()
+                .map(|segment| match segment {
+                    Segment::Literal(text) => text,
+                    Segment::Placeholder { .. } => "x",
+                })
+                .collect();
             if !LITERAL_LABEL.is_match(&filled) {
                 return fail(format!("host label `{label}` is not a valid DNS label"));
             }
@@ -299,13 +308,19 @@ impl DerivedConnectionType {
     /// `base_url` with every param substituted from `params`. Fails closed
     /// when any value is missing or invalid.
     pub fn render_base_url(&self, params: &Value) -> Result<String, String> {
-        let mut url = self.base_url.clone();
+        // Check every value before any is placed in the URL, then substitute
+        // the checked (trimmed) values only.
+        let mut checked = Map::new();
         for param in &self.params {
             let value = params.get(&param.name).and_then(Value::as_str);
             Self::check_param_value(param, value)?;
-            url = url.replace(&format!("{{{}}}", param.name), value.unwrap().trim());
+            checked.insert(
+                param.name.clone(),
+                Value::String(value.unwrap_or_default().trim().to_string()),
+            );
         }
-        Ok(url)
+        url_template::substitute(&self.base_url, &Value::Object(checked))
+            .map_err(|name| format!("baseUrl placeholder `{{{name}}}` has no value"))
     }
 
     /// The parameters of the base type for a connection stored with
