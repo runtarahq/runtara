@@ -73,6 +73,15 @@ fn validate_connection_parameters(
     let Some(meta) = runtara_agents::registry::find_connection_type(integration_id) else {
         return Ok(());
     };
+    // A connection type an agent declared: every template value must match
+    // its pattern, so the base URL it renders stays on the vendor's host.
+    if let Some(derived) = runtara_agents::derived::find(integration_id) {
+        let empty = serde_json::Value::Object(Default::default());
+        derived
+            .declaration
+            .render_base_url(params.unwrap_or(&empty))
+            .map_err(ServiceError::ValidationError)?;
+    }
     // Apply the stricter mTLS base-URL and redacted PEM checks before generic
     // URL validation, whose legacy diagnostics may echo a supplied URL.
     if integration_id == "http_mtls" {

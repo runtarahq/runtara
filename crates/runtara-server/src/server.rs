@@ -1235,6 +1235,21 @@ pub async fn start_with(
         .map(|d| Arc::new(runtara_agents::extractors::augment_catalog(&d.catalog())))
         .expect("component dispatcher present after startup hard-fail");
 
+    // Connection types the loaded agents declare (presets of generic types,
+    // e.g. a vendor's branded connection over http_basic). Registered before
+    // anything lists or resolves connection types; a declaration that does
+    // not validate fails boot, as a malformed agent does.
+    if let Some(dispatcher) = component_dispatcher.as_ref() {
+        match runtara_agents::derived::register(dispatcher.declared_connection_types().to_vec()) {
+            Ok(0) => {}
+            Ok(count) => println!("✓ Connection types declared by agents: {count}"),
+            Err(error) => {
+                eprintln!("❌ Connection types declared by agents: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Derive the connection-defaults compatibility map from the runtime
     // agent catalog. Encapsulates the `default_for → integration_ids` view
     // that the connection service uses for validation, plus virtual
@@ -1346,6 +1361,9 @@ pub async fn start_with(
         connection_events: Some(Arc::new(product_events::ConnectionEventBridge::new(
             product_event_sink.clone(),
         ))),
+        // A connection type an agent declared is offered only to the tenants
+        // entitled to one of the agents declaring it.
+        agent_access: Arc::new(EntitledAgents),
         oauth: runtara_connections::OAuthOptions {
             tenantless_callback: config::get().oauth_tenantless_callback,
             browser_binding: config::get().oauth_browser_binding,
@@ -3327,5 +3345,14 @@ mod credential_cipher_tests {
         let resolved =
             credential_cipher(Some(Arc::new(cipher))).expect("encrypting cipher is accepted");
         assert_eq!(resolved.key_id(), "host");
+    }
+}
+
+/// [`runtara_connections::AgentAccess`] from each tenant's entitlements.
+struct EntitledAgents;
+
+impl runtara_connections::AgentAccess for EntitledAgents {
+    fn is_agent_enabled(&self, tenant: &str, agent_id: &str) -> bool {
+        config::entitlements_for(tenant).is_agent_enabled(agent_id)
     }
 }

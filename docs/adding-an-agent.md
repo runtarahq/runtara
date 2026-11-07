@@ -203,6 +203,60 @@ existing connection type (`http_bearer`, `http_api_key`,
    UPDATE_CONNECTION_FORM_SNAPSHOTS=1 cargo test -p runtara-connections --test form_definition_snapshots
    ```
 
+## Declared connection type
+
+An agent built outside this repository cannot add
+a connection type: connection types are compiled into runtara. When the
+service authenticates the way a generic type does (HTTP Basic, an API-key
+header or a bearer token against one base URL), the agent can instead
+**declare** a branded preset of that type. Users then connect the vendor by
+name and fill in the vendor's fields.
+
+The declaration is a `runtara_dsl::derived_connection::DerivedConnectionType`,
+written into the agent's `meta.json` under `connectionTypes` with
+`runtara_dsl::derived_connection::agent_meta_document`. The agent lists the
+declared type's id in its `integration_ids`.
+
+```json
+"connectionTypes": [{
+  "integrationId": "example_crm",
+  "displayName": "Example CRM",
+  "category": "crm",
+  "basedOn": "http_basic",
+  "baseUrl": "https://{account}.vendor.example/api",
+  "params": [{ "name": "account", "displayName": "Account",
+               "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$" }],
+  "fields": [{ "name": "username", "displayName": "API user" },
+             { "name": "password", "displayName": "API password" }],
+  "iconUrl": "https://cdn.example.com/icons/example-crm.svg"
+}]
+```
+
+- `basedOn` is one of `http_basic`, `http_api_key` or `http_bearer`.
+- `params` are fields of the declared type that only fill `baseUrl`'s
+  placeholders. Each needs an anchored `pattern`; values must also match
+  `[A-Za-z0-9_-]{1,63}`. The host of `baseUrl` must end in at least two
+  literal labels, so a value chooses the vendor's tenant and never another
+  host.
+- `fields` relabel the base type's fields. `fixed` gives base fields a
+  value the user cannot change, such as `header_name` for `http_api_key`.
+  The base's `base_url` is never a user field, and secrecy is always the
+  base's.
+- `iconUrl` is an `https://` URL, served by the CDN rather than by runtara.
+
+At boot the server registers the declarations of the agents in its release
+(`runtara_agents::derived::register`), and an invalid one stops it. From then
+on the type is listed, found, validated and rendered like a built-in one. A
+connection of it authenticates as its base type, with its parameters turned
+into the base's (`DerivedConnectionType::to_base_parameters`). Values that do
+not render leave no base URL, so the proxy refuses the request. Rate limits
+are the base type's. The type is offered only to tenants entitled to an agent
+that declares it (`runtara_connections::AgentAccess`).
+
+Use a compiled [connection type](#connection-type) instead when the service
+needs an OAuth flow, request signing, or anything else a generic base cannot
+express.
+
 ## Verify
 
 ```bash

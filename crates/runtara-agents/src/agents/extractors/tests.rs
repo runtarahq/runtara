@@ -1018,3 +1018,38 @@ fn test_gemini_connection_type_is_registered() {
     assert!(key.is_secret);
     assert_eq!(meta.fields.len(), 1, "the API host must stay pinned");
 }
+
+// ============================================================================
+// HTTP Basic Extractor Tests
+// ============================================================================
+
+#[test]
+fn test_http_basic_extractor_sends_basic_auth_to_the_base_url() {
+    let params = json!({
+        "username": "api_user",
+        "password": "p:ss wörd",
+        "base_url": "https://api.example.com/v1"
+    });
+    let config =
+        extract_http_config("http_basic", &params, None).expect("Should extract basic config");
+    assert_eq!(config.url_prefix, "https://api.example.com/v1");
+    assert_eq!(
+        config.headers["Authorization"],
+        // base64("api_user:p:ss wörd"): the password keeps its colon, space and UTF-8.
+        "Basic YXBpX3VzZXI6cDpzcyB3w7ZyZA=="
+    );
+    assert!(get_http_extractor_ids().contains(&"http_basic"));
+}
+
+#[test]
+fn test_http_basic_username_may_not_contain_a_colon() {
+    let params = json!({"username": "a:b", "password": "x", "base_url": "https://api.example.com"});
+    let error = extract_http_config("http_basic", &params, None).unwrap_err();
+    assert!(error.contains("may not contain ':'"), "{error}");
+}
+
+#[test]
+fn test_http_basic_requires_username_and_password() {
+    let params = json!({"username": "a", "base_url": "https://api.example.com"});
+    assert!(extract_http_config("http_basic", &params, None).is_err());
+}

@@ -7,6 +7,7 @@ use runtara_dsl::agent_meta::ConnectionTypeMeta;
 pub static CONNECTION_TYPES: &[&ConnectionTypeMeta] = &[
     &crate::extractors::http_api_key::__CONNECTION_META_HttpApiKeyParams,
     &crate::extractors::http_bearer::__CONNECTION_META_HttpBearerParams,
+    &crate::extractors::http_basic::__CONNECTION_META_HttpBasicParams,
     &crate::extractors::http_mtls::__CONNECTION_META_HttpMtlsParams,
     &crate::extractors::connection_types::__CONNECTION_META_ShopifyAccessTokenParams,
     &crate::extractors::connection_types::__CONNECTION_META_ShopifyClientCredentialsParams,

@@ -92,6 +92,7 @@ fn facade_with_redis(
     redis_manager: Option<redis::aio::ConnectionManager>,
 ) -> ConnectionsFacade {
     ConnectionsFacade::new(ConnectionsState::from_config(ConnectionsConfig {
+        agent_access: std::sync::Arc::new(runtara_connections::EveryAgent),
         db_pool: pool,
         redis_manager,
         public_base_url: "http://localhost".to_string(),

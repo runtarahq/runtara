@@ -135,6 +135,32 @@ fn describe_connection_auth(
     params: &Value,
     headers: &mut HashMap<String, String>,
 ) -> ConnectionAuthDescriptor {
+    // A connection type an agent declared authenticates exactly as its base
+    // type, with the base's parameters: the base URL rendered from the
+    // declaration's template. Parameters that do not render (a missing or
+    // invalid template value) leave no base URL and no credential, so the
+    // request fails closed at the proxy's pin step.
+    if let Some(translated) = runtara_agents::derived::to_base(integration_id, params) {
+        return match translated {
+            Ok((base, base_params)) => {
+                describe_connection_auth(connection_id, base, &base_params, headers)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    connection_id,
+                    integration_id,
+                    %error,
+                    "declared connection type has invalid parameters; not authenticating"
+                );
+                ConnectionAuthDescriptor {
+                    base_url: None,
+                    aws_signing: None,
+                    azure_signing: None,
+                    deferred_auth: None,
+                }
+            }
+        };
+    }
     match integration_id {
         "openai_api_key" => {
             if let Some(key) = params["api_key"].as_str() {
@@ -330,6 +356,27 @@ fn describe_connection_auth(
         "http_bearer" => {
             if let Some(token) = params["token"].as_str() {
                 headers.insert("Authorization".into(), format!("Bearer {}", token));
+            }
+            ConnectionAuthDescriptor {
+                base_url: params["base_url"].as_str().map(|u| u.to_string()),
+                aws_signing: None,
+                azure_signing: None,
+                deferred_auth: None,
+            }
+        }
+        // ── HTTP Basic ──────────────────────────────────────────
+        "http_basic" => {
+            if let (Some(username), Some(password)) =
+                (params["username"].as_str(), params["password"].as_str())
+            {
+                match runtara_agents::extractors::http_basic_auth(username, password) {
+                    Ok(value) => {
+                        headers.insert("Authorization".into(), value);
+                    }
+                    Err(error) => {
+                        tracing::warn!(connection_id, %error, "http_basic: not authenticating")
+                    }
+                }
             }
             ConnectionAuthDescriptor {
                 base_url: params["base_url"].as_str().map(|u| u.to_string()),
@@ -1370,6 +1417,35 @@ mod tests {
             descriptor.base_url.as_deref(),
             Some("https://api.goshippo.com")
         );
+    }
+
+    #[test]
+    fn http_basic_is_basic_auth_on_its_base_url() {
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "http_basic",
+            &json!({ "username": "user", "password": "pa:ss", "base_url": "https://api.example.com" }),
+            &mut headers,
+        );
+        assert_eq!(
+            headers.get("Authorization"),
+            Some(&format!("Basic {}", BASE64.encode("user:pa:ss")))
+        );
+        assert_eq!(
+            descriptor.base_url.as_deref(),
+            Some("https://api.example.com")
+        );
+
+        // A username with a colon cannot be encoded: no credential is sent.
+        let mut headers = HashMap::new();
+        describe_connection_auth(
+            "conn-1",
+            "http_basic",
+            &json!({ "username": "us:er", "password": "x", "base_url": "https://api.example.com" }),
+            &mut headers,
+        );
+        assert!(!headers.contains_key("Authorization"));
     }
 
     #[test]

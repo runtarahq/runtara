@@ -27,6 +27,7 @@ pub const RATE_LIMIT_OPT_OUT: &[&str] = &[
     // Honesty about the unprotected state is handled in the UI, not a covert
     // backstop (see SYN-495).
     "http_api_key",
+    "http_basic",
     "http_bearer",
     "http_mtls",
     "http_oauth2_client_credentials",
@@ -46,6 +47,10 @@ pub const RATE_LIMIT_OPT_OUT: &[&str] = &[
 /// (e.g., postgres, presigned S3/Azure), or where the target API's
 /// limits are unknown (see [`RATE_LIMIT_OPT_OUT`]).
 pub fn get_default_rate_limit_config(integration_id: &str) -> Option<RateLimitConfigDto> {
+    // A connection type an agent declared inherits its base's default.
+    if let Some(derived) = runtara_agents::derived::find(integration_id) {
+        return get_default_rate_limit_config(derived.base.integration_id);
+    }
     match integration_id {
         // Shopify Admin API: bucket-based throttling (~50 cost points/sec for GraphQL).
         // 2 req/s with burst of 4 is conservative and avoids 429s. Both credential

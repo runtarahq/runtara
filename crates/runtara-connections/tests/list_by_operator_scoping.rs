@@ -300,6 +300,7 @@ async fn native_descriptions_and_resources_enforce_tenant_and_safe_metadata() {
         agent_catalog: catalog,
         connection_events: None,
         oauth: Default::default(),
+        agent_access: Arc::new(runtara_connections::EveryAgent),
     });
     assert!(
         facade

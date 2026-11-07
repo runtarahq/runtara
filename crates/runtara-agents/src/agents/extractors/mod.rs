@@ -13,6 +13,7 @@ use std::collections::HashMap;
 
 pub mod connection_types;
 pub(crate) mod http_api_key;
+pub(crate) mod http_basic;
 pub(crate) mod http_bearer;
 pub(crate) mod http_mtls;
 
@@ -21,6 +22,7 @@ mod tests;
 
 // Re-export extractors to ensure they're linked and registered
 pub use http_api_key::HttpApiKeyExtractor;
+pub use http_basic::{HttpBasicExtractor, http_basic_auth};
 pub use http_bearer::HttpBearerExtractor;
 pub use http_mtls::HttpMtlsExtractor;
 
@@ -48,6 +50,7 @@ pub trait HttpConnectionExtractor: Send + Sync {
 
 static HTTP_EXTRACTORS: &[&dyn HttpConnectionExtractor] = &[
     &HttpBearerExtractor,
+    &HttpBasicExtractor,
     &HttpApiKeyExtractor,
     &HttpMtlsExtractor,
     &connection_types::ShopifyExtractor,
@@ -70,12 +73,20 @@ static HTTP_EXTRACTORS: &[&dyn HttpConnectionExtractor] = &[
     &connection_types::McpExtractor,
 ];
 
-/// Returns all integration_ids that have a registered `HttpConnectionExtractor`.
+/// Returns all integration_ids that have a registered `HttpConnectionExtractor`,
+/// including the declared connection types whose base has one.
 pub fn get_http_extractor_ids() -> Vec<&'static str> {
-    HTTP_EXTRACTORS
+    let mut ids: Vec<&'static str> = HTTP_EXTRACTORS
         .iter()
         .map(|extractor| extractor.integration_id())
-        .collect()
+        .collect();
+    let derived: Vec<&'static str> = crate::derived::all()
+        .iter()
+        .filter(|t| ids.contains(&t.base.integration_id))
+        .map(|t| t.meta.integration_id)
+        .collect();
+    ids.extend(derived);
+    ids
 }
 
 /// The one agent whose integration list is defined by the host extractor
@@ -133,6 +144,13 @@ pub fn extract_http_config(
     parameters: &Value,
     rate_limit_config: Option<Value>,
 ) -> Result<HttpConnectionConfig, String> {
+    // A declared type authenticates exactly as its base, with the base's
+    // parameters (its base URL rendered from the declaration's template).
+    if let Some(translated) = crate::derived::to_base(integration_id, parameters) {
+        let (base, base_parameters) =
+            translated.map_err(|e| format!("Invalid {integration_id} connection: {e}"))?;
+        return extract_http_config(base, &base_parameters, rate_limit_config);
+    }
     for extractor in HTTP_EXTRACTORS {
         if extractor.integration_id() == integration_id {
             let mut config = extractor.extract(parameters)?;

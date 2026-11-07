@@ -946,6 +946,10 @@ pub struct ConnectionTypeDto {
     /// tenant may connect with, in place of its own client credentials.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managed_apps: Vec<crate::oauth_apps::OAuthAppSummary>,
+    /// Icon for a connection type an agent declared: an https URL (a CDN)
+    /// to load as an image. Absent for built-in types.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_url: Option<String>,
 }
 
 /// Response for listing all connection types
