@@ -126,7 +126,7 @@ Start the server with:
 ```bash
 AUTH_PROVIDER=local SERVER_HOST=127.0.0.1 \
   RUNTARA_ENTITLEMENTS_JSON='{"features":{"database":false}}' \
-  cargo run -p runtara-server --features embed-ui
+  cargo run -p runtara-server
 ```
 
 (Or via your dev wrapper of choice. The point is the env var on the process. `AUTH_PROVIDER=local` matters here: the default `oidc` mode needs `OAUTH2_JWKS_URI`/`OAUTH2_ISSUER` and will not boot without them.)
@@ -168,11 +168,11 @@ WARN  entitlement denial
 
 ### Verify the SPA
 
-Open the UI. The Database menu item is hidden. Direct navigation to `/ui/objects/types` shows the "Feature not enabled" page rather than the object types list.
+Open the console (runtara-frontend, pointed at this server). The Database menu item is hidden. Direct navigation to `/ui/objects/types` shows the "Feature not enabled" page rather than the object types list.
 
 ## Listening port
 
-The server binds one port, `SERVER_PORT` (default `7001`), for the public API and the embedded SPA. Auth is JWT, API key or proxy header depending on `AUTH_PROVIDER`. Running workflows reach the host through in-process imports, not HTTP, so there is no separate internal port to gate.
+The server binds one port, `SERVER_PORT` (default `7001`), for the public API. The console is deployed separately (runtara-frontend). Auth is JWT, API key or proxy header depending on `AUTH_PROVIDER`. Running workflows reach the host through in-process imports, not HTTP, so there is no separate internal port to gate.
 
 ## Troubleshooting
 

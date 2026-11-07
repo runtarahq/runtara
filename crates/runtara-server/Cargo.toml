@@ -25,9 +25,6 @@ name = "dump_openapi"
 path = "src/bin/dump_openapi.rs"
 
 [features]
-# Embed the runtara-frontend release pinned in frontend.lock (fetched into
-# frontend-dist/ by build.rs) and serve it at the UI mount prefix.
-embed-ui = ["dep:rust-embed"]
 db-integration-tests = []
 # The save-time validator sandbox against a built runtara-validate-guest
 # (RUNTARA_VALIDATOR_WASM).
@@ -227,13 +224,6 @@ http-body-util = "0.1"
 bytes = "1"
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 
-# Optional: embedded UI assets (`embed-ui` feature)
-# Debug builds read frontend-dist/ from disk (no `debug-embed`); release builds embed.
-# Any build can serve another dist directory from disk — see RUNTARA_UI_DIST_DIR.
-rust-embed = { version = "8", features = ["mime-guess"], optional = true }
-# Content types for UI assets read from disk (RUNTARA_UI_DIST_DIR). Not optional:
-# the disk source works in builds without `embed-ui`.
-mime_guess = "2"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

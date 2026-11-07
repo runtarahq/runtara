@@ -55,30 +55,6 @@ fn main() {
     for git_path in build_metadata::git_rerun_paths(workspace_root) {
         println!("cargo:rerun-if-changed={}", git_path.display());
     }
-
-    // `embed-ui` embeds the runtara-frontend release pinned in frontend.lock.
-    // rust_embed needs it on disk at compile time; the script fetches it (and
-    // checks its checksum) unless that release is already there.
-    if std::env::var("CARGO_FEATURE_EMBED_UI").is_ok() {
-        let lock = crate_dir.join("frontend.lock");
-        println!("cargo:rerun-if-changed={}", lock.display());
-        println!("cargo:rerun-if-env-changed=RUNTARA_FRONTEND_TARBALL");
-        let status = Command::new("bash")
-            .arg(workspace_root.join("scripts/fetch-frontend.sh"))
-            .status()
-            .expect("Failed to run scripts/fetch-frontend.sh");
-        if !status.success() {
-            panic!(
-                "\n\n`embed-ui` needs the runtara-frontend release pinned in {}, \
-                 and scripts/fetch-frontend.sh could not provide it (see above).\n\n",
-                lock.display()
-            );
-        }
-        println!(
-            "cargo:rerun-if-changed={}",
-            crate_dir.join("frontend-dist").display()
-        );
-    }
 }
 
 fn resolve_build_number() -> String {

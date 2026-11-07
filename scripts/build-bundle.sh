@@ -111,23 +111,10 @@ resolve_versions() {
     TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 
     info "Runtara version: ${RUNTARA_VERSION} (artifact channel)"
-    info "Stamped version: ${RUNTARA_STAMP_VERSION} (reported in binary/UI)"
+    info "Stamped version: ${RUNTARA_STAMP_VERSION} (reported by the binary)"
     info "Runtara commit:  ${RUNTARA_COMMIT}"
     info "Rustc version:   ${RUSTC_VERSION}"
     info "Target dir:      ${TARGET_DIR}"
-}
-
-# ─── Fetch frontend ──────────────────────────────────────────────────────────
-
-# The embedded UI is the runtara-frontend release pinned in
-# crates/runtara-server/frontend.lock. build.rs fetches it too; doing it here
-# first surfaces a download or checksum failure as its own step.
-fetch_frontend() {
-    if [ "$SKIP_BUILD" = "1" ]; then
-        return
-    fi
-    step "Fetching the embedded frontend release"
-    "${SCRIPT_DIR}/fetch-frontend.sh"
 }
 
 # ─── Build runtara-server ────────────────────────────────────────────────────
@@ -142,9 +129,9 @@ build_server() {
         return
     fi
 
-    step "Building runtara-server (release, with embed-ui)"
+    step "Building runtara-server (release)"
     BUILD_VERSION="$RUNTARA_STAMP_VERSION" BUILD_COMMIT="$RUNTARA_COMMIT" BUILD_NUMBER="$RUNTARA_BUILD_NUMBER" \
-        cargo build --release -p runtara-server --features embed-ui
+        cargo build --release -p runtara-server
 }
 
 # ─── Build agent components ─────────────────────────────────────────────────
@@ -264,7 +251,6 @@ main() {
 
     detect_platform
     resolve_versions
-    fetch_frontend
     build_server
     build_agent_components
     assemble_bundle

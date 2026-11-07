@@ -59,45 +59,25 @@ to zero seconds, under which every workflow is killed the instant it starts —
 migrate rather than leave the old name in place. Whichever name supplies it, the
 resolved timeout is logged at startup.
 
-## Embedded UI (optional)
+## Console
 
-The console lives in
-[runtarahq/runtara-frontend](https://github.com/runtarahq/runtara-frontend).
-The `embed-ui` cargo feature embeds the release pinned in `frontend.lock`
-(version and SHA-256); `build.rs` fetches it into `frontend-dist/` with
-`scripts/fetch-frontend.sh`, once:
+The server serves no UI. The console lives in
+[runtarahq/runtara-frontend](https://github.com/runtarahq/runtara-frontend)
+and is deployed on its own — its image `ghcr.io/runtarahq/runtara-frontend`
+or a static host — calling this server's API from another origin. Console X.Y
+works with server X.Y and the minor on either side.
 
-```bash
-cargo build -p runtara-server --features embed-ui
-```
+The server needs two settings for it:
 
-To embed another release, change `frontend.lock`. Console X.Y works with server
-X.Y and the minor on either side.
+- `CORS_ALLOWED_ORIGINS` — the console's origin, e.g.
+  `https://app.example.com`, so the browser lets it call the API.
+- `RUNTARA_UI_PUBLIC_URL` — where the console is served, e.g.
+  `https://app.example.com/`. The OAuth callback sends the consent popup to
+  the console's `oauth-complete.html` there; without it the callback answers
+  in plain text.
 
-Without env config the UI is served at `/ui/` (self-hosted). For a tenant
-deployed behind a gateway that routes `/ui/<tenant-id>/…` externally, set
-`RUNTARA_UI_BASE_PATH=/ui/<tenant-id>` so the `<base href>` injected into
-`index.html` points the browser at tenant-scoped asset URLs. The Axum mount
-prefix stays at `/ui` (override via `RUNTARA_UI_MOUNT` only if the gateway
-does not strip the tenant segment before forwarding).
-
-When the console is served from somewhere else (a static host, `vite dev`),
-set `RUNTARA_UI_PUBLIC_URL` to where its files are, e.g.
-`https://app.example.com/`. The OAuth callback sends the consent popup to that
-console's `oauth-complete.html`; without the setting it uses the UI this
-server serves, and with no UI it answers in plain text. A console on another
-origin also needs that origin in `CORS_ALLOWED_ORIGINS`.
-
-`RUNTARA_UI_DIST_DIR=<path to a runtara-frontend dist/>` serves the UI from that directory
-at request time instead of from the embedded snapshot. It works with or without
-`embed-ui` and in any profile, and takes precedence when both are available.
-Its point is development: an embedded bundle is fixed at link time, so
-`npm run build:watch` output is invisible to a `--release` server until the
-binary is rebuilt. Pointing at `dist` makes a save plus a reload the whole loop
-— and lets a dev build drop `embed-ui`, which is what stops a running watcher
-from invalidating every cargo build. Assets from a disk source are served
-`no-cache` rather than `immutable`, and a read that lands mid-rebuild returns
-503 rather than a stale page. See runtara-frontend's README for the dev loops.
+The console's own settings (auth mode, OIDC client, API URL) are the
+`RUNTARA_UI_*` variables of its image; see runtara-frontend's README.
 
 ## Inside Runtara
 

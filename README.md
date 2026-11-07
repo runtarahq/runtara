@@ -12,7 +12,7 @@ curl -fsSL https://raw.githubusercontent.com/runtarahq/runtara/refs/heads/main/d
     && FETCH_EXAMPLES=yes RUNTARA_PORT=3030 docker compose up
 ```
 
-Go to **http://localhost:3030/ui** and it will have the platform and example workflows.
+Go to **http://localhost:3030/ui/** and it will have the platform and example workflows.
 
 
 [Website](https://runtara.com) | [Product docs](https://runtara.com/docs/runtara-platform) | [Runtara Cloud](https://tally.so/r/81qE5o)
@@ -171,26 +171,35 @@ Default local ports:
 
 Each release publishes a multi-arch (amd64 + arm64) server image to the GitHub
 Container Registry: `ghcr.io/runtarahq/runtara` (tags `:X.Y.Z`, `:latest`, and
-a rolling `:dev`).
+a rolling `:dev`). The console is a separate image,
+`ghcr.io/runtarahq/runtara-frontend`, released from
+[runtara-frontend](https://github.com/runtarahq/runtara-frontend); the server
+serves no UI.
 
 **Evaluating? One command brings up the whole stack:**
 
 ```bash
-docker compose up          # then open http://localhost:3000/ui
+docker compose up          # then open http://localhost:3000/ui/
 ```
 
-The root `docker-compose.yml` starts the server image plus PostgreSQL and
-Valkey, wired for password-free local auth so you land straight in the UI — no
-identity provider to configure. It is a turnkey trial stack, not a production
-deployment. The host port defaults to 3000; if it's taken, override it with
-`RUNTARA_PORT=3030 docker compose up`. (Before the first tagged release, use the
+The root `docker-compose.yml` starts the server and console images plus
+PostgreSQL and Valkey, wired for password-free local auth so you land straight
+in the console — no identity provider to configure. It is a turnkey trial
+stack, not a production deployment. The console is on host port 3000 and the
+API on 7001; if either is taken, override it with
+`RUNTARA_PORT=3030 RUNTARA_API_PORT=7101 docker compose up`. (Before the first tagged release, use the
 rolling dev image: `RUNTARA_IMAGE_TAG=dev docker compose up`.)
 
 **Running the image yourself:** it contains `runtara-server` plus its bundled
 toolchain and agent components — a server image, not all-in-one. Supply
 PostgreSQL, Valkey, and config via environment (same variables as a native
 run); the `docker-compose.yml` above is the reference for the full set. All
-runtime state is written under `/data`, which is exposed as a volume.
+runtime state is written under `/data`, which is exposed as a volume. Run the
+console image next to it with `RUNTARA_UI_API_BASE_URL` set to the server, and
+list the console's origin in the server's `CORS_ALLOWED_ORIGINS` and as its
+`RUNTARA_UI_PUBLIC_URL` (runtara-frontend's README lists the console's
+settings). A native install (`scripts/install.sh`) is headless: the API and
+MCP only.
 
 ### Build And Test
 

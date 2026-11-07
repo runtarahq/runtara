@@ -24,8 +24,6 @@ pub mod triggers;
 pub mod workflows;
 pub mod workflows_sync;
 
-// Always compiled: without `embed-ui` it can still serve a dist directory from
-// disk via `RUNTARA_UI_DIST_DIR` (a runtara-frontend checkout's build, say).
-pub mod ui;
+pub mod console;
 
 pub mod operations;
