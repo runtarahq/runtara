@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A per-tenant keyring needs no default key.**
+  `TenantKeyedCipher::without_default()` seals and opens only the tenants
+  given a cipher of their own and refuses any other, instead of sealing it
+  under a shared default. A server boots with it, since everything it seals
+  is encrypted, so a host that keys every tenant it serves no longer needs
+  `RUNTARA_CONNECTIONS_ENCRYPTION_KEY` (or a placeholder cipher) for a
+  default nothing should use.
+
 - **Connection types declared by agents.** An agent can declare, in its
   `meta.json` under `connectionTypes`, a branded connection type that is a
   preset of a generic one (`http_basic`, `http_api_key` or `http_bearer`):

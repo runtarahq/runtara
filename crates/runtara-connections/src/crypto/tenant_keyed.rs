@@ -8,7 +8,7 @@ use serde_json::Value;
 use super::{CipherContext, CipherError, CredentialCipher};
 
 /// Seals and opens each tenant's credentials with that tenant's own cipher,
-/// and a tenant without one with `default`.
+/// and a tenant without one with the default, when there is one.
 ///
 /// Every per-tenant cipher is its own keyring (a current key plus retired
 /// ones), so rotating one tenant's key and re-encrypting its rows
@@ -16,16 +16,33 @@ use super::{CipherContext, CipherError, CredentialCipher};
 /// ciphertext as it was. A host that keeps keys in a KMS builds the
 /// per-tenant ciphers from the keys it unwraps there and supplies the result
 /// through the server's options.
+///
+/// A host that gives every tenant it serves keys of its own needs no default
+/// ([`TenantKeyedCipher::without_default`]): a tenant without keys is then
+/// refused, rather than sealed under a key that is not its own.
 pub struct TenantKeyedCipher {
-    default: Arc<dyn CredentialCipher>,
+    default: Option<Arc<dyn CredentialCipher>>,
     tenants: HashMap<String, Arc<dyn CredentialCipher>>,
 }
+
+/// The key id a cipher without a default reports: it seals nothing under
+/// a key of its own.
+const NO_DEFAULT_KEY_ID: &str = "none";
 
 impl TenantKeyedCipher {
     /// Every tenant under `default` until given its own cipher.
     pub fn new(default: Arc<dyn CredentialCipher>) -> Self {
         Self {
-            default,
+            default: Some(default),
+            tenants: HashMap::new(),
+        }
+    }
+
+    /// Only the tenants given a cipher of their own: any other tenant's
+    /// credentials are neither sealed nor opened.
+    pub fn without_default() -> Self {
+        Self {
+            default: None,
             tenants: HashMap::new(),
         }
     }
@@ -40,36 +57,54 @@ impl TenantKeyedCipher {
         self
     }
 
-    fn cipher_for(&self, tenant: &str) -> &dyn CredentialCipher {
+    fn cipher_for(&self, tenant: &str) -> Option<&dyn CredentialCipher> {
         self.tenants
             .get(tenant)
-            .map_or(self.default.as_ref(), |cipher| cipher.as_ref())
+            .or(self.default.as_ref())
+            .map(|cipher| cipher.as_ref())
+    }
+
+    fn no_keys(tenant: &str) -> String {
+        format!("tenant {tenant} has no credential keys")
     }
 }
 
 impl CredentialCipher for TenantKeyedCipher {
     fn encrypt(&self, plaintext: &Value, context: &CipherContext) -> Result<Value, CipherError> {
         self.cipher_for(context.tenant_id)
+            .ok_or_else(|| CipherError::Encrypt(Self::no_keys(context.tenant_id)))?
             .encrypt(plaintext, context)
     }
 
     fn decrypt(&self, stored: &Value, context: &CipherContext) -> Result<Value, CipherError> {
-        self.cipher_for(context.tenant_id).decrypt(stored, context)
+        self.cipher_for(context.tenant_id)
+            .ok_or_else(|| CipherError::Decrypt(Self::no_keys(context.tenant_id)))?
+            .decrypt(stored, context)
     }
 
     /// The default cipher's key; each tenant's envelopes name their own.
     fn key_id(&self) -> &str {
-        self.default.key_id()
+        self.default
+            .as_ref()
+            .map_or(NO_DEFAULT_KEY_ID, |default| default.key_id())
     }
 
+    /// Whether every credential it seals is encrypted: the default's, if
+    /// there is one, and every tenant's own. Without a default, a tenant with
+    /// no keys has nothing sealed at all.
     fn is_encrypting(&self) -> bool {
-        self.default.is_encrypting() && self.tenants.values().all(|c| c.is_encrypting())
+        self.default
+            .as_ref()
+            .is_none_or(|default| default.is_encrypting())
+            && self.tenants.values().all(|c| c.is_encrypting())
     }
 
     /// A process serving several tenants may have no default key: a tenant
-    /// with its own is encrypted all the same.
+    /// with its own is encrypted all the same. A tenant with no cipher at all
+    /// is not: nothing of its can be sealed or re-encrypted.
     fn is_encrypting_for(&self, tenant: &str) -> bool {
-        self.cipher_for(tenant).is_encrypting()
+        self.cipher_for(tenant)
+            .is_some_and(|cipher| cipher.is_encrypting())
     }
 }
 
@@ -126,6 +161,47 @@ mod tests {
         assert!(
             !cipher.is_encrypting_for("beta"),
             "beta has no keys of its own"
+        );
+    }
+
+    /// Without a default, the tenants with keys are sealed under them, any
+    /// other is refused, and the whole counts as encrypting, so a server
+    /// boots with it.
+    #[test]
+    fn without_a_default_a_tenant_without_keys_is_refused() {
+        let cipher =
+            TenantKeyedCipher::without_default().with_tenant("acme", keyring((2, "acme-1"), &[]));
+        assert!(cipher.is_encrypting());
+        assert!(cipher.is_encrypting_for("acme"));
+        assert!(!cipher.is_encrypting_for("beta"));
+
+        let secret = json!({"token": "s"});
+        let acme = cipher.encrypt(&secret, &ctx("acme", "c1")).unwrap();
+        assert_eq!(acme["kid"], "acme-1");
+        assert_eq!(cipher.decrypt(&acme, &ctx("acme", "c1")).unwrap(), secret);
+
+        let refused = cipher.encrypt(&secret, &ctx("beta", "c2")).unwrap_err();
+        assert!(refused.to_string().contains("beta"));
+        assert!(cipher.decrypt(&acme, &ctx("beta", "c1")).is_err());
+        // Nothing comes back in the clear either.
+        assert!(cipher.decrypt(&secret, &ctx("beta", "c2")).is_err());
+
+        // One tenant's plaintext cipher still makes the whole not encrypting.
+        let leaky = TenantKeyedCipher::without_default()
+            .with_tenant("acme", Arc::new(crate::crypto::noop::NoOpCipher));
+        assert!(!leaky.is_encrypting());
+    }
+
+    /// Before any tenant is given keys, it seals nothing and still boots.
+    #[test]
+    fn without_a_default_or_tenants_nothing_is_sealed() {
+        let cipher = TenantKeyedCipher::without_default();
+        assert!(cipher.is_encrypting());
+        assert_eq!(cipher.key_id(), "none");
+        assert!(
+            cipher
+                .encrypt(&json!({"token": "s"}), &ctx("acme", "c1"))
+                .is_err()
         );
     }
 
