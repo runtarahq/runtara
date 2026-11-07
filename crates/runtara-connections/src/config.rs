@@ -60,6 +60,44 @@ pub struct ConnectionsConfig {
 
     /// How OAuth authorization-code flows are started and completed.
     pub oauth: OAuthOptions,
+
+    /// Which agents each tenant may use. A connection type an agent declared
+    /// is offered to, and can be created by, only the tenants that may use
+    /// one of the agents declaring it. [`EveryAgent`] allows every agent.
+    pub agent_access: Arc<dyn AgentAccess>,
+}
+
+/// Which agents a tenant may use (the host's entitlements).
+pub trait AgentAccess: Send + Sync {
+    fn is_agent_enabled(&self, tenant: &str, agent_id: &str) -> bool;
+}
+
+/// Every tenant may use every agent.
+pub struct EveryAgent;
+
+impl AgentAccess for EveryAgent {
+    fn is_agent_enabled(&self, _tenant: &str, _agent_id: &str) -> bool {
+        true
+    }
+}
+
+/// Whether `tenant` is offered connection type `integration_id`: a compiled
+/// type always; a type agents declared when the tenant may use one of them.
+/// Unknown types are not offered.
+pub fn connection_type_offered(
+    access: &dyn AgentAccess,
+    tenant: &str,
+    integration_id: &str,
+) -> bool {
+    if runtara_agents::registry::find_compiled_connection_type(integration_id).is_some() {
+        return true;
+    }
+    runtara_agents::derived::find(integration_id).is_some_and(|derived| {
+        derived
+            .agents
+            .iter()
+            .any(|agent| access.is_agent_enabled(tenant, agent))
+    })
 }
 
 /// The work a request leaves to the host, as a boxed future.
@@ -134,6 +172,7 @@ pub struct ConnectionsState {
     pub agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
     pub connection_events: crate::events::ConnectionEvents,
     pub oauth: OAuthOptions,
+    pub agent_access: Arc<dyn AgentAccess>,
 }
 
 impl ConnectionsState {
@@ -149,6 +188,7 @@ impl ConnectionsState {
             agent_catalog: config.agent_catalog,
             connection_events: config.connection_events,
             oauth: config.oauth,
+            agent_access: config.agent_access,
         }
     }
 }
@@ -180,6 +220,12 @@ impl axum::extract::FromRef<ConnectionsState> for Arc<runtara_dsl::agent_meta::A
 impl axum::extract::FromRef<ConnectionsState> for crate::events::ConnectionEvents {
     fn from_ref(state: &ConnectionsState) -> crate::events::ConnectionEvents {
         state.connection_events.clone()
+    }
+}
+
+impl axum::extract::FromRef<ConnectionsState> for Arc<dyn AgentAccess> {
+    fn from_ref(state: &ConnectionsState) -> Arc<dyn AgentAccess> {
+        state.agent_access.clone()
     }
 }
 

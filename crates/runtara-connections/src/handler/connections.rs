@@ -36,6 +36,7 @@ use crate::types::*;
     ),
     tag = "connections-controller"
 ))]
+#[allow(clippy::too_many_arguments)] // axum extractors
 pub async fn create_connection_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
@@ -43,8 +44,28 @@ pub async fn create_connection_handler(
     State(compatibility): State<Arc<IntegrationCompatibility>>,
     State(events): State<crate::events::ConnectionEvents>,
     State(oauth): State<crate::config::OAuthOptions>,
+    State(agent_access): State<Arc<dyn crate::config::AgentAccess>>,
     Json(payload): Json<CreateConnectionRequest>,
 ) -> Result<(StatusCode, Json<CreateConnectionResponse>), (StatusCode, Json<Value>)> {
+    // A connection type an agent declared exists only for the tenants that
+    // may use one of its agents; for any other it is an unknown type.
+    if let Some(integration_id) = payload.integration_id.as_deref()
+        && runtara_agents::derived::find(integration_id).is_some()
+        && !crate::config::connection_type_offered(
+            agent_access.as_ref(),
+            &tenant_id,
+            integration_id,
+        )
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "success": false,
+                "error": "CONNECTION_TYPE_NOT_FOUND",
+                "message": format!("Connection type '{integration_id}' not found")
+            })),
+        ));
+    }
     // Create service with repository
     let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
     let service = ConnectionService::new(repository, compatibility).with_oauth(&oauth);
@@ -526,6 +547,8 @@ fn meta_to_dto(meta: &runtara_dsl::agent_meta::ConnectionTypeMeta) -> Connection
             default_scopes: c.default_scopes.to_string(),
         }),
         managed_apps: Vec::new(),
+        icon_url: runtara_agents::derived::find(meta.integration_id)
+            .and_then(|derived| derived.declaration.icon_url.clone()),
     }
 }
 
@@ -568,9 +591,17 @@ fn managed_apps(
 pub async fn list_connection_types_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(oauth): State<crate::config::OAuthOptions>,
+    State(agent_access): State<Arc<dyn crate::config::AgentAccess>>,
 ) -> Json<ListConnectionTypesResponse> {
     let apps = managed_apps(&oauth, &tenant_id);
     let connection_types: Vec<ConnectionTypeDto> = get_all_connection_types()
+        .filter(|meta| {
+            crate::config::connection_type_offered(
+                agent_access.as_ref(),
+                &tenant_id,
+                meta.integration_id,
+            )
+        })
         .map(|meta| with_managed_apps(meta_to_dto(meta), &apps))
         .collect();
     let count = connection_types.len();
@@ -653,9 +684,12 @@ pub async fn list_connection_auth_types_handler() -> Json<ListConnectionAuthType
 pub async fn get_connection_type_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(oauth): State<crate::config::OAuthOptions>,
+    State(agent_access): State<Arc<dyn crate::config::AgentAccess>>,
     Path(integration_id): Path<String>,
 ) -> Result<Json<ConnectionTypeResponse>, (StatusCode, Json<Value>)> {
-    match find_connection_type(&integration_id) {
+    let offered =
+        crate::config::connection_type_offered(agent_access.as_ref(), &tenant_id, &integration_id);
+    match find_connection_type(&integration_id).filter(|_| offered) {
         Some(meta) => Ok(Json(ConnectionTypeResponse {
             success: true,
             connection_type: with_managed_apps(

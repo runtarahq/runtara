@@ -24,6 +24,12 @@
     "fnv1a64": "ba67ec945a80eac6"
   },
   {
+    "integrationId": "http_basic",
+    "fieldCount": 3,
+    "serializedBytes": 976,
+    "fnv1a64": "fb3652cdb2eb0d4b"
+  },
+  {
     "integrationId": "http_bearer",
     "fieldCount": 2,
     "serializedBytes": 780,

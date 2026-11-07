@@ -22,7 +22,8 @@ pub use auth::azure_signing::AzureSigningParams;
 pub use auth::provider_auth::{ResolvedConnectionAuth, resolve_connection_auth};
 pub use auth::token_cache::AuthResolutionError;
 pub use config::{
-    ConnectionsConfig, ConnectionsState, EveryTenant, HostFuture, OAuthOptions, TenantHost,
+    AgentAccess, ConnectionsConfig, ConnectionsState, EveryAgent, EveryTenant, HostFuture,
+    OAuthOptions, TenantHost, connection_type_offered,
 };
 pub use crypto::{
     CipherError, CredentialCipher, ENCRYPTION_KEY_ENV, ENVELOPE_ALG, ENVELOPE_VERSION,

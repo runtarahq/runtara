@@ -135,6 +135,32 @@ fn describe_connection_auth(
     params: &Value,
     headers: &mut HashMap<String, String>,
 ) -> ConnectionAuthDescriptor {
+    // A connection type an agent declared authenticates exactly as its base
+    // type, with the base's parameters: the base URL rendered from the
+    // declaration's template. Parameters that do not render (a missing or
+    // invalid template value) leave no base URL and no credential, so the
+    // request fails closed at the proxy's pin step.
+    if let Some(translated) = runtara_agents::derived::to_base(integration_id, params) {
+        return match translated {
+            Ok((base, base_params)) => {
+                describe_connection_auth(connection_id, base, &base_params, headers)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    connection_id,
+                    integration_id,
+                    %error,
+                    "declared connection type has invalid parameters; not authenticating"
+                );
+                ConnectionAuthDescriptor {
+                    base_url: None,
+                    aws_signing: None,
+                    azure_signing: None,
+                    deferred_auth: None,
+                }
+            }
+        };
+    }
     match integration_id {
         "openai_api_key" => {
             if let Some(key) = params["api_key"].as_str() {
@@ -330,6 +356,27 @@ fn describe_connection_auth(
         "http_bearer" => {
             if let Some(token) = params["token"].as_str() {
                 headers.insert("Authorization".into(), format!("Bearer {}", token));
+            }
+            ConnectionAuthDescriptor {
+                base_url: params["base_url"].as_str().map(|u| u.to_string()),
+                aws_signing: None,
+                azure_signing: None,
+                deferred_auth: None,
+            }
+        }
+        // ── HTTP Basic ──────────────────────────────────────────
+        "http_basic" => {
+            if let (Some(username), Some(password)) =
+                (params["username"].as_str(), params["password"].as_str())
+            {
+                match runtara_agents::extractors::http_basic_auth(username, password) {
+                    Ok(value) => {
+                        headers.insert("Authorization".into(), value);
+                    }
+                    Err(error) => {
+                        tracing::warn!(connection_id, %error, "http_basic: not authenticating")
+                    }
+                }
             }
             ConnectionAuthDescriptor {
                 base_url: params["base_url"].as_str().map(|u| u.to_string()),
@@ -829,7 +876,7 @@ fn resolve_oauth_base_url(cfg: &OAuthConfig, params: &Value) -> Option<String> {
     }
     let mut url = host.trim_end_matches('/').to_string();
     if !cfg.base_url_path_template.is_empty() {
-        url.push_str(&substitute_path_template(
+        url.push_str(&runtara_dsl::url_template::substitute_or_empty(
             cfg.base_url_path_template,
             params,
         ));
@@ -892,8 +939,9 @@ impl std::fmt::Display for NamedEndpointError {
 /// Sandbox selection follows the same rule as [`resolve_oauth_base_url`]: the
 /// `sandbox_url` wins when the connection's `environment` parameter is
 /// `"sandbox"` and the descriptor declares one. `{param}` placeholders in the URL
-/// and in header values are substituted from `params` — strictly, unlike
-/// [`substitute_path_template`], because an endpoint URL that silently loses its
+/// and in header values are substituted from `params` — strictly
+/// ([`runtara_dsl::url_template::substitute`]), unlike the OAuth base URL path
+/// template, because an endpoint URL that silently loses its
 /// tenant segment would point at a different scope of the provider's API rather
 /// than at an obviously-broken path.
 ///
@@ -926,7 +974,7 @@ pub fn resolve_named_endpoint(
     };
 
     let strict = |template: &str| {
-        substitute_template_strict(template, params).map_err(|param| {
+        runtara_dsl::url_template::substitute(template, params).map_err(|param| {
             NamedEndpointError::UnresolvedTemplate {
                 name: endpoint.name.to_string(),
                 param,
@@ -958,56 +1006,6 @@ pub fn resolve_named_endpoint_for(
             declared: Vec::new(),
         }),
     }
-}
-
-/// Like [`substitute_path_template`] but fails on a `{name}` with no matching
-/// string param, returning the offending placeholder name.
-fn substitute_template_strict(template: &str, params: &Value) -> Result<String, String> {
-    let mut out = String::with_capacity(template.len());
-    let mut chars = template.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '{' {
-            let mut name = String::new();
-            for c2 in chars.by_ref() {
-                if c2 == '}' {
-                    break;
-                }
-                name.push(c2);
-            }
-            match params[name.as_str()].as_str().filter(|s| !s.is_empty()) {
-                Some(val) => out.push_str(val),
-                None => return Err(name),
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    Ok(out)
-}
-
-/// Replace `{name}` placeholders in a path template with the matching string param.
-/// A missing param substitutes empty (yielding an obviously-broken path the API
-/// rejects clearly, rather than silently hitting the wrong resource).
-fn substitute_path_template(template: &str, params: &Value) -> String {
-    let mut out = String::with_capacity(template.len());
-    let mut chars = template.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '{' {
-            let mut name = String::new();
-            for c2 in chars.by_ref() {
-                if c2 == '}' {
-                    break;
-                }
-                name.push(c2);
-            }
-            if let Some(val) = params[name.as_str()].as_str() {
-                out.push_str(val);
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 /// Generic OAuth2 client-credentials mint, fully parameter-driven. `token_auth =
@@ -1370,6 +1368,35 @@ mod tests {
             descriptor.base_url.as_deref(),
             Some("https://api.goshippo.com")
         );
+    }
+
+    #[test]
+    fn http_basic_is_basic_auth_on_its_base_url() {
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "http_basic",
+            &json!({ "username": "user", "password": "pa:ss", "base_url": "https://api.example.com" }),
+            &mut headers,
+        );
+        assert_eq!(
+            headers.get("Authorization"),
+            Some(&format!("Basic {}", BASE64.encode("user:pa:ss")))
+        );
+        assert_eq!(
+            descriptor.base_url.as_deref(),
+            Some("https://api.example.com")
+        );
+
+        // A username with a colon cannot be encoded: no credential is sent.
+        let mut headers = HashMap::new();
+        describe_connection_auth(
+            "conn-1",
+            "http_basic",
+            &json!({ "username": "us:er", "password": "x", "base_url": "https://api.example.com" }),
+            &mut headers,
+        );
+        assert!(!headers.contains_key("Authorization"));
     }
 
     #[test]

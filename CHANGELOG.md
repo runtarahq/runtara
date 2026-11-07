@@ -13,6 +13,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Connection types declared by agents.** An agent can declare, in its
+  `meta.json` under `connectionTypes`, a branded connection type that is a
+  preset of a generic one (`http_basic`, `http_api_key` or `http_bearer`):
+  its own name, category, icon URL and field labels, and a base URL template
+  such as `https://{account}.vendor.example/api`. Users then connect the
+  vendor, not a generic HTTP connection. The server registers the
+  declarations of the agents it loads at boot, and refuses to start on an
+  invalid one. A declared connection authenticates exactly as its base type,
+  with the base URL rendered from the template. The template's host must end
+  in literal labels and every substituted value must match its pattern, so a
+  connection can choose the vendor's tenant but never another host. A
+  declared type is listed, fetched and creatable only for tenants entitled to
+  an agent that declares it. The connection-type API returns its `iconUrl`.
+  Agents built outside this repository can now ship with their own connection
+  type ([docs/adding-an-agent.md](docs/adding-an-agent.md#declared-connection-type)).
+- **`http_basic` connection type.** HTTP Basic authentication with a username,
+  a password and a required https base URL, for any API that takes Basic
+  credentials. It has no default rate limit, like the other generic types.
+
 - **Jira agent, generated from Atlassian's API spec.** Thirty-two capabilities
   for Jira Cloud: create, read, edit, assign, transition and delete issues,
   search with JQL, manage comments, log work, link issues, watch them, and read

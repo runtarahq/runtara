@@ -98,6 +98,7 @@ impl Fixture {
 
         let connections = Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
             ConnectionsConfig {
+                agent_access: std::sync::Arc::new(runtara_connections::EveryAgent),
                 db_pool: pool.clone(),
                 redis_manager: None,
                 public_base_url: "http://localhost".to_string(),

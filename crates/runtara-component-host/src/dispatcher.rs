@@ -99,6 +99,13 @@ pub struct ComponentDispatcherService {
     /// server-side `AgentsService` + workflow validation paths can hold the
     /// same data without copying.
     catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
+    /// The connection types loaded agents declare in their `meta.json`, as
+    /// `(agent id, declaration)`, sorted by agent id. The server registers
+    /// them at boot (`runtara_agents::derived::register`).
+    declared_connection_types: Vec<(
+        String,
+        runtara_dsl::derived_connection::DerivedConnectionType,
+    )>,
     /// Per-call wall-clock budget for `test_capability`.
     test_timeout: Duration,
     /// Per-call guest linear-memory cap for `test_capability`, in bytes.
@@ -231,6 +238,7 @@ impl ComponentDispatcherService {
         let mut trusted = crate::trusted::TrustedExecutor::new(Arc::clone(&engine));
         let mut agents = HashMap::new();
         let mut agent_info: HashMap<String, AgentInfo> = HashMap::new();
+        let mut declared_connection_types = Vec::new();
 
         for AgentSource {
             id: agent_id,
@@ -257,6 +265,17 @@ impl ComponentDispatcherService {
             // "azure_blob_storage", and `agent_info_of("azure-blob-storage")`
             // returns None while `agent_ids()` yields it.
             info.id = agent_id.clone();
+            let extensions =
+                runtara_dsl::derived_connection::AgentMetaExtensions::from_meta_json(&meta_bytes)
+                    .with_context(|| {
+                    format!("agent `{agent_id}`: failed to parse declared connection types")
+                })?;
+            declared_connection_types.extend(
+                extensions
+                    .connection_types
+                    .into_iter()
+                    .map(|declared| (agent_id.clone(), declared)),
+            );
 
             trusted.register(&info, &bytes, &meta_bytes)?;
             let loaded = load_agent_bytes(&engine, &linker, &bytes, &agent_id)?;
@@ -277,6 +296,7 @@ impl ComponentDispatcherService {
         let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
             by_id.into_iter().map(|(_, v)| v).collect(),
         ));
+        declared_connection_types.sort_by(|a, b| a.0.cmp(&b.0));
 
         Ok(Self {
             trusted: Arc::new(trusted),
@@ -287,6 +307,7 @@ impl ComponentDispatcherService {
             engine,
             agents,
             catalog,
+            declared_connection_types,
             test_timeout: parse_timeout(std::env::var("RUNTARA_TEST_CAPABILITY_TIMEOUT_SECS").ok()),
             memory_max_bytes: parse_memory_max(
                 std::env::var("RUNTARA_TEST_CAPABILITY_MEMORY_MAX_BYTES").ok(),
@@ -361,6 +382,17 @@ impl ComponentDispatcherService {
     /// so the runtime, not compile-time, is the source of truth.
     pub fn catalog(&self) -> Arc<runtara_dsl::agent_meta::AgentCatalog> {
         Arc::clone(&self.catalog)
+    }
+
+    /// The connection types the loaded agents declare, as
+    /// `(agent id, declaration)`, for `runtara_agents::derived::register`.
+    pub fn declared_connection_types(
+        &self,
+    ) -> &[(
+        String,
+        runtara_dsl::derived_connection::DerivedConnectionType,
+    )] {
+        &self.declared_connection_types
     }
 
     /// Execute one capability and return a `TestResult` shaped for the

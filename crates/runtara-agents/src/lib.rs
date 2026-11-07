@@ -14,6 +14,9 @@ pub mod connections;
 
 // Re-export shared infrastructure
 pub mod registry;
+
+/// Connection types agents declare, registered at boot.
+pub mod derived;
 mod static_registry;
 
 // Re-export commonly used types for workflow code
