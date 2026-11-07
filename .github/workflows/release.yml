@@ -181,8 +181,15 @@ jobs:
     needs: bundle
     timeout-minutes: 20
     env:
+      # The console release whose image and smoke suite run against the
+      # bundle: console X.Y works with server X.Y and the minor on either side.
+      RUNTARA_FRONTEND_VERSION: 10.0.1
       SMOKE_API_BASE_URL: http://127.0.0.1:7001
-      PLAYWRIGHT_BASE_URL: http://127.0.0.1:7001
+      # The console runs in its own container (runtara-frontend's image) and
+      # calls the server across origins.
+      PLAYWRIGHT_BASE_URL: http://127.0.0.1:8080
+      CORS_ALLOWED_ORIGINS: http://127.0.0.1:8080
+      RUNTARA_UI_PUBLIC_URL: http://127.0.0.1:8080/
       E2E_UI_BASE_PATH: /ui
       E2E_SMOKE_AUTH_MODE: local
       RUNTARA_SERVER_DATABASE_URL: postgresql://smo_worker:GueUkDKea0CjKP4Rn5Bk0FDV@127.0.0.1:5432/smo_object_model
@@ -198,7 +205,6 @@ jobs:
       RUNTARA_DEV_MODE: "true"
       RUNTARA_SDK_BACKEND: http
       RUNTARA_COMPILE_TARGET: wasm32-wasip2
-      RUNTARA_UI_STRIP_ORG_ID: "true"
       RUST_LOG: info
       OTEL_SDK_DISABLED: "true"
 
@@ -206,18 +212,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # The smoke suite is runtara-frontend's, at the release the bundle embeds.
-      - name: Read the embedded frontend release
-        id: frontend
-        run: |
-          version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*//p' crates/runtara-server/frontend.lock | tr -d '[:space:]')"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-
+      # The smoke suite is runtara-frontend's, at RUNTARA_FRONTEND_VERSION.
       - name: Checkout runtara-frontend
         uses: actions/checkout@v4
         with:
           repository: runtarahq/runtara-frontend
-          ref: v${{ steps.frontend.outputs.version }}
+          ref: v${{ env.RUNTARA_FRONTEND_VERSION }}
           path: frontend
 
       - name: Setup Node.js
@@ -301,6 +301,29 @@ jobs:
           tail -200 "$DATA_DIR/runtara-server.log"
           exit 1
 
+      # The console image built from the same checkout as the suite, so the
+      # two always match.
+      - name: Start the console
+        run: |
+          docker build -t runtara-frontend:smoke \
+            --build-arg VERSION="${RUNTARA_FRONTEND_VERSION}" frontend
+          docker run -d --name runtara-console -p 8080:8080 \
+            -e RUNTARA_UI_AUTH_MODE="${AUTH_PROVIDER}" \
+            -e RUNTARA_UI_API_BASE_URL="${SMOKE_API_BASE_URL}" \
+            -e RUNTARA_UI_TENANT_ID="${TENANT_ID}" \
+            -e RUNTARA_UI_STRIP_ORG_ID=true \
+            runtara-frontend:smoke
+
+          for _ in {1..30}; do
+              if curl -fsS http://127.0.0.1:8080/healthz >/dev/null; then
+                  exit 0
+              fi
+              sleep 1
+          done
+
+          docker logs runtara-console
+          exit 1
+
       - name: Run smoke tests
         working-directory: frontend
         run: npm run test:e2e:smoke -- --max-failures=5
@@ -323,6 +346,8 @@ jobs:
 
               kill -9 "$pid" 2>/dev/null || true
           fi
+          docker logs runtara-console > "$DATA_DIR/runtara-console.log" 2>&1 || true
+          docker rm -f runtara-console 2>/dev/null || true
           docker compose -f dev/docker-compose.yml down -v
 
       - name: Upload smoke test results
@@ -334,6 +359,7 @@ jobs:
             frontend/e2e-results/
             frontend/e2e-report/
             .data/smoke/runtara-server.log
+            .data/smoke/runtara-console.log
           retention-days: 7
 
   # Publish the release's agents, shared components and index to the artifact

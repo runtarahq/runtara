@@ -8,8 +8,8 @@ scoped README files, examples.
 ## Architecture
 
 - `crates/runtara-server` is the native application and composition root. It
-  owns the public/internal HTTP APIs, auth, MCP endpoint, workers, OpenAPI, and
-  the optionally embedded frontend.
+  owns the public/internal HTTP APIs, auth, MCP endpoint, workers, and OpenAPI.
+  It serves no UI.
 - `crates/runtara-core` owns durable execution state: instances, checkpoints,
   signals, events, and sleep.
 - `crates/runtara-environment` owns image and instance lifecycle, runners, and
@@ -31,11 +31,11 @@ scoped README files, examples.
   schemas, and rate limiting.
 - `crates/runtara-object-store` owns schema-driven tenant object storage.
 - The console (React/Vite) lives in
-  [runtarahq/runtara-frontend](https://github.com/runtarahq/runtara-frontend).
-  `embed-ui` embeds the release pinned in `crates/runtara-server/frontend.lock`,
-  which `build.rs` fetches with `scripts/fetch-frontend.sh`. Console changes go
-  to that repository; moving the embedded console to a new release means
-  updating the lock's version and sha256.
+  [runtarahq/runtara-frontend](https://github.com/runtarahq/runtara-frontend)
+  and is deployed on its own (its image `ghcr.io/runtarahq/runtara-frontend`,
+  or a static host), calling the server's API across origins. Console changes
+  go to that repository. The release smoke test runs the console release named
+  by `RUNTARA_FRONTEND_VERSION` in `.github/workflows/release.yml`.
 - `prototypes` and `spikes` are experimental and are not production code unless
   a task explicitly targets them.
 
@@ -69,7 +69,6 @@ scoped README files, examples.
   validation WASM package (`runtara-validation-wasm-<version>.tgz`, from
   `crates/runtara-validation-wasm`) for runtara-frontend, which builds against
   them (`.github/workflows/frontend-inputs.yml`).
-- `crates/runtara-server/frontend-dist` is the fetched console release; ignored.
 - Agent `.wasm` and `.meta.json` files are produced under
   `target/wasm32-wasip2/release` by
   `scripts/build-agent-components.sh`.

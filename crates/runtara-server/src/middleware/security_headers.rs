@@ -14,9 +14,8 @@ use axum::{
 /// Matches the headers previously set by the API gateway's `header_filter_by_lua_block`.
 /// HSTS is deliberately omitted — it stays at the TLS termination layer (gateway/LB).
 ///
-/// CSP is applied only when a handler hasn't already set one. That lets the embedded
-/// UI route relax `default-src 'none'` for its HTML responses without losing the strict
-/// default on JSON/API routes.
+/// CSP is applied only when a handler hasn't already set one, so a handler that serves
+/// HTML (the OAuth callback's plain page, say) can relax the strict API default.
 pub async fn security_headers_middleware(request: Request, next: Next) -> Response<Body> {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();

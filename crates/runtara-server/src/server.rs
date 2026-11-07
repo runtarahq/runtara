@@ -1307,7 +1307,7 @@ pub async fn start_with(
     });
     // Where the OAuth callback sends the consent popup: the console's landing
     // page, on whichever host serves the console.
-    let oauth_complete_url = match crate::api::handlers::ui::oauth_complete_url(&public_base_url) {
+    let oauth_complete_url = match crate::api::handlers::console::oauth_complete_url() {
         Ok(url) => url,
         Err(msg) => {
             eprintln!("❌ Configuration error: RUNTARA_UI_PUBLIC_URL: {msg}");
@@ -2956,44 +2956,6 @@ pub async fn start_with(
         .merge(oidc_routes)
         .nest("/mcp", mcp_router);
 
-    // UI. Served when the binary was built with `embed-ui`, or when
-    // RUNTARA_UI_DIST_DIR points at a runtara-frontend dist/ (which wins, and works
-    // in any profile — see `handlers::ui::AssetSource`).
-    // - RUNTARA_UI_BASE_PATH: `<base href>` injected into index.html (default `/ui`).
-    //   Tenant deployments set this to `/ui/<tenant-id>` so the browser resolves
-    //   tenant-scoped asset URLs correctly.
-    // - RUNTARA_UI_MOUNT: Axum prefix where UI is served. Defaults to the base path,
-    //   which is the right answer for self-hosted and no-gateway local dev. Override
-    //   (e.g. to `/ui`) only when a gateway strips the tenant segment before forwarding.
-    let public_app = match crate::api::handlers::ui::resolve_source() {
-        Some(source) => {
-            fn normalize(raw: &str, fallback: &str) -> String {
-                let trimmed = raw.trim_end_matches('/');
-                if trimmed.is_empty() {
-                    fallback.to_string()
-                } else {
-                    trimmed.to_string()
-                }
-            }
-            let base_raw =
-                std::env::var("RUNTARA_UI_BASE_PATH").unwrap_or_else(|_| "/ui".to_string());
-            let base = normalize(&base_raw, "/ui");
-            let base_href = format!("{}/", base);
-            let mount = match std::env::var("RUNTARA_UI_MOUNT") {
-                Ok(raw) => normalize(&raw, &base),
-                Err(_) => base.clone(),
-            };
-            tracing::info!(
-                mount = %mount,
-                base_href = %base_href,
-                assets = %source.describe(),
-                "UI enabled"
-            );
-            public_app.merge(crate::api::handlers::ui::router(&mount, &base_href, source))
-        }
-        None => public_app,
-    };
-
     // Only expose OpenAPI docs when explicitly enabled (disabled in production)
     let public_app = if std::env::var("ENABLE_OPENAPI_DOCS").is_ok() {
         public_app.route(
@@ -3061,14 +3023,6 @@ pub async fn start_with(
         };
         let origin = format!("http://{shown_host}:{port}");
         println!("\n  Runtara {} is ready.\n", env!("BUILD_VERSION"));
-        if crate::api::handlers::ui::resolve_source().is_some() {
-            // Mirrors the RUNTARA_UI_BASE_PATH normalization used at the UI
-            // mount above (default `/ui`).
-            let raw = std::env::var("RUNTARA_UI_BASE_PATH").unwrap_or_else(|_| "/ui".to_string());
-            let trimmed = raw.trim_end_matches('/');
-            let ui = if trimmed.is_empty() { "/ui" } else { trimmed };
-            println!("    UI:      {origin}{ui}");
-        }
         println!("    API:     {origin}");
         println!("    Health:  {origin}/health\n");
     }

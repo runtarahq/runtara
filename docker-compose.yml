@@ -1,20 +1,23 @@
 # Runtara — single-command evaluation stack.
 #
 #   docker compose up
-#   open http://localhost:3000/ui
+#   open http://localhost:3000/ui/
 #
-# Brings up the published Runtara server image plus the PostgreSQL and Valkey
-# it needs, wired for password-free **local auth** so evaluators land straight
-# in the UI with no identity provider to configure. This is a turnkey trial
+# Brings up the published Runtara server and console images plus the
+# PostgreSQL and Valkey the server needs, wired for password-free **local
+# auth** so evaluators land straight in the console with no identity provider
+# to configure. The console is its own container (runtara-frontend) and calls
+# the server's API on its own port, across origins (CORS). This is a turnkey trial
 # stack, NOT a production deployment — local auth has no authentication.
 #
 # Self-contained: everything (including DB bootstrap) lives in this one file,
 # so it can be downloaded and run on its own without cloning the repo.
 #
-# Host port defaults to 3000; override if it's taken:
-#   RUNTARA_PORT=3030 docker compose up
+# Host ports default to 3000 (console) and 7001 (API); override if taken:
+#   RUNTARA_PORT=3030 RUNTARA_API_PORT=7101 docker compose up
 # Until the first tagged release publishes :latest, point at the rolling dev
 # image:  RUNTARA_IMAGE_TAG=dev docker compose up
+# The console image's tag: RUNTARA_CONSOLE_TAG (default latest).
 
 services:
   postgres:
@@ -62,20 +65,22 @@ services:
       valkey:
         condition: service_healthy
     environment:
-      # Password-free local auth. The SPA reads authMode from the server at
-      # runtime (window.__RUNTARA_CONFIG__), so no rebuild is needed.
+      # Password-free local auth. The console is told the same (its
+      # RUNTARA_UI_AUTH_MODE below).
       AUTH_PROVIDER: local
       # Local/trust-proxy auth refuse to bind a non-loopback address (an
       # unauthenticated listener must not be exposed directly). So the server
       # binds loopback and the `proxy` sidecar below fronts it. Overrides the
       # image's default SERVER_HOST=0.0.0.0.
       SERVER_HOST: 127.0.0.1
-      # Match the published host port so the server's ready-banner link is
+      # Match the published API port so the server's ready-banner link is
       # correct. Drives the in-image healthcheck (curls 127.0.0.1:$SERVER_PORT).
-      SERVER_PORT: "${RUNTARA_PORT:-3000}"
+      SERVER_PORT: "${RUNTARA_API_PORT:-7001}"
       TENANT_ID: evaluation
-      # Single-tenant: stop the SPA from prefixing API calls with an org id.
-      RUNTARA_UI_STRIP_ORG_ID: "true"
+      # The console is on another origin: let it call the API, and send the
+      # OAuth consent popup back to its landing page.
+      CORS_ALLOWED_ORIGINS: "http://localhost:${RUNTARA_PORT:-3000},http://127.0.0.1:${RUNTARA_PORT:-3000}"
+      RUNTARA_UI_PUBLIC_URL: "http://localhost:${RUNTARA_PORT:-3000}/"
       # No OTLP collector in this stack — silence the exporter.
       OTEL_SDK_DISABLED: "true"
       RUNTARA_SERVER_DATABASE_URL: postgres://runtara:runtara@postgres/runtara_server
@@ -136,7 +141,7 @@ services:
     # Publish the *proxy's* listen port (8080). Ports must be declared on the
     # network-namespace owner, which the sidecar joins via network_mode below.
     ports:
-      - "${RUNTARA_PORT:-3000}:8080"
+      - "${RUNTARA_API_PORT:-7001}:8080"
     volumes:
       - runtara_data:/data
 
@@ -149,7 +154,22 @@ services:
       runtara:
         condition: service_healthy
     network_mode: "service:runtara"
-    command: ["TCP-LISTEN:8080,fork,reuseaddr", "TCP:127.0.0.1:${RUNTARA_PORT:-3000}"]
+    command: ["TCP-LISTEN:8080,fork,reuseaddr", "TCP:127.0.0.1:${RUNTARA_API_PORT:-7001}"]
+
+  # The console (runtara-frontend): static files served by nginx, with its
+  # config.js rendered from these RUNTARA_UI_* values at start. The browser
+  # loads it from the host's port and calls the API at RUNTARA_UI_API_BASE_URL.
+  console:
+    image: ghcr.io/runtarahq/runtara-frontend:${RUNTARA_CONSOLE_TAG:-latest}
+    pull_policy: always
+    environment:
+      RUNTARA_UI_AUTH_MODE: local
+      RUNTARA_UI_API_BASE_URL: "http://localhost:${RUNTARA_API_PORT:-7001}"
+      RUNTARA_UI_TENANT_ID: evaluation
+      # Single-tenant: stop the console from prefixing API calls with an org id.
+      RUNTARA_UI_STRIP_ORG_ID: "true"
+    ports:
+      - "${RUNTARA_PORT:-3000}:8080"
 
   # Optional one-shot example seeder. Runs ONLY when FETCH_EXAMPLES=yes;
   # otherwise it starts, prints a notice, and exits 0. When enabled it fetches
@@ -169,7 +189,7 @@ services:
     environment:
       FETCH_EXAMPLES: "${FETCH_EXAMPLES:-no}"
       EXAMPLES_REF: "${EXAMPLES_REF:-main}"
-      SERVER_PORT: "${RUNTARA_PORT:-3000}"
+      SERVER_PORT: "${RUNTARA_API_PORT:-7001}"
     command:
       - sh
       - -c

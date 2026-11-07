@@ -57,7 +57,7 @@ VOLUME ["/data"]
 
 LABEL org.opencontainers.image.source="https://github.com/runtarahq/runtara" \
       org.opencontainers.image.title="runtara" \
-      org.opencontainers.image.description="Runtara server (workflow runtime + API + UI)"
+      org.opencontainers.image.description="Runtara server (workflow runtime + API); the console is ghcr.io/runtarahq/runtara-frontend"
 
 USER runtara
 WORKDIR /home/runtara

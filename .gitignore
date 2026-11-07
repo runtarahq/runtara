@@ -89,10 +89,6 @@ src/operators_lib/target/
 # Generated specification files (created during build)
 specs/
 
-# The runtara-frontend release embed-ui embeds (scripts/fetch-frontend.sh)
-crates/runtara-server/frontend-dist/
-crates/runtara-server/frontend-dist.release
-
 # Claude Code — ignore user-specific state, track team-shared files
 .claude/settings.local.json
 .claude/worktrees/
