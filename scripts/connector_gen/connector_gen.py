@@ -65,6 +65,19 @@ ANNOTATIONS = ("description", "title", "summary", "example", "examples", "defaul
 NAME_MAPS = ("properties", "responses")
 
 
+# On a parameter or a body field: the step input's name, when the wire name
+# cannot be it (the platform owns that name, or it reads badly, as `status[]`).
+INPUT_NAME = "x-runtara-input-name"
+# Set by `fetch` on a free-form `deepObject` query parameter.
+FREE_FORM_QUERY = "x-runtara-free-form-query"
+# The input name is also the generated Rust field's name.
+RUST_KEYWORDS = frozenset("""as async await break const continue crate dyn else enum extern false fn for if
+    impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe
+    use where while""".split())
+# Inputs the platform sets on every call.
+PLATFORM_INPUTS = ("connection_id", "_connection")
+
+
 def load_config(crate: Path) -> dict:
     with open(crate / "connector.yaml") as f:
         return yaml.safe_load(f)
@@ -411,6 +424,19 @@ def is_object(schema: dict) -> bool:
     return schema.get("type") == "object" or "properties" in schema
 
 
+def is_free_form_query(parameter: dict, schema: dict) -> bool:
+    """A `deepObject` query parameter whose keys are the caller's to choose, such
+    as a filter on custom fields: `filter[Colour]=red&filter[Size][0]=S`."""
+    return (
+        parameter.get("in") == "query"
+        and parameter.get("style") == "deepObject"
+        and parameter.get("explode", True)
+        and schema.get("type") == "object"
+        and not schema.get("properties")
+        and bool(schema.get("additionalProperties"))
+    )
+
+
 def check_parameter(spec: dict, name: str, parameter: dict) -> list:
     """The parameters `parameter` is sent as: none (an optional cookie), itself,
     or one per field of an object query parameter."""
@@ -434,6 +460,8 @@ def check_parameter(spec: dict, name: str, parameter: dict) -> list:
             print(f"note: {name}: array query parameter `{resolved['name']}` declares no item fields; "
                   "sending its items as strings")
             return [{**resolved, "schema": {**schema, "items": {"type": "string"}}}]
+    if is_free_form_query(resolved, schema):
+        return [{**resolved, FREE_FORM_QUERY: True}]
     if resolved.get("in") == "query" and (
         resolved.get("style") == "deepObject" or schema.get("type") == "object"
     ):
@@ -965,6 +993,36 @@ def rename_refs(sliced: dict, renames: dict) -> None:
     sliced["components"]["schemas"] = {renames.get(name, name): schema for name, schema in schemas.items()}
 
 
+def check_input_names(sliced: dict) -> None:
+    """Every step input of an operation has its own usable name. A parameter or
+    a body field takes its wire name unless `x-runtara-input-name` gives another."""
+    for path, item in sliced["paths"].items():
+        for method, op in item.items():
+            if method not in HTTP_METHODS:
+                continue
+            fields = [deref(sliced, p) for p in [*item.get("parameters", []), *op.get("parameters", [])]]
+            for media in (deref(sliced, op.get("requestBody") or {}).get("content") or {}).values():
+                properties = deref(sliced, media.get("schema") or {}).get("properties") or {}
+                fields += [{"name": name, **prop} for name, prop in properties.items()]
+                break
+            seen = set()
+            for field in fields:
+                custom = field.get(INPUT_NAME)
+                if custom is not None and (
+                    not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(custom)) or custom in RUST_KEYWORDS
+                ):
+                    sys.exit(f"{op['operationId']}: {INPUT_NAME} `{custom}` is not a plain name")
+                name = custom or field["name"]
+                if name in PLATFORM_INPUTS:
+                    sys.exit(
+                        f"{op['operationId']}: the platform sets the input `{name}` on every call, "
+                        f"which would overwrite the value; name it with {INPUT_NAME}"
+                    )
+                if name in seen:
+                    sys.exit(f"{op['operationId']}: two inputs are named `{name}`")
+                seen.add(name)
+
+
 def check_names(sliced: dict, operation_ids: list, model_names: dict) -> None:
     reserved = RESERVED_TYPE_NAMES | {model_name(op) + "Input" for op in operation_ids}
     for name in sliced["components"].get("schemas", {}):
@@ -1164,6 +1222,7 @@ def slice_one(spec: dict, operation_ids: list, first: str, model_names: dict, bo
     normalize_schemas(sliced)
     rename_schemas(sliced, model_names)
     check_names(sliced, operation_ids, model_names)
+    check_input_names(sliced)
     return sliced, used
 
 
@@ -1267,12 +1326,13 @@ def describe_field(target: dict, name: str, schema: dict, labels: dict, required
     humanized field name. Required fields get no default: the metadata would
     then call them optional while the step still has to send them."""
     title = schema.get("x-runtara-title", schema.get("title"))
-    if name in labels:
-        label = labels[name]
+    input_name = target.get(INPUT_NAME, name)
+    if name in labels or input_name in labels:
+        label = labels.get(name, labels.get(input_name))
     elif isinstance(title, str) and " " in title.strip():
         label = title.strip()
     else:
-        label = humanize(name)
+        label = humanize(input_name)
     target["x-runtara-label"] = clean_text(label)
     example = scalar_text(target.get("example", schema.get("example")))
     if example is not None:
@@ -1357,24 +1417,32 @@ def write_json(path: Path, value) -> None:
         f.write("\n")
 
 
-def download(source: dict) -> bytes:
-    """The spec at `source["url"]`, refused unless it matches the pinned sha256."""
-    # Some vendor CDNs (Zendesk's) refuse urllib's default `Python-urllib` agent.
-    request = urllib.request.Request(source["url"], headers={"User-Agent": "runtara-connector-gen"})
-    with urllib.request.urlopen(request) as response:
-        raw = response.read()
+def download(source: dict, crate: Path) -> bytes:
+    """The spec at `source["url"]`, or at `source["path"]` relative to the crate,
+    refused unless it matches the pinned sha256."""
+    if ("url" in source) == ("path" in source):
+        sys.exit("a spec in connector.yaml names exactly one of `url` and `path`")
+    if "path" in source:
+        where = source["path"]
+        raw = (crate / where).read_bytes()
+    else:
+        where = source["url"]
+        # Some vendor CDNs (Zendesk's) refuse urllib's default `Python-urllib` agent.
+        request = urllib.request.Request(where, headers={"User-Agent": "runtara-connector-gen"})
+        with urllib.request.urlopen(request) as response:
+            raw = response.read()
     digest = hashlib.sha256(raw).hexdigest()
     if digest != source["sha256"]:
         sys.exit(
-            f"{source['url']} changed: sha256 is {digest}, connector.yaml pins {source['sha256']}.\n"
-            "Review the vendor's change, update the pin, then fetch again."
+            f"{where} changed: sha256 is {digest}, connector.yaml pins {source['sha256']}.\n"
+            "Review the change, update the pin, then fetch again."
         )
     return raw
 
 
 def fetch(crate: Path) -> None:
     config = load_config(crate)
-    sliced = slice_specs([(source, load_spec(download(source))) for source in spec_sources(config)], config)
+    sliced = slice_specs([(source, load_spec(download(source, crate))) for source in spec_sources(config)], config)
     describe_fields(sliced, config.get("labels") or {})
     write_json(crate / "spec.slice.json", sliced)
     fixtures = crate / "tests" / "fixtures"

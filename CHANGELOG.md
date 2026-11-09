@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`connector_gen` generates from a spec you write, and takes more of an API.**
+  `spec: {path: openapi.yaml, sha256: …}` reads a spec kept in the crate, for a
+  vendor that publishes none. `x-runtara-input-name` on a parameter or body field
+  names the step input apart from the wire name. A `deepObject` query parameter
+  with `additionalProperties` stays one object input, sent as `filter[key]=value`.
+  `fetch` now refuses an input named `connection_id` or `_connection`: the
+  platform sets those on every call, which would overwrite the value.
+
 - **A per-tenant keyring needs no default key.**
   `TenantKeyedCipher::without_default()` seals and opens only the tenants
   given a cipher of their own and refuses any other, instead of sealing it

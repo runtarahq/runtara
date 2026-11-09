@@ -281,6 +281,39 @@ impl Request {
         }
     }
 
+    /// A free-form `deepObject` parameter: `name[key]=value` per key, and
+    /// `name[key][0]=value` per item of a list. Null values are left out.
+    pub fn query_object<T: Serialize>(mut self, name: &str, value: &T) -> Self {
+        fn text(value: &Value) -> String {
+            match value {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            }
+        }
+        if let Ok(Value::Object(fields)) = serde_json::to_value(value) {
+            for (key, value) in fields {
+                match value {
+                    Value::Null => {}
+                    Value::Array(items) => {
+                        for (index, item) in items.iter().enumerate() {
+                            self.query
+                                .push((format!("{name}[{key}][{index}]"), text(item)));
+                        }
+                    }
+                    value => self.query.push((format!("{name}[{key}]"), text(&value))),
+                }
+            }
+        }
+        self
+    }
+
+    pub fn query_object_opt<T: Serialize>(self, name: &str, value: &Option<T>) -> Self {
+        match value {
+            Some(value) => self.query_object(name, value),
+            None => self,
+        }
+    }
+
     pub fn header<T: ParamValue>(mut self, name: &str, value: &T) -> Self {
         self.headers.push((name.to_string(), value.to_param()));
         self

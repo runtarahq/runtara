@@ -240,3 +240,25 @@ fn query_parameters_are_encoded_into_the_request() {
     );
     assert_eq!(request.body_json(), None);
 }
+
+#[test]
+fn a_free_form_object_parameter_is_sent_key_by_key() {
+    let filter = json!({"Size": ["S", "M"], "Colour": "red", "Count": 2, "Gone": null});
+    let request = runtara_agent_pipedrive::kit::Request::new("GET", "/x".to_string())
+        .query_object_opt("filter", &Some(filter))
+        .query_object_opt("other", &None::<Value>);
+    let pairs: Vec<(&str, &str)> = request
+        .query_pairs()
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![
+            ("filter[Colour]", "red"),
+            ("filter[Count]", "2"),
+            ("filter[Size][0]", "S"),
+            ("filter[Size][1]", "M"),
+        ]
+    );
+}

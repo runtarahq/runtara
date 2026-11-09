@@ -9,13 +9,15 @@ Written for people and coding assistants alike; the rules in
 | The service has… | Do this |
 | -- | -- |
 | An official OpenAPI 3 or Swagger 2.0 spec | [Generate the agent](#generated-agent) with `scripts/connector_gen` |
+| No spec, but an API reference that describes it fully | Write the spec, keep it in the crate, and generate the agent from it ([`spec: path`](../scripts/connector_gen/README.md#everyday-changes)) |
 | No usable spec, or behaviour the spec cannot express | Write the agent by hand; `crates/agents/runtara-agent-stripe` is the reference |
 | A plain HTTP API nobody needs typed capabilities for | Add only a [connection type](#connection-type); the generic `http` agent can then call the service with it |
 
 `fetch` refuses operations the generator cannot send correctly: form-encoded or
 multipart request bodies (a Swagger 2.0 operation that also `consumes` JSON is
-sent JSON), object query parameters without declared scalar fields or in a
-style other than `deepObject` or exploded `form`, array query parameters of
+sent JSON), object query parameters without declared scalar fields (unless
+free-form: a `deepObject` with `additionalProperties`) or in a style other than
+`deepObject` or exploded `form`, array query parameters of
 objects or in a style other than `form`, and required cookie parameters. Such an operation
 needs a hand-written capability, or the generic `http` agent.
 
