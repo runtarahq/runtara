@@ -75,7 +75,7 @@ pub struct {{operationIdCamelCase}}Input {
 {{#allParams}}
 {{^isBodyParam}}
     #[field({{>field_input_attrs}})]
-    #[serde(rename = "{{baseName}}"{{^required}}, default, skip_serializing_if = "Option::is_none"{{/required}})]
+    #[serde(rename = "{{#vendorExtensions.x-runtara-input-name}}{{.}}{{/vendorExtensions.x-runtara-input-name}}{{^vendorExtensions.x-runtara-input-name}}{{baseName}}{{/vendorExtensions.x-runtara-input-name}}"{{^required}}, default, skip_serializing_if = "Option::is_none"{{/required}})]
     pub {{paramName}}: {{^required}}Option<{{/required}}{{#isModel}}{{#lambda.pascalcase}}{{baseType}}{{/lambda.pascalcase}}{{/isModel}}{{^isModel}}{{{dataType}}}{{/isModel}}{{^required}}>{{/required}},
 {{/isBodyParam}}
 {{/allParams}}
@@ -86,7 +86,7 @@ pub struct {{operationIdCamelCase}}Input {
 {{! A nullable field keeps an explicit null apart from an absent field:
     optional ones are Option<Option<T>> (None = omit, Some(None) = send null). }}
     #[field({{>field_input_attrs}})]
-    #[serde(rename = "{{baseName}}"{{^required}}, default, skip_serializing_if = "Option::is_none"{{#isNullable}}, deserialize_with = "kit::nullable"{{/isNullable}}{{/required}})]
+    #[serde(rename = "{{#vendorExtensions.x-runtara-input-name}}{{.}}{{/vendorExtensions.x-runtara-input-name}}{{^vendorExtensions.x-runtara-input-name}}{{baseName}}{{/vendorExtensions.x-runtara-input-name}}"{{^required}}, default, skip_serializing_if = "Option::is_none"{{#isNullable}}, deserialize_with = "kit::nullable"{{/isNullable}}{{/required}})]
     pub {{name}}: {{^required}}Option<{{/required}}{{#isNullable}}Option<{{/isNullable}}{{>rt_type}}{{#isNullable}}>{{/isNullable}}{{^required}}>{{/required}},
 {{/isReadOnly}}
 {{/vars}}
@@ -131,7 +131,7 @@ impl {{operationIdCamelCase}}Input {
         let request = kit::Request::new("{{httpMethod}}", path)
 {{#queryParams}}
 {{! An exploded array (the OpenAPI default) repeats the parameter: ids=1&ids=2. }}
-            .{{#isArray}}{{#isExplode}}query_each{{/isExplode}}{{^isExplode}}query{{/isExplode}}{{/isArray}}{{^isArray}}query{{/isArray}}{{^required}}_opt{{/required}}("{{baseName}}", &self.{{paramName}})
+            .{{#vendorExtensions.x-runtara-free-form-query}}query_object{{/vendorExtensions.x-runtara-free-form-query}}{{^vendorExtensions.x-runtara-free-form-query}}{{#isArray}}{{#isExplode}}query_each{{/isExplode}}{{^isExplode}}query{{/isExplode}}{{/isArray}}{{^isArray}}query{{/isArray}}{{/vendorExtensions.x-runtara-free-form-query}}{{^required}}_opt{{/required}}("{{baseName}}", &self.{{paramName}})
 {{/queryParams}}
 {{#headerParams}}
             .{{#required}}header{{/required}}{{^required}}header_opt{{/required}}("{{baseName}}", &self.{{paramName}})

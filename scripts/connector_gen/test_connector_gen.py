@@ -1355,5 +1355,148 @@ class DriftTest(unittest.TestCase):
             self.assertEqual(len(problems), 3, problems)
 
 
+def input_names_spec() -> dict:
+    return {
+        "openapi": "3.0.3",
+        "info": {"title": "T", "version": "1"},
+        "servers": [{"url": "https://api.example.com"}],
+        "paths": {
+            "/calls": {
+                "get": {
+                    "operationId": "listCalls",
+                    "tags": ["calls"],
+                    "parameters": [
+                        {"name": "connection_id", "in": "query", "x-runtara-input-name": "call_id",
+                         "schema": {"type": "string"}},
+                        {"name": "status[]", "in": "query", "x-runtara-input-name": "statuses",
+                         "schema": {"type": "array", "items": {"type": "string"}}},
+                        {"name": "filter", "in": "query", "style": "deepObject",
+                         "schema": {"type": "object", "additionalProperties": True}},
+                    ],
+                    "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {"type": "object"}}}}},
+                },
+                "post": {
+                    "operationId": "addCall",
+                    "tags": ["calls"],
+                    "requestBody": {"content": {"application/json": {"schema": {
+                        "type": "object",
+                        "required": ["connection_id"],
+                        "properties": {
+                            "connection_id": {"type": "string", "x-runtara-input-name": "call_id"},
+                            "note": {"type": "string"},
+                        },
+                    }}}},
+                    "responses": {"204": {"description": "done"}},
+                },
+            },
+        },
+    }
+
+
+class InputNameTest(unittest.TestCase):
+    def slice(self, spec: dict) -> dict:
+        return cg.slice_spec(spec, ["listCalls", "addCall"])
+
+    def test_inputs_can_be_named_apart_from_the_wire(self):
+        self.slice(input_names_spec())
+
+    def test_an_input_the_platform_sets_is_refused(self):
+        for parameter_name in ("connection_id", "_connection"):
+            spec = input_names_spec()
+            del spec["paths"]["/calls"]["get"]["parameters"][0]["x-runtara-input-name"]
+            spec["paths"]["/calls"]["get"]["parameters"][0]["name"] = parameter_name
+            with self.assertRaisesRegex(SystemExit, "platform sets"):
+                self.slice(spec)
+        spec = input_names_spec()
+        del spec["paths"]["/calls"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]["connection_id"]["x-runtara-input-name"]
+        with self.assertRaisesRegex(SystemExit, "platform sets"):
+            self.slice(spec)
+
+    def test_two_inputs_with_one_name_are_refused(self):
+        spec = input_names_spec()
+        spec["paths"]["/calls"]["get"]["parameters"][1]["x-runtara-input-name"] = "call_id"
+        with self.assertRaisesRegex(SystemExit, "two inputs"):
+            self.slice(spec)
+
+    def test_an_input_name_must_be_plain(self):
+        spec = input_names_spec()
+        spec["paths"]["/calls"]["get"]["parameters"][1]["x-runtara-input-name"] = "status[]"
+        with self.assertRaisesRegex(SystemExit, "not a plain name"):
+            self.slice(spec)
+
+    def test_the_label_follows_the_input_name(self):
+        sliced = self.slice(input_names_spec())
+        cg.describe_fields(sliced, {})
+        parameter = sliced["paths"]["/calls"]["get"]["parameters"][0]
+        self.assertEqual(parameter["x-runtara-label"], "Call ID")
+
+
+class FreeFormQueryTest(unittest.TestCase):
+    def parameter(self, **changes) -> dict:
+        spec = input_names_spec()
+        parameter = spec["paths"]["/calls"]["get"]["parameters"][2]
+        parameter.update(changes)
+        spec["paths"]["/calls"]["get"]["parameters"] = [parameter]
+        return spec
+
+    def test_it_is_kept_as_one_input(self):
+        sliced = cg.slice_spec(self.parameter(), ["listCalls"])
+        parameter = sliced["paths"]["/calls"]["get"]["parameters"][0]
+        self.assertEqual(parameter["name"], "filter")
+        self.assertIs(parameter[cg.FREE_FORM_QUERY], True)
+
+    def test_an_object_that_declares_no_keys_or_values_is_still_refused(self):
+        spec = self.parameter(schema={"type": "object"})
+        with self.assertRaisesRegex(SystemExit, "without declared fields"):
+            cg.slice_spec(spec, ["listCalls"])
+
+    def test_another_style_is_still_refused(self):
+        spec = self.parameter(style="form")
+        with self.assertRaisesRegex(SystemExit, "without declared fields"):
+            cg.slice_spec(spec, ["listCalls"])
+
+
+class LocalSpecTest(unittest.TestCase):
+    def test_a_path_is_read_from_the_crate_and_pinned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            crate = Path(tmp)
+            (crate / "openapi.yaml").write_bytes(b"spec")
+            digest = "c7a1d03c1b9d7a5f0b8e6d0a2b6c3b5e"
+            with self.assertRaisesRegex(SystemExit, "openapi.yaml changed"):
+                cg.download({"path": "openapi.yaml", "sha256": digest}, crate)
+            actual = cg.hashlib.sha256(b"spec").hexdigest()
+            self.assertEqual(cg.download({"path": "openapi.yaml", "sha256": actual}, crate), b"spec")
+
+    def test_exactly_one_location_is_named(self):
+        for source in ({"sha256": "x"}, {"url": "u", "path": "p", "sha256": "x"}):
+            with self.assertRaisesRegex(SystemExit, "exactly one"):
+                cg.download(source, Path("."))
+
+
+@unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
+class InputNameRenderTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_crate(Path(tmp), input_names_spec(), ["listCalls", "addCall"])
+            cls.text = cg.render(Path(tmp))
+
+    def test_the_input_is_named_apart_from_what_is_sent(self):
+        inputs = re.findall(r"pub struct \w+Input \{.*?\n\}", self.text, re.S)
+        self.assertEqual(len(inputs), 2)
+        for fields in inputs:
+            self.assertIn('rename = "call_id"', fields)
+            self.assertNotIn('rename = "connection_id"', fields)
+        self.assertIn('.query_opt("connection_id", &self.connection_id)', self.text)
+        self.assertIn('.field("connection_id", &self.connection_id)', self.text)
+
+    def test_an_array_keeps_its_wire_name(self):
+        self.assertIn('rename = "statuses"', self.text)
+        self.assertIn('"status[]"', self.text)
+
+    def test_a_free_form_parameter_is_sent_key_by_key(self):
+        self.assertIn('.query_object_opt("filter", &self.filter)', self.text)
+
+
 if __name__ == "__main__":
     unittest.main()

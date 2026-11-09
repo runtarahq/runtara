@@ -228,6 +228,43 @@ connection_parameters:
   - token
 ```
 
+**The vendor publishes no spec.** Write one from the vendor's API reference, keep
+it in the crate, and name it by `path` (relative to the crate) instead of `url`.
+It is pinned the same way, so a change to it needs a new `sha256`:
+
+```yaml
+spec:
+  path: openapi.yaml
+  sha256: 2b0fb0de…
+```
+
+**An input cannot take the wire name.** The platform sets `connection_id` on every
+call, so `fetch` refuses an input with that name; and a name like `status[]` reads
+badly in the step editor. In the spec, give the parameter or body field its input
+name. The request still sends the wire name:
+
+```yaml
+parameters:
+  - name: status[]
+    in: query
+    x-runtara-input-name: statuses
+    schema: {type: array, items: {type: string}}
+```
+
+**A query parameter's keys are the caller's to choose**, such as a filter on custom
+fields. Declare a `deepObject` with `additionalProperties`. It stays one input, an
+object sent as `filter[Colour]=red` and `filter[Size][0]=S`. Its generated code
+calls `kit.rs`'s `query_object`, which `runtara-agent-pipedrive`'s copy has; an
+agent with an older copy needs those methods added.
+
+```yaml
+parameters:
+  - name: filter
+    in: query
+    style: deepObject
+    schema: {type: object, additionalProperties: true}
+```
+
 **The API version is a path parameter**, such as UPS's
 `/shipments/{version}/ship`. Pin it, and `fetch` writes the spec's default into
 the path (`/shipments/v2409/ship`, the version the generated types describe)
@@ -382,8 +419,9 @@ crates/agents/runtara-agent-<id>/
   rewritten where listed above).
 - `fetch` refuses, naming the operation, what the templates cannot send yet:
   request bodies that are not JSON (form-encoded, multipart), object query
-  parameters without declared scalar fields or in a style other than
-  `deepObject` or exploded `form`, array query parameters of objects or in a
+  parameters without declared scalar fields (unless free-form: a `deepObject`
+  with `additionalProperties`) or in a style other than `deepObject` or exploded
+  `form`, array query parameters of objects or in a
   style other than `form`, and required cookie parameters. A Swagger 2.0 operation that
   `consumes` only form data is such a form body.
 - An input typed by a schema (a ticket's `comment`, say) is described to the step
