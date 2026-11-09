@@ -230,17 +230,20 @@ fn describe_connection_auth(
         // request names the one this connection was authorized for. Without it
         // there is no base URL, so a request is refused rather than sent to no
         // organisation in particular.
-        "xero_oauth" => {
-            let mut descriptor =
-                describe_oauth_authcode_auth(connection_id, integration_id, params, headers);
-            match xero_tenant_id(params) {
-                Some(tenant) => {
-                    headers.insert("xero-tenant-id".into(), tenant.to_string());
-                }
-                None => descriptor.base_url = None,
+        "xero_oauth" => match xero_tenant_id(params) {
+            Some(tenant) => {
+                headers.insert("xero-tenant-id".into(), tenant.to_string());
+                describe_oauth_authcode_auth(connection_id, integration_id, params, headers)
             }
-            descriptor
-        }
+            // No organisation to name: no destination and no credentials, so
+            // the proxy refuses the request and no token goes anywhere.
+            None => ConnectionAuthDescriptor {
+                base_url: None,
+                aws_signing: None,
+                azure_signing: None,
+                deferred_auth: None,
+            },
+        },
         "stripe_api_key" => {
             if let Some(key) = params["secret_key"].as_str() {
                 headers.insert("Authorization".into(), format!("Bearer {}", key));
@@ -1449,15 +1452,22 @@ mod tests {
     #[test]
     fn xero_without_an_organisation_has_no_destination() {
         for tenant in [json!(null), json!(""), json!("not-a-uuid"), json!(42)] {
-            let mut headers = HashMap::new();
-            let descriptor = describe_connection_auth(
-                "conn-1",
-                "xero_oauth",
-                &json!({ "client_id": "client", "access_token": "access", "tenant_id": tenant }),
-                &mut headers,
-            );
-            assert_eq!(descriptor.base_url, None, "{tenant}");
-            assert!(!headers.contains_key("xero-tenant-id"), "{tenant}");
+            for tokens in [
+                json!({ "access_token": "access" }),
+                json!({ "access_token": "access", "refresh_token": "refresh" }),
+            ] {
+                let mut params = json!({ "client_id": "client", "tenant_id": tenant });
+                params
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(tokens.as_object().unwrap().clone());
+                let mut headers = HashMap::new();
+                let descriptor =
+                    describe_connection_auth("conn-1", "xero_oauth", &params, &mut headers);
+                assert_eq!(descriptor.base_url, None, "{params}");
+                assert!(descriptor.deferred_auth.is_none(), "{params}");
+                assert!(headers.is_empty(), "{params}: {headers:?}");
+            }
         }
     }
 

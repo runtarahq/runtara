@@ -861,27 +861,42 @@ async fn add_provider_account_fields(
         .json()
         .await
         .map_err(|e| unresolved(e.to_string()))?;
-    let previous = params["tenant_id"].as_str();
-    let (tenant_id, tenant_name) =
-        select_xero_tenant(&connections, token, previous).map_err(OAuthError::AccountUnresolved)?;
-    granted.insert("tenant_id".to_string(), Value::String(tenant_id));
-    if let Some(name) = tenant_name {
-        granted.insert("tenant_name".to_string(), Value::String(name));
-    }
+    let fields = xero_account_fields(&connections, token, params["tenant_id"].as_str())
+        .map_err(OAuthError::AccountUnresolved)?;
+    granted.extend(fields);
     Ok(())
+}
+
+/// The fields a Xero connection stores for the organisation it uses. The name
+/// is always written, `null` when Xero gives none, so that a name from an
+/// earlier organisation does not stay.
+fn xero_account_fields(
+    connections: &Value,
+    access_token: &str,
+    previous: Option<&str>,
+) -> Result<serde_json::Map<String, Value>, String> {
+    let (tenant_id, tenant_name) = select_xero_tenant(connections, access_token, previous)?;
+    let mut fields = serde_json::Map::new();
+    fields.insert("tenant_id".to_string(), Value::String(tenant_id));
+    fields.insert(
+        "tenant_name".to_string(),
+        tenant_name.map_or(Value::Null, Value::String),
+    );
+    Ok(fields)
 }
 
 /// The organisation a Xero consent authorized, from Xero's connections list:
 /// the organisation whose `authEventId` is the access token's
-/// `authentication_event_id`, or the only organisation when the token does not
-/// say.
+/// `authentication_event_id`.
 ///
 /// Reconnecting authorizes no organisation anew: Xero's consent screen shows
 /// those already connected as fixed, and the token's event names none of them.
 /// The connection then keeps the organisation it had (`previous`) while Xero
-/// still lists it. One consent can authorize several organisations, but a
-/// connection works with one, so several (none of them the connection's
-/// own) is an error, as is none.
+/// still lists it, and fails once Xero does not: it never moves to another
+/// organisation the consent did not name. A new connection whose consent named
+/// none takes the only organisation Xero lists, as does one whose token does
+/// not say. One consent can authorize several organisations, but a connection
+/// works with one, so several (none of them the connection's own) is an error.
 fn select_xero_tenant(
     connections: &Value,
     access_token: &str,
@@ -893,41 +908,52 @@ fn select_xero_tenant(
         .iter()
         .filter(|c| c["tenantType"].as_str() == Some("ORGANISATION"))
         .collect();
-    let event = jwt_claim(access_token, "authentication_event_id");
-    let authorized: Vec<&Value> = match &event {
+    let previous = previous.filter(|tenant| !tenant.is_empty());
+    let authorized: Vec<&Value> = match jwt_claim(access_token, "authentication_event_id") {
         Some(event) => organisations
             .iter()
             .copied()
             .filter(|c| c["authEventId"].as_str() == Some(event.as_str()))
             .collect(),
-        None => organisations.clone(),
+        None => Vec::new(),
     };
-    fn with_tenant<'a>(list: &[&'a Value], tenant: Option<&str>) -> Option<&'a Value> {
+    fn listed<'a>(list: &[&'a Value], tenant: Option<&str>) -> Option<&'a Value> {
         let tenant = tenant?;
         list.iter()
             .copied()
             .find(|c| c["tenantId"].as_str() == Some(tenant))
     }
-    let kept = with_tenant(&authorized, previous);
-    let chosen = match authorized.as_slice() {
-        [one] => *one,
-        [_, _, ..] if kept.is_some() => kept.unwrap(),
-        [] if with_tenant(&organisations, previous).is_some() => {
-            with_tenant(&organisations, previous).unwrap()
-        }
-        [] if organisations.len() == 1 => organisations[0],
-        [] => {
-            return Err(
-                "the authorization named no Xero organisation; authorize again and choose one"
-                    .to_string(),
-            );
-        }
-        _ => {
-            return Err(format!(
-                "{} Xero organisations were authorized at once; a connection uses one, so                  authorize again and choose only the organisation this connection is for",
+    let chosen = match (authorized.as_slice(), previous) {
+        ([one], _) => *one,
+        ([_, _, ..], _) => listed(&authorized, previous).ok_or_else(|| {
+            format!(
+                "{} Xero organisations were authorized at once; a connection uses one, \
+                 so authorize again and choose only the organisation this connection is for",
                 authorized.len()
-            ));
-        }
+            )
+        })?,
+        ([], Some(_)) => listed(&organisations, previous).ok_or(
+            "Xero no longer lists the organisation this connection used; \
+             authorize again and choose it",
+        )?,
+        ([], None) => match organisations.as_slice() {
+            [only] => *only,
+            [] => {
+                return Err(
+                    "the authorization named no Xero organisation; authorize again and choose one"
+                        .to_string(),
+                );
+            }
+            several => {
+                return Err(format!(
+                    "the authorization named no new Xero organisation, and the app is already \
+                     connected to {}, which Xero does not offer to choose again; to use one of \
+                     them here, disconnect it in Xero under Settings → Connected apps, then \
+                     authorize again and choose it",
+                    several.len()
+                ));
+            }
+        },
     };
     let tenant_id = chosen["tenantId"]
         .as_str()
@@ -1441,6 +1467,65 @@ mod tests {
                 .0,
             ORG_B
         );
+    }
+
+    #[test]
+    fn xero_reconnect_never_moves_to_another_organisation() {
+        // The connection's organisation was disconnected in Xero; the one
+        // Xero still lists came from an earlier consent, not this one.
+        let token = token_with(json!({ "authentication_event_id": "event-3" }));
+        let other = json!([connection(ORG_A, "Other", "event-1", "ORGANISATION")]);
+        let err = select_xero_tenant(&other, &token, Some(ORG_B)).unwrap_err();
+        assert!(err.contains("no longer lists"), "{err}");
+        // Nor when the token does not name its consent.
+        assert!(select_xero_tenant(&other, "not-a-jwt", Some(ORG_B)).is_err());
+        // A new connection (no organisation yet, or an empty one) takes it.
+        for previous in [None, Some("")] {
+            assert_eq!(
+                select_xero_tenant(&other, &token, previous).unwrap().0,
+                ORG_A,
+                "{previous:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn xero_tenant_errors_say_what_to_do() {
+        let token = token_with(json!({ "authentication_event_id": "event-3" }));
+        // A new connection where every organisation is already connected:
+        // Xero's consent screen offers none of them.
+        let connected = json!([
+            connection(ORG_A, "One", "event-1", "ORGANISATION"),
+            connection(ORG_B, "Two", "event-2", "ORGANISATION"),
+        ]);
+        let err = select_xero_tenant(&connected, &token, None).unwrap_err();
+        assert!(err.contains("Settings → Connected apps"), "{err}");
+
+        let both = json!([
+            connection(ORG_A, "One", "event-3", "ORGANISATION"),
+            connection(ORG_B, "Two", "event-3", "ORGANISATION"),
+        ]);
+        let err = select_xero_tenant(&both, &token, None).unwrap_err();
+        for message in [
+            err,
+            select_xero_tenant(&connected, &token, None).unwrap_err(),
+        ] {
+            assert!(!message.contains("  "), "{message}");
+        }
+    }
+
+    #[test]
+    fn xero_account_fields_replace_an_earlier_name() {
+        let token = token_with(json!({ "authentication_event_id": "event-1" }));
+        let unnamed = json!([{
+            "authEventId": "event-1",
+            "tenantId": ORG_A,
+            "tenantType": "ORGANISATION",
+        }]);
+        let mut params = json!({ "tenant_id": ORG_B, "tenant_name": "Earlier Org" });
+        let fields = xero_account_fields(&unnamed, &token, Some(ORG_B)).unwrap();
+        params.as_object_mut().unwrap().extend(fields);
+        assert_eq!(params, json!({ "tenant_id": ORG_A, "tenant_name": null }));
     }
 
     #[test]

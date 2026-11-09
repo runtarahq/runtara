@@ -2,12 +2,13 @@
 //! (`ConnectionRepository::persist_refreshed_oauth`) and its optimistic-concurrency
 //! guard, against a real Postgres. Uses synthetic generation markers ("g0", "g1", …)
 //! in place of real SHA-256 hashes — the guard only does string equality, so this
-//! isolates the concurrency semantics from the hashing.
+//! isolates the concurrency semantics from the hashing. A reauthorization computes
+//! the hash itself, so the tests that store one use the real hash.
 
 use std::sync::Arc;
 
 use runtara_connections::crypto::noop::NoOpCipher;
-use runtara_connections::repository::connections::ConnectionRepository;
+use runtara_connections::repository::connections::{ConnectionRepository, refresh_token_hash};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use sqlx::Row;
@@ -182,17 +183,35 @@ async fn a_reauthorization_starts_a_new_rotation_chain() {
         .expect("re-authorization is stored");
     let (_, hash) = read_back(&fixture.pool, id).await;
     assert_eq!(
-        hash, None,
-        "the old chain's hash must not guard the new one"
+        hash.as_deref(),
+        Some(refresh_token_hash("R0").as_str()),
+        "the guard follows the new chain, not the old one"
     );
 
-    // Its first rotation is persisted, though it was never the old chain's.
+    // A refresh that started on the old chain finishes late: it must not
+    // overwrite the new authorization's tokens.
+    let rows = repo
+        .persist_refreshed_oauth(
+            id,
+            tenant,
+            &json!({ "refresh_token": "T2" }),
+            Some("g1"),
+            Some("g2"),
+        )
+        .await
+        .expect("stale persist call succeeds at the SQL level");
+    assert_eq!(rows, 0, "the old chain must lose to the new authorization");
+    let (params, _) = read_back(&fixture.pool, id).await;
+    assert_eq!(params["refresh_token"], "R0");
+
+    // The new chain's first rotation is persisted.
+    let r0 = refresh_token_hash("R0");
     let rows = repo
         .persist_refreshed_oauth(
             id,
             tenant,
             &json!({ "refresh_token": "R1" }),
-            Some("r0"),
+            Some(r0.as_str()),
             Some("r1"),
         )
         .await

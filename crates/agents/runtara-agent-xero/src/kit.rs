@@ -71,6 +71,12 @@ impl AgentError {
         self
     }
 
+    /// An attribute that is not a plain string (a list, an object).
+    pub fn with_attr_value(mut self, key: &str, value: Value) -> Self {
+        self.attributes.insert(key.to_string(), value);
+        self
+    }
+
     pub fn with_retry_after_ms(mut self, ms: Option<u64>) -> Self {
         self.retry_after_ms = ms;
         self
@@ -353,17 +359,28 @@ impl Request {
 }
 
 /// Refuses a path with an empty segment, which an empty path parameter
-/// leaves. Xero does not answer it with an error: `/Contacts/` is the list,
-/// and a POST to it creates a contact, so `update-contact` with an empty
-/// `ContactID` would create one instead of updating.
+/// leaves, or a `.` or `..` segment, which URL resolution drops along with
+/// the segment before it (also when percent-encoded: `%2E` is a `.` there).
+/// Xero does not answer either with an error: `/Contacts/` and
+/// `/Contacts/.` both reach `/Contacts`, the list, and a POST to it creates a
+/// contact, so `update-contact` with such a `ContactID` would create one
+/// instead of updating.
 pub fn check_path(method: &str, path: &str, prefix: &str) -> Result<(), AgentError> {
-    let empty_segment = path.split('/').skip(1).any(|segment| segment.is_empty());
-    if empty_segment {
-        return Err(AgentError::permanent(
+    let refuse = |reason: &str| {
+        AgentError::permanent(
             format!("{prefix}_INVALID_INPUT"),
-            format!("{prefix} {method} {path}: a path parameter is empty"),
+            format!("{prefix} {method} {path}: a path parameter is {reason}"),
         )
-        .with_attr("path", path));
+        .with_attr("path", path)
+    };
+    for segment in path.split('/').skip(1) {
+        if segment.is_empty() {
+            return Err(refuse("empty"));
+        }
+        let dots = segment.to_ascii_lowercase().replace("%2e", ".");
+        if dots == "." || dots == ".." {
+            return Err(refuse("`.` or `..`"));
+        }
     }
     Ok(())
 }
@@ -406,6 +423,8 @@ pub fn outcome_unknown(prefix: &str, message: String) -> AgentError {
 ///   without a response body returns `Value::Null`.
 /// - A 2xx body that is not JSON (text, binary) decodes as a JSON string of its
 ///   text, which suits operations whose output is `Value`.
+/// - A 2xx answer to a write that marks records as refused is an error: see
+///   [`refused_records`].
 pub fn decode<T: DeserializeOwned>(
     response: &runtara_http::HttpResponse,
     method: &str,
@@ -441,6 +460,13 @@ pub fn decode<T: DeserializeOwned>(
         }
         outcome_unknown(prefix, message)
     };
+    if !is_read(method)
+        && let Ok(body) = serde_json::from_slice::<Value>(&response.body)
+        && let Some(err) = refused_records(&body, method, path, prefix)
+    {
+        return Err(err.with_attr("status_code", status.to_string()));
+    }
+
     let text = String::from_utf8_lossy(&response.body);
     if text.trim().is_empty() {
         return serde_json::from_value(Value::Null).map_err(invalid);
@@ -452,6 +478,101 @@ pub fn decode<T: DeserializeOwned>(
         }
         Err(e) => Err(invalid(e)),
     }
+}
+
+/// The records a write's answer marks as refused, as an error; `None` when it
+/// marks none.
+///
+/// With `summarizeErrors=false` Xero answers a create with 200 even when it
+/// saved none or only some of the records: each one it refused carries
+/// `HasErrors`, `StatusAttributeString: "ERROR"` or `ValidationErrors`, and
+/// the ID of a refused record is empty or all zeros. Reported as a success,
+/// that would let a workflow go on as if every record were saved. The error is
+/// permanent, as sending the batch again would create the saved records a
+/// second time; its `saved_ids` names those, and `refused` each refused
+/// record's position in the batch and Xero's messages.
+fn refused_records(body: &Value, method: &str, path: &str, prefix: &str) -> Option<AgentError> {
+    const NIL_ID: &str = "00000000-0000-0000-0000-000000000000";
+    let mut kind = "";
+    let mut total = 0;
+    let mut saved_ids = Vec::new();
+    let mut refused = Vec::new();
+    for (key, records) in body.as_object()? {
+        let Some(records) = records.as_array() else {
+            continue;
+        };
+        // `Invoices` hold `InvoiceID`, `CreditNotes` `CreditNoteID`, and so on.
+        let id_field = format!("{}ID", key.strip_suffix('s').unwrap_or(key));
+        for (index, record) in records.iter().enumerate() {
+            let Some(record) = record.as_object() else {
+                continue;
+            };
+            let id = record
+                .get(&id_field)
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && *id != NIL_ID);
+            let errors: &[Value] = record
+                .get("ValidationErrors")
+                .and_then(Value::as_array)
+                .map_or(&[], Vec::as_slice);
+            let has_errors = record.get("HasErrors").and_then(Value::as_bool) == Some(true)
+                || record
+                    .get("StatusAttributeString")
+                    .and_then(Value::as_str)
+                    .is_some_and(|status| status.eq_ignore_ascii_case("ERROR"))
+                || !errors.is_empty();
+            if !has_errors {
+                if record.contains_key(&id_field) {
+                    total += 1;
+                    saved_ids.extend(id.map(str::to_string));
+                }
+                continue;
+            }
+            kind = key;
+            total += 1;
+            let messages: Vec<&str> = errors
+                .iter()
+                .filter_map(|error| error.get("Message").and_then(Value::as_str))
+                .collect();
+            refused.push((index, id, messages));
+        }
+    }
+    let (_, _, first) = refused.first()?;
+    let reason = match first.as_slice() {
+        [] => "Xero gave no reason".to_string(),
+        messages => messages.join("; "),
+    };
+    let mut message = format!(
+        "{prefix} {method} {path}: Xero refused {} of {total} {}: {reason}",
+        refused.len(),
+        kind.to_ascii_lowercase()
+    );
+    if refused.len() > 1 {
+        message.push_str(&format!(" (and {} more)", refused.len() - 1));
+    }
+    let saved = total - refused.len();
+    if saved > 0 {
+        message.push_str(&format!(
+            ". It saved the other {saved}, whose IDs are in saved_ids; \
+             sending the batch again would create those a second time"
+        ));
+    }
+    let refused = refused
+        .into_iter()
+        .map(|(index, id, messages)| {
+            let mut entry = serde_json::json!({ "index": index, "messages": messages });
+            if let Some(id) = id {
+                entry["id"] = Value::String(id.to_string());
+            }
+            entry
+        })
+        .collect();
+    Some(
+        AgentError::permanent(format!("{prefix}_VALIDATION_FAILED"), message)
+            .with_attr("path", path)
+            .with_attr_value("refused", Value::Array(refused))
+            .with_attr_value("saved_ids", serde_json::json!(saved_ids)),
+    )
 }
 
 fn header<'a>(headers: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
