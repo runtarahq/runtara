@@ -1,0 +1,106 @@
+{
+  "DateTimeUTC": "/Date(1552329729002)/",
+  "Id": "bd83b60e-9d16-4a3b-9f59-0a2d0ccd35f2",
+  "Invoices": [
+    {
+      "AmountDue": 575.0,
+      "AmountPaid": 0.0,
+      "Contact": {
+        "Addresses": [
+          {
+            "AddressType": "STREET",
+            "City": "",
+            "Country": "",
+            "PostalCode": "",
+            "Region": ""
+          },
+          {
+            "AddressType": "POBOX",
+            "City": "",
+            "Country": "",
+            "PostalCode": "",
+            "Region": ""
+          }
+        ],
+        "BankAccountDetails": "",
+        "ContactGroups": [],
+        "ContactID": "be392c72-c121-4f83-9512-03ac71e54c20",
+        "ContactPersons": [],
+        "ContactStatus": "ACTIVE",
+        "DefaultCurrency": "NZD",
+        "EmailAddress": "",
+        "HasValidationErrors": false,
+        "IsCustomer": true,
+        "IsSupplier": false,
+        "Name": "Luke Skywalker",
+        "Phones": [
+          {
+            "PhoneAreaCode": "",
+            "PhoneCountryCode": "",
+            "PhoneNumber": "",
+            "PhoneType": "DEFAULT"
+          },
+          {
+            "PhoneAreaCode": "",
+            "PhoneCountryCode": "",
+            "PhoneNumber": "",
+            "PhoneType": "DDI"
+          },
+          {
+            "PhoneAreaCode": "",
+            "PhoneCountryCode": "",
+            "PhoneNumber": "",
+            "PhoneType": "FAX"
+          },
+          {
+            "PhoneAreaCode": "",
+            "PhoneCountryCode": "",
+            "PhoneNumber": "",
+            "PhoneType": "MOBILE"
+          }
+        ],
+        "PurchasesTrackingCategories": [],
+        "SalesTrackingCategories": [],
+        "UpdatedDateUTC": "/Date(1552329691573+0000)/"
+      },
+      "CurrencyCode": "NZD",
+      "CurrencyRate": 1.0,
+      "Date": "/Date(1552262400000+0000)/",
+      "DateString": "2019-03-11T00:00:00",
+      "DueDate": "/Date(1552348800000+0000)/",
+      "DueDateString": "2019-03-12T00:00:00",
+      "HasErrors": false,
+      "InvoiceID": "4074292c-09b3-456d-84e7-add864c6c39b",
+      "InvoiceNumber": "INV-0008",
+      "IsDiscounted": false,
+      "LineAmountTypes": "Exclusive",
+      "LineItems": [
+        {
+          "AccountCode": "200",
+          "Description": "Light Saber",
+          "LineAmount": 500.0,
+          "LineItemID": "6de1bf9f-de95-4c47-9287-37305db758c9",
+          "Quantity": 1.0,
+          "TaxAmount": 75.0,
+          "TaxType": "OUTPUT2",
+          "Tracking": [],
+          "UnitAmount": 500.0,
+          "ValidationErrors": []
+        }
+      ],
+      "Overpayments": [],
+      "Prepayments": [],
+      "Reference": "My the Force be With You",
+      "SentToContact": false,
+      "Status": "SUBMITTED",
+      "SubTotal": 500.0,
+      "Total": 575.0,
+      "TotalTax": 75.0,
+      "Type": "ACCREC",
+      "UpdatedDateUTC": "/Date(1552329728987+0000)/",
+      "UpdatedDateUTCString": "2019-03-11T18:42:08Z"
+    }
+  ],
+  "ProviderName": "Provider Name Example",
+  "Status": "OK"
+}

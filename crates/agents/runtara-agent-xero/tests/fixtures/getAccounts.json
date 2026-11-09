@@ -1,0 +1,24 @@
+{
+  "Accounts": [
+    {
+      "AccountID": "ebd06280-af70-4bed-97c6-7451a454ad85",
+      "BankAccountNumber": "0209087654321050",
+      "BankAccountType": "BANK",
+      "Code": "091",
+      "CurrencyCode": "NZD",
+      "EnablePaymentsToAccount": false,
+      "Name": "Business Savings Account",
+      "TaxType": "NONE",
+      "Type": "BANK"
+    },
+    {
+      "AccountID": "7d05a53d-613d-4eb2-a2fc-dcb6adb80b80",
+      "Code": "200",
+      "Description": "Income from any normal business activity",
+      "EnablePaymentsToAccount": false,
+      "Name": "Sales",
+      "TaxType": "OUTPUT2",
+      "Type": "REVENUE"
+    }
+  ]
+}

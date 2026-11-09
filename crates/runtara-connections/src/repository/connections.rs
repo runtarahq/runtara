@@ -995,6 +995,11 @@ impl ConnectionRepository {
 
     /// Update connection parameters and status atomically.
     /// Used by OAuth callback to store tokens and set status to ACTIVE.
+    ///
+    /// A new authorization starts a new refresh-token chain, so the rotation
+    /// guard's `refresh_token_hash` is reset: left at the old chain's hash, it
+    /// would match no refresh token of the new one, and every rotation after a
+    /// reconnect would be dropped by [`Self::persist_refreshed_oauth`].
     pub async fn update_parameters_and_status(
         &self,
         id: &str,
@@ -1010,6 +1015,7 @@ impl ConnectionRepository {
             UPDATE connection_data_entity
             SET connection_parameters = $3,
                 status = $4,
+                refresh_token_hash = NULL,
                 updated_at = NOW()
             WHERE id = $1 AND tenant_id = $2
             "#,

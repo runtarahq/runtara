@@ -1,0 +1,125 @@
+{
+  "DateTimeUTC": "/Date(1552327126164)/",
+  "Id": "ccece84a-075c-4fcd-9073-149d4f7a91cf",
+  "Invoices": [
+    {
+      "AmountDue": 40.0,
+      "AmountPaid": 0.0,
+      "Contact": {
+        "Addresses": [
+          {
+            "AddressType": "STREET",
+            "AttentionTo": "",
+            "City": "",
+            "Country": "",
+            "PostalCode": "",
+            "Region": ""
+          },
+          {
+            "AddressType": "POBOX",
+            "AttentionTo": "",
+            "City": "Anytown",
+            "Country": "USA",
+            "PostalCode": "10101",
+            "Region": "NY"
+          }
+        ],
+        "BankAccountDetails": "",
+        "ContactGroups": [
+          {
+            "ContactGroupID": "17b44ed7-4389-4162-91cb-3dd5766e4e22",
+            "Contacts": [],
+            "HasValidationErrors": false,
+            "Name": "Oasis",
+            "Status": "ACTIVE"
+          }
+        ],
+        "ContactID": "430fa14a-f945-44d3-9f97-5df5e28441b8",
+        "ContactPersons": [
+          {
+            "EmailAddress": "debbie@rockstar.com",
+            "FirstName": "Debbie",
+            "IncludeInEmails": false,
+            "LastName": "Gwyther"
+          }
+        ],
+        "ContactStatus": "ACTIVE",
+        "EmailAddress": "liam@rockstar.com",
+        "FirstName": "Liam",
+        "HasValidationErrors": false,
+        "IsCustomer": true,
+        "IsSupplier": true,
+        "LastName": "Gallagher",
+        "Name": "Liam Gallagher",
+        "Phones": [
+          {
+            "PhoneAreaCode": "212",
+            "PhoneCountryCode": "",
+            "PhoneNumber": "222-2222",
+            "PhoneType": "DEFAULT"
+          },
+          {
+            "PhoneAreaCode": "",
+            "PhoneCountryCode": "",
+            "PhoneNumber": "",
+            "PhoneType": "DDI"
+          },
+          {
+            "PhoneAreaCode": "212",
+            "PhoneCountryCode": "",
+            "PhoneNumber": "333-2233",
+            "PhoneType": "FAX"
+          },
+          {
+            "PhoneAreaCode": "212",
+            "PhoneCountryCode": "",
+            "PhoneNumber": "444-3433",
+            "PhoneType": "MOBILE"
+          }
+        ],
+        "PurchasesTrackingCategories": [],
+        "SalesTrackingCategories": [],
+        "UpdatedDateUTC": "/Date(1551747281053+0000)/"
+      },
+      "CurrencyCode": "NZD",
+      "CurrencyRate": 1.0,
+      "Date": "/Date(1552262400000+0000)/",
+      "DateString": "2019-03-11T00:00:00",
+      "DueDate": "/Date(1544400000000+0000)/",
+      "DueDateString": "2018-12-10T00:00:00",
+      "HasErrors": false,
+      "InvoiceID": "ed255415-e141-4150-aab7-89c3bbbb851c",
+      "InvoiceNumber": "INV-0007",
+      "IsDiscounted": false,
+      "LineAmountTypes": "Exclusive",
+      "LineItems": [
+        {
+          "AccountCode": "200",
+          "Description": "Acme Tires",
+          "LineAmount": 40.0,
+          "LineItemID": "5f7a612b-fdcc-4d33-90fa-a9f6bc6db32f",
+          "Quantity": 2.0,
+          "TaxAmount": 0.0,
+          "TaxType": "NONE",
+          "Tracking": [],
+          "UnitAmount": 20.0,
+          "ValidationErrors": []
+        }
+      ],
+      "Overpayments": [],
+      "Prepayments": [],
+      "Reference": "Website Design",
+      "SentToContact": false,
+      "Status": "AUTHORISED",
+      "StatusAttributeString": "OK",
+      "SubTotal": 40.0,
+      "Total": 40.0,
+      "TotalTax": 0.0,
+      "Type": "ACCREC",
+      "UpdatedDateUTC": "/Date(1552327126117+0000)/",
+      "UpdatedDateUTCString": "2019-03-11T17:58:46Z"
+    }
+  ],
+  "ProviderName": "Provider Name Example",
+  "Status": "OK"
+}

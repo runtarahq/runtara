@@ -60,6 +60,7 @@ impl PgFixture {
                 status VARCHAR(64),
                 rate_limit_config JSONB,
                 is_default_file_storage BOOLEAN DEFAULT FALSE,
+                refresh_token_hash TEXT DEFAULT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )

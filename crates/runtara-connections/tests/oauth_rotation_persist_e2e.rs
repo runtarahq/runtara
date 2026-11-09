@@ -35,7 +35,7 @@ impl PgFixture {
         let pool = PgPool::connect(&url)
             .await
             .expect("required Postgres connection");
-        // Minimal schema: only the columns persist_refreshed_oauth touches.
+        // Minimal schema: only the columns the OAuth token writes touch.
         sqlx::query(
             r#"
             CREATE TABLE connection_data_entity (
@@ -43,6 +43,7 @@ impl PgFixture {
                 tenant_id VARCHAR(255) NOT NULL,
                 connection_parameters JSONB DEFAULT NULL,
                 refresh_token_hash TEXT DEFAULT NULL,
+                status VARCHAR(64) DEFAULT NULL,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
             "#,
@@ -153,4 +154,51 @@ async fn rotation_persist_bootstraps_on_null_then_guards_on_generation() {
     // Row is unchanged — the winner's token is preserved, not clobbered.
     assert_eq!(params["refresh_token"], "T2");
     assert_eq!(hash.as_deref(), Some("g2"));
+}
+
+#[tokio::test]
+async fn a_reauthorization_starts_a_new_rotation_chain() {
+    let fixture = PgFixture::start().await;
+    let repo = repo(fixture.pool.clone());
+    let tenant = "t_reauth";
+    let id = "conn_reauth";
+
+    insert_conn(&fixture.pool, id, tenant, &json!({ "refresh_token": "T0" })).await;
+    let rows = repo
+        .persist_refreshed_oauth(
+            id,
+            tenant,
+            &json!({ "refresh_token": "T1" }),
+            Some("g0"),
+            Some("g1"),
+        )
+        .await
+        .expect("first chain rotates");
+    assert_eq!(rows, 1);
+
+    // The user authorizes again: a new refresh token, from a new chain.
+    repo.update_parameters_and_status(id, tenant, &json!({ "refresh_token": "R0" }), "ACTIVE")
+        .await
+        .expect("re-authorization is stored");
+    let (_, hash) = read_back(&fixture.pool, id).await;
+    assert_eq!(
+        hash, None,
+        "the old chain's hash must not guard the new one"
+    );
+
+    // Its first rotation is persisted, though it was never the old chain's.
+    let rows = repo
+        .persist_refreshed_oauth(
+            id,
+            tenant,
+            &json!({ "refresh_token": "R1" }),
+            Some("r0"),
+            Some("r1"),
+        )
+        .await
+        .expect("new chain rotates");
+    assert_eq!(rows, 1, "a rotation after reconnecting must be persisted");
+    let (params, hash) = read_back(&fixture.pool, id).await;
+    assert_eq!(params["refresh_token"], "R1");
+    assert_eq!(hash.as_deref(), Some("r1"));
 }

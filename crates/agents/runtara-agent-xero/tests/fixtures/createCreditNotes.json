@@ -1,0 +1,105 @@
+{
+  "CreditNotes": [
+    {
+      "Allocations": [],
+      "Contact": {
+        "Addresses": [
+          {
+            "AddressType": "STREET",
+            "AttentionTo": "",
+            "City": "",
+            "Country": "",
+            "PostalCode": "",
+            "Region": ""
+          },
+          {
+            "AddressType": "POBOX",
+            "AttentionTo": "",
+            "City": "Anytown",
+            "Country": "USA",
+            "PostalCode": "10101",
+            "Region": "NY"
+          }
+        ],
+        "BankAccountDetails": "",
+        "ContactGroups": [],
+        "ContactID": "430fa14a-f945-44d3-9f97-5df5e28441b8",
+        "ContactPersons": [],
+        "ContactStatus": "ACTIVE",
+        "EmailAddress": "liam@rockstar.com",
+        "FirstName": "Liam",
+        "HasValidationErrors": false,
+        "LastName": "Gallagher",
+        "Name": "Liam Gallagher",
+        "Phones": [
+          {
+            "PhoneAreaCode": "212",
+            "PhoneCountryCode": "",
+            "PhoneNumber": "222-2222",
+            "PhoneType": "DEFAULT"
+          },
+          {
+            "PhoneAreaCode": "",
+            "PhoneCountryCode": "",
+            "PhoneNumber": "",
+            "PhoneType": "DDI"
+          },
+          {
+            "PhoneAreaCode": "212",
+            "PhoneCountryCode": "",
+            "PhoneNumber": "333-2233",
+            "PhoneType": "FAX"
+          },
+          {
+            "PhoneAreaCode": "212",
+            "PhoneCountryCode": "",
+            "PhoneNumber": "444-3433",
+            "PhoneType": "MOBILE"
+          }
+        ],
+        "UpdatedDateUTC": "/Date(1551747281053+0000)/"
+      },
+      "CreditNoteID": "f9256f04-5a99-4680-acb9-6b4639cc439a",
+      "CreditNoteNumber": "",
+      "CurrencyCode": "NZD",
+      "CurrencyRate": 1.0,
+      "Date": "/Date(1546646400000+0000)/",
+      "DateString": "2019-01-05T00:00:00",
+      "ID": "f9256f04-5a99-4680-acb9-6b4639cc439a",
+      "LineAmountTypes": "Exclusive",
+      "LineItems": [
+        {
+          "AccountCode": "400",
+          "Description": "Foobar",
+          "LineAmount": 40.0,
+          "Quantity": 2.0,
+          "TaxAmount": 6.0,
+          "TaxType": "INPUT2",
+          "Tracking": [],
+          "UnitAmount": 20.0,
+          "ValidationErrors": []
+        }
+      ],
+      "Payments": [],
+      "Reference": "",
+      "RemainingCredit": 46.0,
+      "Status": "DRAFT",
+      "StatusAttributeString": "OK",
+      "SubTotal": 40.0,
+      "Total": 46.0,
+      "TotalTax": 6.0,
+      "Type": "ACCPAYCREDIT",
+      "UpdatedDateUTC": "/Date(1551812702650+0000)/",
+      "UpdatedDateUTCString": "2019-03-05T19:05:02Z",
+      "ValidationErrors": [
+        {
+          "Message": "An existing Credit Note with the specified CreditNoteID could not be found"
+        }
+      ]
+    }
+  ],
+  "DateTimeUTC": "/Date(1551812702713)/",
+  "Id": "5e57a661-42da-4a19-96a0-00405a0e946d",
+  "ProviderName": "Provider Name Example",
+  "Status": "OK"
+}

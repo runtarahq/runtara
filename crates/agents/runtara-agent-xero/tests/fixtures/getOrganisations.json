@@ -1,0 +1,40 @@
+{
+  "DateTimeUTC": "/Date(1552404447003)/",
+  "Id": "27b7a645-a3ee-43c8-b2c6-a2fa7b84c8c5",
+  "Organisations": [
+    {
+      "APIKey": "CTJ60UH519MXQIXEJSDPDALS3EOZ5Y",
+      "Addresses": [],
+      "BaseCurrency": "NZD",
+      "Class": "PREMIUM",
+      "CountryCode": "NZ",
+      "CreatedDateUTC": "/Date(1455827393000)/",
+      "DefaultPurchasesTax": "Tax Exclusive",
+      "DefaultSalesTax": "Tax Exclusive",
+      "Edition": "BUSINESS",
+      "EndOfYearLockDate": "/Date(1546214400000+0000)/",
+      "ExternalLinks": [],
+      "FinancialYearEndDay": 31,
+      "FinancialYearEndMonth": 3,
+      "IsDemoCompany": false,
+      "LegalName": "Dev Evangelist - Sid Test 3 (NZ-2016-02)",
+      "Name": "Dev Evangelist - Sid Test 3 (NZ-2016-02)",
+      "OrganisationEntityType": "COMPANY",
+      "OrganisationID": "b2c885a9-4bb9-4a00-9b6e-6c2bf60b1a2b",
+      "OrganisationStatus": "ACTIVE",
+      "OrganisationType": "COMPANY",
+      "PaymentTerms": {},
+      "PaysTax": true,
+      "PeriodLockDate": "/Date(1546214400000+0000)/",
+      "Phones": [],
+      "SalesTaxBasis": "PAYMENTS",
+      "SalesTaxPeriod": "TWOMONTHS",
+      "ShortCode": "!mBdtL",
+      "TaxNumber": "071-138-054",
+      "Timezone": "NEWZEALANDSTANDARDTIME",
+      "Version": "NZ"
+    }
+  ],
+  "ProviderName": "Provider Name Example",
+  "Status": "OK"
+}

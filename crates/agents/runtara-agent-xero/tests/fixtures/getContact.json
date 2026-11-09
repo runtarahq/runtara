@@ -1,0 +1,130 @@
+{
+  "Contacts": [
+    {
+      "AccountNumber": "1234567",
+      "AccountsPayableTaxType": "TAX022",
+      "AccountsReceivableTaxType": "TAX003",
+      "Addresses": [
+        {
+          "AddressLine1": "123 Fake Street",
+          "AddressType": "STREET",
+          "AttentionTo": "",
+          "City": "Vancouver",
+          "Country": "",
+          "PostalCode": "V6B 2T4",
+          "Region": "British Columbia"
+        },
+        {
+          "AddressLine1": "1234 Fake Street",
+          "AddressType": "POBOX",
+          "AttentionTo": "Blake",
+          "City": "Vancouver",
+          "Country": "",
+          "PostalCode": "V6B 2T4",
+          "Region": "British Columbia"
+        }
+      ],
+      "Attachments": [
+        {
+          "AttachmentID": "04e0a3e3-b116-456a-9f32-9706f0d33afa",
+          "ContentLength": 2878711,
+          "FileName": "sample5.jpg",
+          "MimeType": "image/jpg",
+          "Url": "https://api.xero.com/api.xro/2.0/contact/8138a266-fb42-49b2-a104-014b7045753d/Attachments/sample5.jpg"
+        }
+      ],
+      "Balances": {
+        "AccountsPayable": {
+          "Outstanding": -43.6,
+          "Overdue": 40.0
+        },
+        "AccountsReceivable": {
+          "Outstanding": 118.9,
+          "Overdue": 136.9
+        }
+      },
+      "BankAccountDetails": "12334567",
+      "BatchPayments": {
+        "BankAccountName": "Citi Bank",
+        "BankAccountNumber": "12334567",
+        "Code": "",
+        "Details": "biz checking",
+        "Reference": ""
+      },
+      "BrandingTheme": {
+        "BrandingThemeID": "dabc7637-62c1-4941-8a6e-ee44fa5090e7",
+        "Name": "Standard"
+      },
+      "CompanyNumber": "NumberBusiness1234",
+      "ContactGroups": [],
+      "ContactID": "8138a266-fb42-49b2-a104-014b7045753d",
+      "ContactNumber": "SB2",
+      "ContactPersons": [
+        {
+          "EmailAddress": "sue.johnson@krave.com",
+          "FirstName": "Sue",
+          "IncludeInEmails": true,
+          "LastName": "Johnson"
+        }
+      ],
+      "ContactStatus": "ACTIVE",
+      "DefaultCurrency": "USD",
+      "Discount": 13.0,
+      "EmailAddress": "bk@krave.co",
+      "FirstName": "Blake",
+      "HasAttachments": true,
+      "HasValidationErrors": false,
+      "IsCustomer": true,
+      "IsSupplier": true,
+      "LastName": "Kohler",
+      "Name": "Acme Parts Co.",
+      "PaymentTerms": {
+        "Bills": {
+          "Day": 12,
+          "Type": "OFFOLLOWINGMONTH"
+        },
+        "Sales": {
+          "Day": 14,
+          "Type": "OFCURRENTMONTH"
+        }
+      },
+      "Phones": [
+        {
+          "PhoneAreaCode": "345",
+          "PhoneCountryCode": "4",
+          "PhoneNumber": "489-44493",
+          "PhoneType": "DDI"
+        },
+        {
+          "PhoneAreaCode": "604",
+          "PhoneCountryCode": "1",
+          "PhoneNumber": "408-0914",
+          "PhoneType": "DEFAULT"
+        },
+        {
+          "PhoneAreaCode": "123",
+          "PhoneCountryCode": "2",
+          "PhoneNumber": "123-9933",
+          "PhoneType": "FAX"
+        },
+        {
+          "PhoneAreaCode": "234",
+          "PhoneCountryCode": "3",
+          "PhoneNumber": "999-44",
+          "PhoneType": "MOBILE"
+        }
+      ],
+      "PurchasesDefaultAccountCode": "660",
+      "PurchasesDefaultLineAmountType": "INCLUSIVE",
+      "SalesDefaultAccountCode": "002",
+      "SalesDefaultLineAmountType": "INCLUSIVE",
+      "TaxNumber": "123-22-3456",
+      "UpdatedDateUTC": "/Date(1551459777193+0000)/",
+      "Website": "http://www.google.com"
+    }
+  ],
+  "DateTimeUTC": "/Date(1551462703288)/",
+  "Id": "5c83b115-a6e8-4f2a-877f-ba63d009235b",
+  "ProviderName": "Xero API Partner",
+  "Status": "OK"
+}

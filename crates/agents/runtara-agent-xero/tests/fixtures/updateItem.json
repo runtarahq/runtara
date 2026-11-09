@@ -1,0 +1,21 @@
+{
+  "DateTimeUTC": "/Date(1552332558975)/",
+  "Id": "24feb629-6b14-499e-9aa1-fc2c596c0280",
+  "Items": [
+    {
+      "Code": "abc38306",
+      "Description": "Hello Xero",
+      "IsPurchased": true,
+      "IsSold": true,
+      "IsTrackedAsInventory": false,
+      "ItemID": "a7e87086-e0ae-4df2-83d7-e26e9a6b7786",
+      "Name": "Hello8746",
+      "PurchaseDetails": {},
+      "SalesDetails": {},
+      "UpdatedDateUTC": "/Date(1552332558924)/",
+      "ValidationErrors": []
+    }
+  ],
+  "ProviderName": "Provider Name Example",
+  "Status": "OK"
+}

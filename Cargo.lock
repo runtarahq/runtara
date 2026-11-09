@@ -4195,6 +4195,7 @@ dependencies = [
  "runtara-agent-transform",
  "runtara-agent-ups",
  "runtara-agent-utils",
+ "runtara-agent-xero",
  "runtara-agent-xlsx",
  "runtara-agent-xml",
  "runtara-agent-zendesk",
@@ -4613,6 +4614,18 @@ dependencies = [
  "rand 0.8.6",
  "runtara-agent-macro",
  "runtara-dsl",
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.58.0",
+]
+
+[[package]]
+name = "runtara-agent-xero"
+version = "10.0.0"
+dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
+ "runtara-http",
  "serde",
  "serde_json",
  "wit-bindgen 0.58.0",

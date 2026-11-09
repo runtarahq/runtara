@@ -1,0 +1,78 @@
+{
+  "DateTimeUTC": "/Date(1552432238716)/",
+  "Id": "83b5715a-6a77-4c16-b5b8-2da08b5fde44",
+  "Payments": [
+    {
+      "Account": {
+        "AccountID": "5690f1e8-1d02-4893-90c2-ee1a69eff942",
+        "Code": "970",
+        "Name": "Owner A Funds Introduced"
+      },
+      "Amount": 1.0,
+      "BankAmount": 1.0,
+      "CurrencyRate": 1.0,
+      "Date": "/Date(1552348800000+0000)/",
+      "HasAccount": true,
+      "HasValidationErrors": true,
+      "Invoice": {
+        "AmountDue": 229.0,
+        "AmountPaid": 1.0,
+        "Contact": {
+          "ContactID": "a3675fc4-f8dd-4f03-ba5b-f1870566bcd7",
+          "ContactPersons": [],
+          "HasValidationErrors": false,
+          "Name": "Barney Rubble-83203"
+        },
+        "CurrencyCode": "NZD",
+        "CurrencyRate": 1.0,
+        "Date": "/Date(1539129600000+0000)/",
+        "DateString": "2018-10-10T00:00:00",
+        "DueDate": "/Date(1539820800000+0000)/",
+        "DueDateString": "2018-10-18T00:00:00",
+        "HasErrors": false,
+        "InvoiceID": "c7c37b83-ac95-45ea-88ba-8ad83a5f22fe",
+        "InvoiceNumber": "INV-0004",
+        "IsDiscounted": false,
+        "LineAmountTypes": "Exclusive",
+        "LineItems": [
+          {
+            "AccountCode": "200",
+            "Description": "boo",
+            "LineAmount": 200.0,
+            "LineItemID": "173dfdb9-43b5-4bd2-ae25-9419e662a3a7",
+            "Quantity": 1.0,
+            "TaxAmount": 30.0,
+            "TaxType": "OUTPUT2",
+            "Tracking": [],
+            "UnitAmount": 200.0,
+            "ValidationErrors": []
+          }
+        ],
+        "Overpayments": [],
+        "Prepayments": [],
+        "Reference": "",
+        "SentToContact": false,
+        "Status": "AUTHORISED",
+        "SubTotal": 200.0,
+        "Total": 230.0,
+        "TotalTax": 30.0,
+        "Type": "ACCREC",
+        "UpdatedDateUTC": "/Date(1552432238623+0000)/",
+        "UpdatedDateUTCString": "2019-03-12T23:10:38Z"
+      },
+      "IsReconciled": false,
+      "PaymentID": "61ed71fc-01bf-4eb8-8419-8a18789ff45f",
+      "PaymentType": "ACCRECPAYMENT",
+      "Status": "AUTHORISED",
+      "UpdatedDateUTC": "/Date(1552432238623+0000)/",
+      "UpdatedDateUTCString": "2019-03-12T23:10:38Z",
+      "ValidationErrors": [
+        {
+          "Message": "Payment amount exceeds the amount outstanding on this document"
+        }
+      ]
+    }
+  ],
+  "ProviderName": "Provider Name Example",
+  "Status": "OK"
+}

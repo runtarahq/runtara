@@ -1,0 +1,25 @@
+{
+  "DateTimeUTC": "/Date(1552331871904)/",
+  "Id": "ae7ef7c8-9024-4d42-8d59-5f26ed3f508b",
+  "Items": [
+    {
+      "Code": "abc65591",
+      "Description": "foobar",
+      "IsPurchased": true,
+      "IsSold": true,
+      "IsTrackedAsInventory": false,
+      "ItemID": "a4544d51-48f6-441f-a623-99ecbced6ab7",
+      "Name": "Hello11350",
+      "PurchaseDetails": {},
+      "SalesDetails": {},
+      "UpdatedDateUTC": "/Date(1552331871707)/",
+      "ValidationErrors": [
+        {
+          "Message": "Price List Item with Code ''abc'' already exists"
+        }
+      ]
+    }
+  ],
+  "ProviderName": "Provider Name Example",
+  "Status": "OK"
+}
