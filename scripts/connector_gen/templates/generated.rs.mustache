@@ -76,7 +76,7 @@ pub struct {{operationIdCamelCase}}Input {
 {{^isBodyParam}}
     #[field({{>field_input_attrs}})]
     #[serde(rename = "{{#vendorExtensions.x-runtara-input-name}}{{.}}{{/vendorExtensions.x-runtara-input-name}}{{^vendorExtensions.x-runtara-input-name}}{{baseName}}{{/vendorExtensions.x-runtara-input-name}}"{{^required}}, default, skip_serializing_if = "Option::is_none"{{/required}})]
-    pub {{paramName}}: {{^required}}Option<{{/required}}{{#isModel}}{{#lambda.pascalcase}}{{baseType}}{{/lambda.pascalcase}}{{/isModel}}{{^isModel}}{{{dataType}}}{{/isModel}}{{^required}}>{{/required}},
+    pub {{#vendorExtensions.x-runtara-input-name}}{{.}}{{/vendorExtensions.x-runtara-input-name}}{{^vendorExtensions.x-runtara-input-name}}{{paramName}}{{/vendorExtensions.x-runtara-input-name}}: {{^required}}Option<{{/required}}{{#isModel}}{{#lambda.pascalcase}}{{baseType}}{{/lambda.pascalcase}}{{/isModel}}{{^isModel}}{{{dataType}}}{{/isModel}}{{^required}}>{{/required}},
 {{/isBodyParam}}
 {{/allParams}}
 {{#bodyParam}}
@@ -87,7 +87,7 @@ pub struct {{operationIdCamelCase}}Input {
     optional ones are Option<Option<T>> (None = omit, Some(None) = send null). }}
     #[field({{>field_input_attrs}})]
     #[serde(rename = "{{#vendorExtensions.x-runtara-input-name}}{{.}}{{/vendorExtensions.x-runtara-input-name}}{{^vendorExtensions.x-runtara-input-name}}{{baseName}}{{/vendorExtensions.x-runtara-input-name}}"{{^required}}, default, skip_serializing_if = "Option::is_none"{{#isNullable}}, deserialize_with = "kit::nullable"{{/isNullable}}{{/required}})]
-    pub {{name}}: {{^required}}Option<{{/required}}{{#isNullable}}Option<{{/isNullable}}{{>rt_type}}{{#isNullable}}>{{/isNullable}}{{^required}}>{{/required}},
+    pub {{#vendorExtensions.x-runtara-input-name}}{{.}}{{/vendorExtensions.x-runtara-input-name}}{{^vendorExtensions.x-runtara-input-name}}{{name}}{{/vendorExtensions.x-runtara-input-name}}: {{^required}}Option<{{/required}}{{#isNullable}}Option<{{/isNullable}}{{>rt_type}}{{#isNullable}}>{{/isNullable}}{{^required}}>{{/required}},
 {{/isReadOnly}}
 {{/vars}}
 {{#vars.isEmpty}}
@@ -122,7 +122,7 @@ impl {{operationIdCamelCase}}Input {
 {{#hasPathParams}}
         let path = format!(
             "{{basePathWithoutHost}}{{{path}}}"{{#pathParams}},
-            {{baseName}} = kit::encode_path(&self.{{paramName}}){{/pathParams}}
+            {{baseName}} = kit::encode_path(&self.{{#vendorExtensions.x-runtara-input-name}}{{.}}{{/vendorExtensions.x-runtara-input-name}}{{^vendorExtensions.x-runtara-input-name}}{{paramName}}{{/vendorExtensions.x-runtara-input-name}}){{/pathParams}}
         );
 {{/hasPathParams}}
 {{^hasPathParams}}
@@ -131,10 +131,10 @@ impl {{operationIdCamelCase}}Input {
         let request = kit::Request::new("{{httpMethod}}", path)
 {{#queryParams}}
 {{! An exploded array (the OpenAPI default) repeats the parameter: ids=1&ids=2. }}
-            .{{#vendorExtensions.x-runtara-free-form-query}}query_object{{/vendorExtensions.x-runtara-free-form-query}}{{^vendorExtensions.x-runtara-free-form-query}}{{#isArray}}{{#isExplode}}query_each{{/isExplode}}{{^isExplode}}query{{/isExplode}}{{/isArray}}{{^isArray}}query{{/isArray}}{{/vendorExtensions.x-runtara-free-form-query}}{{^required}}_opt{{/required}}("{{baseName}}", &self.{{paramName}})
+            .{{#vendorExtensions.x-runtara-free-form-query}}query_object{{/vendorExtensions.x-runtara-free-form-query}}{{^vendorExtensions.x-runtara-free-form-query}}{{#isArray}}{{#isExplode}}query_each{{/isExplode}}{{^isExplode}}query{{/isExplode}}{{/isArray}}{{^isArray}}query{{/isArray}}{{/vendorExtensions.x-runtara-free-form-query}}{{^required}}_opt{{/required}}("{{baseName}}", &self.{{#vendorExtensions.x-runtara-input-name}}{{.}}{{/vendorExtensions.x-runtara-input-name}}{{^vendorExtensions.x-runtara-input-name}}{{paramName}}{{/vendorExtensions.x-runtara-input-name}})
 {{/queryParams}}
 {{#headerParams}}
-            .{{#required}}header{{/required}}{{^required}}header_opt{{/required}}("{{baseName}}", &self.{{paramName}})
+            .{{#required}}header{{/required}}{{^required}}header_opt{{/required}}("{{baseName}}", &self.{{#vendorExtensions.x-runtara-input-name}}{{.}}{{/vendorExtensions.x-runtara-input-name}}{{^vendorExtensions.x-runtara-input-name}}{{paramName}}{{/vendorExtensions.x-runtara-input-name}})
 {{/headerParams}}
         ;
 {{#bodyParam}}
@@ -143,7 +143,7 @@ impl {{operationIdCamelCase}}Input {
             kit::Body::new()
 {{#vars}}
 {{^isReadOnly}}
-                .{{#required}}field{{/required}}{{^required}}field_opt{{/required}}("{{baseName}}", &self.{{name}})
+                .{{#required}}field{{/required}}{{^required}}field_opt{{/required}}("{{baseName}}", &self.{{#vendorExtensions.x-runtara-input-name}}{{.}}{{/vendorExtensions.x-runtara-input-name}}{{^vendorExtensions.x-runtara-input-name}}{{name}}{{/vendorExtensions.x-runtara-input-name}})
 {{/isReadOnly}}
 {{/vars}}
 {{! `fetch` unwrapped a body envelope (the fields were sent inside "ticket", say): wrap them back. }}

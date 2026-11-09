@@ -70,6 +70,10 @@ NAME_MAPS = ("properties", "responses")
 INPUT_NAME = "x-runtara-input-name"
 # Set by `fetch` on a free-form `deepObject` query parameter.
 FREE_FORM_QUERY = "x-runtara-free-form-query"
+# The input name is also the generated Rust field's name.
+RUST_KEYWORDS = frozenset("""as async await break const continue crate dyn else enum extern false fn for if
+    impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe
+    use where while""".split())
 # Inputs the platform sets on every call.
 PLATFORM_INPUTS = ("connection_id", "_connection")
 
@@ -1004,7 +1008,9 @@ def check_input_names(sliced: dict) -> None:
             seen = set()
             for field in fields:
                 custom = field.get(INPUT_NAME)
-                if custom is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(custom)):
+                if custom is not None and (
+                    not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(custom)) or custom in RUST_KEYWORDS
+                ):
                     sys.exit(f"{op['operationId']}: {INPUT_NAME} `{custom}` is not a plain name")
                 name = custom or field["name"]
                 if name in PLATFORM_INPUTS:

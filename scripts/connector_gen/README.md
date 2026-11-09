@@ -241,7 +241,8 @@ spec:
 **An input cannot take the wire name.** The platform sets `connection_id` on every
 call, so `fetch` refuses an input with that name; and a name like `status[]` reads
 badly in the step editor. In the spec, give the parameter or body field its input
-name. The request still sends the wire name:
+name, which is also the generated Rust field's. The request still sends the wire
+name:
 
 ```yaml
 parameters:

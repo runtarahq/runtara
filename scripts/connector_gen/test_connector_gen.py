@@ -1423,6 +1423,10 @@ class InputNameTest(unittest.TestCase):
         spec["paths"]["/calls"]["get"]["parameters"][1]["x-runtara-input-name"] = "status[]"
         with self.assertRaisesRegex(SystemExit, "not a plain name"):
             self.slice(spec)
+        spec = input_names_spec()
+        spec["paths"]["/calls"]["get"]["parameters"][1]["x-runtara-input-name"] = "type"
+        with self.assertRaisesRegex(SystemExit, "not a plain name"):
+            self.slice(spec)
 
     def test_the_label_follows_the_input_name(self):
         sliced = self.slice(input_names_spec())
@@ -1487,8 +1491,15 @@ class InputNameRenderTest(unittest.TestCase):
         for fields in inputs:
             self.assertIn('rename = "call_id"', fields)
             self.assertNotIn('rename = "connection_id"', fields)
-        self.assertIn('.query_opt("connection_id", &self.connection_id)', self.text)
-        self.assertIn('.field("connection_id", &self.connection_id)', self.text)
+        self.assertIn('.query_opt("connection_id", &self.call_id)', self.text)
+        self.assertIn('.field("connection_id", &self.call_id)', self.text)
+
+    def test_the_rust_field_takes_the_input_name(self):
+        # The agent macro hides a field named `connection_id` from the metadata.
+        inputs = re.findall(r"pub struct \w+Input \{.*?\n\}", self.text, re.S)
+        for fields in inputs:
+            self.assertRegex(fields, r"pub call_id: ")
+            self.assertNotIn("pub connection_id:", fields)
 
     def test_an_array_keeps_its_wire_name(self):
         self.assertIn('rename = "statuses"', self.text)
