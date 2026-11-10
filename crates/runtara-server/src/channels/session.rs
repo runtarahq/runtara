@@ -694,11 +694,17 @@ impl ChannelRouter {
                 ))
             }
             "slack_bot" => {
-                let bot_token = params["bot_token"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("Missing bot_token in connection"))?;
+                let auth = super::channel::ReplyAuth::of(
+                    &self.connections,
+                    &route.tenant_id,
+                    connection_id,
+                    "slack_bot",
+                    params,
+                    "bot_token",
+                    super::channel::ReplyAuth::Bearer,
+                )?;
                 Arc::new(super::channel::SlackChannel::new(
-                    bot_token.to_string(),
+                    auth,
                     self.http_client.clone(),
                 ))
             }
@@ -718,15 +724,24 @@ impl ChannelRouter {
                 ))
             }
             "mailgun" => {
-                let api_key = params["api_key"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("Missing api_key in connection"))?;
+                let auth = super::channel::ReplyAuth::of(
+                    &self.connections,
+                    &route.tenant_id,
+                    connection_id,
+                    "mailgun",
+                    params,
+                    "api_key",
+                    |password| super::channel::ReplyAuth::Basic {
+                        username: "api".to_string(),
+                        password,
+                    },
+                )?;
                 let domain = params["domain"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("Missing domain in connection"))?;
                 let region = params["region"].as_str().unwrap_or("us");
                 Arc::new(super::channel::MailgunChannel::new(
-                    api_key.to_string(),
+                    auth,
                     domain.to_string(),
                     region.to_string(),
                     self.http_client.clone(),
