@@ -1,3 +1,6 @@
+// Handlers and middleware return a ready `axum::Response` as their refusal.
+#![allow(clippy::result_large_err)]
+
 pub mod agent_release;
 pub mod api;
 pub mod audit;

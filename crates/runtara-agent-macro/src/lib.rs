@@ -14,6 +14,10 @@
 //! Note: The metadata types (CapabilityMeta, InputTypeMeta, StepTypeMeta, etc.) are defined
 //! in `runtara-dsl` crate to avoid proc-macro crate limitations.
 
+// darling's `#[darling(multiple)]` derive output initializes `field: field`;
+// the lint level of a derive's impl cannot be set from the struct.
+#![allow(clippy::redundant_field_names)]
+
 use darling::{FromDeriveInput, FromField, FromMeta};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
