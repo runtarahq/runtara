@@ -5862,7 +5862,7 @@ checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
 [[package]]
 name = "seal-broker"
 version = "0.1.0"
-source = "git+https://github.com/runtarahq/seal?rev=dd53183d896d61d071b5a3e476d930590ebffbb1#dd53183d896d61d071b5a3e476d930590ebffbb1"
+source = "git+https://github.com/runtarahq/seal?rev=2f4fb4ff6772893503e28f200c85fbf0d57d1a36#2f4fb4ff6772893503e28f200c85fbf0d57d1a36"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -5893,7 +5893,7 @@ dependencies = [
 [[package]]
 name = "seal-client"
 version = "0.1.0"
-source = "git+https://github.com/runtarahq/seal?rev=dd53183d896d61d071b5a3e476d930590ebffbb1#dd53183d896d61d071b5a3e476d930590ebffbb1"
+source = "git+https://github.com/runtarahq/seal?rev=2f4fb4ff6772893503e28f200c85fbf0d57d1a36#2f4fb4ff6772893503e28f200c85fbf0d57d1a36"
 dependencies = [
  "async-trait",
  "bytes",
@@ -5912,12 +5912,13 @@ dependencies = [
  "tonic",
  "tower",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
 name = "seal-format"
 version = "0.1.0"
-source = "git+https://github.com/runtarahq/seal?rev=dd53183d896d61d071b5a3e476d930590ebffbb1#dd53183d896d61d071b5a3e476d930590ebffbb1"
+source = "git+https://github.com/runtarahq/seal?rev=2f4fb4ff6772893503e28f200c85fbf0d57d1a36#2f4fb4ff6772893503e28f200c85fbf0d57d1a36"
 dependencies = [
  "base64 0.23.1",
  "hpke",
@@ -5930,7 +5931,7 @@ dependencies = [
 [[package]]
 name = "seal-keys"
 version = "0.1.0"
-source = "git+https://github.com/runtarahq/seal?rev=dd53183d896d61d071b5a3e476d930590ebffbb1#dd53183d896d61d071b5a3e476d930590ebffbb1"
+source = "git+https://github.com/runtarahq/seal?rev=2f4fb4ff6772893503e28f200c85fbf0d57d1a36#2f4fb4ff6772893503e28f200c85fbf0d57d1a36"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -5955,13 +5956,14 @@ dependencies = [
 [[package]]
 name = "seal-proto"
 version = "0.1.0"
-source = "git+https://github.com/runtarahq/seal?rev=dd53183d896d61d071b5a3e476d930590ebffbb1#dd53183d896d61d071b5a3e476d930590ebffbb1"
+source = "git+https://github.com/runtarahq/seal?rev=2f4fb4ff6772893503e28f200c85fbf0d57d1a36#2f4fb4ff6772893503e28f200c85fbf0d57d1a36"
 dependencies = [
  "prost",
  "protox",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "zeroize",
 ]
 
 [[package]]

@@ -58,10 +58,10 @@ zeroize = "1.8"
 
 # Sealed credentials: seal stores each secret with the rules for using it, and
 # sends requests itself. `in-process` links seal into this process (library mode).
-seal-broker = { git = "https://github.com/runtarahq/seal", rev = "dd53183d896d61d071b5a3e476d930590ebffbb1" }
-seal-client = { git = "https://github.com/runtarahq/seal", rev = "dd53183d896d61d071b5a3e476d930590ebffbb1", features = ["in-process"] }
-seal-format = { git = "https://github.com/runtarahq/seal", rev = "dd53183d896d61d071b5a3e476d930590ebffbb1" }
-seal-keys = { git = "https://github.com/runtarahq/seal", rev = "dd53183d896d61d071b5a3e476d930590ebffbb1" }
+seal-broker = { git = "https://github.com/runtarahq/seal", rev = "2f4fb4ff6772893503e28f200c85fbf0d57d1a36" }
+seal-client = { git = "https://github.com/runtarahq/seal", rev = "2f4fb4ff6772893503e28f200c85fbf0d57d1a36", features = ["in-process"] }
+seal-format = { git = "https://github.com/runtarahq/seal", rev = "2f4fb4ff6772893503e28f200c85fbf0d57d1a36" }
+seal-keys = { git = "https://github.com/runtarahq/seal", rev = "2f4fb4ff6772893503e28f200c85fbf0d57d1a36" }
 # The request and response types seal's client takes and returns.
 bytes = "1"
 http = "1"
