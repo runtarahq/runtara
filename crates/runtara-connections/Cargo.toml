@@ -56,6 +56,13 @@ tokio = { version = "1", features = ["sync", "net"] }
 aes-gcm = "0.10"
 zeroize = "1.8"
 
+# Sealed credentials: seal stores each secret with the rules for using it, and
+# sends requests itself. `in-process` links seal into this process (library mode).
+seal-broker = { git = "https://github.com/runtarahq/seal", rev = "087de1cc75d84c7ddeea06d8eb9f8476845dc37c" }
+seal-client = { git = "https://github.com/runtarahq/seal", rev = "087de1cc75d84c7ddeea06d8eb9f8476845dc37c", features = ["in-process"] }
+seal-format = { git = "https://github.com/runtarahq/seal", rev = "087de1cc75d84c7ddeea06d8eb9f8476845dc37c" }
+seal-keys = { git = "https://github.com/runtarahq/seal", rev = "087de1cc75d84c7ddeea06d8eb9f8476845dc37c" }
+
 # Error handling
 thiserror = "2"
 async-trait = "0.1"
