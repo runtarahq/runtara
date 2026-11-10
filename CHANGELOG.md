@@ -45,9 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`connector_gen` takes APIs published as one spec per resource.** Specs whose
   `servers` differ only in their descriptions merge, and a parameter two of them
   define differently under one name gets each spec's name, as schemas already
-  did. `omit_parameters` leaves out parameters no step input can carry, and
+  did. `omit_parameters` leaves out parameters no step input can carry,
   `read_operations` marks an operation that only reads though its method is not
-  GET. An inline schema of an operation whose name has an acronym
+  GET, and `field_types` retypes a property of a schema the spec types wrongly
+  (Zoho's `$append_values`, an object its spec calls a string). An inline schema of an operation whose name has an acronym
   (`executeCOQLQuery`) is now generated under the name its uses refer to, and a
   property such as `status_reason__s` becomes a snake-case field. A
   `model_names` rename now renames the schema itself, so its struct and every

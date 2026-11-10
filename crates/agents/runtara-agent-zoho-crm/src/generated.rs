@@ -9672,14 +9672,14 @@ pub type RecordPutErrorDataItem = Value;
 pub struct RecordPutWriteDataItem {
     #[field(
         display_name = r##"$append Values"##,
-        description = r##"Represents the $append values value."##
+        description = r##"Multi-select picklist fields of this record, each mapped to `true` to add the values given to the record's own, or `false` to replace them (the default)."##
     )]
     #[serde(
         rename = "$append_values",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub dollar_append_values: Option<String>,
+    pub dollar_append_values: Option<HashMap<String, bool>>,
     #[field(display_name = r##"Layout"##)]
     #[serde(rename = "Layout", default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<RecordPutWriteDataItemLayout>,
@@ -9716,14 +9716,14 @@ pub struct RecordPutWriteDataItemLayout {
 pub struct RecordSinglePutWriteDataItem {
     #[field(
         display_name = r##"$append Values"##,
-        description = r##"Represents the $append values value."##
+        description = r##"Multi-select picklist fields of this record, each mapped to `true` to add the values given to the record's own, or `false` to replace them (the default)."##
     )]
     #[serde(
         rename = "$append_values",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub dollar_append_values: Option<String>,
+    pub dollar_append_values: Option<HashMap<String, bool>>,
     #[field(display_name = r##"Layout"##)]
     #[serde(rename = "Layout", default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<RecordPutWriteDataItemLayout>,

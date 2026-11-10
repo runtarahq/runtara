@@ -14,7 +14,7 @@ use runtara_agent_zoho_crm::{
     GetSingleUser200Response, GetUsers200Response, RecordDeleteByIdSuccessResponse,
     RecordDeleteSuccessResponse, RecordGetSuccessResponse, RecordIdgetSuccessResponse,
     RecordSuccessResponse, RecordUpsertSuccessResponse, SearchRecords200Response,
-    SearchRecordsInput, UpdateRecordInput, UpsertRecordsInput,
+    SearchRecordsInput, UpdateRecordInput, UpdateRecordsInput, UpsertRecordsInput,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -225,6 +225,44 @@ fn an_upsert_names_its_duplicate_check_fields() {
             "data": [{ "Last_Name": "Smith", "Email": "smith@example.com" }],
             "duplicate_check_fields": ["Email"],
         }))
+    );
+}
+
+/// `$append_values` is an object of multi-select picklist fields (Zoho's spec
+/// says a string), and reaches Zoho as one in every write that takes it.
+#[test]
+fn append_values_are_sent_as_an_object() {
+    let append = json!({ "Foreign_Languages": true, "Skills": false });
+    let record = json!({ "Foreign_Languages": ["Korean"], "$append_values": append });
+    let listed = json!({
+        "id": "5725767000000524157",
+        "Foreign_Languages": ["Korean"],
+        "$append_values": append,
+    });
+
+    let input: UpdateRecordsInput =
+        serde_json::from_value(json!({ "module": "Leads", "data": [listed] })).unwrap();
+    assert_eq!(
+        input.request().unwrap().body_json(),
+        Some(json!({ "data": [listed] }))
+    );
+
+    let input: UpdateRecordInput = serde_json::from_value(json!({
+        "module": "Leads",
+        "recordId": "5725767000000524157",
+        "data": [record],
+    }))
+    .unwrap();
+    assert_eq!(
+        input.request().unwrap().body_json(),
+        Some(json!({ "data": [record] }))
+    );
+
+    let input: UpsertRecordsInput =
+        serde_json::from_value(json!({ "module": "Leads", "data": [record] })).unwrap();
+    assert_eq!(
+        input.request().unwrap().body_json(),
+        Some(json!({ "data": [record] }))
     );
 }
 

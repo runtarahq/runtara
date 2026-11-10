@@ -11424,12 +11424,11 @@
         "description": "Represents a single record put write data result item.",
         "properties": {
           "$append_values": {
-            "description": "Represents the $append values value.",
-            "examples": [
-              "true"
-            ],
-            "maxLength": 10,
-            "type": "string",
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "description": "Multi-select picklist fields of this record, each mapped to `true` to add the values given to the record's own, or `false` to replace them (the default).",
+            "type": "object",
             "x-runtara-label": "$append Values"
           },
           "Layout": {
@@ -11489,12 +11488,11 @@
         "description": "Represents a single record single put write data result item.",
         "properties": {
           "$append_values": {
-            "description": "Represents the $append values value.",
-            "examples": [
-              "true"
-            ],
-            "maxLength": 10,
-            "type": "string",
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "description": "Multi-select picklist fields of this record, each mapped to `true` to add the values given to the record's own, or `false` to replace them (the default).",
+            "type": "object",
             "x-runtara-label": "$append Values"
           },
           "Layout": {

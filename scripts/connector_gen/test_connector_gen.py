@@ -752,6 +752,43 @@ class InputTypesTest(unittest.TestCase):
         self.assertIn("['thread_ts']", str(raised.exception))
 
 
+class FieldTypesTest(unittest.TestCase):
+    """`field_types` retypes a schema's property, such as one inside the items
+    of a request-body array, which `input_types` cannot reach."""
+
+    APPEND = {"type": "object", "additionalProperties": {"type": "boolean"}}
+
+    @staticmethod
+    def spec() -> dict:
+        body = json_body({"type": "object", "properties": {
+            "data": {"type": "array", "items": {"$ref": "#/components/schemas/Record"}}}})
+        return {"openapi": "3.0.1", "info": {"title": "t", "version": "1"}, "paths": {
+            "/records": {"put": {"operationId": "update", **body, "responses": {"200": {"description": "ok"}}}},
+        }, "components": {"schemas": {"Record": {"type": "object", "properties": {
+            "$append_values": {"type": "string", "maxLength": 10, "examples": ["true"],
+                               "description": "Append values."},
+            "id": {"type": "string"}}}}}}
+
+    def slice(self, field_types: dict) -> dict:
+        return cg.slice_specs([({"operations": ["update"]}, self.spec())], {"field_types": field_types})
+
+    def test_the_property_takes_the_schema_and_keeps_its_description(self):
+        record = self.slice({"Record": {"$append_values": self.APPEND}})["components"]["schemas"]["Record"]
+        self.assertEqual(record["properties"]["$append_values"], {**self.APPEND, "description": "Append values."})
+        self.assertEqual(record["properties"]["id"], {"type": "string"})
+
+    def test_a_type_name_replaces_the_type(self):
+        record = self.slice({"Record": {"id": "integer"}})["components"]["schemas"]["Record"]
+        self.assertEqual(record["properties"]["id"], {"type": "integer"})
+
+    def test_an_unknown_schema_or_property_fails(self):
+        for field_types, named in (({"Reply": {"id": "string"}}, "`Reply`"),
+                                   ({"Record": {"id": "string", "note": "string"}}, "['note']")):
+            with self.subTest(named), self.assertRaises(SystemExit) as raised:
+                self.slice(field_types)
+            self.assertIn(named, str(raised.exception))
+
+
 class Swagger2Test(unittest.TestCase):
     """A Swagger 2.0 spec is converted to OpenAPI 3 before it is sliced."""
 

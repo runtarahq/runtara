@@ -304,6 +304,22 @@ input_types:
   thread_ts: string
 ```
 
+**The spec types a field inside a schema wrongly**, out of `input_types`'
+reach, such as a field of the records in a request body's array. Zoho's spec
+types a record's `$append_values` as a string; its API takes an object of
+multi-select picklist fields, each mapped to `true` or `false`. Name the schema
+(as it is in `spec.slice.json`) and give each property the type or schema it
+should have, as for `input_types`. A schema or property the slice lacks is an
+error.
+
+```yaml
+field_types:
+  RecordPutWriteDataItem:
+    $append_values:
+      type: object
+      additionalProperties: {type: boolean}
+```
+
 **No step input can carry a parameter**, such as Zoho's `filters`, a nested
 filter object `fetch` refuses. List it, and the operations that take it are
 generated without it; another operation (a search, a query) covers the need:

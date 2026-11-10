@@ -1100,12 +1100,37 @@ def slice_specs(specs: list, config: dict) -> dict:
         sliced = merge_slices(slices)
         check_names(sliced, [op for source, _ in specs for op in source["operations"]], model_names)
     make_optional(sliced, config.get("optional_fields") or {})
+    retype_fields(sliced, config.get("field_types") or {})
     retype_inputs(sliced, config.get("input_types") or {})
     return sliced
 
 
 # What a retyped input keeps of the schema the vendor gave it.
 RETYPE_KEPT = ("description", "title", "deprecated", "nullable", "readOnly", "writeOnly")
+
+
+def retyped_schema(schema: dict, new) -> dict:
+    """`schema` given the type (`string`) or schema `new`, keeping what
+    `RETYPE_KEPT` names unless `new` gives it."""
+    new = copy.deepcopy(new) if isinstance(new, dict) else {"type": new}
+    return {**{key: schema[key] for key in RETYPE_KEPT if key in schema}, **new}
+
+
+def retype_fields(sliced: dict, fields: dict) -> None:
+    """`field_types`: schema name -> {property: the type or schema the vendor's
+    spec should have given it}, for a field `input_types` cannot reach, such as
+    one inside the items of a request-body array. Zoho's spec types a record's
+    `$append_values` as a string; its API takes an object."""
+    schemas = sliced["components"].get("schemas", {})
+    for schema, types in fields.items():
+        properties = schemas.get(schema, {}).get("properties")
+        if properties is None:
+            sys.exit(f"field_types: `{schema}` is no schema with properties in spec.slice.json")
+        unknown = sorted(set(types) - set(properties))
+        if unknown:
+            sys.exit(f"field_types: `{schema}` in spec.slice.json has no properties {unknown}")
+        for name, new in types.items():
+            properties[name] = retyped_schema(deref(sliced, properties[name]), new)
 
 
 def retype_inputs(sliced: dict, types: dict) -> None:
@@ -1119,9 +1144,7 @@ def retype_inputs(sliced: dict, types: dict) -> None:
         return
 
     def retyped(schema: dict, name: str) -> dict:
-        new = types[name]
-        new = copy.deepcopy(new) if isinstance(new, dict) else {"type": new}
-        return {**{key: schema[key] for key in RETYPE_KEPT if key in schema}, **new}
+        return retyped_schema(schema, types[name])
 
     used = set()
     for item in sliced["paths"].values():
