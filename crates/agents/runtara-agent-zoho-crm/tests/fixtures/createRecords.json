@@ -1,0 +1,23 @@
+{
+  "data": [
+    {
+      "code": "SUCCESS",
+      "details": {
+        "$approval_state": "approved",
+        "Created_By": {
+          "id": "5725767000000411001",
+          "name": "Patricia Boyle"
+        },
+        "Created_Time": "2023-05-10T01:10:47-07:00",
+        "Modified_By": {
+          "id": "5725767000000411001",
+          "name": "Patricia Boyle"
+        },
+        "Modified_Time": "2023-05-10T01:10:47-07:00",
+        "id": "5725767000000524157"
+      },
+      "message": "record added",
+      "status": "success"
+    }
+  ]
+}

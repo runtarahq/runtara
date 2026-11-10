@@ -178,5 +178,11 @@
     "fieldCount": 4,
     "serializedBytes": 1513,
     "fnv1a64": "049b4f57d8daf732"
+  },
+  {
+    "integrationId": "zoho_crm_oauth",
+    "fieldCount": 7,
+    "serializedBytes": 2938,
+    "fnv1a64": "20429c79f5ae7b63"
   }
 ]

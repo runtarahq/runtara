@@ -1,0 +1,44 @@
+{
+  "data": [
+    {
+      "action": "update",
+      "code": "SUCCESS",
+      "details": {
+        "Created_By": {
+          "id": "4150868000000225013",
+          "name": "Patricia Boyle"
+        },
+        "Created_Time": "2019-09-11T16:21:15+05:30",
+        "Modified_By": {
+          "id": "4150868000000225013",
+          "name": "Patricia Boyle"
+        },
+        "Modified_Time": "2020-10-14T10:31:43+05:30",
+        "id": "4150868000000376008"
+      },
+      "duplicate_field": "Email",
+      "message": "record updated",
+      "status": "success"
+    },
+    {
+      "action": "insert",
+      "code": "SUCCESS",
+      "details": {
+        "Created_By": {
+          "id": "4150868000000225013",
+          "name": "Patricia Boyle"
+        },
+        "Created_Time": "2020-10-14T10:31:43+05:30",
+        "Modified_By": {
+          "id": "4150868000000225013",
+          "name": "Patricia Boyle"
+        },
+        "Modified_Time": "2020-10-14T10:31:43+05:30",
+        "id": "4150868000003194003"
+      },
+      "duplicate_field": "Email",
+      "message": "record added",
+      "status": "success"
+    }
+  ]
+}

@@ -49,5 +49,6 @@ runtara-agent-xero = { path = "../agents/runtara-agent-xero" }
 runtara-agent-xlsx = { path = "../agents/runtara-agent-xlsx" }
 runtara-agent-xml = { path = "../agents/runtara-agent-xml" }
 runtara-agent-zendesk = { path = "../agents/runtara-agent-zendesk" }
+runtara-agent-zoho-crm = { path = "../agents/runtara-agent-zoho-crm" }
 serde_json = { workspace = true }
 anyhow = "1"

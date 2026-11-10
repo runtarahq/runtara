@@ -4199,6 +4199,7 @@ dependencies = [
  "runtara-agent-xlsx",
  "runtara-agent-xml",
  "runtara-agent-zendesk",
+ "runtara-agent-zoho-crm",
  "runtara-dsl",
  "serde_json",
 ]
@@ -4660,6 +4661,18 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-zendesk"
+version = "10.0.0"
+dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.58.0",
+]
+
+[[package]]
+name = "runtara-agent-zoho-crm"
 version = "10.0.0"
 dependencies = [
  "runtara-agent-macro",

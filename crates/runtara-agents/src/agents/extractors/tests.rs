@@ -87,6 +87,126 @@ fn xero_is_reachable_from_the_http_agent_and_needs_a_client() {
 }
 
 #[test]
+fn zoho_crm_is_reachable_from_the_http_agent_and_needs_a_client_and_a_region() {
+    assert!(get_http_extractor_ids().contains(&"zoho_crm_oauth"));
+    let extractor = connection_types::ZohoCrmOAuthExtractor;
+    assert_eq!(extractor.integration_id(), "zoho_crm_oauth");
+    for params in [
+        json!({ "client_id": "1000.abc", "client_secret": "shh" }),
+        json!({ "oauth_app": "zoho-platform", "data_center": "eu", "environment": "developer" }),
+    ] {
+        let config = extractor.extract(&params).expect("a client is enough");
+        assert!(config.url_prefix.is_empty(), "got {:?}", config.url_prefix);
+    }
+    assert!(extractor.extract(&json!({})).is_err());
+    let err = extractor
+        .extract(&json!({ "client_id": "1000.abc", "data_center": "mars" }))
+        .unwrap_err();
+    assert!(err.contains("`mars`"), "{err}");
+    // A stale environment from an earlier authorization does not stop the
+    // data centre from changing.
+    assert!(
+        extractor
+            .extract(
+                &json!({ "client_id": "1000.abc", "data_center": "cn", "environment": "developer" })
+            )
+            .is_ok()
+    );
+}
+
+#[test]
+fn zoho_hosts_follow_the_data_centre_and_the_environment() {
+    use connection_types::zoho_hosts;
+    let hosts = |params| zoho_hosts(&params).map(|h| (h.auth_url, h.token_url, h.base_url));
+    let expected = |accounts: &str, api: &str| {
+        Some((
+            format!("https://{accounts}/oauth/v2/auth"),
+            format!("https://{accounts}/oauth/v2/token"),
+            format!("https://{api}"),
+        ))
+    };
+    assert_eq!(
+        hosts(json!({})),
+        expected("accounts.zoho.com", "www.zohoapis.com")
+    );
+    for (data_center, accounts, api) in [
+        ("us", "accounts.zoho.com", "zohoapis.com"),
+        ("eu", "accounts.zoho.eu", "zohoapis.eu"),
+        ("in", "accounts.zoho.in", "zohoapis.in"),
+        ("au", "accounts.zoho.com.au", "zohoapis.com.au"),
+        ("jp", "accounts.zoho.jp", "zohoapis.jp"),
+        ("ca", "accounts.zohocloud.ca", "zohoapis.ca"),
+        ("sa", "accounts.zoho.sa", "zohoapis.sa"),
+        ("uk", "accounts.zoho.uk", "zohoapis.uk"),
+        ("cn", "accounts.zoho.com.cn", "zohoapis.com.cn"),
+    ] {
+        for (environment, prefix) in [("production", "www"), ("sandbox", "sandbox")] {
+            assert_eq!(
+                hosts(json!({ "data_center": data_center, "environment": environment })),
+                expected(accounts, &format!("{prefix}.{api}")),
+                "{data_center} {environment}"
+            );
+        }
+        let developer = hosts(json!({ "data_center": data_center, "environment": "developer" }));
+        if data_center == "cn" {
+            // China has no Developer Edition host; its login server still answers.
+            let (auth, token, _) = expected(accounts, "").unwrap();
+            assert_eq!(developer, Some((auth, token, String::new())));
+        } else {
+            assert_eq!(developer, expected(accounts, &format!("developer.{api}")));
+        }
+        assert_eq!(
+            connection_types::zoho_data_center_of(&format!("https://{accounts}")),
+            Some(data_center)
+        );
+    }
+    for params in [
+        json!({ "data_center": "mars" }),
+        json!({ "data_center": "EU" }),
+    ] {
+        assert_eq!(hosts(params.clone()), None, "{params}");
+    }
+    // An environment with no API host leaves only that empty.
+    let staging = zoho_hosts(&json!({ "data_center": "eu", "environment": "staging" })).unwrap();
+    assert_eq!(
+        (staging.auth_url.as_str(), staging.base_url.as_str()),
+        ("https://accounts.zoho.eu/oauth/v2/auth", "")
+    );
+    assert_eq!(
+        connection_types::zoho_data_center_of("https://accounts.zoho.example"),
+        None
+    );
+}
+
+#[test]
+fn zoho_crm_descriptor_resolves_its_hosts_and_asks_for_offline_access() {
+    let meta = crate::registry::find_connection_type("zoho_crm_oauth").expect("registered");
+    let oauth = meta.oauth_config.expect("an OAuth descriptor");
+    assert!(oauth.hosts.is_some());
+    assert_eq!(oauth.authorize_params, "access_type=offline&prompt=consent");
+    assert_eq!(oauth.token_header_prefix, "Zoho-oauthtoken");
+    assert!(!oauth.refresh_token_rotates);
+    assert_eq!(oauth.reauth_on_error_codes, ["invalid_code"]);
+    let data_center = meta
+        .fields
+        .iter()
+        .find(|f| f.name == "data_center")
+        .unwrap();
+    assert_eq!(
+        data_center.enum_values.unwrap_or_default().join(","),
+        "us,eu,in,au,jp,ca,sa,uk,cn"
+    );
+    // The token decides the environment: it is set after the code exchange.
+    for name in ["environment", "org_id", "org_name"] {
+        let field = meta.fields.iter().find(|f| f.name == name).unwrap();
+        assert!(
+            matches!(field.access, runtara_dsl::form::FieldAccessMode::Read),
+            "{name} is set by the host, not the user"
+        );
+    }
+}
+
+#[test]
 fn xero_descriptor_rotates_and_reads_the_organisation_back() {
     let meta = crate::registry::find_connection_type("xero_oauth").expect("registered");
     let oauth = meta.oauth_config.expect("an OAuth descriptor");

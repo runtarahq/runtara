@@ -186,6 +186,16 @@ existing connection type (`http_bearer`, `http_api_key`,
      through its API, as Xero names the organisation, is looked up after the
      code exchange in `add_provider_account_fields` (`service/oauth.rs`), and
      the auth arm sends it (`xero_oauth`).
+   - A provider that runs its login server and API per region names one
+     function that resolves all three URLs from the connection's region
+     fields, with `oauth_hosts` (`zoho_hosts`, from `data_center` and
+     `environment`, the second looked up after the code exchange in
+     `add_provider_account_fields`). The function picks from a table in code, so parameters
+     still cannot name a host; a value it does not know resolves to nothing,
+     and the flow and every request fail closed. `oauth_authorize_params`
+     appends fixed query parameters to the authorize URL (Zoho's
+     `access_type=offline&prompt=consent`), and `oauth_token_header_prefix`
+     replaces `Bearer` before the access token (`Zoho-oauthtoken`).
    - OAuth2 client credentials against the vendor's own token endpoint get a
      `describe_<vendor>_client_credentials_auth` returning
      `DeferredAuth::OAuth2ClientCredentials` (Shopify, Zendesk): the token is
