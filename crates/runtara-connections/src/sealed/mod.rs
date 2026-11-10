@@ -11,6 +11,7 @@
 //! without opening anything.
 
 pub mod keys;
+pub(crate) mod oauth;
 pub mod policy;
 #[cfg(any(test, feature = "test-util"))]
 pub mod testing;

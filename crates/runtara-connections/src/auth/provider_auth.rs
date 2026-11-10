@@ -29,6 +29,10 @@ pub struct ResolvedConnectionAuth {
     /// must be persisted back to the connection. `None` on every cache hit / fast
     /// path and for non-refresh grants. Consumed by the facade write-back.
     pub rotated_credentials: Option<RotatedCredentials>,
+    /// For a connection whose OAuth secrets are sealed: its parameters with
+    /// the sealed access token a request presents. The token was got through
+    /// seal and is never readable here.
+    pub sealed_parameters: Option<Value>,
 }
 
 /// Access + (possibly rotated) refresh token captured when an OAuth refresh fires,
@@ -83,6 +87,32 @@ pub async fn resolve_connection_auth(
     headers: &mut HashMap<String, String>,
     events: &crate::events::ConnectionEvents,
 ) -> Result<ResolvedConnectionAuth, token_cache::AuthResolutionError> {
+    resolve_connection_auth_with_seal(
+        client,
+        tenant_id,
+        connection_id,
+        integration_id,
+        params,
+        headers,
+        events,
+        None,
+    )
+    .await
+}
+
+/// [`resolve_connection_auth`], for a deployment with seal: a connection
+/// whose OAuth secrets are sealed gets its access token through it.
+#[allow(clippy::too_many_arguments)]
+pub async fn resolve_connection_auth_with_seal(
+    client: &Client,
+    tenant_id: &str,
+    connection_id: &str,
+    integration_id: &str,
+    params: &Value,
+    headers: &mut HashMap<String, String>,
+    events: &crate::events::ConnectionEvents,
+    sealed: Option<&crate::sealed::SealedCredentials>,
+) -> Result<ResolvedConnectionAuth, token_cache::AuthResolutionError> {
     // Authorized by a flow started without a browser and not yet confirmed:
     // its tokens are held apart, and the connection has none of its own.
     if params
@@ -124,16 +154,34 @@ pub async fn resolve_connection_auth(
         rotated_credentials = resolved.rotated;
     }
 
+    // A sealed client secret is no use to the request above: the access
+    // token comes through seal, already sealed for the connection's API.
+    let mut sealed_parameters = None;
+    if crate::sealed::policy::sealed_token_grant(integration_id, params).is_some() {
+        let sealed = sealed.ok_or_else(|| {
+            token_cache::AuthResolutionError::permanent(
+                "the connection's credentials are sealed, and this deployment has no seal",
+            )
+        })?;
+        let token = sealed
+            .minted_access_token(tenant_id, connection_id, integration_id, params)
+            .await?;
+        let mut presenting = params.clone();
+        presenting[crate::sealed::policy::ACCESS_TOKEN_FIELD] = token;
+        sealed_parameters = Some(presenting);
+    }
+
     Ok(ResolvedConnectionAuth {
         base_url: descriptor.base_url,
         aws_signing: descriptor.aws_signing,
         azure_signing: descriptor.azure_signing,
         mtls_client,
         rotated_credentials,
+        sealed_parameters,
     })
 }
 
-fn describe_connection_auth(
+pub(crate) fn describe_connection_auth(
     connection_id: &str,
     integration_id: &str,
     params: &Value,

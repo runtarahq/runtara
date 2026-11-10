@@ -488,7 +488,7 @@ impl ConnectionsFacade {
         let effective = app
             .as_ref()
             .map(|app| crate::oauth_apps::with_app_credentials(params, app));
-        let resolved = match provider_auth::resolve_connection_auth(
+        let resolved = match provider_auth::resolve_connection_auth_with_seal(
             &self.state.http_client,
             tenant_id,
             connection_id,
@@ -496,6 +496,7 @@ impl ConnectionsFacade {
             effective.as_ref().unwrap_or(params),
             headers,
             &self.state.connection_events,
+            self.state.sealed.as_deref(),
         )
         .await
         {

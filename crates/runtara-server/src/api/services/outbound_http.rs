@@ -655,12 +655,15 @@ async fn execute_request(
         aws_signing = resolved.aws_signing;
         azure_signing = resolved.azure_signing;
         mtls_client = resolved.mtls_client;
+        // What the request presents to seal: the connection's parameters,
+        // with the access token got for it if its OAuth secrets are sealed.
+        let presenting = resolved.sealed_parameters.unwrap_or_else(|| params.clone());
         // A sealed connection whose settings use no credential (an MCP server
         // with no auth) presents nothing, and is sent like any other.
         if conn.sealed
-            && !runtara_connections::sealed::request_fields(integration_id, &params).is_empty()
+            && !runtara_connections::sealed::request_fields(integration_id, &presenting).is_empty()
         {
-            sealed_connection = Some((integration_id.to_string(), params.clone()));
+            sealed_connection = Some((integration_id.to_string(), presenting));
         }
 
         // ── Pre-flight rate limit check ────────────────────────────────────
@@ -1514,6 +1517,7 @@ mod tests {
             azure_signing: None,
             mtls_client: None,
             rotated_credentials: None,
+            sealed_parameters: None,
         }
     }
 
@@ -1576,6 +1580,7 @@ mod tests {
             azure_signing: None,
             mtls_client: None,
             rotated_credentials: None,
+            sealed_parameters: None,
         };
         apply_aws_service_override(Some("sqs"), &mut resolved);
 
@@ -1601,6 +1606,7 @@ mod tests {
             azure_signing: None,
             mtls_client: None,
             rotated_credentials: None,
+            sealed_parameters: None,
         }
     }
 
@@ -1806,6 +1812,7 @@ mod tests {
             azure_signing: None,
             mtls_client: None,
             rotated_credentials: None,
+            sealed_parameters: None,
         }
     }
 

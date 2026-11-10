@@ -12,8 +12,10 @@ use runtara_agents::extractors::connection_types::{GEMINI_API_BASE_URL, SHIPPO_A
 use runtara_agents::registry::find_connection_type;
 use seal_format::Policy;
 use seal_format::policy::{
-    Destination, HmacHash, Host, Inject, Method, Part, Rule, Scheme, Verify,
+    Definition, Destination, HmacHash, Host, Inject, Method, Part, ResponseFormat, Rule, Scheme,
+    SealResponse, SealedField, Verify,
 };
+use seal_format::{FieldName, PolicyName};
 use serde_json::{Value, json};
 
 use crate::auth::provider_auth::{
@@ -73,8 +75,33 @@ enum Usage {
     /// for a credential that signs, or one that goes with a credential that
     /// does.
     Targets(Vec<Target>),
+    /// An OAuth client's secret: sent to its token endpoint only, where the
+    /// access token that comes back is sealed for the API.
+    ClientSecret(TokenGrant),
     /// Never sent: checks that a message came from the provider.
     Verify(HmacHash),
+}
+
+/// The field a sealed access token is presented as: the name seal seals it
+/// under as it comes back from the token endpoint.
+pub const ACCESS_TOKEN_FIELD: &str = "access_token";
+
+/// The definition, within a client secret's policy, of what its access tokens
+/// are for.
+const API_DEFINITION: &str = "api";
+
+/// How an OAuth client gets an access token, and where the token may go.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenGrant {
+    /// The token endpoint.
+    pub token_url: String,
+    /// How the client secret is sent there.
+    client: Inject,
+    /// The APIs an access token may go to, each with whether it may go
+    /// anywhere on the host.
+    api: Vec<(String, bool)>,
+    /// How an access token is sent to them.
+    token: Inject,
 }
 
 /// One destination of a secret, and how it is used there.
@@ -361,6 +388,133 @@ fn azure_blob_secrets(params: &Value) -> Option<Vec<Secret>> {
     }])
 }
 
+/// The client-credentials types, and the parameter that holds each one's
+/// client secret.
+const CLIENT_CREDENTIALS_TYPES: &[(&str, &str)] = &[
+    ("shopify_client_credentials", "client_secret"),
+    ("microsoft_entra_client_credentials", "client_secret"),
+    ("http_oauth2_client_credentials", "client_secret"),
+    ("zendesk_client_credentials", "client_secret"),
+    ("ups_client_credentials", "client_secret"),
+    ("teams_bot", "app_password"),
+];
+
+/// The Bot Connector, where a Teams bot's replies go. A conversation names
+/// its own service URL on this host; seal takes no wildcard, so the regional
+/// hosts and the other Bot Framework channels are not reached with a sealed
+/// secret.
+const TEAMS_BOT_CONNECTOR: &str = "https://smba.trafficmanager.net";
+
+/// What stands for a secret while a connection's token request is worked
+/// out: the request's shape is taken, and the stand-in never sent.
+const SECRET_STAND_IN: &str = "(sealed)";
+
+/// The parameter holding a client-credentials connection's secret.
+pub fn client_secret_field(integration_id: &str) -> Option<&'static str> {
+    CLIENT_CREDENTIALS_TYPES
+        .iter()
+        .find(|(known, _)| *known == integration_id)
+        .map(|(_, field)| *field)
+}
+
+/// A client-credentials connection's token request, as the type builds it,
+/// with a stand-in for the secret: the grant's shape, without the secret.
+pub(crate) fn client_credentials_request(
+    connection_id: &str,
+    integration_id: &str,
+    params: &Value,
+) -> Option<(crate::auth::token_cache::DeferredAuth, Option<String>)> {
+    let field = client_secret_field(integration_id)?;
+    if !holds(params, field) {
+        return None;
+    }
+    let mut stand_in = params.clone();
+    stand_in[field] = Value::String(SECRET_STAND_IN.to_owned());
+    let mut headers = std::collections::HashMap::new();
+    let described = crate::auth::provider_auth::describe_connection_auth(
+        connection_id,
+        integration_id,
+        &stand_in,
+        &mut headers,
+    );
+    Some((described.deferred_auth?, described.base_url))
+}
+
+/// How a client-credentials connection gets its access token.
+fn token_grant(integration_id: &str, params: &Value) -> Option<TokenGrant> {
+    use crate::auth::token_cache::{DeferredAuth, TokenRequestBody};
+    let (request, base_url) = client_credentials_request("", integration_id, params)?;
+    let DeferredAuth::OAuth2ClientCredentials {
+        token_url,
+        header_name,
+        header_value_prefix,
+        request_body,
+        basic_auth,
+        ..
+    } = request
+    else {
+        return None;
+    };
+    let client = match (basic_auth, request_body) {
+        (Some((client_id, _)), _) => basic(&client_id),
+        (None, TokenRequestBody::Json(_)) => Inject::JsonField {
+            pointer: "/client_secret".to_owned(),
+        },
+        (None, TokenRequestBody::FormUrlEncoded(_)) => Inject::FormField {
+            name: "client_secret".to_owned(),
+        },
+    };
+    let api = match integration_id {
+        "teams_bot" => vec![(TEAMS_BOT_CONNECTOR.to_owned(), true)],
+        _ => vec![(base_url?, false)],
+    };
+    Some(TokenGrant {
+        token_url,
+        client,
+        api,
+        token: header(
+            &header_name,
+            &format!("{}{{}}", header_value_prefix.unwrap_or_default()),
+        ),
+    })
+}
+
+/// How a connection whose client secret is sealed gets its access token, if
+/// it is of a type that gets one.
+pub fn sealed_token_grant(integration_id: &str, params: &Value) -> Option<TokenGrant> {
+    let field = client_secret_field(integration_id)?;
+    super::is_sealed(&params[field])
+        .then(|| token_grant(integration_id, params))
+        .flatten()
+}
+
+/// The policy of a client secret, and of the access tokens it gets.
+fn client_secret_policy(grant: &TokenGrant, allowances: &Allowances) -> Option<Policy> {
+    let mut to_token_endpoint = rule_for(&grant.token_url, &grant.client, false, allowances)?;
+    to_token_endpoint.seal_response = Some(SealResponse {
+        format: ResponseFormat::Json,
+        fields: vec![SealedField {
+            at: "/access_token".to_owned(),
+            as_field: FieldName::new(ACCESS_TOKEN_FIELD).ok()?,
+            policy: PolicyName::new(API_DEFINITION).ok()?,
+            expose_claims: Vec::new(),
+        }],
+    });
+    let mut to_api = Vec::new();
+    for (base_url, any_path) in &grant.api {
+        to_api.push(rule_for(base_url, &grant.token, *any_path, allowances)?);
+    }
+    Some(Policy {
+        rules: vec![to_token_endpoint],
+        definitions: BTreeMap::from([(
+            PolicyName::new(API_DEFINITION).ok()?,
+            Definition { rules: to_api },
+        )]),
+        shared: false,
+        verify: None,
+    })
+}
+
 /// Whether a connection's requests are signed by seal with SigV4. The body's
 /// hash is then the caller's to send.
 pub fn signs_with_sigv4(integration_id: &str, params: &Value) -> bool {
@@ -503,6 +657,10 @@ fn secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
             }]),
         }]),
         "aws_credentials" | "s3_compatible" => aws_secrets(integration_id, params),
+        _ if client_secret_field(integration_id).is_some() => Some(vec![Secret {
+            field: client_secret_field(integration_id)?,
+            usage: Usage::ClientSecret(token_grant(integration_id, params)?),
+        }]),
         "azure_blob_storage" => azure_blob_secrets(params),
         "http_bearer" => one("token", filled(params, "base_url")?, bearer()),
         "http_basic" => {
@@ -526,6 +684,11 @@ fn secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
 /// that are sent, and that its current settings use. A secret that only
 /// verifies is never among them, since it may go nowhere.
 pub fn request_fields(integration_id: &str, params: &Value) -> Vec<String> {
+    // A client secret goes to its token endpoint only. What a request
+    // presents is the access token got with it.
+    if client_secret_field(integration_id).is_some() {
+        return vec![ACCESS_TOKEN_FIELD.to_owned()];
+    }
     secrets(integration_id, params)
         .into_iter()
         .flatten()
@@ -555,6 +718,7 @@ pub fn injected_headers(integration_id: &str, params: &Value) -> Vec<String> {
                 ..
             } => vec![inject],
             Usage::Targets(targets) => targets.iter().map(|target| &target.inject).collect(),
+            Usage::ClientSecret(grant) => vec![&grant.token],
             _ => Vec::new(),
         };
         for header in injects.into_iter().flat_map(headers_of) {
@@ -593,6 +757,12 @@ pub const SEALABLE_TYPES: &[&str] = &[
     "s3_compatible",
     "azure_blob_storage",
     "http_mtls",
+    "shopify_client_credentials",
+    "microsoft_entra_client_credentials",
+    "http_oauth2_client_credentials",
+    "zendesk_client_credentials",
+    "ups_client_credentials",
+    "teams_bot",
     "http_bearer",
     "http_basic",
     "http_api_key",
@@ -657,6 +827,13 @@ pub fn policies(
                 shared: false,
                 verify: Some(Verify::Hmac { hash: *hash }),
             },
+            Usage::ClientSecret(grant) => {
+                let mut grant = grant.clone();
+                if let Some(api_base) = allowances.api_bases.get(integration_id) {
+                    grant.api = vec![(api_base.clone(), true)];
+                }
+                client_secret_policy(&grant, allowances)?
+            }
             Usage::Targets(targets) => {
                 let mut rules = Vec::new();
                 for target in targets {
@@ -841,6 +1018,9 @@ mod tests {
             "access_key_id": "AKIA", "aws_access_key_id": "AKIA",
             "account_name": "account",
             "client_certificate_pem": "-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----",
+            "client_id": "client", "client_secret": "s", "app_id": "app", "app_password": "s",
+            "tenant_id": "tenant", "scope": "read", "subdomain": "acme",
+            "token_url": "https://auth.example.com/token",
         });
         for integration_id in SEALABLE_TYPES {
             if !this_seal_can_seal(integration_id) {
@@ -857,9 +1037,12 @@ mod tests {
                 .filter(|field| field.is_secret)
                 .map(|field| field.name)
                 .collect();
-            // A certificate is marked secret to keep it out of the console,
-            // but it is public, and seal is given it as it is.
-            secrets.retain(|name| !["client_certificate_pem", "server_ca_pem"].contains(name));
+            // A certificate, or a client's id, may be marked secret to keep
+            // it out of the console, but it is public: seal is given it as
+            // it is.
+            secrets.retain(|name| {
+                !["client_certificate_pem", "server_ca_pem", "client_id"].contains(name)
+            });
             secrets.sort_unstable();
             let sealed: Vec<String> = policies(integration_id, &params, &Allowances::default())
                 .unwrap_or_else(|| panic!("{integration_id} is sealed"))
@@ -1090,6 +1273,196 @@ mod tests {
         let mut bare = params;
         bare["client_certificate_pem"] = json!("");
         assert_eq!(policies("http_mtls", &bare, &Allowances::default()), None);
+    }
+
+    /// The policy of a client-credentials connection's secret.
+    fn client_secret(integration_id: &str, params: Value) -> (String, Value) {
+        let policies = policies(integration_id, &params, &Allowances::default())
+            .unwrap_or_else(|| panic!("{integration_id} is sealed"));
+        assert_eq!(policies.len(), 1, "{integration_id}");
+        let (field, policy) = policies.into_iter().next().unwrap();
+        (field, canonical(&policy))
+    }
+
+    /// What a token endpoint's answer is sealed as.
+    fn sealed_access_token() -> Value {
+        json!({
+            "format": "json",
+            "fields": [{"at": "/access_token", "as": "access_token", "policy": "api"}],
+        })
+    }
+
+    #[test]
+    fn a_client_secret_goes_to_its_token_endpoint_and_its_tokens_to_the_api() {
+        let (field, policy) = client_secret(
+            "http_oauth2_client_credentials",
+            json!({
+                "client_id": "cid", "client_secret": "s",
+                "token_url": "https://auth.example.com/oauth/token",
+                "base_url": "https://api.example.com/v2",
+            }),
+        );
+        assert_eq!(field, "client_secret");
+        assert_eq!(
+            policy,
+            json!({
+                "rules": [{
+                    "destination": {
+                        "scheme": "https", "host": "auth.example.com", "path_prefix": "/oauth/token",
+                    },
+                    "inject": {"form_field": {"name": "client_secret"}},
+                    "seal_response": sealed_access_token(),
+                }],
+                "definitions": {"api": {"rules": [{
+                    "destination": {
+                        "scheme": "https", "host": "api.example.com", "path_prefix": "/v2",
+                    },
+                    "inject": {"header": {"name": "Authorization", "format": "Bearer {}"}},
+                }]}},
+            })
+        );
+        // A request presents the token, never the secret.
+        let params = json!({"client_secret": {"$sealed": {}}});
+        assert_eq!(
+            request_fields("http_oauth2_client_credentials", &params),
+            ["access_token"]
+        );
+    }
+
+    #[test]
+    fn each_client_credentials_type_sends_its_secret_as_it_always_did() {
+        // In an `Authorization: Basic` header, with the client's id.
+        let (_, ups) = client_secret(
+            "ups_client_credentials",
+            json!({"client_id": "cid", "client_secret": "s"}),
+        );
+        assert_eq!(
+            ups["rules"][0]["inject"],
+            json!({"basic": {"username": {"literal": "cid"}}})
+        );
+        assert_eq!(
+            ups["rules"][0]["destination"]["path_prefix"],
+            "/security/v1/oauth/token"
+        );
+        let (_, generic) = client_secret(
+            "http_oauth2_client_credentials",
+            json!({
+                "client_id": "cid", "client_secret": "s", "token_auth": "basic",
+                "token_url": "https://auth.example.com/token",
+                "base_url": "https://api.example.com",
+            }),
+        );
+        assert_eq!(
+            generic["rules"][0]["inject"],
+            json!({"basic": {"username": {"literal": "cid"}}})
+        );
+
+        // In a JSON body, and the token in the provider's own header.
+        let (_, shopify) = client_secret(
+            "shopify_client_credentials",
+            json!({"shop_domain": "acme.myshopify.com", "client_id": "cid", "client_secret": "s"}),
+        );
+        assert_eq!(
+            shopify["rules"][0],
+            json!({
+                "destination": {
+                    "scheme": "https", "host": "acme.myshopify.com",
+                    "path_prefix": "/admin/oauth/access_token",
+                },
+                "inject": {"json_field": {"pointer": "/client_secret"}},
+                "seal_response": sealed_access_token(),
+            })
+        );
+        assert_eq!(
+            shopify["definitions"]["api"]["rules"],
+            json!([{
+                "destination": {"scheme": "https", "host": "acme.myshopify.com"},
+                "inject": {"header": {"name": "X-Shopify-Access-Token", "format": "{}"}},
+            }])
+        );
+        assert_eq!(
+            injected_headers(
+                "shopify_client_credentials",
+                &json!({"shop_domain": "acme.myshopify.com", "client_id": "cid", "client_secret": "s"})
+            ),
+            ["X-Shopify-Access-Token"]
+        );
+        let (_, zendesk) = client_secret(
+            "zendesk_client_credentials",
+            json!({"subdomain": "acme", "client_id": "cid", "client_secret": "s"}),
+        );
+        assert_eq!(
+            zendesk["rules"][0]["inject"],
+            json!({"json_field": {"pointer": "/client_secret"}})
+        );
+        assert_eq!(
+            zendesk["rules"][0]["destination"]["host"],
+            "acme.zendesk.com"
+        );
+
+        // In a form body, to the tenant's own Entra authority.
+        let (_, entra) = client_secret(
+            "microsoft_entra_client_credentials",
+            json!({
+                "tenant_id": "tenant-1", "client_id": "cid", "client_secret": "s",
+                "scope": "https://graph.microsoft.com/.default",
+                "base_url": "https://graph.microsoft.com",
+            }),
+        );
+        assert_eq!(
+            entra["rules"][0]["destination"],
+            json!({
+                "scheme": "https", "host": "login.microsoftonline.com",
+                "path_prefix": "/tenant-1/oauth2/v2.0/token",
+            })
+        );
+        assert_eq!(
+            entra["rules"][0]["inject"],
+            json!({"form_field": {"name": "client_secret"}})
+        );
+    }
+
+    #[test]
+    fn a_teams_bots_token_goes_to_the_bot_connector() {
+        let (field, policy) = client_secret(
+            "teams_bot",
+            json!({"app_id": "app-1", "app_password": "s", "azure_tenant_id": "tenant-1"}),
+        );
+        assert_eq!(field, "app_password");
+        assert_eq!(
+            policy["rules"][0]["destination"]["path_prefix"],
+            "/tenant-1/oauth2/v2.0/token"
+        );
+        // A conversation's service URL is a path on this host.
+        assert_eq!(
+            policy["definitions"]["api"]["rules"],
+            json!([{
+                "destination": {"scheme": "https", "host": "smba.trafficmanager.net"},
+                "inject": {"header": {"name": "Authorization", "format": "Bearer {}"}},
+            }])
+        );
+    }
+
+    #[test]
+    fn a_client_secret_with_nowhere_to_go_is_not_sealed() {
+        // No token endpoint, or no API.
+        for params in [
+            json!({"client_id": "cid", "client_secret": "s", "base_url": "https://api.example.com"}),
+            json!({"client_id": "cid", "client_secret": "s", "token_url": "https://auth.example.com/token"}),
+            json!({"client_id": "cid", "client_secret": "s",
+                "token_url": "https://auth.example.com/token?tenant=1",
+                "base_url": "https://api.example.com"}),
+        ] {
+            assert_eq!(
+                policies(
+                    "http_oauth2_client_credentials",
+                    &params,
+                    &Allowances::default()
+                ),
+                None,
+                "{params}"
+            );
+        }
     }
 
     #[test]
@@ -1353,7 +1726,7 @@ mod tests {
 
     #[test]
     fn a_type_seal_does_not_handle_yet_is_not_sealed() {
-        for integration_id in ["quickbooks_online", "teams_bot", "nope"] {
+        for integration_id in ["quickbooks_online", "xero_oauth", "postgres", "nope"] {
             let params = json!({"api_key": "s", "base_url": "https://api.example.com"});
             assert_eq!(
                 policies(integration_id, &params, &Allowances::default()),

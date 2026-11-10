@@ -18,6 +18,8 @@ pub enum ReplyAuth {
     /// A token this process holds, which the provider takes in the URL's
     /// path: the caller writes it there.
     InPath(String),
+    /// An `Authorization` header this process holds, sent as it is.
+    Header(String),
     /// The connection's secret is sealed: seal attaches it and sends the
     /// reply, and refuses any destination the secret's policy does not allow.
     Sealed {
@@ -67,6 +69,18 @@ impl ReplyAuth {
         content_type: &str,
         body: Vec<u8>,
     ) -> anyhow::Result<(u16, serde_json::Value)> {
+        let (status, bytes) = self.post(client, url, content_type, body).await?;
+        Ok((status, serde_json::from_slice(&bytes)?))
+    }
+
+    /// POSTs `body` and returns the response's status and body.
+    async fn post(
+        &self,
+        client: &reqwest::Client,
+        url: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> anyhow::Result<(u16, Vec<u8>)> {
         let (status, bytes) = match self {
             Self::Sealed {
                 connections,
@@ -115,6 +129,7 @@ impl ReplyAuth {
                         request.basic_auth(username, Some(password))
                     }
                     Self::InPath(_) => request,
+                    Self::Header(authorization) => request.header("Authorization", authorization),
                     Self::Sealed { .. } => unreachable!("handled above"),
                 };
                 // The URL may hold the token, and reqwest's errors name it.
@@ -124,7 +139,7 @@ impl ReplyAuth {
                 (status, bytes.to_vec())
             }
         };
-        Ok((status, serde_json::from_slice(&bytes)?))
+        Ok((status, bytes))
     }
 }
 
@@ -370,7 +385,8 @@ impl Channel for TeamsChannel {
             // Mint the Bot Connector token through the shared connection-auth
             // path (correct single-tenant authority + process token cache).
             let mut headers = std::collections::HashMap::new();
-            self.facade
+            let resolved = self
+                .facade
                 .resolve_connection_auth(
                     &self.connection_id,
                     &self.tenant_id,
@@ -380,10 +396,21 @@ impl Channel for TeamsChannel {
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("Teams auth resolution failed: {e}"))?;
-            let authorization = headers
-                .get("Authorization")
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("Teams auth did not yield a bearer token"))?;
+            // A sealed app password gets a sealed token: seal attaches it and
+            // sends the reply. Otherwise the token is this process's to send.
+            let auth =
+                match resolved.sealed_parameters {
+                    Some(parameters) => ReplyAuth::Sealed {
+                        connections: self.facade.clone(),
+                        tenant_id: self.tenant_id.clone(),
+                        connection_id: self.connection_id.clone(),
+                        integration_id: "teams_bot".to_string(),
+                        parameters,
+                    },
+                    None => ReplyAuth::Header(headers.get("Authorization").cloned().ok_or_else(
+                        || anyhow::anyhow!("Teams auth did not yield a bearer token"),
+                    )?),
+                };
 
             let url = format!(
                 "{}/v3/conversations/{}/activities",
@@ -393,22 +420,23 @@ impl Channel for TeamsChannel {
 
             // Teams has a ~28KB message limit. Split at 4000 chars for safety.
             for chunk in split_message(&text, 4000) {
-                let resp = self
-                    .client
-                    .post(&url)
-                    .header("Authorization", &authorization)
-                    .json(&json!({
-                        "type": "message",
-                        "text": chunk,
-                        // Keep the Teams compose box enabled after replies.
-                        "inputHint": "acceptingInput",
-                    }))
-                    .send()
+                let activity = json!({
+                    "type": "message",
+                    "text": chunk,
+                    // Keep the Teams compose box enabled after replies.
+                    "inputHint": "acceptingInput",
+                });
+                let (status, body) = auth
+                    .post(
+                        &self.client,
+                        &url,
+                        "application/json",
+                        serde_json::to_vec(&activity)?,
+                    )
                     .await?;
 
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
+                if !(200..300).contains(&status) {
+                    let body = String::from_utf8_lossy(&body).into_owned();
                     tracing::warn!(
                         conversation = %conversation_id,
                         status = %status,
