@@ -1,0 +1,58 @@
+{
+  "info": {
+    "count": 1,
+    "more_records": false,
+    "page": 1,
+    "per_page": 200
+  },
+  "users": [
+    {
+      "$current_shift": {
+        "id": "111133000000012345",
+        "name": "Morning Shift"
+      },
+      "$next_shift": {
+        "id": "111133000000023456",
+        "name": "Evening Shift"
+      },
+      "$shift_effective_from": null,
+      "Modified_By": {
+        "id": "111133000000057662",
+        "name": "Thuvassshhhh test test"
+      },
+      "Modified_Time": "2025-12-08T16:53:16+05:30",
+      "Reporting_To": null,
+      "alias": "aaaa",
+      "confirm": true,
+      "created_by": {
+        "id": "111133000000057662",
+        "name": "Thuvassshhhh test test"
+      },
+      "created_time": "2025-11-12T11:20:12+05:30",
+      "date_format": "MM/dd/yyyy",
+      "decimal_separator": "Period",
+      "email": "user@example.com",
+      "first_name": "Thuvassshhhh",
+      "full_name": "Thuvassshhhh test test",
+      "id": "111133000000057662",
+      "image_link": "https://profile.csez.zohocorpin.com/file?ID=43318041&fs=thumb",
+      "last_name": "test test",
+      "locale": "en_US",
+      "microsoft": false,
+      "phone": null,
+      "profile": {
+        "id": "111133000000000497",
+        "name": "Administrator"
+      },
+      "role": {
+        "id": "111133000000000861",
+        "name": "CEO"
+      },
+      "sandboxDeveloper": false,
+      "status": "disabled",
+      "status_reason__s": null,
+      "type__s": "Regular User",
+      "zuid": "43318041"
+    }
+  ]
+}

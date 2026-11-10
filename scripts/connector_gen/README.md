@@ -200,13 +200,16 @@ specs:
 ```
 
 `fetch` slices each spec and merges the slices into one `spec.slice.json`.
-The specs must list the same `servers`, and no path and method may be in two
+The specs must list the same `servers` (URLs and variable values; their
+descriptions may differ, as Zoho's do), and no path and method may be in two
 of them. A schema that two specs define differently under one generated name
 gets the spec's name in front in each of them (`ErrorResponse` becomes
 `TrackingErrorResponse` and `ShippingErrorResponse`); one they define the same
-way is kept once. A `body_envelopes`, `connection_headers`,
-`connection_parameters` or `pinned_path_parameters` name has to match in one
-of the specs.
+way is kept once. So does any other component, such as a shared parameter
+(Zoho's `Module` becomes `RecordsModule` and `SearchModule`), which the
+generated code never shows. A `body_envelopes`, `connection_headers`,
+`connection_parameters`, `pinned_path_parameters`, `omit_parameters` or
+`read_operations` name has to match in one of the specs.
 
 **The connection sends a header** every operation declares, such as UPS's
 `transId` (unique per request) and `transactionSrc`. List it, and it is no
@@ -301,6 +304,25 @@ input_types:
   thread_ts: string
 ```
 
+**No step input can carry a parameter**, such as Zoho's `filters`, a nested
+filter object `fetch` refuses. List it, and the operations that take it are
+generated without it; another operation (a search, a query) covers the need:
+
+```yaml
+omit_parameters:
+  - filters
+  - cross_filters
+```
+
+**An operation only reads, though its method is not GET**, such as a query sent
+as a POST (Zoho's COQL). List it, and the step is not marked as having side
+effects:
+
+```yaml
+read_operations:
+  - executeCOQLQuery
+```
+
 **The agent accepts several connection types** for the same API (an OAuth
 client and an API token, say): list them all.
 
@@ -338,7 +360,12 @@ crates/agents/runtara-agent-<id>/
   add theirs to those, and leave the declared ones as they are. A body that is
   not an object, is composed of anything but objects, or requires a field it
   does not declare stays a single `body` input. Non-GET operations are marked
-  `side_effects`.
+  `side_effects`, except those listed in `read_operations`.
+- A model is a struct named after its schema in PascalCase; an inline schema is
+  named after its operation, acronyms kept (`executeCOQLQuery`'s response is
+  `ExecuteCOQLQuery200Response`). A field takes its property's name in snake
+  case, with runs of `_` made one (Zoho's `status_reason__s` is the field
+  `status_reason_s`); the wire name stays.
 - An exploded array query parameter (the OpenAPI default) is sent as
   `ids=1&ids=2`; with `explode: false` it is sent as `ids=1,2`. Items typed as
   an object with no declared fields (Jira's `StringList`) are sent as strings.

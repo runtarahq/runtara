@@ -1,0 +1,63 @@
+{
+  "org": [
+    {
+      "alias": "acme",
+      "call_icon": "show",
+      "checkin_preferences": {
+        "restricted_event_types": null
+      },
+      "city": "Austin",
+      "company_name": "Acme Inc.",
+      "country": "US",
+      "country_code": "US",
+      "created_time": "2023-01-01T12:00:00Z",
+      "currency": "US Dollar - USD",
+      "currency_locale": "USD",
+      "currency_symbol": "$",
+      "deletable_org_account": false,
+      "description": "Main office",
+      "domain_name": "acmeinc",
+      "employee_count": "100",
+      "ezgid": "ezgid123",
+      "fax": null,
+      "gapps_enabled": false,
+      "hierarchy_preferences": {
+        "strictly_reporting": false,
+        "type": "Role_Hierarchy"
+      },
+      "hipaa_compliance_enabled": false,
+      "id": "1234567890",
+      "iso_code": "US",
+      "license_details": {
+        "paid": false,
+        "paid_expiry": null,
+        "paid_type": "free",
+        "portal_users_license_purchased": 0,
+        "trial_action": "Update Evaluation",
+        "trial_expiry": "2025-12-04T17:26:17+05:30",
+        "trial_type": "enterprise",
+        "users_license_purchased": 3
+      },
+      "lite_users_enabled": false,
+      "max_per_page": 200,
+      "mc_status": true,
+      "mobile": null,
+      "oauth_presence": true,
+      "phone": "+915551234",
+      "photo_id": null,
+      "primary_email": "acmeadmin@acmei.com",
+      "primary_zuid": "zuid123",
+      "privacy_settings": true,
+      "state": "TX",
+      "street": "123 Main St",
+      "time_zone": "America/Chicago",
+      "translation_enabled": false,
+      "type": "production",
+      "website": "www.acmeinc.com",
+      "zgid": "zgid123",
+      "zia_portal_id": null,
+      "zia_zgid": 12345,
+      "zip": "78701"
+    }
+  ]
+}

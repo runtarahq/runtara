@@ -144,6 +144,9 @@ pub(crate) enum DeferredAuth {
         cache_key: TokenCacheKey,
         token_url: String,
         header_name: String,
+        /// The word before the access token in the header: `Bearer`, or the
+        /// provider's own (Zoho's `Zoho-oauthtoken`).
+        header_scheme: String,
         client_id: String,
         client_secret: String,
         refresh_token: String,
@@ -196,6 +199,7 @@ pub(crate) async fn resolve_deferred_auth(
             cache_key,
             token_url,
             header_name,
+            header_scheme,
             client_id,
             client_secret,
             refresh_token,
@@ -217,7 +221,7 @@ pub(crate) async fn resolve_deferred_auth(
                 );
                 return Ok(ResolvedDeferredAuth::header_only(
                     header_name,
-                    format!("Bearer {access_token}"),
+                    format!("{header_scheme} {access_token}"),
                 ));
             }
 
@@ -225,7 +229,7 @@ pub(crate) async fn resolve_deferred_auth(
             if let Some(token) = get_fresh_cached_token(&cache_key) {
                 return Ok(ResolvedDeferredAuth::header_only(
                     header_name,
-                    format!("Bearer {token}"),
+                    format!("{header_scheme} {token}"),
                 ));
             }
 
@@ -239,7 +243,7 @@ pub(crate) async fn resolve_deferred_auth(
             if let Some(token) = get_fresh_cached_token(&cache_key) {
                 return Ok(ResolvedDeferredAuth::header_only(
                     header_name,
-                    format!("Bearer {token}"),
+                    format!("{header_scheme} {token}"),
                 ));
             }
 
@@ -279,7 +283,7 @@ pub(crate) async fn resolve_deferred_auth(
                             expires_at: tr.expires_at,
                         },
                     );
-                    let header_value = format!("Bearer {}", tr.access_token);
+                    let header_value = format!("{header_scheme} {}", tr.access_token);
                     Ok(ResolvedDeferredAuth {
                         header_name,
                         header_value,
@@ -465,6 +469,11 @@ async fn parse_token_response(
         );
     }
 
+    if let Some(refusal) = refusal_with_success_status(status, &body) {
+        tracing::debug!(status = %status, body = %body, "token endpoint refused the grant");
+        return Err(refusal);
+    }
+
     let access_token = body["access_token"]
         .as_str()
         .ok_or_else(|| {
@@ -481,6 +490,25 @@ async fn parse_token_response(
         expires_at: token_expiry(&body, default_ttl_seconds),
         refresh_token,
     })
+}
+
+/// A refusal some providers (Zoho) answer with a 2xx: no `access_token`, and an
+/// OAuth `error`. It is the same refusal as a 4xx, so permanent like one, with
+/// the code in the message for the descriptor's reauth codes to match.
+fn refusal_with_success_status(
+    status: reqwest::StatusCode,
+    body: &Value,
+) -> Option<AuthResolutionError> {
+    if body.get("access_token").is_some() {
+        return None;
+    }
+    let code = body["error"].as_str()?;
+    let desc = body["error_description"].as_str().unwrap_or("");
+    Some(AuthResolutionError::permanent(
+        format!("Token endpoint returned {status}: {code} {desc}")
+            .trim()
+            .to_string(),
+    ))
 }
 
 /// When the token expires: after its `expires_in`, or after the default
@@ -775,6 +803,7 @@ mod tests {
             cache_key: key("conn-1", "hubspot-cache"),
             token_url: "https://example.com/token".to_string(),
             header_name: "Authorization".to_string(),
+            header_scheme: "Bearer".to_string(),
             client_id: "id".to_string(),
             client_secret: "secret".to_string(),
             refresh_token: "refresh".to_string(),
@@ -951,11 +980,61 @@ mod tests {
         assert!(!err.permanent, "429 is transient: {err}");
     }
 
+    #[test]
+    fn a_refusal_answered_with_200_is_permanent() {
+        // Zoho answers a dead refresh token with 200 and an OAuth `error`.
+        let err = refusal_with_success_status(
+            reqwest::StatusCode::OK,
+            &serde_json::json!({ "error": "invalid_code" }),
+        )
+        .expect("a refusal");
+        assert!(err.permanent, "a refused grant is permanent: {err}");
+        assert!(err.message.contains("invalid_code"), "{err}");
+        // A token, even beside an `error`, is no refusal; nor is a body without either.
+        for body in [
+            serde_json::json!({ "access_token": "a", "error": "x" }),
+            serde_json::json!({ "expires_in": 3600 }),
+        ] {
+            assert!(
+                refusal_with_success_status(reqwest::StatusCode::OK, &body).is_none(),
+                "{body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_access_token_follows_the_providers_scheme() {
+        let auth = DeferredAuth::OAuth2RefreshToken {
+            cache_key: key("conn-scheme", "zoho-scheme"),
+            token_url: "http://127.0.0.1:9/token".to_string(),
+            header_name: "Authorization".to_string(),
+            header_scheme: "Zoho-oauthtoken".to_string(),
+            client_id: "id".to_string(),
+            client_secret: "secret".to_string(),
+            refresh_token: "refresh".to_string(),
+            token_endpoint_auth: TokenEndpointAuth::FormBody,
+            fallback_access_token: Some("1000.access".to_string()),
+            fallback_expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+        };
+        let resolved = resolve_deferred_auth(
+            &Client::new(),
+            auth,
+            &None,
+            "tenant-1",
+            "conn-scheme",
+            "zoho_crm_oauth",
+        )
+        .await
+        .expect("a fresh stored token needs no refresh");
+        assert_eq!(resolved.header_value, "Zoho-oauthtoken 1000.access");
+    }
+
     fn refresh_auth(cache_key: TokenCacheKey, token_url: String) -> DeferredAuth {
         DeferredAuth::OAuth2RefreshToken {
             cache_key,
             token_url,
             header_name: "Authorization".to_string(),
+            header_scheme: "Bearer".to_string(),
             client_id: "id".to_string(),
             client_secret: "secret".to_string(),
             refresh_token: "refresh".to_string(),
@@ -1088,6 +1167,7 @@ mod tests {
             cache_key: key("conn-42", "rec-refresh-cache"),
             token_url: "http://127.0.0.1:1/token".to_string(),
             header_name: "Authorization".to_string(),
+            header_scheme: "Bearer".to_string(),
             client_id: "id".to_string(),
             client_secret: "secret".to_string(),
             refresh_token: "refresh".to_string(),
@@ -1131,6 +1211,7 @@ mod tests {
             cache_key: key("conn-1", "rec-fallback-cache"),
             token_url: "https://example.com/token".to_string(),
             header_name: "Authorization".to_string(),
+            header_scheme: "Bearer".to_string(),
             client_id: "id".to_string(),
             client_secret: "secret".to_string(),
             refresh_token: "refresh".to_string(),
@@ -1164,6 +1245,7 @@ mod tests {
             cache_key: key("conn-neg", "neg-cache-test"),
             token_url: "http://127.0.0.1:1/token".to_string(),
             header_name: "Authorization".to_string(),
+            header_scheme: "Bearer".to_string(),
             client_id: "id".to_string(),
             client_secret: "secret".to_string(),
             refresh_token: "refresh".to_string(),

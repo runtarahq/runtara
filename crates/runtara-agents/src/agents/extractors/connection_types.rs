@@ -10,6 +10,7 @@
 
 use crate::extractors::{HttpConnectionConfig, HttpConnectionExtractor};
 use runtara_agent_macro::ConnectionParams;
+use runtara_dsl::agent_meta::OAuthHosts;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -1129,6 +1130,207 @@ impl HttpConnectionExtractor for XeroOAuthExtractor {
             && params.get("oauth_app").and_then(|v| v.as_str()).is_none()
         {
             return Err("Invalid xero_oauth connection: missing client_id".to_string());
+        }
+
+        let mut headers = HashMap::new();
+        headers.insert("Accept".to_string(), "application/json".to_string());
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+
+        Ok(HttpConnectionConfig {
+            headers,
+            query_parameters: HashMap::new(),
+            url_prefix: String::new(),
+            rate_limit_config: None,
+        })
+    }
+}
+
+/// Zoho CRM, authorized through a Zoho API Console "server-based application":
+/// the tenant's own (Client ID and Secret below) or a platform app.
+///
+/// Zoho runs its login server and its API per data centre, and the API host
+/// also names the environment: `www.` for production, `developer.` for the
+/// free Developer Edition, `sandbox.` for a sandbox. The user picks the data
+/// centre; the environment is the one of the organisation chosen on Zoho's
+/// consent screen, which the host looks up after the code exchange (a token
+/// works on its own environment's host only). [`zoho_hosts`] resolves all
+/// three URLs from `data_center` and `environment`; a pair it does not know
+/// leaves no URLs, so nothing is authorized or sent. Zoho issues a refresh token only for
+/// `access_type=offline`, does not rotate it, and keeps at most 20 per user
+/// and client, dropping the oldest. Its API reads the access token after
+/// `Zoho-oauthtoken`.
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "zoho_crm_oauth",
+    display_name = "Zoho CRM",
+    description = "Connect to the Zoho CRM API with OAuth 2.0 authorization",
+    category = "crm",
+    auth_type = "oauth2_authorization_code",
+    oauth_auth_url = "https://accounts.zoho.com/oauth/v2/auth",
+    oauth_token_url = "https://accounts.zoho.com/oauth/v2/token",
+    oauth_default_scopes = "ZohoCRM.modules.ALL ZohoCRM.settings.modules.READ ZohoCRM.users.READ ZohoCRM.org.READ ZohoCRM.coql.READ",
+    oauth_hosts = "zoho_hosts",
+    oauth_authorize_params = "access_type=offline&prompt=consent",
+    oauth_token_header_prefix = "Zoho-oauthtoken",
+    oauth_reauth_on_error_codes = "invalid_code"
+)]
+pub struct ZohoCrmOAuthParams {
+    /// Zoho API Console client ID
+    #[field(
+        display_name = "Client ID",
+        description = "Client ID of your server-based application in the Zoho API Console",
+        requires_reauthorization
+    )]
+    pub client_id: String,
+
+    /// Zoho API Console client secret
+    #[field(
+        display_name = "Client Secret",
+        description = "Client secret of your server-based application in the Zoho API Console",
+        secret,
+        requires_reauthorization
+    )]
+    pub client_secret: String,
+
+    /// The Zoho data centre the account lives in
+    #[serde(default = "default_zoho_data_center")]
+    #[field(
+        display_name = "Data Centre",
+        description = "Where your Zoho account lives, as your CRM's address shows: crm.zoho.com is us, \
+                       crm.zoho.eu is eu, .in is in, .com.au is au, .jp is jp, zohocloud.ca is ca, \
+                       .sa is sa, .uk is uk, .com.cn is cn",
+        default = "us",
+        enum_values = "us,eu,in,au,jp,ca,sa,uk,cn",
+        requires_reauthorization
+    )]
+    pub data_center: String,
+
+    /// The environment of the organisation the token is bound to, set after the code exchange
+    #[serde(default = "default_zoho_environment")]
+    #[field(
+        display_name = "Environment",
+        description = "Set automatically after authorization, from the organisation chosen on \
+                       Zoho's consent screen: production, developer (a Developer Edition) or sandbox",
+        access = "read"
+    )]
+    pub environment: String,
+
+    /// The organisation the token is bound to, set after the code exchange
+    #[serde(default)]
+    #[field(
+        display_name = "Organisation ID",
+        description = "The Zoho CRM organisation this connection uses, set automatically after authorization",
+        access = "read"
+    )]
+    pub org_id: Option<String>,
+
+    /// The organisation's name, for display
+    #[serde(default)]
+    #[field(
+        display_name = "Organisation",
+        description = "Name of the Zoho CRM organisation, set automatically after authorization",
+        access = "read"
+    )]
+    pub org_name: Option<String>,
+
+    /// OAuth2 scopes (space-separated)
+    #[serde(default = "default_zoho_crm_scopes")]
+    #[field(
+        display_name = "Scopes",
+        description = "Space-separated OAuth2 scopes. The default reads and writes records of every \
+                       module and reads modules, users, the organisation and COQL queries.",
+        default = "ZohoCRM.modules.ALL ZohoCRM.settings.modules.READ ZohoCRM.users.READ ZohoCRM.org.READ ZohoCRM.coql.READ",
+        requires_reauthorization
+    )]
+    pub scopes: String,
+}
+
+fn default_zoho_data_center() -> String {
+    "us".to_string()
+}
+
+fn default_zoho_environment() -> String {
+    "production".to_string()
+}
+
+fn default_zoho_crm_scopes() -> String {
+    "ZohoCRM.modules.ALL ZohoCRM.settings.modules.READ ZohoCRM.users.READ ZohoCRM.org.READ ZohoCRM.coql.READ"
+        .to_string()
+}
+
+/// Zoho's data centres: the `data_center` value, the login (accounts) server
+/// and the API domain that `www.`, `developer.` or `sandbox.` go in front of.
+/// Canada's login server is the odd one out.
+const ZOHO_DATA_CENTERS: &[(&str, &str, &str)] = &[
+    ("us", "accounts.zoho.com", "zohoapis.com"),
+    ("eu", "accounts.zoho.eu", "zohoapis.eu"),
+    ("in", "accounts.zoho.in", "zohoapis.in"),
+    ("au", "accounts.zoho.com.au", "zohoapis.com.au"),
+    ("jp", "accounts.zoho.jp", "zohoapis.jp"),
+    ("ca", "accounts.zohocloud.ca", "zohoapis.ca"),
+    ("sa", "accounts.zoho.sa", "zohoapis.sa"),
+    ("uk", "accounts.zoho.uk", "zohoapis.uk"),
+    ("cn", "accounts.zoho.com.cn", "zohoapis.com.cn"),
+];
+
+/// The OAuth endpoints and API host of a Zoho connection, from its
+/// `data_center` and `environment`; `None` for a value not in the table, or
+/// for China's Developer Edition, which has no API host.
+pub fn zoho_hosts(params: &Value) -> Option<OAuthHosts> {
+    let data_center = params["data_center"].as_str().unwrap_or("us");
+    let (_, accounts, api) = ZOHO_DATA_CENTERS
+        .iter()
+        .find(|(key, _, _)| *key == data_center)?;
+    let prefix = match params["environment"].as_str().unwrap_or("production") {
+        "production" => "www",
+        "developer" if data_center != "cn" => "developer",
+        "sandbox" => "sandbox",
+        _ => return None,
+    };
+    Some(OAuthHosts {
+        auth_url: format!("https://{accounts}/oauth/v2/auth"),
+        token_url: format!("https://{accounts}/oauth/v2/token"),
+        base_url: format!("https://{prefix}.{api}"),
+    })
+}
+
+/// The `data_center` whose login server is `accounts_server` (a URL such as
+/// `https://accounts.zoho.eu`, as Zoho names it on the OAuth callback).
+pub fn zoho_data_center_of(accounts_server: &str) -> Option<&'static str> {
+    let host = accounts_server
+        .trim()
+        .trim_start_matches("https://")
+        .trim_end_matches('/');
+    ZOHO_DATA_CENTERS
+        .iter()
+        .find(|(_, accounts, _)| accounts.eq_ignore_ascii_case(host))
+        .map(|(key, _, _)| *key)
+}
+
+/// HTTP extractor for Zoho CRM connections. The proxy resolves the token and
+/// the region's API host from the connection, so the values here only serve
+/// the extractor contract and let the generic `http` agent bind a
+/// `zoho_crm_oauth` connection.
+pub struct ZohoCrmOAuthExtractor;
+
+impl HttpConnectionExtractor for ZohoCrmOAuthExtractor {
+    fn integration_id(&self) -> &'static str {
+        "zoho_crm_oauth"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        if params.get("client_id").and_then(|v| v.as_str()).is_none()
+            && params.get("oauth_app").and_then(|v| v.as_str()).is_none()
+        {
+            return Err("Invalid zoho_crm_oauth connection: missing client_id".to_string());
+        }
+        if zoho_hosts(params).is_none() {
+            return Err(format!(
+                "Invalid zoho_crm_oauth connection: no Zoho API host for data centre `{}` and \
+                 environment `{}`",
+                params["data_center"].as_str().unwrap_or("us"),
+                params["environment"].as_str().unwrap_or("production"),
+            ));
         }
 
         let mut headers = HashMap::new();
@@ -2414,6 +2616,10 @@ mod form_condition_tests {
             (
                 &__CONNECTION_META_XeroOAuthParams,
                 &["client_id", "client_secret", "scopes"][..],
+            ),
+            (
+                &__CONNECTION_META_ZohoCrmOAuthParams,
+                &["client_id", "client_secret", "data_center", "scopes"][..],
             ),
             (
                 &__CONNECTION_META_HttpOAuth2AuthorizationCodeParams,

@@ -135,6 +135,17 @@ pub fn get_default_rate_limit_config(integration_id: &str) -> Option<RateLimitCo
             max_retries: 3,
             max_wait_ms: 60000,
         }),
+        // Zoho CRM: credits per rolling 24 hours (5,000 on the Free edition, more
+        // per user on paid ones) and a cap on concurrent calls per edition, 5 to
+        // 25 (Free and Developer allow the fewest). 2 req/s with a burst of 5
+        // keeps a run to the lowest concurrency; a 429 is retried after its wait.
+        "zoho_crm_oauth" => Some(RateLimitConfigDto {
+            requests_per_second: 2,
+            burst_size: 5,
+            retry_on_limit: true,
+            max_retries: 3,
+            max_wait_ms: 60000,
+        }),
         // Pipedrive: API-token requests are limited per token over a 2-second
         // window, from 20 per window on the Essential plan up to 120 on Enterprise.
         // 5 req/s with burst 10 can never exceed 20 in any 2-second window.
@@ -281,6 +292,15 @@ mod tests {
         assert_eq!(config.requests_per_second, 1);
         assert!(config.burst_size <= 5);
         assert!(config.burst_size + config.requests_per_second * 60 <= 65);
+        assert!(config.retry_on_limit);
+    }
+
+    #[test]
+    fn test_zoho_crm_defaults_keep_to_the_lowest_concurrency() {
+        let config = get_default_rate_limit_config("zoho_crm_oauth").unwrap();
+        // Zoho's Free and Developer editions allow 5 calls at once.
+        assert!(config.burst_size <= 5);
+        assert!(config.requests_per_second <= 5);
         assert!(config.retry_on_limit);
     }
 

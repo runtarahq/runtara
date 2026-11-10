@@ -223,7 +223,10 @@ fn describe_connection_auth(
         // OAuth2 authorization-code integrations are fully descriptor-driven: base URL,
         // token-endpoint auth style, refresh rotation and extra callback params all come
         // from the connection type's OAuthConfig (see runtara-dsl agent_meta).
-        "hubspot_private_app" | "quickbooks_online" | "http_oauth2_authorization_code" => {
+        "hubspot_private_app"
+        | "quickbooks_online"
+        | "zoho_crm_oauth"
+        | "http_oauth2_authorization_code" => {
             describe_oauth_authcode_auth(connection_id, integration_id, params, headers)
         }
         // One Xero token reaches every organisation its user authorized; each
@@ -790,9 +793,17 @@ pub(crate) fn resolve_effective_oauth_config(
     params: &Value,
 ) -> EffectiveOAuthConfig {
     if !cfg.params_driven {
+        // A provider that runs its endpoints per region resolves them from the
+        // connection's region; one it does not know leaves none, so nothing is
+        // authorized against or refreshed from a guessed host.
+        let (auth_url, token_url) = match cfg.hosts.map(|hosts| hosts(params)) {
+            Some(Some(hosts)) => (hosts.auth_url, hosts.token_url),
+            Some(None) => (String::new(), String::new()),
+            None => (cfg.auth_url.to_string(), cfg.token_url.to_string()),
+        };
         return EffectiveOAuthConfig {
-            auth_url: cfg.auth_url.to_string(),
-            token_url: cfg.token_url.to_string(),
+            auth_url,
+            token_url,
             token_endpoint_auth: cfg.token_endpoint_auth,
             pkce_required: cfg.pkce_required,
             refresh_token_rotates: cfg.refresh_token_rotates,
@@ -855,9 +866,20 @@ fn describe_oauth_authcode_auth(
     params: &Value,
     headers: &mut HashMap<String, String>,
 ) -> ConnectionAuthDescriptor {
-    let base_url = find_connection_type(integration_id)
-        .and_then(|meta| meta.oauth_config)
-        .and_then(|cfg| resolve_oauth_base_url(cfg, params));
+    let oauth_config = find_connection_type(integration_id).and_then(|meta| meta.oauth_config);
+    // A region the descriptor does not know has no hosts: no destination and
+    // no credentials, so no token goes anywhere.
+    if let Some(hosts) = oauth_config.and_then(|cfg| cfg.hosts)
+        && hosts(params).is_none()
+    {
+        return ConnectionAuthDescriptor {
+            base_url: None,
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: None,
+        };
+    }
+    let base_url = oauth_config.and_then(|cfg| resolve_oauth_base_url(cfg, params));
 
     match describe_oauth_refresh_auth(connection_id, integration_id, params, "Authorization") {
         Some(auth) => ConnectionAuthDescriptor {
@@ -868,7 +890,8 @@ fn describe_oauth_authcode_auth(
         },
         None => {
             if let Some(token) = params["access_token"].as_str() {
-                headers.insert("Authorization".into(), format!("Bearer {}", token));
+                let scheme = oauth_config.map_or("Bearer", token_header_scheme);
+                headers.insert("Authorization".into(), format!("{scheme} {token}"));
             }
             ConnectionAuthDescriptor {
                 base_url,
@@ -880,8 +903,9 @@ fn describe_oauth_authcode_auth(
     }
 }
 
-/// Resolve an OAuth integration's API base URL from its descriptor: pick the sandbox
-/// host when the connection's `environment` param is `"sandbox"`, then append any
+/// Resolve an OAuth integration's API base URL from its descriptor: the host its
+/// `hosts` function resolves from the connection's region, or else the sandbox host
+/// when the connection's `environment` param is `"sandbox"`; then append any
 /// `{param}`-templated path (e.g. QuickBooks `/v3/company/{realm_id}`). Returns `None`
 /// when the descriptor declares no base URL.
 fn resolve_oauth_base_url(cfg: &OAuthConfig, params: &Value) -> Option<String> {
@@ -890,11 +914,18 @@ fn resolve_oauth_base_url(cfg: &OAuthConfig, params: &Value) -> Option<String> {
         return first_string_param(params, &["base_url"])
             .map(|u| u.trim_end_matches('/').to_string());
     }
-    let is_sandbox = params["environment"].as_str() == Some("sandbox");
-    let host = if !cfg.sandbox_base_url.is_empty() && is_sandbox {
-        cfg.sandbox_base_url
-    } else {
-        cfg.base_url
+    let host = match cfg.hosts {
+        // Per region: no base URL for a region the descriptor does not know,
+        // so a credentialed request fails closed at the proxy's pin step.
+        Some(hosts) => hosts(params)?.base_url,
+        None => {
+            let is_sandbox = params["environment"].as_str() == Some("sandbox");
+            if !cfg.sandbox_base_url.is_empty() && is_sandbox {
+                cfg.sandbox_base_url.to_string()
+            } else {
+                cfg.base_url.to_string()
+            }
+        }
     };
     if host.is_empty() {
         return None;
@@ -1084,6 +1115,15 @@ fn describe_http_oauth2_client_credentials_auth(
     })
 }
 
+/// The word before an OAuth access token in the `Authorization` header.
+fn token_header_scheme(cfg: &OAuthConfig) -> &'static str {
+    if cfg.token_header_prefix.is_empty() {
+        "Bearer"
+    } else {
+        cfg.token_header_prefix
+    }
+}
+
 fn describe_oauth_refresh_auth(
     connection_id: &str,
     integration_id: &str,
@@ -1109,6 +1149,7 @@ fn describe_oauth_refresh_auth(
         ),
         token_url: effective.token_url,
         header_name: header_name.to_string(),
+        header_scheme: token_header_scheme(oauth_config).to_string(),
         client_id,
         client_secret,
         refresh_token,
@@ -1289,6 +1330,9 @@ mod tests {
             revocation_endpoint: "",
             pkce_required: false,
             params_driven: false,
+            hosts: None,
+            authorize_params: "",
+            token_header_prefix: "",
         }
     }
 
@@ -1495,6 +1539,122 @@ mod tests {
                 assert!(matches!(token_endpoint_auth, TokenEndpointAuth::HttpBasic));
             }
             _ => panic!("a refresh token means a deferred refresh"),
+        }
+    }
+
+    fn zoho_params(extra: Value) -> Value {
+        let mut params = json!({ "client_id": "1000.client", "client_secret": "secret" });
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        params
+    }
+
+    #[test]
+    fn zoho_requests_go_to_the_data_centres_hosts() {
+        for (region, token_url, base_url) in [
+            (
+                json!({}),
+                "https://accounts.zoho.com/oauth/v2/token",
+                "https://www.zohoapis.com",
+            ),
+            (
+                json!({ "data_center": "eu", "environment": "developer" }),
+                "https://accounts.zoho.eu/oauth/v2/token",
+                "https://developer.zohoapis.eu",
+            ),
+            (
+                json!({ "data_center": "ca", "environment": "sandbox" }),
+                "https://accounts.zohocloud.ca/oauth/v2/token",
+                "https://sandbox.zohoapis.ca",
+            ),
+        ] {
+            let mut params = zoho_params(json!({ "refresh_token": "1000.refresh" }));
+            params
+                .as_object_mut()
+                .unwrap()
+                .extend(region.as_object().unwrap().clone());
+            let mut headers = HashMap::new();
+            let descriptor =
+                describe_connection_auth("conn-1", "zoho_crm_oauth", &params, &mut headers);
+            assert_eq!(descriptor.base_url.as_deref(), Some(base_url), "{region}");
+            match descriptor.deferred_auth {
+                Some(DeferredAuth::OAuth2RefreshToken {
+                    token_url: url,
+                    header_scheme,
+                    token_endpoint_auth,
+                    ..
+                }) => {
+                    assert_eq!(url, token_url, "{region}");
+                    assert_eq!(header_scheme, "Zoho-oauthtoken");
+                    assert!(matches!(token_endpoint_auth, TokenEndpointAuth::FormBody));
+                }
+                _ => panic!("a refresh token means a deferred refresh"),
+            }
+        }
+    }
+
+    #[test]
+    fn zoho_authorizes_at_its_data_centre() {
+        let cfg = find_connection_type("zoho_crm_oauth")
+            .and_then(|meta| meta.oauth_config)
+            .unwrap();
+        let effective = resolve_effective_oauth_config(cfg, &json!({ "data_center": "jp" }));
+        assert_eq!(effective.auth_url, "https://accounts.zoho.jp/oauth/v2/auth");
+        assert_eq!(
+            effective.token_url,
+            "https://accounts.zoho.jp/oauth/v2/token"
+        );
+        // No guess for a data centre the table does not know.
+        let unknown = resolve_effective_oauth_config(cfg, &json!({ "data_center": "mars" }));
+        assert_eq!(
+            (unknown.auth_url.as_str(), unknown.token_url.as_str()),
+            ("", "")
+        );
+    }
+
+    #[test]
+    fn zoho_sends_its_first_token_after_its_own_scheme() {
+        // Right after consent, before the refresh token is stored.
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "zoho_crm_oauth",
+            &zoho_params(json!({ "access_token": "1000.access", "data_center": "eu" })),
+            &mut headers,
+        );
+        assert_eq!(
+            descriptor.base_url.as_deref(),
+            Some("https://www.zohoapis.eu")
+        );
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("Zoho-oauthtoken 1000.access")
+        );
+    }
+
+    #[test]
+    fn zoho_without_a_known_region_has_no_destination_and_no_credentials() {
+        for region in [
+            json!({ "data_center": "mars" }),
+            json!({ "data_center": "cn", "environment": "developer" }),
+            json!({ "environment": "staging" }),
+        ] {
+            let mut params = zoho_params(json!({
+                "access_token": "1000.access",
+                "refresh_token": "1000.refresh",
+            }));
+            params
+                .as_object_mut()
+                .unwrap()
+                .extend(region.as_object().unwrap().clone());
+            let mut headers = HashMap::new();
+            let descriptor =
+                describe_connection_auth("conn-1", "zoho_crm_oauth", &params, &mut headers);
+            assert_eq!(descriptor.base_url, None, "{region}");
+            assert!(descriptor.deferred_auth.is_none(), "{region}");
+            assert!(headers.is_empty(), "{region}: {headers:?}");
         }
     }
 
@@ -1886,6 +2046,9 @@ mod tests {
             revocation_endpoint: "https://revoke.example.com",
             pkce_required: false,
             params_driven: false,
+            hosts: None,
+            authorize_params: "",
+            token_header_prefix: "",
         }
     }
 
@@ -2050,6 +2213,9 @@ mod tests {
             revocation_endpoint: "", // legitimately empty on the curated provider
             pkce_required: false,
             params_driven: false,
+            hosts: None,
+            authorize_params: "",
+            token_header_prefix: "",
         };
         let hostile = json!({
             "auth_url": "https://attacker.example/authorize",
@@ -2097,6 +2263,9 @@ mod tests {
             revocation_endpoint: "",
             pkce_required: false,
             params_driven: true,
+            hosts: None,
+            authorize_params: "",
+            token_header_prefix: "",
         };
         let params = json!({
             "auth_url": "https://auth.example.com/authorize",

@@ -1509,5 +1509,142 @@ class InputNameRenderTest(unittest.TestCase):
         self.assertIn('.query_object_opt("filter", &self.filter)', self.text)
 
 
+class MergeComponentsTest(unittest.TestCase):
+    """What the specs of one API may word differently (Zoho's, one per resource)."""
+
+    def test_servers_that_differ_only_in_their_descriptions_merge(self):
+        def spec(path, op_id, description):
+            spec = merge_spec(path, op_id, {"Reply": {"type": "object"}})
+            spec["servers"] = [{"url": "https://zohoapis.{dc}/crm/{version}", "description": description,
+                                "variables": {"dc": {"default": "com", "description": description},
+                                              "version": {"default": "v8"}}}]
+            return spec
+
+        merged = merge(("Records", "records", spec("/records", "records", "Records server")),
+                       ("Users", "users", spec("/users", "users", "API Server URL")))
+        self.assertEqual(merged["servers"][0]["url"], "https://zohoapis.{dc}/crm/{version}")
+        # A variable's value still has to agree.
+        other = spec("/users", "users", "x")
+        other["servers"][0]["variables"]["version"]["default"] = "v7"
+        with self.assertRaises(SystemExit) as raised:
+            merge(("Records", "records", spec("/records", "records", "y")), ("Users", "users", other))
+        self.assertIn("servers", str(raised.exception))
+
+    def test_a_parameter_the_specs_define_differently_gets_the_spec_name(self):
+        def spec(path, op_id, description):
+            spec = merge_spec(path, op_id, {"Reply": {"type": "object"}},
+                              parameters=[{"$ref": "#/components/parameters/Page"},
+                                          {"$ref": "#/components/parameters/Fields"}])
+            spec["components"]["parameters"] = {
+                "Page": {"in": "query", "name": "page", "description": description,
+                         "schema": {"type": "integer"}},
+                "Fields": {"in": "query", "name": "fields", "schema": {"type": "string"}},
+            }
+            return spec
+
+        merged = merge(("Records", "records", spec("/records", "records", "Records' page")),
+                       ("Users", "users", spec("/users", "users", "Users' page")))
+        # `Page` differs and is renamed per spec; `Fields` is the same and kept once.
+        self.assertEqual(sorted(merged["components"]["parameters"]), ["Fields", "RecordsPage", "UsersPage"])
+        refs = [p["$ref"] for p in operation(merged, "users")["parameters"]]
+        self.assertEqual(refs, ["#/components/parameters/UsersPage", "#/components/parameters/Fields"])
+        self.assertEqual(merged["components"]["parameters"]["RecordsPage"]["description"], "Records' page")
+
+
+class OmitParametersTest(unittest.TestCase):
+    """`omit_parameters`: query or header parameters no step input carries."""
+
+    @staticmethod
+    def spec() -> dict:
+        filters = {"in": "query", "name": "filters", "schema": {"oneOf": [
+            {"type": "object", "properties": {"field": {"type": "string"}}},
+            {"type": "object", "properties": {"group": {"type": "array", "items": {"type": "object"}}}},
+        ]}}
+        page = {"in": "query", "name": "page", "schema": {"type": "integer"}}
+        return spec_with({"parameters": [filters, page]}, method="get")
+
+    def test_an_omitted_parameter_is_no_input_and_is_not_checked(self):
+        with self.assertRaises(SystemExit) as raised:
+            cg.slice_spec(self.spec(), ["op"])
+        self.assertIn("non-scalar alternatives", str(raised.exception))
+        sliced = cg.slice_spec(self.spec(), ["op"], omit_parameters=["filters"])
+        self.assertEqual([p["name"] for p in operation(sliced, "op")["parameters"]], ["page"])
+
+    def test_an_unmatched_name_fails(self):
+        with self.assertRaises(SystemExit) as raised:
+            cg.slice_spec(self.spec(), ["op"], omit_parameters=["filters", "sort"])
+        self.assertIn("['sort']", str(raised.exception))
+
+
+class ReadOperationsTest(unittest.TestCase):
+    """`read_operations`: an operation that only reads though its method is not GET."""
+
+    @staticmethod
+    def spec() -> dict:
+        ok = {"responses": {"200": {"description": "ok"}}}
+        return {"openapi": "3.0.1", "info": {"title": "t", "version": "1"}, "paths": {
+            "/coql": {"post": {"operationId": "query", **ok}},
+            "/records": {"post": {"operationId": "create", **ok}},
+        }}
+
+    def test_a_listed_operation_has_no_side_effects(self):
+        sliced = cg.slice_spec(self.spec(), ["query", "create"], read_operations=["query"])
+        self.assertNotIn("x-runtara-side-effects", operation(sliced, "query"))
+        self.assertTrue(operation(sliced, "create")["x-runtara-side-effects"])
+
+    def test_an_unmatched_name_fails(self):
+        with self.assertRaises(SystemExit) as raised:
+            cg.slice_spec(self.spec(), ["query"], read_operations=["search"])
+        self.assertIn("['search']", str(raised.exception))
+
+
+class PropertyNameTest(unittest.TestCase):
+    def test_runs_of_underscores_collapse_and_other_names_are_left_to_the_generator(self):
+        sliced = {"components": {"schemas": {"Lead": {"type": "object", "properties": {
+            "status_reason__s": {"type": "string"},
+            "Owner__C": {"type": "string"},
+            "Last_Name": {"type": "string"},
+            "$approval": {"type": "object"},
+            "_id": {"type": "string"},
+        }}}}}
+        self.assertEqual(cg.property_name_mappings(sliced),
+                         {"Owner__C": "owner_c", "status_reason__s": "status_reason_s"})
+
+    def test_parameters_get_the_same_treatment(self):
+        def parameter(name):
+            return {"in": "query", "name": name, "schema": {"type": "string"}}
+
+        sliced = {"paths": {"/users": {"get": {"parameters": [
+            parameter("type__s"), parameter("page[size]"), parameter("per_page"), parameter("_id")]}}}}
+        self.assertEqual(cg.parameter_name_mappings(sliced),
+                         {"page[size]": "page_size", "type__s": "type_s"})
+
+
+@unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
+class InlineNameRenderTest(unittest.TestCase):
+    """An inline schema takes its name from the operation, acronyms included
+    (Zoho's `executeCOQLQuery`): its struct and every use of it agree."""
+
+    def test_inline_models_of_an_acronym_operation_match_their_uses(self):
+        response = {"type": "object", "properties": {
+            "data": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "info": {"type": "object", "properties": {"count": {"type": "integer"}}},
+            "status_reason__s": {"type": "string"},
+        }}
+        op = {"operationId": "executeCOQLQuery", **ok_json(response)}
+        with tempfile.TemporaryDirectory() as tmp:
+            write_crate(Path(tmp), spec_with(op), ["executeCOQLQuery"])
+            text = cg.render(Path(tmp))
+        structs = set(re.findall(r"pub struct (\w+)", text))
+        returned = re.search(r"-> Result<(\w+), AgentError>", text).group(1)
+        info = re.search(r"pub info: Option<(\w+)>", text).group(1)
+        self.assertIn(returned, structs)
+        self.assertIn(info, structs)
+        registry = re.sub(r"\s+", " ", text[text.index("let output_types"):])
+        self.assertIn(f'"{returned}", &__OUTPUT_META_{returned} as &OutputTypeMeta', registry)
+        self.assertIn('rename = "status_reason__s"', text)
+        self.assertIn("pub status_reason_s: Option<String>,", text)
+
+
 if __name__ == "__main__":
     unittest.main()

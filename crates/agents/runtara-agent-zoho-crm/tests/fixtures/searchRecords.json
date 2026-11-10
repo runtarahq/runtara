@@ -1,0 +1,31 @@
+{
+  "data": [
+    {
+      "Company": "Zylker",
+      "Created_By": {
+        "id": "5843104000000411001",
+        "name": "John Smith"
+      },
+      "Created_Time": "2023-01-15T10:30:00+00:00",
+      "Email": "lead@zylker.com",
+      "Lead_Status": "Qualified",
+      "Modified_By": {
+        "id": "5843104000000411001",
+        "name": "John Smith"
+      },
+      "Modified_Time": "2023-01-20T14:45:00+00:00",
+      "Owner": {
+        "email": "john.smith@example.com",
+        "id": "5843104000000411001",
+        "name": "John Smith"
+      },
+      "id": "5843104000000624035"
+    }
+  ],
+  "info": {
+    "count": 1,
+    "more_records": false,
+    "page": 1,
+    "per_page": 200
+  }
+}
