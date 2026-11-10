@@ -32,6 +32,7 @@ pub mod publish_release;
 pub mod reencrypt;
 pub mod runtime_client;
 pub mod runtime_types;
+pub mod seal_connections;
 pub mod server;
 pub mod shutdown;
 pub mod step_events;
@@ -56,3 +57,14 @@ pub use runtara_dsl::spec as spec_generator;
 
 // Re-export ObjectStoreManager for use by host applications
 pub use api::repositories::object_model::ObjectStoreManager;
+
+/// What this deployment lets seal reach that seal refuses by default: the
+/// outbound proxy's development allowances are seal's too. A secret is
+/// sealed with them, so the server and its maintenance commands must agree.
+pub(crate) fn seal_allowances() -> runtara_connections::sealed::Allowances {
+    runtara_connections::sealed::Allowances {
+        private_hosts: runtara_connections::net::allowed_private_hosts().to_vec(),
+        plain_http_hosts: api::services::outbound_http::proxy_allow_http_hosts(),
+        ..Default::default()
+    }
+}

@@ -450,3 +450,159 @@ async fn two_instances_seal_a_tenants_connections_to_the_same_key() {
             .any(|(keyset, tenant)| keyset.starts_with("t-") && tenant == "auth0|globex")
     );
 }
+
+/// Connections stored before sealing was on are sealed in place: each as it
+/// would be on its next save, one tenant at a time or all, and only what
+/// seal can hold. A dry run writes nothing.
+#[tokio::test]
+async fn existing_connections_are_sealed_in_place() {
+    use runtara_connections::repository::connections::{SealingStats, refresh_token_guard};
+    let fixture = Fixture::new().await;
+    let unsealed = fixture.service(None);
+    let sealable = unsealed
+        .create_connection(bearer("api", "https://api.example.com/v1"), TENANT)
+        .await
+        .unwrap();
+    // A destination seal cannot express: left as it is.
+    let unexpressible = unsealed
+        .create_connection(bearer("odd", "https://api.example.com/v1?tenant=1"), TENANT)
+        .await
+        .unwrap();
+    let elsewhere = unsealed
+        .create_connection(
+            bearer("theirs", "https://api.example.com/v1"),
+            "other-tenant",
+        )
+        .await
+        .unwrap();
+    // An authorized OAuth connection, with the rotation guard of its
+    // readable refresh token, and a type seal does not handle.
+    for (id, integration_id, parameters, guard) in [
+        (
+            "oauth-1",
+            "http_oauth2_authorization_code",
+            json!({
+                "auth_url": "https://auth.example.com/authorize",
+                "token_url": "https://auth.example.com/token",
+                "base_url": "https://api.example.com",
+                "client_id": "cid", "client_secret": "csec",
+                "access_token": "at-CANARY", "refresh_token": "rt-CANARY",
+            }),
+            Some("guard-of-the-readable-token"),
+        ),
+        (
+            "sftp-1",
+            "sftp",
+            json!({"host": "files.example.com", "password": SECRET}),
+            None,
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO connection_data_entity \
+             (id, tenant_id, title, integration_id, connection_parameters, refresh_token_hash) \
+             VALUES ($1, $2, $1, $3, $4, $5)",
+        )
+        .bind(id)
+        .bind(TENANT)
+        .bind(integration_id)
+        .bind(parameters)
+        .bind(guard)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    }
+    let sealed = fixture.sealed();
+    let repository = fixture.repository();
+
+    // A dry run counts, and writes nothing.
+    let would = repository
+        .seal_existing(&sealed, Some(TENANT), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        would,
+        SealingStats {
+            scanned: 4,
+            sealed: 2,
+            unchanged: 2,
+            failed: 0
+        }
+    );
+    for id in [sealable.as_str(), "oauth-1"] {
+        assert_eq!(fixture.row(id).await.0, "cipher", "{id}");
+    }
+
+    // One tenant's connections.
+    let stats = repository
+        .seal_existing(&sealed, Some(TENANT), false)
+        .await
+        .unwrap();
+    assert_eq!(stats, would);
+    let (format, stored) = fixture.row(&sealable).await;
+    assert_eq!(format, "seal");
+    assert!(is_sealed(&stored["token"]));
+    assert_eq!(stored["base_url"], "https://api.example.com/v1");
+    let (format, oauth) = fixture.row("oauth-1").await;
+    assert_eq!(format, "seal");
+    for token in ["access_token", "refresh_token"] {
+        assert!(is_sealed(&oauth[token]), "{token}");
+    }
+    assert!(!oauth.to_string().contains("CANARY"));
+    // The rotation guard is now the sealed refresh token's, so that the next
+    // rotation is stored.
+    let guard: Option<String> = sqlx::query_scalar(
+        "SELECT refresh_token_hash FROM connection_data_entity WHERE id = 'oauth-1'",
+    )
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(guard, refresh_token_guard(&oauth["refresh_token"]));
+    assert!(guard.is_some());
+    // What seal cannot hold stays readable, and stays as it was.
+    for (id, field) in [(unexpressible.as_str(), "token"), ("sftp-1", "password")] {
+        let (format, stored) = fixture.row(id).await;
+        assert_eq!(format, "cipher", "{id}");
+        assert_eq!(stored[field], SECRET, "{id}");
+    }
+    // Another tenant's connection was not touched.
+    assert_eq!(fixture.row(&elsewhere).await.0, "cipher");
+    assert!(
+        fixture
+            .repository()
+            .get_with_parameters(&sealable, TENANT)
+            .await
+            .unwrap()
+            .unwrap()
+            .sealed
+    );
+
+    // Every tenant: only what is left to seal.
+    let rest = repository
+        .seal_existing(&sealed, None, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        rest,
+        SealingStats {
+            scanned: 3,
+            sealed: 1,
+            unchanged: 2,
+            failed: 0
+        }
+    );
+    assert_eq!(fixture.row(&elsewhere).await.0, "seal");
+    // Run again, nothing changes: the secrets already sealed are not looked at.
+    let again = repository
+        .seal_existing(&sealed, None, false)
+        .await
+        .unwrap();
+    assert_eq!((again.scanned, again.sealed), (2, 0));
+    // Each tenant's secrets are sealed to its own key.
+    assert_eq!(
+        fixture.keys().await,
+        [
+            (TENANT.to_owned(), TENANT.to_owned()),
+            ("other-tenant".to_owned(), "other-tenant".to_owned()),
+        ]
+    );
+}

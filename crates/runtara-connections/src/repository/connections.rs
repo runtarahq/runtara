@@ -1167,6 +1167,132 @@ impl ConnectionRepository {
         Ok(result.rows_affected())
     }
 
+    /// Seal the secrets of connections stored before sealing was on, for one
+    /// tenant or for all: each is sealed as it would be on its next save.
+    ///
+    /// A connection is left as it is where seal does not handle its type or
+    /// cannot express where its secret goes. One written meanwhile is left
+    /// to that write. With `dry_run`, nothing is written, and the count is
+    /// of what would be sealed. Sealing is one-way: a sealed secret is not
+    /// stored readable again.
+    pub async fn seal_existing(
+        &self,
+        sealed: &crate::sealed::SealedCredentials,
+        tenant_id: Option<&str>,
+        dry_run: bool,
+    ) -> Result<SealingStats, sqlx::Error> {
+        const UNSEALED: &str = "SELECT id, tenant_id, integration_id, connection_parameters \
+             FROM connection_data_entity \
+             WHERE credential_format = 'cipher' AND connection_parameters IS NOT NULL \
+               AND integration_id IS NOT NULL";
+        let rows: Vec<(String, String, String, serde_json::Value)> = match tenant_id {
+            Some(tenant_id) => {
+                sqlx::query_as(&format!("{UNSEALED} AND tenant_id = $1 ORDER BY id"))
+                    .bind(tenant_id)
+                    .fetch_all(&self.pool)
+                    .await?
+            }
+            None => {
+                sqlx::query_as(&format!("{UNSEALED} ORDER BY tenant_id, id"))
+                    .fetch_all(&self.pool)
+                    .await?
+            }
+        };
+
+        let mut stats = SealingStats {
+            scanned: rows.len(),
+            ..SealingStats::default()
+        };
+        for (id, tenant, integration_id, stored) in rows {
+            let context = CipherContext {
+                tenant_id: &tenant,
+                connection_id: &id,
+            };
+            let parameters = if is_envelope(&stored) {
+                match self.cipher.decrypt(&stored, &context) {
+                    Ok(parameters) => parameters,
+                    Err(error) => {
+                        stats.failed += 1;
+                        tracing::error!(
+                            connection_id = %id, tenant_id = %tenant, %error,
+                            "seal: the connection could not be read, skipping it"
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                stored.clone()
+            };
+            let sealed_parameters = match sealed
+                .seal_parameters(&tenant, &id, &integration_id, &parameters, None)
+                .await
+            {
+                Ok(Some(sealed_parameters))
+                    if crate::sealed::has_sealed_values(&sealed_parameters) =>
+                {
+                    sealed_parameters
+                }
+                // Not a type seal handles, a destination it cannot express,
+                // or nothing entered to seal.
+                Ok(_) => {
+                    stats.unchanged += 1;
+                    continue;
+                }
+                Err(error) => {
+                    stats.failed += 1;
+                    tracing::error!(
+                        connection_id = %id, tenant_id = %tenant, %error,
+                        "seal: the connection could not be sealed, skipping it"
+                    );
+                    continue;
+                }
+            };
+            if dry_run {
+                stats.sealed += 1;
+                continue;
+            }
+            let encrypted = match self.cipher.encrypt(&sealed_parameters, &context) {
+                Ok(encrypted) => encrypted,
+                Err(error) => {
+                    stats.failed += 1;
+                    tracing::error!(
+                        connection_id = %id, tenant_id = %tenant, %error,
+                        "seal: the sealed connection could not be stored, skipping it"
+                    );
+                    continue;
+                }
+            };
+            // Only the value that was read is replaced: a save or a token
+            // refresh meanwhile wins. A refresh token that is now sealed
+            // takes the rotation guard of its sealed form.
+            let updated = sqlx::query(
+                "UPDATE connection_data_entity \
+                 SET connection_parameters = $3, credential_format = $5, \
+                     refresh_token_hash = COALESCE($6, refresh_token_hash) \
+                 WHERE id = $1 AND tenant_id = $2 AND connection_parameters = $4",
+            )
+            .bind(&id)
+            .bind(&tenant)
+            .bind(&encrypted)
+            .bind(&stored)
+            .bind(FORMAT_SEAL)
+            .bind(
+                sealed_parameters
+                    .get("refresh_token")
+                    .filter(|token| crate::sealed::is_sealed(token))
+                    .and_then(refresh_token_guard),
+            )
+            .execute(&self.pool)
+            .await?;
+            if updated.rows_affected() == 0 {
+                stats.unchanged += 1;
+            } else {
+                stats.sealed += 1;
+            }
+        }
+        Ok(stats)
+    }
+
     /// Re-encrypt all rows for a given tenant (or all tenants if `tenant_id`
     /// is `None`) using the current cipher.
     ///
@@ -1297,6 +1423,21 @@ impl ConnectionRepository {
 
         Ok(stats)
     }
+}
+
+/// Summary returned by [`ConnectionRepository::seal_existing`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SealingStats {
+    /// Connections not sealed yet that were looked at.
+    pub scanned: usize,
+    /// Connections whose secrets were sealed (or would be, in a dry run).
+    pub sealed: usize,
+    /// Connections left as they are: of a type seal does not handle, with a
+    /// destination seal cannot express, or with no secret to seal.
+    pub unchanged: usize,
+    /// Connections that could not be read or sealed, and were left alone.
+    pub failed: usize,
 }
 
 /// Summary returned by [`ConnectionRepository::reencrypt_all`].
