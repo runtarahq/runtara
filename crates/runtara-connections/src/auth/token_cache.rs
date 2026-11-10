@@ -367,7 +367,7 @@ async fn exchange_client_credentials_token(
         })?;
 
     // Client credentials has no refresh token to carry forward — drop it.
-    let tr = parse_token_response(response, default_ttl_seconds).await?;
+    let tr = parse_token_response(response, default_ttl_seconds, Grant::ClientCredentials).await?;
     Ok(CachedAccessToken {
         access_token: tr.access_token,
         expires_at: tr.expires_at,
@@ -406,7 +406,22 @@ async fn refresh_oauth_access_token(
         AuthResolutionError::transient(format!("OAuth token refresh request failed: {}", e))
     })?;
 
-    parse_token_response(response, DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS).await
+    parse_token_response(
+        response,
+        DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
+        Grant::RefreshToken,
+    )
+    .await
+}
+
+/// The grant a token response answers. Only a refresh is read for a refusal
+/// sent with a 2xx: Zoho answers a dead refresh token that way. A
+/// client-credentials mint is judged by its status alone, so an endpoint that
+/// answers a passing error with 200 is retried, not taken for a dead grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Grant {
+    ClientCredentials,
+    RefreshToken,
 }
 
 /// Build the `(Authorization header, x-www-form-urlencoded body)` for an OAuth token
@@ -441,6 +456,7 @@ pub(crate) fn token_request_parts(
 async fn parse_token_response(
     response: reqwest::Response,
     default_ttl_seconds: i64,
+    grant: Grant,
 ) -> Result<TokenResponse, AuthResolutionError> {
     let status = response.status();
     let body: Value = response.json().await.map_err(|e| {
@@ -469,7 +485,9 @@ async fn parse_token_response(
         );
     }
 
-    if let Some(refusal) = refusal_with_success_status(status, &body) {
+    if grant == Grant::RefreshToken
+        && let Some(refusal) = refusal_with_success_status(status, &body)
+    {
         tracing::debug!(status = %status, body = %body, "token endpoint refused the grant");
         return Err(refusal);
     }
@@ -492,9 +510,10 @@ async fn parse_token_response(
     })
 }
 
-/// A refusal some providers (Zoho) answer with a 2xx: no `access_token`, and an
-/// OAuth `error`. It is the same refusal as a 4xx, so permanent like one, with
-/// the code in the message for the descriptor's reauth codes to match.
+/// A refusal some providers (Zoho) answer a refresh with a 2xx: no
+/// `access_token`, and an OAuth `error`. It is the same refusal as a 4xx, so
+/// permanent like one, with the code in the message for the descriptor's
+/// reauth codes to match.
 fn refusal_with_success_status(
     status: reqwest::StatusCode,
     body: &Value,
@@ -1000,6 +1019,27 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_client_credentials_error_answered_with_200_stays_transient() {
+        // Only a refresh reads a 2xx `error` as a refusal; a mint that gets one
+        // is retried rather than taken for a dead grant.
+        let _loopback = crate::net::test_allowlist::allow("127.0.0.1");
+        let url = mock_token_endpoint("200 OK", r#"{"error":"temporarily_unavailable"}"#).await;
+        let err = resolve_deferred_auth(
+            &Client::new(),
+            client_credentials_auth(key("conn-cc200", "cc-200-error"), url),
+            &None,
+            "tenant-1",
+            "conn-cc200",
+            "teams_bot",
+        )
+        .await;
+        let Err(err) = err else {
+            panic!("a mint without a token must fail")
+        };
+        assert!(!err.permanent, "a 2xx mint error is transient: {err}");
     }
 
     #[tokio::test]

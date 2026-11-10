@@ -867,10 +867,11 @@ fn describe_oauth_authcode_auth(
     headers: &mut HashMap<String, String>,
 ) -> ConnectionAuthDescriptor {
     let oauth_config = find_connection_type(integration_id).and_then(|meta| meta.oauth_config);
-    // A region the descriptor does not know has no hosts: no destination and
-    // no credentials, so no token goes anywhere.
+    // A region the descriptor does not know, or one without an API host for
+    // the connection's environment: no destination and no credentials, so no
+    // token goes anywhere.
     if let Some(hosts) = oauth_config.and_then(|cfg| cfg.hosts)
-        && hosts(params).is_none()
+        && hosts(params).is_none_or(|hosts| hosts.base_url.is_empty())
     {
         return ConnectionAuthDescriptor {
             base_url: None,
@@ -1116,7 +1117,7 @@ fn describe_http_oauth2_client_credentials_auth(
 }
 
 /// The word before an OAuth access token in the `Authorization` header.
-fn token_header_scheme(cfg: &OAuthConfig) -> &'static str {
+pub(crate) fn token_header_scheme(cfg: &OAuthConfig) -> &'static str {
     if cfg.token_header_prefix.is_empty() {
         "Bearer"
     } else {
@@ -1612,6 +1613,13 @@ mod tests {
             (unknown.auth_url.as_str(), unknown.token_url.as_str()),
             ("", "")
         );
+        // A connection whose environment has no API host in its data centre
+        // can still be authorized again.
+        let stale = resolve_effective_oauth_config(
+            cfg,
+            &json!({ "data_center": "cn", "environment": "developer" }),
+        );
+        assert_eq!(stale.auth_url, "https://accounts.zoho.com.cn/oauth/v2/auth");
     }
 
     #[test]

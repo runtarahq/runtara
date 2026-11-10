@@ -286,10 +286,17 @@ class NormalizeTest(unittest.TestCase):
         self.assertEqual(sorted(sliced["components"]["schemas"]), ["EmailCcObject", "UserObject"])
         response = operation(sliced, "op")["responses"]["200"]["content"]["application/json"]
         self.assertEqual(response["schema"], {"$ref": "#/components/schemas/EmailCcObject"})
-        # A `model_names` entry wins.
+        # A `model_names` entry wins, and every use of the schema follows it.
         sliced = cg.slice_spec(spec_with(ok_json({"$ref": "#/components/schemas/EmailCCObject"}), schemas),
                                ["op"], {"EmailCCObject": "EmailCopy"})
-        self.assertIn("EmailCCObject", sliced["components"]["schemas"])
+        self.assertEqual(sorted(sliced["components"]["schemas"]), ["EmailCopy", "UserObject"])
+        response = operation(sliced, "op")["responses"]["200"]["content"]["application/json"]
+        self.assertEqual(response["schema"], {"$ref": "#/components/schemas/EmailCopy"})
+        # A rename onto a schema the spec already has is refused.
+        with self.assertRaises(SystemExit) as raised:
+            cg.slice_spec(spec_with(ok_json({"$ref": "#/components/schemas/EmailCCObject"}), schemas),
+                          ["op"], {"EmailCCObject": "UserObject"})
+        self.assertIn("model_names", str(raised.exception))
 
     def test_body_envelope_becomes_the_body(self):
         ticket = {"type": "object", "properties": {"subject": {"type": "string"}}}
@@ -1618,6 +1625,27 @@ class PropertyNameTest(unittest.TestCase):
             parameter("type__s"), parameter("page[size]"), parameter("per_page"), parameter("_id")]}}}}
         self.assertEqual(cg.parameter_name_mappings(sliced),
                          {"page[size]": "page_size", "type__s": "type_s"})
+
+
+@unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
+class ModelNamesRenderTest(unittest.TestCase):
+    """A schema renamed with `model_names` (one that would clash with the
+    generated code) is generated under its new name, and used by it."""
+
+    def test_the_struct_and_its_uses_take_the_new_name(self):
+        schemas = {
+            "Value": {"type": "object", "properties": {"amount": {"type": "number"}}},
+            "Holder": {"type": "object", "properties": {"value": {"$ref": "#/components/schemas/Value"}}},
+        }
+        spec = spec_with(ok_json({"$ref": "#/components/schemas/Holder"}), schemas, method="get")
+        with tempfile.TemporaryDirectory() as tmp:
+            write_crate(Path(tmp), spec, ["op"], model_names={"Value": "Amount"})
+            text = cg.render(Path(tmp))
+        self.assertIn("pub struct Amount {", text)
+        self.assertIn("pub value: Option<Amount>,", text)
+        self.assertNotIn("pub struct Value", text)
+        registry = re.sub(r"\s+", " ", text[text.index("let output_types"):])
+        self.assertIn('"Amount", &__OUTPUT_META_Amount as &OutputTypeMeta', registry)
 
 
 @unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")

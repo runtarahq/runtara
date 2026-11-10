@@ -103,6 +103,15 @@ fn zoho_crm_is_reachable_from_the_http_agent_and_needs_a_client_and_a_region() {
         .extract(&json!({ "client_id": "1000.abc", "data_center": "mars" }))
         .unwrap_err();
     assert!(err.contains("`mars`"), "{err}");
+    // A stale environment from an earlier authorization does not stop the
+    // data centre from changing.
+    assert!(
+        extractor
+            .extract(
+                &json!({ "client_id": "1000.abc", "data_center": "cn", "environment": "developer" })
+            )
+            .is_ok()
+    );
 }
 
 #[test]
@@ -140,7 +149,9 @@ fn zoho_hosts_follow_the_data_centre_and_the_environment() {
         }
         let developer = hosts(json!({ "data_center": data_center, "environment": "developer" }));
         if data_center == "cn" {
-            assert_eq!(developer, None, "China has no Developer Edition host");
+            // China has no Developer Edition host; its login server still answers.
+            let (auth, token, _) = expected(accounts, "").unwrap();
+            assert_eq!(developer, Some((auth, token, String::new())));
         } else {
             assert_eq!(developer, expected(accounts, &format!("developer.{api}")));
         }
@@ -152,10 +163,15 @@ fn zoho_hosts_follow_the_data_centre_and_the_environment() {
     for params in [
         json!({ "data_center": "mars" }),
         json!({ "data_center": "EU" }),
-        json!({ "environment": "staging" }),
     ] {
         assert_eq!(hosts(params.clone()), None, "{params}");
     }
+    // An environment with no API host leaves only that empty.
+    let staging = zoho_hosts(&json!({ "data_center": "eu", "environment": "staging" })).unwrap();
+    assert_eq!(
+        (staging.auth_url.as_str(), staging.base_url.as_str()),
+        ("https://accounts.zoho.eu/oauth/v2/auth", "")
+    );
     assert_eq!(
         connection_types::zoho_data_center_of("https://accounts.zoho.example"),
         None

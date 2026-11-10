@@ -49,7 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `read_operations` marks an operation that only reads though its method is not
   GET. An inline schema of an operation whose name has an acronym
   (`executeCOQLQuery`) is now generated under the name its uses refer to, and a
-  property such as `status_reason__s` becomes a snake-case field.
+  property such as `status_reason__s` becomes a snake-case field. A
+  `model_names` rename now renames the schema itself, so its struct and every
+  use of it take the new name; before, its uses kept the old one.
 
 - **`connector_gen` generates from a spec you write, and takes more of an API.**
   `spec: {path: openapi.yaml, sha256: …}` reads a spec kept in the crate, for a
@@ -1291,13 +1293,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **A token endpoint that refuses a grant with 200 no longer looks like an
+- **A token endpoint that refuses a refresh with 200 no longer looks like an
   outage.** Some providers (Zoho) answer a dead refresh token or a bad code with
   HTTP 200 and an OAuth `error` body. A refresh read that as a missing token,
   a passing problem retried for ever, so the connection never asked to be
   reconnected; it is now a refusal like a 4xx, and a descriptor's reauth codes
-  match its `error`. A code exchange reports the provider's `error` instead of
-  "missing access_token".
+  match its `error`. A client-credentials mint is still judged by its status
+  alone. A code exchange reports the provider's `error` instead of "missing
+  access_token".
 
 - **A reconnected OAuth connection keeps its rotated refresh tokens.** A
   provider that rotates refresh tokens (QuickBooks Online, Xero) issues a new

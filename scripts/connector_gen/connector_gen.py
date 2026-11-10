@@ -958,14 +958,18 @@ def rename_schemas(sliced: dict, model_names: dict) -> None:
     """Rename schemas whose Rust struct name differs from the name the templates
     spell their references with (`EmailCCObject` is generated as `EmailCcObject`)
     to the struct name, so both agree, including the inline types named after
-    them. A `model_names` entry takes precedence."""
+    them. A `model_names` entry takes precedence: the schema is renamed to it
+    here, so its struct and every use of it take the new name."""
     schemas = sliced["components"].get("schemas", {})
     renames = {
         name: rust_model_name(name) for name in schemas
         if name not in model_names and rust_model_name(name) != model_name(name)
     }
+    renames.update({name: new for name, new in model_names.items() if name in schemas})
     for old, new in renames.items():
-        if new in schemas:
+        if new in schemas and new not in renames:
+            if old in model_names:
+                sys.exit(f"`model_names` renames schema `{old}` to `{new}`, which the spec also defines")
             sys.exit(f"schema `{old}` is generated as `{new}`, which the spec also defines; "
                      f"rename it with `model_names: {{{old}: <OtherName>}}` in connector.yaml")
     rename_refs(sliced, renames)
@@ -1614,7 +1618,6 @@ def render(crate: Path) -> str:
                 "errorPrefix": agent["error_prefix"],
             },
             "typeMappings": TYPE_MAPPINGS,
-            "modelNameMappings": config.get("model_names") or {},
             "parameterNameMappings": parameter_name_mappings(sliced),
             "nameMappings": property_name_mappings(sliced),
         }))

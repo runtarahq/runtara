@@ -138,7 +138,9 @@ pub fn get_default_rate_limit_config(integration_id: &str) -> Option<RateLimitCo
         // Zoho CRM: credits per rolling 24 hours (5,000 on the Free edition, more
         // per user on paid ones) and a cap on concurrent calls per edition, 5 to
         // 25 (Free and Developer allow the fewest). 2 req/s with a burst of 5
-        // keeps a run to the lowest concurrency; a 429 is retried after its wait.
+        // starts no more than 5 calls at once; the limiter does not count calls
+        // still in flight, so slow ones (a COQL query, a batch) can go over the
+        // cap, which Zoho answers with a 429, retried after its wait.
         "zoho_crm_oauth" => Some(RateLimitConfigDto {
             requests_per_second: 2,
             burst_size: 5,
@@ -296,9 +298,10 @@ mod tests {
     }
 
     #[test]
-    fn test_zoho_crm_defaults_keep_to_the_lowest_concurrency() {
+    fn test_zoho_crm_defaults_start_no_more_calls_at_once_than_the_lowest_cap() {
         let config = get_default_rate_limit_config("zoho_crm_oauth").unwrap();
-        // Zoho's Free and Developer editions allow 5 calls at once.
+        // Zoho's Free and Developer editions allow 5 calls at once; a burst of
+        // at most 5 starts no more than that together.
         assert!(config.burst_size <= 5);
         assert!(config.requests_per_second <= 5);
         assert!(config.retry_on_limit);

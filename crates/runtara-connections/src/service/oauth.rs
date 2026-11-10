@@ -969,9 +969,12 @@ async fn add_zoho_organisation(
     let base = zoho_hosts(&production)
         .ok_or_else(|| unresolved("the connection names no Zoho data centre".to_string()))?
         .base_url;
+    let scheme = find_connection_type("zoho_crm_oauth")
+        .and_then(|meta| meta.oauth_config)
+        .map_or("Bearer", crate::auth::provider_auth::token_header_scheme);
     let response = crate::net::shared_hardened_client()
         .get(format!("{base}/crm/v8/org"))
-        .header("Authorization", format!("Zoho-oauthtoken {token}"))
+        .header("Authorization", format!("{scheme} {token}"))
         .header("Accept", "application/json")
         .timeout(std::time::Duration::from_secs(10))
         .send()
@@ -979,7 +982,7 @@ async fn add_zoho_organisation(
         .map_err(|e| unresolved(e.to_string()))?;
     let status = response.status();
     if !status.is_success() {
-        return Err(unresolved(format!("HTTP {status}")));
+        return Err(unresolved(zoho_lookup_refused(status)));
     }
     let org: Value = response
         .json()
@@ -988,6 +991,19 @@ async fn add_zoho_organisation(
     let fields = zoho_account_fields(&org, params).map_err(OAuthError::AccountUnresolved)?;
     granted.extend(fields);
     Ok(())
+}
+
+/// Why Zoho refused the organisation lookup. A token without
+/// `ZohoCRM.org.READ` (scopes narrowed on the connection) gets a 401 or 403,
+/// which says nothing of the scope, so the message names it.
+fn zoho_lookup_refused(status: reqwest::StatusCode) -> String {
+    match status.as_u16() {
+        401 | 403 => format!(
+            "HTTP {status}; the connection's scopes must include ZohoCRM.org.READ, \
+             which the organisation lookup needs"
+        ),
+        _ => format!("HTTP {status}"),
+    }
 }
 
 /// The fields a Zoho connection stores for the organisation its token is
@@ -1009,7 +1025,9 @@ fn zoho_account_fields(
         )?;
     let mut bound = params.clone();
     bound["environment"] = json!(environment);
-    if runtara_agents::extractors::connection_types::zoho_hosts(&bound).is_none() {
+    if runtara_agents::extractors::connection_types::zoho_hosts(&bound)
+        .is_none_or(|hosts| hosts.base_url.is_empty())
+    {
         return Err(format!(
             "Zoho has no API host for a {environment} organisation in the `{}` data centre",
             params["data_center"].as_str().unwrap_or("us")
@@ -1724,6 +1742,19 @@ mod tests {
         .unwrap();
         assert_eq!(fields["org_id"], json!("42"));
         assert_eq!(fields["org_name"], Value::Null);
+    }
+
+    #[test]
+    fn a_refused_zoho_lookup_names_the_scope_it_needs() {
+        for status in [
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+        ] {
+            let message = zoho_lookup_refused(status);
+            assert!(message.contains("ZohoCRM.org.READ"), "{message}");
+        }
+        let message = zoho_lookup_refused(reqwest::StatusCode::BAD_GATEWAY);
+        assert_eq!(message, "HTTP 502 Bad Gateway");
     }
 
     #[test]

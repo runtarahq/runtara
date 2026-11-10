@@ -1273,24 +1273,26 @@ const ZOHO_DATA_CENTERS: &[(&str, &str, &str)] = &[
     ("cn", "accounts.zoho.com.cn", "zohoapis.com.cn"),
 ];
 
-/// The OAuth endpoints and API host of a Zoho connection, from its
-/// `data_center` and `environment`; `None` for a value not in the table, or
-/// for China's Developer Edition, which has no API host.
+/// The OAuth endpoints and API host of a Zoho connection: the login server
+/// from its `data_center` alone, so that whatever its environment, it can be
+/// authorized again, and the API host from both. `None` for a data centre not
+/// in the table; an empty `base_url` for an environment with no API host
+/// there (China has no Developer Edition), which sends nothing.
 pub fn zoho_hosts(params: &Value) -> Option<OAuthHosts> {
     let data_center = params["data_center"].as_str().unwrap_or("us");
     let (_, accounts, api) = ZOHO_DATA_CENTERS
         .iter()
         .find(|(key, _, _)| *key == data_center)?;
     let prefix = match params["environment"].as_str().unwrap_or("production") {
-        "production" => "www",
-        "developer" if data_center != "cn" => "developer",
-        "sandbox" => "sandbox",
-        _ => return None,
+        "production" => Some("www"),
+        "developer" if data_center != "cn" => Some("developer"),
+        "sandbox" => Some("sandbox"),
+        _ => None,
     };
     Some(OAuthHosts {
         auth_url: format!("https://{accounts}/oauth/v2/auth"),
         token_url: format!("https://{accounts}/oauth/v2/token"),
-        base_url: format!("https://{prefix}.{api}"),
+        base_url: prefix.map_or(String::new(), |prefix| format!("https://{prefix}.{api}")),
     })
 }
 
@@ -1324,12 +1326,12 @@ impl HttpConnectionExtractor for ZohoCrmOAuthExtractor {
         {
             return Err("Invalid zoho_crm_oauth connection: missing client_id".to_string());
         }
+        // The environment is the token's, set when it is authorized: a stale
+        // one must not stop the data centre from being changed.
         if zoho_hosts(params).is_none() {
             return Err(format!(
-                "Invalid zoho_crm_oauth connection: no Zoho API host for data centre `{}` and \
-                 environment `{}`",
+                "Invalid zoho_crm_oauth connection: no Zoho data centre `{}`",
                 params["data_center"].as_str().unwrap_or("us"),
-                params["environment"].as_str().unwrap_or("production"),
             ));
         }
 
