@@ -24,17 +24,17 @@ const TOKEN_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// The largest token response read.
 const MAX_TOKEN_RESPONSE_BYTES: usize = 256 * 1024;
 
-/// What a token endpoint answered: its status, its body with every declared
-/// token replaced by a sealed value, and those values.
+/// What a token endpoint answered with success: its body with every
+/// declared token replaced by a sealed value, and those values.
 pub(crate) struct TokenReply {
-    pub status: u16,
     pub body: Value,
     pub sealed: BTreeMap<FieldName, Envelope>,
 }
 
 impl SealedCredentials {
-    /// POSTs a token request through seal, presenting `presented` (each a
-    /// parameter of the connection holding a sealed value).
+    /// POSTs a token request through seal, presenting `presented_fields`
+    /// (each a parameter of the connection holding a sealed value).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn token_request(
         &self,
         tenant_id: &str,
@@ -124,7 +124,6 @@ impl SealedCredentials {
             return Err(token_endpoint_refusal(status, &body));
         }
         Ok(TokenReply {
-            status,
             body,
             sealed: sent.sealed_fields,
         })
