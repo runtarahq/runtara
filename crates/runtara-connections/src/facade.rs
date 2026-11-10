@@ -16,7 +16,9 @@ use serde_json::Value;
 use crate::auth::provider_auth::{self, ResolvedConnectionAuth, RotatedCredentials};
 use crate::config::ConnectionsState;
 use crate::error::ConnectionsError;
-use crate::repository::connections::{ConnectionRepository, ConnectionWithParameters};
+use crate::repository::connections::{
+    ConnectionRepository, ConnectionWithParameters, refresh_token_hash,
+};
 use crate::resolution::{ConnectionDescriptor, ConnectionResourcePage, ConnectionResourceRequest};
 use crate::resource_resolver::resources_for_integration;
 use crate::service::rate_limits::RateLimitService;
@@ -625,14 +627,6 @@ impl ConnectionsFacade {
             }
         }
     }
-}
-
-/// SHA-256 (hex) of a refresh token — a non-reversible fingerprint stored in the
-/// `refresh_token_hash` column for the rotation optimistic-concurrency guard. The
-/// token value itself is never persisted in plaintext.
-fn refresh_token_hash(token: &str) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(token.as_bytes()))
 }
 
 /// Whether an auth-resolution error message carries one of the provider's terminal

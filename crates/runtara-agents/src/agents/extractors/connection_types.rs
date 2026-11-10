@@ -1030,6 +1030,120 @@ impl HttpConnectionExtractor for QuickBooksOnlineExtractor {
     }
 }
 
+/// Xero Accounting API, authorized through an OAuth 2.0 web app: the tenant's
+/// own (Client ID and Secret below) or a platform app.
+///
+/// One Xero token can reach every organisation its user authorized, so each
+/// request names the organisation in a `xero-tenant-id` header. Xero does not
+/// name it in the callback: after the code exchange the host asks
+/// `https://api.xero.com/connections` which organisation this consent
+/// authorized and stores it as `tenant_id`, and the proxy sends it with every
+/// request (`provider_auth.rs`). A connection without one has no base URL, so
+/// its requests are refused rather than sent without an organisation.
+///
+/// Scopes are Xero's granular ones, which apps created from March 2026 get
+/// instead of `accounting.transactions`. Xero rotates the refresh token on
+/// every refresh.
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "xero_oauth",
+    display_name = "Xero",
+    description = "Connect to the Xero Accounting API with OAuth 2.0 authorization",
+    category = "erp",
+    auth_type = "oauth2_authorization_code",
+    oauth_auth_url = "https://login.xero.com/identity/connect/authorize",
+    oauth_token_url = "https://identity.xero.com/connect/token",
+    oauth_default_scopes = "offline_access accounting.invoices accounting.payments accounting.contacts accounting.settings",
+    oauth_token_auth = "basic",
+    oauth_refresh_rotates = true,
+    oauth_base_url = "https://api.xero.com",
+    oauth_reauth_on_error_codes = "invalid_grant"
+)]
+pub struct XeroOAuthParams {
+    /// Xero app Client ID
+    #[field(
+        display_name = "Client ID",
+        description = "Client ID of your Xero web app (developer.xero.com, My Apps)",
+        requires_reauthorization
+    )]
+    pub client_id: String,
+
+    /// Xero app Client Secret
+    #[field(
+        display_name = "Client Secret",
+        description = "Client secret generated for your Xero web app",
+        secret,
+        requires_reauthorization
+    )]
+    pub client_secret: String,
+
+    /// The organisation the consent authorized, set after the code exchange
+    #[serde(default)]
+    #[field(
+        display_name = "Tenant ID",
+        description = "The Xero organisation this connection uses, set automatically after authorization",
+        access = "read"
+    )]
+    pub tenant_id: Option<String>,
+
+    /// The organisation's name, for display
+    #[serde(default)]
+    #[field(
+        display_name = "Organisation",
+        description = "Name of the Xero organisation, set automatically after authorization",
+        access = "read"
+    )]
+    pub tenant_name: Option<String>,
+
+    /// OAuth2 scopes (space-separated)
+    #[serde(default = "default_xero_scopes")]
+    #[field(
+        display_name = "Scopes",
+        description = "Space-separated OAuth2 scopes. The default covers invoices, credit notes, \
+                       payments, contacts, items, accounts and tax rates; keep offline_access, or \
+                       the connection cannot refresh its token and needs authorizing again.",
+        default = "offline_access accounting.invoices accounting.payments accounting.contacts accounting.settings",
+        requires_reauthorization
+    )]
+    pub scopes: String,
+}
+
+fn default_xero_scopes() -> String {
+    "offline_access accounting.invoices accounting.payments accounting.contacts accounting.settings"
+        .to_string()
+}
+
+/// HTTP extractor for Xero connections. As for QuickBooks, the proxy resolves
+/// the token, the base URL and the `xero-tenant-id` header from the
+/// connection, so the values here only serve the extractor contract and let
+/// the generic `http` agent bind a `xero_oauth` connection.
+pub struct XeroOAuthExtractor;
+
+impl HttpConnectionExtractor for XeroOAuthExtractor {
+    fn integration_id(&self) -> &'static str {
+        "xero_oauth"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        if params.get("client_id").and_then(|v| v.as_str()).is_none()
+            && params.get("oauth_app").and_then(|v| v.as_str()).is_none()
+        {
+            return Err("Invalid xero_oauth connection: missing client_id".to_string());
+        }
+
+        let mut headers = HashMap::new();
+        headers.insert("Accept".to_string(), "application/json".to_string());
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+
+        Ok(HttpConnectionConfig {
+            headers,
+            query_parameters: HashMap::new(),
+            url_prefix: String::new(),
+            rate_limit_config: None,
+        })
+    }
+}
+
 /// HTTP extractor for HubSpot connections.
 ///
 /// Note: the `Authorization` header is NOT set here because the access token
@@ -2296,6 +2410,10 @@ mod form_condition_tests {
             (
                 &__CONNECTION_META_QuickBooksOnlineParams,
                 &["client_id", "client_secret", "environment", "scopes"][..],
+            ),
+            (
+                &__CONNECTION_META_XeroOAuthParams,
+                &["client_id", "client_secret", "scopes"][..],
             ),
             (
                 &__CONNECTION_META_HttpOAuth2AuthorizationCodeParams,

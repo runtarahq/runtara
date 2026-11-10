@@ -1,0 +1,36 @@
+# Input to scripts/connector_gen/connector_gen.py; see its README.md.
+agent:
+  id: xero
+  name: Xero
+  description: Xero Accounting — invoices, credit notes, payments, contacts, items, accounts and tax rates.
+  integration_id: xero_oauth
+  error_prefix: XERO
+spec:
+  # The raw file at a fixed commit of Xero's own spec repository: the branch
+  # moves with every SDK release.
+  url: https://raw.githubusercontent.com/XeroAPI/Xero-OpenAPI/7e495a3dc4abb96fcabf2b421ae0fe46efcacbe9/xero_accounting.yaml
+  sha256: bf9b7af186c56324594345a4e9e1b9ce8ff48d75c8ecfc97d36756fcacdced9c
+# The xero_oauth connection sends the organisation it was authorized for.
+connection_headers:
+  - xero-tenant-id
+operations:
+  - getOrganisations
+  - getAccounts
+  - getTaxRates
+  - getContacts
+  - getContact
+  - createContacts
+  - updateContact
+  - getItems
+  - getItem
+  - createItems
+  - updateItem
+  - getInvoices
+  - getInvoice
+  - createInvoices
+  - updateInvoice
+  - getCreditNotes
+  - createCreditNotes
+  - getPayments
+  - getPayment
+  - createPayment

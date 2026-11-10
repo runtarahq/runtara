@@ -16,6 +16,14 @@ use crate::crypto::{CipherContext, CredentialCipher, is_envelope};
 use crate::types::*;
 use sqlx::PgPool;
 
+/// SHA-256 (hex) of a refresh token — a non-reversible fingerprint stored in the
+/// `refresh_token_hash` column for the rotation optimistic-concurrency guard. The
+/// token value itself is never persisted in plaintext.
+pub fn refresh_token_hash(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
 /// Convert JSONB value from DB to RateLimitConfigDto
 fn parse_rate_limit_config(value: Option<serde_json::Value>) -> Option<RateLimitConfigDto> {
     value.and_then(|v| serde_json::from_value(v).ok())
@@ -995,6 +1003,13 @@ impl ConnectionRepository {
 
     /// Update connection parameters and status atomically.
     /// Used by OAuth callback to store tokens and set status to ACTIVE.
+    ///
+    /// The rotation guard's `refresh_token_hash` is set to the hash of the
+    /// refresh token written here. A new authorization starts a new chain: left
+    /// at the old chain's hash, the guard would match no refresh token of the new
+    /// one, and every rotation after a reconnect would be dropped by
+    /// [`Self::persist_refreshed_oauth`]. Reset to `NULL` instead, it would let a
+    /// refresh still running on the old chain overwrite the new tokens.
     pub async fn update_parameters_and_status(
         &self,
         id: &str,
@@ -1010,6 +1025,7 @@ impl ConnectionRepository {
             UPDATE connection_data_entity
             SET connection_parameters = $3,
                 status = $4,
+                refresh_token_hash = $5,
                 updated_at = NOW()
             WHERE id = $1 AND tenant_id = $2
             "#,
@@ -1018,6 +1034,12 @@ impl ConnectionRepository {
         .bind(tenant_id)
         .bind(&sealed)
         .bind(status)
+        .bind(
+            parameters
+                .get("refresh_token")
+                .and_then(|token| token.as_str())
+                .map(refresh_token_hash),
+        )
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected())

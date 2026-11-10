@@ -1,0 +1,77 @@
+{
+  "Contacts": [
+    {
+      "Addresses": [
+        {
+          "AddressType": "STREET",
+          "City": "",
+          "Country": "",
+          "PostalCode": "",
+          "Region": ""
+        },
+        {
+          "AddressType": "POBOX",
+          "City": "",
+          "Country": "",
+          "PostalCode": "",
+          "Region": ""
+        }
+      ],
+      "BankAccountDetails": "",
+      "ContactGroups": [],
+      "ContactID": "d5be01fb-b09f-4c3a-9c67-e10c2a03412c",
+      "ContactPersons": [],
+      "ContactStatus": "ACTIVE",
+      "EmailAddress": "sid30680@blah.com",
+      "HasValidationErrors": false,
+      "IsCustomer": false,
+      "IsSupplier": false,
+      "Name": "FooBar",
+      "PaymentTerms": {
+        "Bills": {
+          "Day": 15,
+          "Type": "OFCURRENTMONTH"
+        },
+        "Sales": {
+          "Day": 10,
+          "Type": "DAYSAFTERBILLMONTH"
+        }
+      },
+      "Phones": [
+        {
+          "PhoneAreaCode": "",
+          "PhoneCountryCode": "",
+          "PhoneNumber": "",
+          "PhoneType": "DEFAULT"
+        },
+        {
+          "PhoneAreaCode": "",
+          "PhoneCountryCode": "",
+          "PhoneNumber": "",
+          "PhoneType": "DDI"
+        },
+        {
+          "PhoneAreaCode": "",
+          "PhoneCountryCode": "",
+          "PhoneNumber": "",
+          "PhoneType": "FAX"
+        },
+        {
+          "PhoneAreaCode": "415",
+          "PhoneCountryCode": "",
+          "PhoneNumber": "555-1212",
+          "PhoneType": "MOBILE"
+        }
+      ],
+      "PurchasesDefaultLineAmountType": "INCLUSIVE",
+      "PurchasesTrackingCategories": [],
+      "SalesDefaultLineAmountType": "INCLUSIVE",
+      "SalesTrackingCategories": [],
+      "UpdatedDateUTC": "/Date(1551400031763+0000)/"
+    }
+  ],
+  "DateTimeUTC": "/Date(1551400031795)/",
+  "Id": "4166b727-c3f0-4881-acd0-d4f7c0e8fcda",
+  "ProviderName": "Xero API Partner",
+  "Status": "OK"
+}

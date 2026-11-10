@@ -1,0 +1,78 @@
+{
+  "Contacts": [
+    {
+      "Addresses": [
+        {
+          "AddressType": "STREET",
+          "City": "",
+          "Country": "",
+          "PostalCode": "",
+          "Region": ""
+        },
+        {
+          "AddressType": "POBOX",
+          "City": "",
+          "Country": "",
+          "PostalCode": "",
+          "Region": ""
+        }
+      ],
+      "BankAccountDetails": "",
+      "CompanyNumber": "NumberBusiness1234",
+      "ContactGroups": [],
+      "ContactID": "3ff6d40c-af9a-40a3-89ce-3c1556a25591",
+      "ContactPersons": [],
+      "ContactStatus": "ACTIVE",
+      "EmailAddress": "sid32476@blah.com",
+      "HasValidationErrors": false,
+      "IsCustomer": false,
+      "IsSupplier": false,
+      "Name": "Foo9987",
+      "PaymentTerms": {
+        "Bills": {
+          "Day": 15,
+          "Type": "OFCURRENTMONTH"
+        },
+        "Sales": {
+          "Day": 10,
+          "Type": "DAYSAFTERBILLMONTH"
+        }
+      },
+      "Phones": [
+        {
+          "PhoneAreaCode": "",
+          "PhoneCountryCode": "",
+          "PhoneNumber": "",
+          "PhoneType": "DEFAULT"
+        },
+        {
+          "PhoneAreaCode": "",
+          "PhoneCountryCode": "",
+          "PhoneNumber": "",
+          "PhoneType": "DDI"
+        },
+        {
+          "PhoneAreaCode": "",
+          "PhoneCountryCode": "",
+          "PhoneNumber": "",
+          "PhoneType": "FAX"
+        },
+        {
+          "PhoneAreaCode": "415",
+          "PhoneCountryCode": "",
+          "PhoneNumber": "555-1212",
+          "PhoneType": "MOBILE"
+        }
+      ],
+      "PurchasesDefaultLineAmountType": "INCLUSIVE",
+      "PurchasesTrackingCategories": [],
+      "SalesDefaultLineAmountType": "INCLUSIVE",
+      "SalesTrackingCategories": [],
+      "UpdatedDateUTC": "/Date(1551399321043+0000)/"
+    }
+  ],
+  "DateTimeUTC": "/Date(1551399321121)/",
+  "Id": "e997d6d7-6dad-4458-beb8-d9c1bf7f2edf",
+  "ProviderName": "Xero API Partner",
+  "Status": "OK"
+}

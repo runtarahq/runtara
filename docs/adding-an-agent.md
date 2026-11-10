@@ -181,7 +181,11 @@ existing connection type (`http_bearer`, `http_api_key`,
    injects the credential and sets the base URL.
    - OAuth2 authorization-code types are descriptor-driven: add the
      `integration_id` to the existing `hubspot_private_app | quickbooks_online
-     | …` arm instead.
+     | …` arm instead. A value the provider returns in the callback (Intuit's
+     `realmId`) is an `oauth_extra_callback_params` entry. One it names only
+     through its API, as Xero names the organisation, is looked up after the
+     code exchange in `add_provider_account_fields` (`service/oauth.rs`), and
+     the auth arm sends it (`xero_oauth`).
    - OAuth2 client credentials against the vendor's own token endpoint get a
      `describe_<vendor>_client_credentials_auth` returning
      `DeferredAuth::OAuth2ClientCredentials` (Shopify, Zendesk): the token is

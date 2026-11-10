@@ -1,0 +1,97 @@
+{
+  "DateTimeUTC": "/Date(1552431874852)/",
+  "Id": "4876f9ee-3a17-47d8-8c1b-84377c8f2998",
+  "Payments": [
+    {
+      "Account": {
+        "AccountID": "5690f1e8-1d02-4893-90c2-ee1a69eff942",
+        "Code": "970",
+        "Name": "Owner A Funds Introduced"
+      },
+      "Amount": 46.0,
+      "BankAmount": 46.0,
+      "BatchPayment": {
+        "Account": {
+          "AccountID": "5690f1e8-1d02-4893-90c2-ee1a69eff942"
+        },
+        "BatchPaymentID": "b54aa50c-794c-461b-89d1-846e1b84d9c0",
+        "Date": "/Date(1543449600000+0000)/",
+        "IsReconciled": "false",
+        "Status": "AUTHORISED",
+        "TotalAmount": "50.00",
+        "Type": "RECBATCH",
+        "UpdatedDateUTC": "/Date(1541176592690+0000)/"
+      },
+      "BatchPaymentID": "b54aa50c-794c-461b-89d1-846e1b84d9c0",
+      "CurrencyRate": 1.0,
+      "Date": "/Date(1543449600000+0000)/",
+      "HasAccount": true,
+      "HasValidationErrors": false,
+      "Invoice": {
+        "AmountDue": 0.0,
+        "AmountPaid": 46.0,
+        "Contact": {
+          "ContactID": "a3675fc4-f8dd-4f03-ba5b-f1870566bcd7",
+          "ContactPersons": [],
+          "HasValidationErrors": false,
+          "Name": "Barney Rubble-83203"
+        },
+        "CurrencyCode": "NZD",
+        "CurrencyRate": 1.0,
+        "Date": "/Date(1539993600000+0000)/",
+        "DateString": "2018-10-20T00:00:00",
+        "DueDate": "/Date(1546128000000+0000)/",
+        "DueDateString": "2018-12-30T00:00:00",
+        "FullyPaidOnDate": "/Date(1543449600000+0000)/",
+        "HasErrors": false,
+        "InvoiceID": "046d8a6d-1ae1-4b4d-9340-5601bdf41b87",
+        "InvoiceNumber": "INV-0002",
+        "IsDiscounted": false,
+        "LineAmountTypes": "Exclusive",
+        "LineItems": [
+          {
+            "AccountCode": "200",
+            "Description": "Acme Tires",
+            "LineAmount": 40.0,
+            "LineItemID": "878d1688-a905-4866-ae91-5a772c2540c7",
+            "Quantity": 2.0,
+            "TaxAmount": 6.0,
+            "TaxType": "OUTPUT2",
+            "Tracking": [],
+            "UnitAmount": 20.0,
+            "ValidationErrors": []
+          }
+        ],
+        "Overpayments": [],
+        "Payments": [
+          {
+            "Amount": 46.0,
+            "CurrencyRate": 1.0,
+            "Date": "/Date(1543449600000+0000)/",
+            "HasAccount": false,
+            "HasValidationErrors": false,
+            "PaymentID": "99ea7f6b-c513-4066-bc27-b7c65dcd76c2"
+          }
+        ],
+        "Prepayments": [],
+        "Reference": "Red Fish, Blue Fish",
+        "SentToContact": true,
+        "Status": "PAID",
+        "SubTotal": 40.0,
+        "Total": 46.0,
+        "TotalTax": 6.0,
+        "Type": "ACCREC",
+        "UpdatedDateUTC": "/Date(1541176592690+0000)/",
+        "UpdatedDateUTCString": "2018-11-02T16:36:32Z"
+      },
+      "IsReconciled": false,
+      "PaymentID": "99ea7f6b-c513-4066-bc27-b7c65dcd76c2",
+      "PaymentType": "ACCRECPAYMENT",
+      "Status": "AUTHORISED",
+      "UpdatedDateUTC": "/Date(1541176592690+0000)/",
+      "UpdatedDateUTCString": "2018-11-02T16:36:32Z"
+    }
+  ],
+  "ProviderName": "Provider Name Example",
+  "Status": "OK"
+}

@@ -658,6 +658,16 @@ async fn callback_outcome(
             );
             CallbackOutcome::Failed("token_exchange_failed".to_string())
         }
+        Err(OAuthError::AccountUnresolved(msg)) => {
+            crate::events::emit(
+                &events,
+                Some(&tenant_id),
+                crate::events::ConnectionLifecycleEvent::OAuthFailed {
+                    reason: format!("account_unresolved: {}", msg),
+                },
+            );
+            CallbackOutcome::Failed("account_unresolved".to_string())
+        }
         Err(e) => {
             // An internal error may come before the state was matched.
             let verified = !matches!(e, OAuthError::Internal(_));

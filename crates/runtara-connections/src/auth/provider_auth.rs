@@ -226,6 +226,24 @@ fn describe_connection_auth(
         "hubspot_private_app" | "quickbooks_online" | "http_oauth2_authorization_code" => {
             describe_oauth_authcode_auth(connection_id, integration_id, params, headers)
         }
+        // One Xero token reaches every organisation its user authorized; each
+        // request names the one this connection was authorized for. Without it
+        // there is no base URL, so a request is refused rather than sent to no
+        // organisation in particular.
+        "xero_oauth" => match xero_tenant_id(params) {
+            Some(tenant) => {
+                headers.insert("xero-tenant-id".into(), tenant.to_string());
+                describe_oauth_authcode_auth(connection_id, integration_id, params, headers)
+            }
+            // No organisation to name: no destination and no credentials, so
+            // the proxy refuses the request and no token goes anywhere.
+            None => ConnectionAuthDescriptor {
+                base_url: None,
+                aws_signing: None,
+                azure_signing: None,
+                deferred_auth: None,
+            },
+        },
         "stripe_api_key" => {
             if let Some(key) = params["secret_key"].as_str() {
                 headers.insert("Authorization".into(), format!("Bearer {}", key));
@@ -565,6 +583,13 @@ fn describe_shopify_client_credentials_auth(
         basic_auth: None,
         default_ttl_seconds: DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
     })
+}
+
+/// The Xero organisation a connection was authorized for, as Xero spells it.
+fn xero_tenant_id(params: &Value) -> Option<&str> {
+    params["tenant_id"]
+        .as_str()
+        .filter(|tenant| uuid::Uuid::parse_str(tenant).is_ok())
 }
 
 fn zendesk_account_url(params: &Value) -> Option<String> {
@@ -1397,6 +1422,80 @@ mod tests {
             &mut headers,
         );
         assert!(!headers.contains_key("Authorization"));
+    }
+
+    #[test]
+    fn xero_names_the_authorized_organisation_in_every_request() {
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "xero_oauth",
+            &json!({
+                "client_id": "client",
+                "client_secret": "secret",
+                "access_token": "access",
+                "tenant_id": "a3b9b4c0-1d2e-4f50-8a6b-7c8d9e0f1a2b",
+            }),
+            &mut headers,
+        );
+        assert_eq!(descriptor.base_url.as_deref(), Some("https://api.xero.com"));
+        assert_eq!(
+            headers.get("xero-tenant-id").map(String::as_str),
+            Some("a3b9b4c0-1d2e-4f50-8a6b-7c8d9e0f1a2b")
+        );
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("Bearer access")
+        );
+    }
+
+    #[test]
+    fn xero_without_an_organisation_has_no_destination() {
+        for tenant in [json!(null), json!(""), json!("not-a-uuid"), json!(42)] {
+            for tokens in [
+                json!({ "access_token": "access" }),
+                json!({ "access_token": "access", "refresh_token": "refresh" }),
+            ] {
+                let mut params = json!({ "client_id": "client", "tenant_id": tenant });
+                params
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(tokens.as_object().unwrap().clone());
+                let mut headers = HashMap::new();
+                let descriptor =
+                    describe_connection_auth("conn-1", "xero_oauth", &params, &mut headers);
+                assert_eq!(descriptor.base_url, None, "{params}");
+                assert!(descriptor.deferred_auth.is_none(), "{params}");
+                assert!(headers.is_empty(), "{params}: {headers:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn xero_refreshes_through_its_token_endpoint_with_basic_auth() {
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "xero_oauth",
+            &json!({
+                "client_id": "client",
+                "client_secret": "secret",
+                "refresh_token": "refresh",
+                "tenant_id": "a3b9b4c0-1d2e-4f50-8a6b-7c8d9e0f1a2b",
+            }),
+            &mut headers,
+        );
+        match descriptor.deferred_auth {
+            Some(DeferredAuth::OAuth2RefreshToken {
+                token_url,
+                token_endpoint_auth,
+                ..
+            }) => {
+                assert_eq!(token_url, "https://identity.xero.com/connect/token");
+                assert!(matches!(token_endpoint_auth, TokenEndpointAuth::HttpBasic));
+            }
+            _ => panic!("a refresh token means a deferred refresh"),
+        }
     }
 
     #[test]

@@ -1,0 +1,111 @@
+{
+  "DateTimeUTC": "/Date(1552431874205)/",
+  "Id": "9f310473-e1b5-4704-a25c-eec653deb596",
+  "Payments": [
+    {
+      "Account": {
+        "AccountID": "5690f1e8-1d02-4893-90c2-ee1a69eff942",
+        "Code": "970"
+      },
+      "Amount": 46.0,
+      "BankAmount": 46.0,
+      "BatchPayment": {
+        "Account": {
+          "AccountID": "5690f1e8-1d02-4893-90c2-ee1a69eff942"
+        },
+        "BatchPaymentID": "b54aa50c-794c-461b-89d1-846e1b84d9c0",
+        "Date": "/Date(1552521600000+0000)/",
+        "IsReconciled": "false",
+        "Status": "AUTHORISED",
+        "TotalAmount": "50.00",
+        "Type": "RECBATCH",
+        "UpdatedDateUTC": "/Date(1541176592690+0000)/"
+      },
+      "BatchPaymentID": "b54aa50c-794c-461b-89d1-846e1b84d9c0",
+      "CurrencyRate": 1.0,
+      "Date": "/Date(1543449600000+0000)/",
+      "HasAccount": true,
+      "HasValidationErrors": false,
+      "Invoice": {
+        "Contact": {
+          "Addresses": [],
+          "ContactGroups": [],
+          "ContactID": "a3675fc4-f8dd-4f03-ba5b-f1870566bcd7",
+          "ContactNumber": "",
+          "ContactPersons": [],
+          "HasValidationErrors": false,
+          "Name": "Barney Rubble-83203",
+          "Phones": []
+        },
+        "CreditNotes": [],
+        "CurrencyCode": "NZD",
+        "HasErrors": false,
+        "InvoiceID": "046d8a6d-1ae1-4b4d-9340-5601bdf41b87",
+        "InvoiceNumber": "INV-0002",
+        "IsDiscounted": false,
+        "LineItems": [],
+        "Overpayments": [],
+        "Payments": [],
+        "Prepayments": [],
+        "Type": "ACCREC"
+      },
+      "IsReconciled": false,
+      "PaymentID": "99ea7f6b-c513-4066-bc27-b7c65dcd76c2",
+      "PaymentType": "ACCRECPAYMENT",
+      "Reference": "",
+      "Status": "AUTHORISED",
+      "UpdatedDateUTC": "/Date(1541176592690+0000)/",
+      "UpdatedDateUTCString": "2018-11-02T16:36:32Z"
+    },
+    {
+      "Account": {
+        "AccountID": "136ebd08-60ea-4592-8982-be92c153b53a",
+        "Code": "980"
+      },
+      "Amount": 2.0,
+      "BankAmount": 2.0,
+      "CurrencyRate": 1.0,
+      "Date": "/Date(1552521600000+0000)/",
+      "HasAccount": true,
+      "HasValidationErrors": false,
+      "Invoice": {
+        "Contact": {
+          "Addresses": [],
+          "ContactGroups": [],
+          "ContactID": "430fa14a-f945-44d3-9f97-5df5e28441b8",
+          "ContactNumber": "",
+          "ContactPersons": [],
+          "HasValidationErrors": false,
+          "Name": "Liam Gallagher",
+          "Phones": []
+        },
+        "CreditNotes": [],
+        "CurrencyCode": "NZD",
+        "HasErrors": false,
+        "InvoiceID": "249f15fa-f2a7-4acc-8769-0984103f2225",
+        "InvoiceNumber": "CN-0005",
+        "IsDiscounted": false,
+        "LineItems": [],
+        "Overpayments": [],
+        "Payments": [],
+        "Prepayments": [],
+        "Type": "ACCRECCREDIT"
+      },
+      "IsReconciled": false,
+      "PaymentID": "6b037c9b-2e5d-4905-84d3-eabfb3438242",
+      "PaymentType": "ARCREDITPAYMENT",
+      "Reference": "Too much",
+      "Status": "AUTHORISED",
+      "UpdatedDateUTC": "/Date(1551812346173+0000)/",
+      "UpdatedDateUTCString": "2019-03-05T18:59:06Z"
+    }
+  ],
+  "ProviderName": "Provider Name Example",
+  "Status": "OK",
+  "pagination": {
+    "itemCount": 2,
+    "page": 1,
+    "pageCount": 1,
+    "pageSize": 100
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "DateTimeUTC": "/Date(1552331874897)/",
+  "Id": "8487e8d7-5fb3-4f02-b949-dec8f1e38182",
+  "Items": [
+    {
+      "Code": "123",
+      "Description": "Guitars Fender Strat",
+      "IsPurchased": false,
+      "IsSold": true,
+      "IsTrackedAsInventory": false,
+      "ItemID": "c8c54d65-f3f2-452d-926e-bf450b12fb07",
+      "Name": "Guitars",
+      "PurchaseDetails": {},
+      "SalesDetails": {
+        "AccountCode": "200",
+        "TaxType": "OUTPUT2",
+        "UnitPrice": 5000.0
+      },
+      "UpdatedDateUTC": "/Date(1551981476267+0000)/"
+    },
+    {
+      "Code": "abc65591",
+      "Description": "Barfoo",
+      "IsPurchased": true,
+      "IsSold": true,
+      "IsTrackedAsInventory": false,
+      "ItemID": "a4544d51-48f6-441f-a623-99ecbced6ab7",
+      "Name": "Hello11350",
+      "PurchaseDetails": {},
+      "SalesDetails": {},
+      "UpdatedDateUTC": "/Date(1552331873580+0000)/"
+    },
+    {
+      "Code": "fg78Ac",
+      "Description": "Fender Stratocaster Sunburst",
+      "InventoryAssetAccountCode": "140",
+      "IsPurchased": true,
+      "IsSold": true,
+      "IsTrackedAsInventory": true,
+      "ItemID": "5a70a272-a481-4bcf-a8ca-efffd923ab48",
+      "Name": "Fender Stratocaster",
+      "PurchaseDescription": "Fender Stratocaster Sunburst",
+      "PurchaseDetails": {
+        "COGSAccountCode": "500",
+        "TaxType": "",
+        "UnitPrice": 1500.0
+      },
+      "QuantityAvailable": 0.0,
+      "QuantityOnBackOrder": 0.0,
+      "QuantityOnHand": 0.0,
+      "SalesDetails": {
+        "AccountCode": "200",
+        "TaxType": "OUTPUT2",
+        "UnitPrice": 5000.0
+      },
+      "TotalCostPool": 0.0,
+      "UpdatedDateUTC": "/Date(1552331874000+0000)/"
+    }
+  ],
+  "ProviderName": "Provider Name Example",
+  "Status": "OK"
+}

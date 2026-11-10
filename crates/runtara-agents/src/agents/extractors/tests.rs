@@ -70,6 +70,44 @@ fn quickbooks_extractor_requires_client_id() {
     assert!(extractor.extract(&json!({})).is_err());
 }
 
+#[test]
+fn xero_is_reachable_from_the_http_agent_and_needs_a_client() {
+    assert!(get_http_extractor_ids().contains(&"xero_oauth"));
+    let extractor = connection_types::XeroOAuthExtractor;
+    assert_eq!(extractor.integration_id(), "xero_oauth");
+    // The tokens and the organisation arrive with the authorization.
+    for params in [
+        json!({ "client_id": "abc", "client_secret": "shh" }),
+        json!({ "oauth_app": "xero-platform" }),
+    ] {
+        let config = extractor.extract(&params).expect("a client is enough");
+        assert!(config.url_prefix.is_empty(), "got {:?}", config.url_prefix);
+    }
+    assert!(extractor.extract(&json!({})).is_err());
+}
+
+#[test]
+fn xero_descriptor_rotates_and_reads_the_organisation_back() {
+    let meta = crate::registry::find_connection_type("xero_oauth").expect("registered");
+    let oauth = meta.oauth_config.expect("an OAuth descriptor");
+    assert_eq!(oauth.token_url, "https://identity.xero.com/connect/token");
+    assert_eq!(oauth.base_url, "https://api.xero.com");
+    assert!(oauth.refresh_token_rotates);
+    assert!(
+        oauth
+            .default_scopes
+            .split(' ')
+            .any(|s| s == "offline_access")
+    );
+    for name in ["tenant_id", "tenant_name"] {
+        let field = meta.fields.iter().find(|f| f.name == name).unwrap();
+        assert!(
+            matches!(field.access, runtara_dsl::form::FieldAccessMode::Read),
+            "{name} is set by the host, not the user"
+        );
+    }
+}
+
 // ============================================================================
 // Host-resolved integration ids
 // ============================================================================

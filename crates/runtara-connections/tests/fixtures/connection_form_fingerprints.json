@@ -168,6 +168,12 @@
     "fnv1a64": "24f2b23d6e481f2e"
   },
   {
+    "integrationId": "xero_oauth",
+    "fieldCount": 5,
+    "serializedBytes": 1852,
+    "fnv1a64": "d4a5f9fbcbfcaf68"
+  },
+  {
     "integrationId": "zendesk_client_credentials",
     "fieldCount": 4,
     "serializedBytes": 1513,

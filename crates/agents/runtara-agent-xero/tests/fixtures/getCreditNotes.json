@@ -1,0 +1,88 @@
+{
+  "CreditNotes": [
+    {
+      "Allocations": [],
+      "Contact": {
+        "Addresses": [],
+        "ContactGroups": [],
+        "ContactID": "430fa14a-f945-44d3-9f97-5df5e28441b8",
+        "ContactPersons": [],
+        "HasValidationErrors": false,
+        "Name": "Liam Gallagher",
+        "Phones": []
+      },
+      "CreditNoteID": "249f15fa-f2a7-4acc-8769-0984103f2225",
+      "CreditNoteNumber": "CN-0005",
+      "CurrencyCode": "NZD",
+      "CurrencyRate": 1.0,
+      "Date": "/Date(1551744000000+0000)/",
+      "DateString": "2019-03-05T00:00:00",
+      "HasAttachments": true,
+      "ID": "249f15fa-f2a7-4acc-8769-0984103f2225",
+      "LineAmountTypes": "Exclusive",
+      "LineItems": [],
+      "Payments": [
+        {
+          "Amount": 2.0,
+          "CurrencyRate": 1.0,
+          "Date": "/Date(1552521600000+0000)/",
+          "HasAccount": false,
+          "HasValidationErrors": false,
+          "PaymentID": "6b037c9b-2e5d-4905-84d3-eabfb3438242",
+          "Reference": "Too much"
+        }
+      ],
+      "Reference": "US Tour",
+      "RemainingCredit": 32.5,
+      "Status": "AUTHORISED",
+      "SubTotal": 30.0,
+      "Total": 34.5,
+      "TotalTax": 4.5,
+      "Type": "ACCRECCREDIT",
+      "UpdatedDateUTC": "/Date(1551812346157+0000)/",
+      "UpdatedDateUTCString": "2019-03-05T18:59:06Z"
+    },
+    {
+      "Allocations": [],
+      "Contact": {
+        "Addresses": [],
+        "ContactGroups": [],
+        "ContactID": "430fa14a-f945-44d3-9f97-5df5e28441b8",
+        "ContactPersons": [],
+        "HasValidationErrors": false,
+        "Name": "Liam Gallagher",
+        "Phones": []
+      },
+      "CreditNoteID": "f8021bd2-9a6a-4c19-8477-163da0b9290f",
+      "CreditNoteNumber": "",
+      "CurrencyCode": "NZD",
+      "CurrencyRate": 1.0,
+      "Date": "/Date(1546646400000+0000)/",
+      "DateString": "2019-01-05T00:00:00",
+      "HasAttachments": false,
+      "ID": "f8021bd2-9a6a-4c19-8477-163da0b9290f",
+      "LineAmountTypes": "Exclusive",
+      "LineItems": [],
+      "Payments": [],
+      "Reference": "",
+      "RemainingCredit": 46.0,
+      "Status": "DRAFT",
+      "SubTotal": 40.0,
+      "Total": 46.0,
+      "TotalTax": 6.0,
+      "Type": "ACCPAYCREDIT",
+      "UpdatedDateUTC": "/Date(1551812506153+0000)/",
+      "UpdatedDateUTCString": "2019-03-05T19:01:46Z"
+    }
+  ],
+  "DateTimeUTC": "/Date(1551812506620)/",
+  "Id": "306379b0-3d75-4c77-953a-be08fa0efae8",
+  "ProviderName": "Provider Name Example",
+  "Status": "OK",
+  "pagination": {
+    "itemCount": 2,
+    "page": 1,
+    "pageCount": 1,
+    "pageSize": 100
+  }
+}

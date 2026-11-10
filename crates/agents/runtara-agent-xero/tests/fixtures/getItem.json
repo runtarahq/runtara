@@ -1,0 +1,35 @@
+{
+  "DateTimeUTC": "/Date(1552333420160)/",
+  "Id": "0bbd8a92-9ba7-4711-8040-8d6a609ca7e8",
+  "Items": [
+    {
+      "Code": "123",
+      "Description": "Guitars Fender Strat",
+      "InventoryAssetAccountCode": "630",
+      "IsPurchased": true,
+      "IsSold": true,
+      "IsTrackedAsInventory": true,
+      "ItemID": "c8c54d65-f3f2-452d-926e-bf450b12fb07",
+      "Name": "Guitars",
+      "PurchaseDescription": "Brand new Fender Strats",
+      "PurchaseDetails": {
+        "COGSAccountCode": "310",
+        "TaxType": "INPUT2",
+        "UnitPrice": 2500.0
+      },
+      "QuantityAvailable": 10.0,
+      "QuantityOnBackOrder": 0.0,
+      "QuantityOnHand": 10.0,
+      "SalesDetails": {
+        "AccountCode": "200",
+        "TaxType": "OUTPUT2",
+        "UnitPrice": 5000.0
+      },
+      "TotalCostPool": 25000.0,
+      "UpdatedDateUTC": "/Date(1552333309387+0000)/",
+      "ValidationErrors": []
+    }
+  ],
+  "ProviderName": "Provider Name Example",
+  "Status": "OK"
+}

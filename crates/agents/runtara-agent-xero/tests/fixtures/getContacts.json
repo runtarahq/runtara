@@ -1,0 +1,155 @@
+{
+  "Contacts": [
+    {
+      "Addresses": [
+        {
+          "AddressType": "STREET",
+          "City": "",
+          "Country": "",
+          "PostalCode": "",
+          "Region": ""
+        },
+        {
+          "AddressLine1": "",
+          "AddressLine2": "",
+          "AddressLine3": "",
+          "AddressLine4": "",
+          "AddressType": "POBOX",
+          "City": "Palo Alto",
+          "Country": "United States",
+          "PostalCode": "94020",
+          "Region": "CA"
+        }
+      ],
+      "Balances": {
+        "AccountsPayable": {
+          "Outstanding": 231.6,
+          "Overdue": 360.0
+        },
+        "AccountsReceivable": {
+          "Outstanding": 760.0,
+          "Overdue": 920.0
+        }
+      },
+      "BankAccountDetails": "",
+      "CompanyNumber": "NumberBusiness1234",
+      "ContactGroups": [],
+      "ContactID": "5cc8cf28-567e-4d43-b287-687cfcaec47c",
+      "ContactPersons": [],
+      "ContactStatus": "ACTIVE",
+      "EmailAddress": "kat.warren@clampett.com",
+      "FirstName": "Katherine",
+      "HasAttachments": false,
+      "HasValidationErrors": false,
+      "IsCustomer": true,
+      "IsSupplier": true,
+      "LastName": "Warren",
+      "Name": "Katherine Warren",
+      "Phones": [
+        {
+          "PhoneAreaCode": "",
+          "PhoneCountryCode": "",
+          "PhoneNumber": "",
+          "PhoneType": "DDI"
+        },
+        {
+          "PhoneAreaCode": "(626)",
+          "PhoneCountryCode": "",
+          "PhoneNumber": "847-1294",
+          "PhoneType": "DEFAULT"
+        },
+        {
+          "PhoneAreaCode": "",
+          "PhoneCountryCode": "",
+          "PhoneNumber": "",
+          "PhoneType": "FAX"
+        },
+        {
+          "PhoneAreaCode": "",
+          "PhoneCountryCode": "",
+          "PhoneNumber": "",
+          "PhoneType": "MOBILE"
+        }
+      ],
+      "PurchasesDefaultLineAmountType": "INCLUSIVE",
+      "SalesDefaultLineAmountType": "INCLUSIVE",
+      "TaxNumbeType": "",
+      "TaxNumber": "",
+      "UpdatedDateUTC": "/Date(1503348544227+0000)/"
+    },
+    {
+      "Addresses": [
+        {
+          "AddressType": "STREET",
+          "City": "",
+          "Country": "",
+          "PostalCode": "",
+          "Region": ""
+        },
+        {
+          "AddressLine1": "",
+          "AddressLine2": "",
+          "AddressLine3": "",
+          "AddressLine4": "",
+          "AddressType": "POBOX",
+          "City": "Anchorage",
+          "Country": "United States",
+          "PostalCode": "99501",
+          "Region": "AK"
+        }
+      ],
+      "BankAccountDetails": "",
+      "ContactGroups": [],
+      "ContactID": "3ec601ad-eddc-4ccb-a8ac-736e88293b1b",
+      "ContactPersons": [],
+      "ContactStatus": "ACTIVE",
+      "EmailAddress": "lparker@parkerandco.com",
+      "FirstName": "Lisa",
+      "HasAttachments": false,
+      "HasValidationErrors": false,
+      "IsCustomer": false,
+      "IsSupplier": false,
+      "LastName": "Parker",
+      "Name": "Lisa Parker",
+      "Phones": [
+        {
+          "PhoneAreaCode": "",
+          "PhoneCountryCode": "",
+          "PhoneNumber": "",
+          "PhoneType": "DDI"
+        },
+        {
+          "PhoneAreaCode": "(510)",
+          "PhoneCountryCode": "",
+          "PhoneNumber": "266-3583",
+          "PhoneType": "DEFAULT"
+        },
+        {
+          "PhoneAreaCode": "",
+          "PhoneCountryCode": "",
+          "PhoneNumber": "",
+          "PhoneType": "FAX"
+        },
+        {
+          "PhoneAreaCode": "",
+          "PhoneCountryCode": "",
+          "PhoneNumber": "",
+          "PhoneType": "MOBILE"
+        }
+      ],
+      "TaxNumbeType": "",
+      "TaxNumber": "",
+      "UpdatedDateUTC": "/Date(1503348546760+0000)/"
+    }
+  ],
+  "DateTimeUTC": "/Date(1551399323399)/",
+  "Id": "04e93d48-e72f-4775-b7dd-15a041fab972",
+  "ProviderName": "Xero API Partner",
+  "Status": "OK",
+  "pagination": {
+    "itemCount": 2,
+    "page": 1,
+    "pageCount": 1,
+    "pageSize": 100
+  }
+}

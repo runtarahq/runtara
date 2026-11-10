@@ -48,6 +48,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a password and a required https base URL, for any API that takes Basic
   credentials. It has no default rate limit, like the other generic types.
 
+- **Xero agent, generated from Xero's Accounting API spec.** Twenty
+  capabilities: read the organisation, accounts and tax rates; list, read,
+  create and update contacts, items and invoices; list and create credit notes;
+  and list, read and create payments. The new `xero_oauth` connection type
+  authorizes a Xero web app (the tenant's own, or a platform OAuth app) with
+  OAuth 2.0 and Xero's granular scopes, and rotates its refresh token on every
+  refresh. Xero names the authorized organisation only through its connections
+  endpoint, so after the code exchange the host looks it up and stores it as
+  `tenant_id`, and every request sends it as `xero-tenant-id`. Reconnecting
+  keeps the organisation the connection had, which Xero's consent screen
+  shows as already connected, and fails once Xero no longer lists it rather
+  than moving to another organisation. A consent that authorizes several new
+  organisations fails with `account_unresolved`, as a connection works with
+  one, and a connection without an organisation sends no request and no
+  credentials. It is limited by default to 1 request/s with a burst of 5: Xero
+  allows 60 a minute and 5 at once per organisation. A request that is not a
+  read and gets no answer, a 5xx or an answer it cannot read fails with
+  `XERO_OUTCOME_UNKNOWN` instead of being retried; a workflow that sets the
+  step's `Idempotency-Key` can send it again safely. A create sent with
+  `summarizeErrors=false` that Xero answers with 200 but whose records it
+  refused, all or some, fails with `XERO_VALIDATION_FAILED` and is not
+  retried; the error names the IDs of the records Xero saved and each refused
+  record's messages. A step whose ID input is empty, `.` or `..` fails with
+  `XERO_INVALID_INPUT` before anything is sent: Xero answers `/Contacts/`
+  (and `/Contacts/.`) as the list, and a POST to it creates a contact, so such
+  an update would create a record.
 - **Jira agent, generated from Atlassian's API spec.** Thirty-two capabilities
   for Jira Cloud: create, read, edit, assign, transition and delete issues,
   search with JQL, manage comments, log work, link issues, watch them, and read
@@ -1227,6 +1253,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A reconnected OAuth connection keeps its rotated refresh tokens.** A
+  provider that rotates refresh tokens (QuickBooks Online, Xero) issues a new
+  one on every refresh, and the guard against two processes rotating at once
+  compared it with the last rotated token. Authorizing the connection again
+  started a new chain without moving that guard, so every later rotation was
+  dropped and the connection needed reconnecting once its stored refresh token
+  ran out. A new authorization now moves the guard to its own refresh token,
+  so a refresh still running on the old chain cannot overwrite it either.
 - **The Pipedrive and Zendesk agents no longer repeat a write that may have
   gone through.** A network error, a timeout or a 5xx was retried for every
   HTTP method, so a deal, ticket or user whose answer was lost could be created

@@ -121,6 +121,20 @@ pub fn get_default_rate_limit_config(integration_id: &str) -> Option<RateLimitCo
             max_retries: 3,
             max_wait_ms: 60000,
         }),
+        // Xero: 60 calls a minute per organisation per app, 5 at once, under a
+        // daily cap that depends on the app's pricing tier. 1 req/s keeps to the
+        // minute limit, and a burst of 5 lets a run's few calls in a row through
+        // without each waiting for the limiter: a refused step is parked and
+        // retried by the wake scheduler, seconds later. Only a minute of
+        // back-to-back calls can go 5 over Xero's 60, which Xero answers with a
+        // 429 and Retry-After, retried like any other.
+        "xero_oauth" => Some(RateLimitConfigDto {
+            requests_per_second: 1,
+            burst_size: 5,
+            retry_on_limit: true,
+            max_retries: 3,
+            max_wait_ms: 60000,
+        }),
         // Pipedrive: API-token requests are limited per token over a 2-second
         // window, from 20 per window on the Essential plan up to 120 on Enterprise.
         // 5 req/s with burst 10 can never exceed 20 in any 2-second window.
@@ -255,6 +269,18 @@ mod tests {
         let config = get_default_rate_limit_config("ups_client_credentials").unwrap();
         assert_eq!(config.requests_per_second, 5);
         assert_eq!(config.burst_size, 10);
+        assert!(config.retry_on_limit);
+    }
+
+    #[test]
+    fn test_xero_defaults_stay_near_the_minute_limit() {
+        let config = get_default_rate_limit_config("xero_oauth").unwrap();
+        // At most burst + rate × 60 requests in any minute; Xero allows 60, and
+        // the few over it are 429s that are retried. The burst is Xero's limit
+        // on concurrent calls.
+        assert_eq!(config.requests_per_second, 1);
+        assert!(config.burst_size <= 5);
+        assert!(config.burst_size + config.requests_per_second * 60 <= 65);
         assert!(config.retry_on_limit);
     }
 
