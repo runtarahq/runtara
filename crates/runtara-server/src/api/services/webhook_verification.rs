@@ -5,10 +5,8 @@
 //! type defines its own verification method.
 
 use axum::http::HeaderMap;
-use hmac::{Hmac, Mac};
-use runtara_connections::ConnectionsFacade;
+use runtara_connections::{ConnectionWithParameters, ConnectionsFacade, SignatureCheck};
 use serde_json::Value;
-use sha2::Sha256;
 use tracing::debug;
 
 /// Verify a webhook request against the trigger's linked connection.
@@ -44,13 +42,12 @@ pub async fn verify_webhook(
     };
 
     let integration_id = conn.integration_id.as_deref().unwrap_or("");
-    let params = match conn.connection_parameters.as_ref() {
-        Some(p) => p,
-        None => return Ok(()),
-    };
+    if conn.connection_parameters.is_none() {
+        return Ok(());
+    }
 
     match integration_id {
-        "mailgun" => verify_mailgun(params, headers, body),
+        "mailgun" => verify_mailgun(facade, &conn, tenant_id, headers, body).await,
         _ => Ok(()),
     }
 }
@@ -58,12 +55,23 @@ pub async fn verify_webhook(
 /// Verify Mailgun webhook signature.
 ///
 /// Mailgun signs webhooks with HMAC-SHA256(signing_key, timestamp + token).
-/// The signature fields are in the request body (JSON).
-fn verify_mailgun(params: &Value, _headers: &HeaderMap, body: &[u8]) -> Result<(), String> {
-    let signing_key = match params.get("webhook_signing_key").and_then(|v| v.as_str()) {
-        Some(key) if !key.is_empty() => key,
-        _ => return Ok(()),
-    };
+/// The signature fields are in the request body (JSON). A connection with no
+/// signing key accepts the webhook unchecked; a sealed key is checked by seal.
+async fn verify_mailgun(
+    facade: &ConnectionsFacade,
+    conn: &ConnectionWithParameters,
+    tenant_id: &str,
+    _headers: &HeaderMap,
+    body: &[u8],
+) -> Result<(), String> {
+    let has_key = conn
+        .connection_parameters
+        .as_ref()
+        .and_then(|params| params.get("webhook_signing_key"))
+        .is_some_and(|key| !key.is_null() && key.as_str() != Some(""));
+    if !has_key {
+        return Ok(());
+    }
 
     let body_value: Value = serde_json::from_slice(body).unwrap_or_default();
 
@@ -86,25 +94,19 @@ fn verify_mailgun(params: &Value, _headers: &HeaderMap, body: &[u8]) -> Result<(
         .and_then(|v| v.as_str())
         .ok_or("Missing signature in webhook body")?;
 
-    let mut mac = Hmac::<Sha256>::new_from_slice(signing_key.as_bytes())
-        .map_err(|_| "Invalid signing key".to_string())?;
-    mac.update(timestamp_str.as_bytes());
-    mac.update(token.as_bytes());
-    let expected = hex::encode(mac.finalize().into_bytes());
-
-    if !constant_time_eq(signature.as_bytes(), expected.as_bytes()) {
-        return Err("Mailgun webhook signature mismatch".to_string());
+    let message = format!("{timestamp_str}{token}");
+    match facade
+        .check_webhook_signature(
+            conn,
+            tenant_id,
+            "webhook_signing_key",
+            message.as_bytes(),
+            signature,
+        )
+        .await
+        .map_err(|e| format!("Mailgun webhook signature could not be checked: {e}"))?
+    {
+        SignatureCheck::Valid | SignatureCheck::NoSecret => Ok(()),
+        SignatureCheck::Invalid => Err("Mailgun webhook signature mismatch".to_string()),
     }
-
-    Ok(())
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
 }
