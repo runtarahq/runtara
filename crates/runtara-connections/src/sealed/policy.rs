@@ -833,6 +833,14 @@ fn mcp_secrets(params: &Value) -> Option<Vec<Secret>> {
 /// The connection types whose secrets are sealed, and what each secret is
 /// for. This mirrors what `describe_connection_auth` does for the same types.
 fn secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
+    // A connection type an agent declared is its base type with a base URL
+    // rendered from the declaration: its secrets are the base's, under the
+    // same names, sealed for the rendered URL. Parameters that do not render
+    // name no destination, and are not sealed.
+    if let Some(translated) = runtara_agents::derived::to_base(integration_id, params) {
+        let (base, base_params) = translated.ok()?;
+        return secrets(base, &base_params);
+    }
     let one = |field, base_url: &str, inject| Some(vec![sent(field, base_url, inject)]);
     match integration_id {
         "openai_api_key" => one("api_key", &openai_proxy_base_url(params), bearer()),
@@ -1009,6 +1017,9 @@ pub fn injected_headers(integration_id: &str, params: &Value) -> Vec<String> {
 /// parameters.
 pub fn is_sealable_type(integration_id: &str) -> bool {
     SEALABLE_TYPES.contains(&integration_id)
+        // A type an agent declared, by its base.
+        || runtara_agents::derived::find(integration_id)
+            .is_some_and(|derived| SEALABLE_TYPES.contains(&derived.base.integration_id))
 }
 
 /// The connection types [`policies`] knows.
