@@ -62,6 +62,10 @@ seal-broker = { git = "https://github.com/runtarahq/seal", rev = "087de1cc75d84c
 seal-client = { git = "https://github.com/runtarahq/seal", rev = "087de1cc75d84c7ddeea06d8eb9f8476845dc37c", features = ["in-process"] }
 seal-format = { git = "https://github.com/runtarahq/seal", rev = "087de1cc75d84c7ddeea06d8eb9f8476845dc37c" }
 seal-keys = { git = "https://github.com/runtarahq/seal", rev = "087de1cc75d84c7ddeea06d8eb9f8476845dc37c" }
+# The request and response types seal's client takes and returns.
+bytes = "1"
+http = "1"
+http-body-util = "0.1"
 
 # Error handling
 thiserror = "2"
