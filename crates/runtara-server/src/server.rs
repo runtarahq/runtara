@@ -1352,6 +1352,7 @@ pub async fn start_with(
         runtara_connections::sealed::Allowances {
             private_hosts: runtara_connections::net::allowed_private_hosts().to_vec(),
             plain_http_hosts: api::services::outbound_http::proxy_allow_http_hosts(),
+            ..Default::default()
         },
     ) {
         Ok(sealed) => sealed,

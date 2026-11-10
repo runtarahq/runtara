@@ -14,10 +14,19 @@ const SECRET: &str = "s3cr3t-CANARY-token";
 /// seal in this process with keys in memory, allowed to reach a local mock
 /// server over plain HTTP.
 fn sealed_for(server: &MockServer) -> SealedCredentials {
+    sealed_standing_in(server, &[])
+}
+
+/// [`sealed_for`], with the mock server standing in for the APIs of `types`.
+fn sealed_standing_in(server: &MockServer, types: &[&str]) -> SealedCredentials {
     let address = server.address();
     let allowances = Allowances {
         private_hosts: vec![format!("{}:{}", address.ip(), address.port())],
         plain_http_hosts: vec![address.ip().to_string()],
+        api_bases: types
+            .iter()
+            .map(|integration_id| ((*integration_id).to_owned(), server.uri()))
+            .collect(),
     };
     SealedCredentials::in_process(
         Arc::new(MemoryKeySource::default()),
@@ -654,4 +663,65 @@ fn only_a_lone_marker_object_is_a_sealed_value() {
     }
     assert!(!has_sealed_values(&json!({"a": "b"})));
     assert!(!has_sealed_values(&json!("text")));
+}
+
+#[tokio::test]
+async fn a_telegram_token_is_put_in_the_path_by_seal() {
+    let token = "123456:ABC-DEF_canary";
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/bot{token}/sendMessage")))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{\"ok\":true}"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let sealed = sealed_standing_in(&server, &["telegram_bot"]);
+    let stored = sealed
+        .seal_parameters(
+            TENANT,
+            CONNECTION,
+            "telegram_bot",
+            &json!({"bot_token": token}),
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("telegram_bot is sealed");
+    assert!(!stored.to_string().contains(token));
+
+    // The request names the method only.
+    let response = sealed
+        .send_bounded(
+            TENANT,
+            CONNECTION,
+            "telegram_bot",
+            &stored,
+            "POST",
+            &format!("{}/sendMessage", server.uri()),
+            [("content-type".to_owned(), "application/json".to_owned())],
+            Some(b"{\"chat_id\":\"1\",\"text\":\"hi\"}".to_vec()),
+            64 * 1024,
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200);
+    assert!(!format!("{response:?}").contains(token));
+
+    // The token goes nowhere but the Bot API.
+    let elsewhere = MockServer::start().await;
+    let refused = sealed
+        .send_bounded(
+            TENANT,
+            CONNECTION,
+            "telegram_bot",
+            &stored,
+            "POST",
+            &format!("{}/sendMessage", elsewhere.uri()),
+            [],
+            None,
+            64 * 1024,
+        )
+        .await;
+    assert!(matches!(refused, Err(SendError::Seal(_))), "{refused:?}");
+    assert!(elsewhere.received_requests().await.unwrap().is_empty());
 }

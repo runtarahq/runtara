@@ -833,6 +833,7 @@ mod tests {
             Allowances {
                 private_hosts: vec![format!("{}:{}", address.ip(), address.port())],
                 plain_http_hosts: vec![address.ip().to_string()],
+                ..Default::default()
             },
         )
         .unwrap();

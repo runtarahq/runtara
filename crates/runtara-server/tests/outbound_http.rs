@@ -1065,6 +1065,7 @@ async fn native_outbound_sends_a_sealed_connections_request_through_seal() -> an
             Allowances {
                 private_hosts: vec!["127.0.0.1".into()],
                 plain_http_hosts: vec!["127.0.0.1".into()],
+                ..Default::default()
             },
         )
         .map_err(|error| anyhow::anyhow!(error))?,

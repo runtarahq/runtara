@@ -26,6 +26,9 @@ pub struct Allowances {
     /// Hosts that may be reached over plain HTTP
     /// (`RUNTARA_PROXY_ALLOW_HTTP_HOSTS`), lower case.
     pub plain_http_hosts: Vec<String>,
+    /// The API to use for a connection type whose API is otherwise fixed, by
+    /// type: a stand-in for the provider's. Empty outside tests.
+    pub api_bases: BTreeMap<String, String>,
 }
 
 impl Allowances {
@@ -39,6 +42,9 @@ impl Allowances {
         self.plain_http_hosts.iter().any(|entry| entry == host)
     }
 }
+
+/// Telegram's Bot API.
+pub const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 
 /// What a sealed secret is for.
 // A handful are built per connection and dropped at once: their size does not
@@ -203,6 +209,15 @@ fn secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
             &jira_account_url(params)?,
             basic(filled(params, "email")?),
         ),
+        // Telegram takes the token in the URL's path: `/bot<token>/<method>`.
+        // A request names the method only, and seal puts the token before it.
+        "telegram_bot" => one(
+            "bot_token",
+            TELEGRAM_API_BASE,
+            Inject::Path {
+                prefix: "/bot{}".to_owned(),
+            },
+        ),
         "slack_bot" => Some(vec![
             sent("bot_token", "https://slack.com", bearer()),
             verifies("signing_secret"),
@@ -290,6 +305,7 @@ pub const SEALABLE_TYPES: &[&str] = &[
     "pipedrive_api_token",
     "shippo_api_token",
     "jira_api_token",
+    "telegram_bot",
     "slack_bot",
     "mailgun",
     "mcp",
@@ -363,6 +379,7 @@ pub fn policies(
                 any_path,
                 ..
             } => {
+                let base_url = allowances.api_bases.get(integration_id).unwrap_or(base_url);
                 let mut rules = vec![rule_for(base_url, inject, *any_path, allowances)?];
                 // The type's other endpoints, which an agent selects by name.
                 // One whose URL does not render from these parameters cannot
@@ -647,6 +664,45 @@ mod tests {
     }
 
     #[test]
+    fn a_telegram_token_goes_in_the_path_of_the_bot_api() {
+        let (field, policy) = only("telegram_bot", json!({"bot_token": "1:a"}));
+        assert_eq!(field, "bot_token");
+        assert_eq!(
+            policy,
+            json!({"rules": [{
+                "destination": {"scheme": "https", "host": "api.telegram.org"},
+                "inject": {"path": {"prefix": "/bot{}"}},
+            }]})
+        );
+        assert_eq!(request_fields("telegram_bot", &json!({})), ["bot_token"]);
+        // No header is seal's to set.
+        assert!(injected_headers("telegram_bot", &json!({})).is_empty());
+    }
+
+    #[test]
+    fn a_types_api_can_be_stood_in_for() {
+        let allowances = Allowances {
+            private_hosts: vec!["127.0.0.1:4000".to_owned()],
+            plain_http_hosts: vec!["127.0.0.1".to_owned()],
+            api_bases: BTreeMap::from([(
+                "telegram_bot".to_owned(),
+                "http://127.0.0.1:4000".to_owned(),
+            )]),
+        };
+        let policy = policies("telegram_bot", &json!({}), &allowances).unwrap();
+        assert_eq!(
+            canonical(&policy["bot_token"])["rules"][0]["destination"],
+            json!({"scheme": "http", "host": "127.0.0.1", "port": 4000})
+        );
+        // Only that type's.
+        let slack = policies("slack_bot", &json!({}), &allowances).unwrap();
+        assert_eq!(
+            canonical(&slack["bot_token"])["rules"][0]["destination"]["host"],
+            "slack.com"
+        );
+    }
+
+    #[test]
     fn an_mcp_server_gets_the_secret_its_auth_mode_names() {
         let url = "https://mcp.example.com/servers/a/mcp?session=1";
         let host = json!({"scheme": "https", "host": "mcp.example.com"});
@@ -768,6 +824,7 @@ mod tests {
         let allowances = Allowances {
             private_hosts: vec!["127.0.0.1:8080".to_owned()],
             plain_http_hosts: vec!["127.0.0.1".to_owned()],
+            ..Allowances::default()
         };
         let policy = policies("http_bearer", &params, &allowances).unwrap()["token"].clone();
         let rule = &policy.rules[0];
