@@ -1532,7 +1532,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2307,7 +2307,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -3066,7 +3066,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3802,7 +3802,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "log",
  "multimap",
  "petgraph 0.8.3",
@@ -3823,7 +3823,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -3973,7 +3973,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4011,7 +4011,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -5669,7 +5669,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5759,7 +5759,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5862,7 +5862,7 @@ checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
 [[package]]
 name = "seal-broker"
 version = "0.1.0"
-source = "git+https://github.com/runtarahq/seal?rev=943f388d6abe588132cd7587dc9af59c41538558#943f388d6abe588132cd7587dc9af59c41538558"
+source = "git+https://github.com/runtarahq/seal?rev=dd53183d896d61d071b5a3e476d930590ebffbb1#dd53183d896d61d071b5a3e476d930590ebffbb1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -5893,7 +5893,7 @@ dependencies = [
 [[package]]
 name = "seal-client"
 version = "0.1.0"
-source = "git+https://github.com/runtarahq/seal?rev=943f388d6abe588132cd7587dc9af59c41538558#943f388d6abe588132cd7587dc9af59c41538558"
+source = "git+https://github.com/runtarahq/seal?rev=dd53183d896d61d071b5a3e476d930590ebffbb1#dd53183d896d61d071b5a3e476d930590ebffbb1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -5917,7 +5917,7 @@ dependencies = [
 [[package]]
 name = "seal-format"
 version = "0.1.0"
-source = "git+https://github.com/runtarahq/seal?rev=943f388d6abe588132cd7587dc9af59c41538558#943f388d6abe588132cd7587dc9af59c41538558"
+source = "git+https://github.com/runtarahq/seal?rev=dd53183d896d61d071b5a3e476d930590ebffbb1#dd53183d896d61d071b5a3e476d930590ebffbb1"
 dependencies = [
  "base64 0.23.1",
  "hpke",
@@ -5930,7 +5930,7 @@ dependencies = [
 [[package]]
 name = "seal-keys"
 version = "0.1.0"
-source = "git+https://github.com/runtarahq/seal?rev=943f388d6abe588132cd7587dc9af59c41538558#943f388d6abe588132cd7587dc9af59c41538558"
+source = "git+https://github.com/runtarahq/seal?rev=dd53183d896d61d071b5a3e476d930590ebffbb1#dd53183d896d61d071b5a3e476d930590ebffbb1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -5955,7 +5955,7 @@ dependencies = [
 [[package]]
 name = "seal-proto"
 version = "0.1.0"
-source = "git+https://github.com/runtarahq/seal?rev=943f388d6abe588132cd7587dc9af59c41538558#943f388d6abe588132cd7587dc9af59c41538558"
+source = "git+https://github.com/runtarahq/seal?rev=dd53183d896d61d071b5a3e476d930590ebffbb1#dd53183d896d61d071b5a3e476d930590ebffbb1"
 dependencies = [
  "prost",
  "protox",
@@ -6309,7 +6309,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6761,7 +6761,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8335,7 +8335,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
