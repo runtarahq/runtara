@@ -1022,6 +1022,7 @@ mod tests {
                     private_hosts: vec![address],
                     plain_http_hosts: vec![host],
                     api_bases: [("telegram_bot".to_string(), telegram_api_base.clone())].into(),
+                    ..Default::default()
                 },
             )
             .unwrap(),

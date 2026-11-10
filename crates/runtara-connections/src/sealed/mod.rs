@@ -119,6 +119,14 @@ impl SealedCredentials {
         let keyring = Keyring::new(source, wrap, KeyringConfig::default())
             .map_err(|error| error.to_string())?;
         let mut config = BrokerConfig::default();
+        for pem in &allowances.extra_roots {
+            use rustls_pki_types::pem::PemObject;
+            for certificate in rustls_pki_types::CertificateDer::pem_slice_iter(pem.as_bytes()) {
+                config.client.extra_roots.push(
+                    certificate.map_err(|_| "an extra root is not a PEM certificate".to_owned())?,
+                );
+            }
+        }
         // A rule names a private destination only when this deployment's
         // allowance listed its host as the secret was sealed.
         config.network.honour_private_rules = !allowances.private_hosts.is_empty();
@@ -196,6 +204,9 @@ impl SealedCredentials {
         parameters: &Value,
         stored: Option<&Value>,
     ) -> Result<Option<Value>, SealingError> {
+        // What is sealed of a connection may be part of what was entered.
+        let prepared = policy::prepared(integration_id, parameters);
+        let parameters = &prepared;
         let Some(fields) = parameters.as_object() else {
             return Ok(None);
         };
@@ -304,6 +315,32 @@ impl SealedCredentials {
             })
             .await?;
         Ok(response.response)
+    }
+
+    /// Opens a session with a sealed Postgres connection's database. seal
+    /// logs in with the sealed password and relays the session: speak
+    /// Postgres over the stream with no TLS and no password, as the
+    /// connection's user and database.
+    pub async fn connect_pg(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        parameters: &Value,
+    ) -> Result<seal_client::PgStream, SealError> {
+        let target = policy::postgres_target(parameters)
+            .ok_or_else(|| invalid_request("the connection names no database to log in to"))?;
+        let (field, value) = presented(parameters, policy::PG_URL_FIELD)?;
+        self.client
+            .connect_pg(seal_client::ConnectRequest {
+                keyset: keys::keyset_for_tenant(tenant_id),
+                item: ItemId::new(connection_id)
+                    .map_err(|_| invalid_request("the connection's id is not an item id"))?,
+                sealed: BTreeMap::from([(field, value)]),
+                plain: BTreeMap::new(),
+                host: target.host,
+                port: target.port,
+            })
+            .await
     }
 
     /// A presigned URL (S3) or a URL with a shared access signature (Azure

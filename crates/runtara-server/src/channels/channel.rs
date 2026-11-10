@@ -751,6 +751,7 @@ mod tests {
                     private_hosts: vec![format!("{}:{}", address.ip(), address.port())],
                     plain_http_hosts: vec![address.ip().to_string()],
                     api_bases: [("telegram_bot".to_string(), server.uri())].into(),
+                    ..Default::default()
                 },
             )
             .unwrap(),

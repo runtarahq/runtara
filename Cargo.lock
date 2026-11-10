@@ -5218,6 +5218,7 @@ dependencies = [
  "runtara-agents",
  "runtara-connections",
  "runtara-dsl",
+ "rustls-pki-types",
  "seal-broker",
  "seal-client",
  "seal-format",

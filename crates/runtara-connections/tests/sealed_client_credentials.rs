@@ -35,6 +35,7 @@ fn sealed_for(server: &MockServer, stand_in_for: &[&str]) -> SealedCredentials {
                 .iter()
                 .map(|integration_id| ((*integration_id).to_owned(), server.uri()))
                 .collect(),
+            ..Default::default()
         },
     )
     .unwrap()

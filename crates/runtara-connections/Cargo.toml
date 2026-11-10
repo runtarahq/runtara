@@ -62,6 +62,8 @@ seal-broker = { git = "https://github.com/runtarahq/seal", rev = "0d42fc615b8e94
 seal-client = { git = "https://github.com/runtarahq/seal", rev = "0d42fc615b8e94a3b20668c550dde383dbb2f0b2", features = ["in-process"] }
 seal-format = { git = "https://github.com/runtarahq/seal", rev = "0d42fc615b8e94a3b20668c550dde383dbb2f0b2" }
 seal-keys = { git = "https://github.com/runtarahq/seal", rev = "0d42fc615b8e94a3b20668c550dde383dbb2f0b2" }
+# Certificates a deployment has seal trust besides the public roots.
+rustls-pki-types = { version = "1", features = ["std"] }
 # The request and response types seal's client takes and returns.
 bytes = "1"
 http = "1"

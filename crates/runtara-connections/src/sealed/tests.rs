@@ -27,6 +27,7 @@ fn sealed_standing_in(server: &MockServer, types: &[&str]) -> SealedCredentials 
             .iter()
             .map(|integration_id| ((*integration_id).to_owned(), server.uri()))
             .collect(),
+        ..Default::default()
     };
     SealedCredentials::in_process(
         Arc::new(MemoryKeySource::default()),
@@ -1007,4 +1008,47 @@ async fn an_s3_key_signs_requests_and_copies_between_buckets() {
             .any(|(name, value)| name == "x-amz-copy-source"
                 && value == "/other-bucket/original.txt")
     );
+}
+
+#[tokio::test]
+async fn a_database_url_is_stored_as_its_sealed_password_and_its_target() {
+    let server = MockServer::start().await;
+    let sealed = sealed_for(&server);
+    let url = format!("postgres://app:{SECRET}@db.example.com:6432/orders?sslmode=verify-full");
+
+    let stored = sealed
+        .seal_parameters(
+            TENANT,
+            CONNECTION,
+            "postgres",
+            &json!({"database_url": url}),
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("a verified Postgres connection is sealed");
+    assert!(is_sealed(&stored["database_url"]));
+    assert_eq!(
+        stored["database_target"],
+        "postgres://app@db.example.com:6432/orders"
+    );
+    assert!(!stored.to_string().contains(SECRET));
+
+    // Saved again untouched, it stays as it is.
+    let again = sealed
+        .seal_parameters(TENANT, CONNECTION, "postgres", &stored, Some(&stored))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(again, stored);
+
+    // A URL seal could not log in for is not sealed, and is stored whole.
+    let unverified = json!({
+        "database_url": format!("postgres://app:{SECRET}@db.example.com/orders?sslmode=require"),
+    });
+    let stored = sealed
+        .seal_parameters(TENANT, CONNECTION, "postgres", &unverified, None)
+        .await
+        .unwrap();
+    assert_eq!(stored, None);
 }

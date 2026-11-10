@@ -12,8 +12,8 @@ use runtara_agents::extractors::connection_types::{GEMINI_API_BASE_URL, SHIPPO_A
 use runtara_agents::registry::find_connection_type;
 use seal_format::Policy;
 use seal_format::policy::{
-    Definition, Destination, HmacHash, Host, Inject, Method, Part, ResponseFormat, Rule, Scheme,
-    SealResponse, SealedField, Verify,
+    Definition, Destination, HmacHash, Host, Inject, Method, Part, PgTls, ResponseFormat, Rule,
+    Scheme, SealResponse, SealedField, Verify,
 };
 use seal_format::{FieldName, PolicyName};
 use serde_json::{Value, json};
@@ -36,6 +36,9 @@ pub struct Allowances {
     /// The API to use for a connection type whose API is otherwise fixed, by
     /// type: a stand-in for the provider's. Empty outside tests.
     pub api_bases: BTreeMap<String, String>,
+    /// Certificate authorities seal trusts besides the public ones, each in
+    /// PEM: for a database or provider whose certificate a private CA signed.
+    pub extra_roots: Vec<String>,
 }
 
 impl Allowances {
@@ -82,8 +85,113 @@ enum Usage {
     /// to the API, or the refresh token, sent to the token endpoint for the
     /// next pair, which comes back sealed.
     Token(TokenRole, AuthorizedTokens),
+    /// A database password: seal logs in with it, and relays the session.
+    Postgres(PgTarget),
     /// Never sent: checks that a message came from the provider.
     Verify(HmacHash),
+}
+
+/// The parameter a Postgres connection's URL is entered in. Sealed, it holds
+/// the URL's password, and [`PG_TARGET_FIELD`] the rest.
+pub const PG_URL_FIELD: &str = "database_url";
+
+/// The parameter holding a sealed Postgres connection's URL without its
+/// password: where seal logs in, and as whom.
+pub const PG_TARGET_FIELD: &str = "database_target";
+
+/// The database a sealed Postgres connection is for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PgTarget {
+    pub host: String,
+    pub port: u16,
+    pub database: String,
+    pub user: String,
+}
+
+fn percent_decoded(value: &str) -> Option<String> {
+    urlencoding::decode(value)
+        .ok()
+        .map(|value| value.into_owned())
+}
+
+/// A Postgres URL seal can log in for, as the URL without its password, and
+/// the password.
+///
+/// seal always verifies the server's certificate against its host name, so
+/// only a URL that asks for that (`sslmode=verify-full`) is sealed: any other
+/// may be for a server whose certificate would not verify, and sealing it
+/// would break the connection. Nothing else may be in the query, since seal,
+/// not the URL, decides how the session is opened.
+fn split_postgres_url(url: &str) -> Option<(String, String)> {
+    let parsed = url::Url::parse(url.trim()).ok()?;
+    if !matches!(parsed.scheme(), "postgres" | "postgresql") {
+        return None;
+    }
+    let host = parsed
+        .host_str()
+        .filter(|host| !host.is_empty())?
+        .to_ascii_lowercase();
+    let user = Some(parsed.username()).filter(|user| !user.is_empty())?;
+    let password = percent_decoded(parsed.password()?).filter(|password| !password.is_empty())?;
+    let database = parsed
+        .path()
+        .strip_prefix('/')
+        .filter(|database| !database.is_empty() && !database.contains('/'))?;
+    let mut query = parsed.query_pairs();
+    let verifies = matches!(
+        (query.next(), query.next()),
+        (Some((key, value)), None) if key == "sslmode" && value == "verify-full"
+    );
+    if !verifies || parsed.fragment().is_some() {
+        return None;
+    }
+    let port = parsed.port().unwrap_or(5432);
+    Some((
+        format!("postgres://{user}@{host}:{port}/{database}"),
+        password,
+    ))
+}
+
+/// The database of a sealed Postgres connection, from its stored target.
+pub fn postgres_target(params: &Value) -> Option<PgTarget> {
+    let parsed = url::Url::parse(filled(params, PG_TARGET_FIELD)?).ok()?;
+    Some(PgTarget {
+        host: parsed.host_str()?.to_ascii_lowercase(),
+        port: parsed.port()?,
+        database: percent_decoded(parsed.path().strip_prefix('/')?)?,
+        user: percent_decoded(parsed.username())?,
+    })
+}
+
+/// A connection's parameters as they are sealed: for a Postgres connection
+/// whose URL was just entered, the password apart from the rest of the URL,
+/// since seal takes the password alone and the rest is where it may go. A
+/// URL seal cannot log in for is left as it is, whole.
+pub fn prepared(integration_id: &str, params: &Value) -> Value {
+    let mut params = params.clone();
+    if integration_id != "postgres" {
+        return params;
+    }
+    let Some(fields) = params.as_object_mut() else {
+        return params;
+    };
+    match fields.get(PG_URL_FIELD) {
+        // Still sealed: its target stays with it.
+        Some(sealed) if super::is_sealed(sealed) => {}
+        Some(Value::String(url)) => match split_postgres_url(url) {
+            Some((target, password)) => {
+                fields.insert(PG_URL_FIELD.to_owned(), Value::String(password));
+                fields.insert(PG_TARGET_FIELD.to_owned(), Value::String(target));
+            }
+            None => {
+                fields.remove(PG_TARGET_FIELD);
+            }
+        },
+        _ => {
+            fields.remove(PG_TARGET_FIELD);
+        }
+    }
+    params
 }
 
 /// Which of an authorization's two tokens.
@@ -798,6 +906,10 @@ fn secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
             }]),
         }]),
         "aws_credentials" | "s3_compatible" => aws_secrets(integration_id, params),
+        "postgres" => Some(vec![Secret {
+            field: PG_URL_FIELD,
+            usage: Usage::Postgres(postgres_target(params)?),
+        }]),
         _ if authorized_tokens(integration_id, params).is_some() => {
             let tokens = authorized_tokens(integration_id, params)?;
             Some(vec![
@@ -854,6 +966,7 @@ pub fn request_fields(integration_id: &str, params: &Value) -> Vec<String> {
                     ..
                 } | Usage::Targets(_)
                     | Usage::Token(TokenRole::Access, _)
+                    | Usage::Postgres(_)
             )
         })
         .map(|secret| secret.field.to_owned())
@@ -926,6 +1039,7 @@ pub const SEALABLE_TYPES: &[&str] = &[
     "quickbooks_online",
     "xero_oauth",
     "http_oauth2_authorization_code",
+    "postgres",
     "http_bearer",
     "http_basic",
     "http_api_key",
@@ -990,6 +1104,33 @@ pub fn policies(
                 shared: false,
                 verify: Some(Verify::Hmac { hash: *hash }),
             },
+            Usage::Postgres(target) => {
+                let mut rule = Rule::new(
+                    Destination::Postgres {
+                        host: Host::new(target.host.as_str()).ok()?,
+                        port: target.port,
+                        databases: vec![target.database.clone()],
+                        user: Part::Literal(target.user.clone()),
+                        tls: PgTls::VerifyFull,
+                        allow_replication: false,
+                    },
+                    // As the connection logged in before it was sealed: with
+                    // whatever the server asks for, over a verified session.
+                    Inject::PgPassword {
+                        allow_md5: true,
+                        allow_cleartext_password: true,
+                        require_channel_binding: false,
+                    },
+                );
+                rule.allow_private_destination =
+                    allowances.allows_private(&target.host, Some(target.port));
+                Policy {
+                    rules: vec![rule],
+                    definitions: BTreeMap::new(),
+                    shared: false,
+                    verify: None,
+                }
+            }
             Usage::Token(role, tokens) => {
                 let mut tokens = tokens.clone();
                 if let Some(api_base) = allowances.api_bases.get(integration_id) {
@@ -1173,7 +1314,7 @@ mod tests {
             );
             assert!(is_sealable_type(integration_id));
         }
-        assert!(!is_sealable_type("postgres"));
+        assert!(!is_sealable_type("sftp"));
     }
 
     /// The secret's parameter is one the type marks secret, so that nothing
@@ -1191,6 +1332,7 @@ mod tests {
             "client_id": "client", "client_secret": "s", "app_id": "app", "app_password": "s",
             "tenant_id": "tenant", "scope": "read", "subdomain": "acme",
             "token_url": "https://auth.example.com/token",
+            "database_target": "postgres://app@db.example.com:5432/orders",
         });
         for integration_id in SEALABLE_TYPES {
             if !this_seal_can_seal(integration_id) {
@@ -1683,6 +1825,94 @@ mod tests {
     }
 
     #[test]
+    fn a_database_password_is_sealed_apart_from_where_it_logs_in() {
+        let entered = json!({
+            "database_url": "postgresql://app%40acme:p%40ss%2Fword@DB.example.com/orders?sslmode=verify-full",
+        });
+        // Nothing is sealed of a URL as it is entered: it is split first.
+        assert_eq!(policies("postgres", &entered, &Allowances::default()), None);
+        let prepared = prepared("postgres", &entered);
+        assert_eq!(
+            prepared,
+            json!({
+                "database_url": "p@ss/word",
+                "database_target": "postgres://app%40acme@db.example.com:5432/orders",
+            })
+        );
+        assert_eq!(
+            postgres_target(&prepared),
+            Some(PgTarget {
+                host: "db.example.com".into(),
+                port: 5432,
+                database: "orders".into(),
+                user: "app@acme".into(),
+            })
+        );
+        let (field, policy) = only("postgres", prepared.clone());
+        assert_eq!(field, "database_url");
+        assert_eq!(
+            policy,
+            json!({"rules": [{
+                "destination": {
+                    "scheme": "postgres", "host": "db.example.com", "port": 5432,
+                    "databases": ["orders"], "user": {"literal": "app@acme"},
+                },
+                "inject": {"pg_password": {
+                    "allow_md5": true, "allow_cleartext_password": true,
+                }},
+            }]})
+        );
+        assert_eq!(request_fields("postgres", &prepared), ["database_url"]);
+
+        // Sealed, the password's marker and its target stay as they are.
+        let stored = json!({
+            "database_url": {"$sealed": {}},
+            "database_target": "postgres://app@db.example.com:6432/orders",
+        });
+        assert_eq!(super::prepared("postgres", &stored), stored);
+        // A URL entered anew replaces both.
+        let mut again = stored.clone();
+        again["database_url"] = json!("postgres://app:pw@other.example.com/db?sslmode=verify-full");
+        assert_eq!(
+            super::prepared("postgres", &again)["database_target"],
+            "postgres://app@other.example.com:5432/db"
+        );
+        // Only a Postgres connection is split.
+        assert_eq!(super::prepared("http_bearer", &entered), entered);
+    }
+
+    #[test]
+    fn a_database_url_seal_could_not_log_in_for_is_left_whole() {
+        for url in [
+            // seal always verifies the server; these do not ask for that.
+            "postgres://app:pw@db.example.com/orders",
+            "postgres://app:pw@db.example.com/orders?sslmode=require",
+            "postgres://app:pw@db.example.com/orders?sslmode=disable",
+            // seal, not the URL, decides how the session is opened.
+            "postgres://app:pw@db.example.com/orders?sslmode=verify-full&sslrootcert=/ca.pem",
+            "postgres://app:pw@db.example.com/orders?sslmode=verify-full&host=/tmp",
+            // Nothing to log in with, as, or to.
+            "postgres://app@db.example.com/orders?sslmode=verify-full",
+            "postgres://:pw@db.example.com/orders?sslmode=verify-full",
+            "postgres://app:pw@db.example.com/?sslmode=verify-full",
+            "postgres://app:pw@db.example.com/a/b?sslmode=verify-full",
+            "mysql://app:pw@db.example.com/orders?sslmode=verify-full",
+            "not a url",
+        ] {
+            // A target left from an earlier, sealed URL goes with it.
+            let entered = json!({
+                "database_url": url,
+                "database_target": "postgres://old@db.example.com:5432/old",
+            });
+            assert_eq!(
+                prepared("postgres", &entered),
+                json!({"database_url": url}),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
     fn a_teams_bots_token_goes_to_the_bot_connector() {
         let (field, policy) = client_secret(
             "teams_bot",
@@ -1908,6 +2138,7 @@ mod tests {
                 "telegram_bot".to_owned(),
                 "http://127.0.0.1:4000".to_owned(),
             )]),
+            ..Default::default()
         };
         let policy = policies("telegram_bot", &json!({}), &allowances).unwrap();
         assert_eq!(
@@ -1986,7 +2217,7 @@ mod tests {
 
     #[test]
     fn a_type_seal_does_not_handle_yet_is_not_sealed() {
-        for integration_id in ["postgres", "nope"] {
+        for integration_id in ["sftp", "nope"] {
             let params = json!({"api_key": "s", "base_url": "https://api.example.com"});
             assert_eq!(
                 policies(integration_id, &params, &Allowances::default()),
