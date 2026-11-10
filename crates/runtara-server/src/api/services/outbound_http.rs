@@ -525,6 +525,9 @@ async fn execute_request(
     // an individual request. It remains opaque here; auth resolution parsed
     // the write-only PEM fields and built a hardened Rustls client.
     let mut mtls_client: Option<reqwest::Client> = None;
+    // A sealed connection's type and parameters. Its secrets are markers, not
+    // values: seal attaches them and sends the request.
+    let mut sealed_connection: Option<(String, Value)> = None;
 
     // ── Connection credential injection ──────────────────────────────────
     if let Some(ref connection_id) = request.connection_id {
@@ -651,6 +654,9 @@ async fn execute_request(
         aws_signing = resolved.aws_signing;
         azure_signing = resolved.azure_signing;
         mtls_client = resolved.mtls_client;
+        if conn.sealed {
+            sealed_connection = Some((integration_id.to_string(), params.clone()));
+        }
 
         // ── Pre-flight rate limit check ────────────────────────────────────
         // If adaptive rate limiting is enabled, check the token bucket before
@@ -799,6 +805,60 @@ async fn execute_request(
         })?;
     }
 
+    // ── Sealed credentials: seal sends the request ───────────────────────
+    // Everything above still applies: the URL is pinned to the connection's
+    // base, rate limits are checked, and headers the connection type adds are
+    // set. seal then attaches the secret, and refuses any destination the
+    // secret's own policy does not allow.
+    if let (Some((integration_id, params)), Some(connection_id)) =
+        (&sealed_connection, request.connection_id.as_deref())
+    {
+        let Some(sealed) = facade.sealed() else {
+            tracing::error!(
+                target: "proxy",
+                connection_id,
+                "connection is sealed, but this deployment has no seal"
+            );
+            return Err((
+                502,
+                json!({
+                    "error": "Connection credentials are sealed and cannot be used here",
+                    "code": "SEALED_CREDENTIALS_UNAVAILABLE",
+                }),
+            ));
+        };
+        let upstream = sealed
+            .send_bounded(
+                tenant_id,
+                connection_id,
+                integration_id,
+                params,
+                &method,
+                &final_url,
+                final_headers,
+                body_bytes,
+                response_limit,
+            )
+            .await
+            .map_err(|error| map_sealed_send_error(&error, connection_id))?;
+        track_upstream_429(
+            facade,
+            tenant_id,
+            Some(connection_id),
+            upstream.status,
+            upstream
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+                .map(|(_, value)| value.as_str()),
+        );
+        return Ok(Response {
+            status: upstream.status,
+            headers: upstream.headers,
+            body: upstream.body,
+        });
+    }
+
     let outbound_client = mtls_client.as_ref().unwrap_or(client);
     let mut req_builder = outbound_client.request(reqwest_method, &final_url);
 
@@ -845,33 +905,16 @@ async fn execute_request(
         (413, json!({"error": "Upstream response headers exceed byte limit", "code": "RESPONSE_TOO_LARGE"})))?;
     let resp_body_bytes = read_bounded_response(response, body_limit).await?;
 
-    // Track upstream 429 responses for analytics
-    if status == 429
-        && let Some(ref connection_id) = request.connection_id
-    {
-        let retry_after = resp_headers
+    track_upstream_429(
+        facade,
+        tenant_id,
+        request.connection_id.as_deref(),
+        status,
+        resp_headers
             .get("retry-after")
             .or_else(|| resp_headers.get("Retry-After"))
-            .and_then(|v| v.parse::<u64>().ok());
-
-        record_credential_request_async(
-            facade,
-            connection_id,
-            tenant_id,
-            RateLimitEventType::RateLimited,
-            Some(json!({
-                "source": "upstream_429",
-                "retry_after_secs": retry_after
-            })),
-        );
-
-        tracing::warn!(
-            target: "proxy",
-            connection_id = connection_id.as_str(),
-            retry_after_secs = ?retry_after,
-            "Upstream returned 429 — rate limited"
-        );
-    }
+            .map(String::as_str),
+    );
 
     Ok(Response {
         status,
@@ -883,6 +926,83 @@ async fn execute_request(
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// Record an upstream 429 on a connection's request, for analytics.
+fn track_upstream_429(
+    facade: &ConnectionsFacade,
+    tenant_id: &str,
+    connection_id: Option<&str>,
+    status: u16,
+    retry_after: Option<&str>,
+) {
+    let Some(connection_id) = connection_id.filter(|_| status == 429) else {
+        return;
+    };
+    let retry_after = retry_after.and_then(|v| v.parse::<u64>().ok());
+
+    record_credential_request_async(
+        facade,
+        connection_id,
+        tenant_id,
+        RateLimitEventType::RateLimited,
+        Some(json!({
+            "source": "upstream_429",
+            "retry_after_secs": retry_after
+        })),
+    );
+
+    tracing::warn!(
+        target: "proxy",
+        connection_id,
+        retry_after_secs = ?retry_after,
+        "Upstream returned 429 — rate limited"
+    );
+}
+
+/// What the agent is told when a request with sealed credentials got no
+/// response. seal's detail has identifiers and static text only; it is logged,
+/// and the agent gets seal's code.
+fn map_sealed_send_error(
+    error: &runtara_connections::sealed::SendError,
+    connection_id: &str,
+) -> (u16, Value) {
+    use runtara_connections::sealed::{SealErrorCode, SendError};
+    match error {
+        SendError::InvalidRequest => (400, json!({"error": "Invalid outbound request"})),
+        SendError::TooLarge => (
+            413,
+            json!({"error": "Upstream response exceeds byte limit", "code": "RESPONSE_TOO_LARGE"}),
+        ),
+        SendError::BodyFailed => (
+            502,
+            json!({"error": "Failed to read upstream response body"}),
+        ),
+        SendError::Seal(error) => {
+            tracing::warn!(
+                target: "proxy",
+                connection_id,
+                code = error.code.as_str(),
+                detail = %error.detail,
+                "seal did not send the request"
+            );
+            let status = match error.code {
+                // The destination is not one the credential may go to.
+                SealErrorCode::PolicyDenied | SealErrorCode::DestinationRefused => 403,
+                SealErrorCode::BadRequest | SealErrorCode::Conflict => 400,
+                SealErrorCode::BodyTooLarge => 413,
+                _ => 502,
+            };
+            (
+                status,
+                json!({
+                    "error": "The request was not sent with the connection's credentials",
+                    "code": format!("SEAL_{}", error.code.as_str()),
+                    "connection_id": connection_id,
+                }),
+            )
+        }
+    }
+}
 
 fn remove_headers(headers: &mut HashMap<String, String>, names: &[&str]) {
     headers.retain(|key, _| !names.iter().any(|name| key.eq_ignore_ascii_case(name)));
