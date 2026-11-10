@@ -212,15 +212,15 @@ async fn connections_that_are_not_sealed_stay_as_they_were() {
     // A type seal does not handle yet, with sealing on.
     let service = fixture.service(Some(fixture.sealed()));
     let request: CreateConnectionRequest = serde_json::from_value(json!({
-        "title": "mail",
-        "integrationId": "mailgun",
-        "connectionParameters": {"api_key": SECRET, "domain": "mg.example.com"},
+        "title": "bot",
+        "integrationId": "telegram_bot",
+        "connectionParameters": {"bot_token": SECRET},
     }))
     .unwrap();
     let id = service.create_connection(request, TENANT).await.unwrap();
     let (format, stored) = fixture.row(&id).await;
     assert_eq!(format, "cipher");
-    assert_eq!(stored["api_key"], SECRET);
+    assert_eq!(stored["bot_token"], SECRET);
     let resolved = fixture
         .repository()
         .get_with_parameters(&id, TENANT)
@@ -241,6 +241,88 @@ async fn connections_that_are_not_sealed_stay_as_they_were() {
 
     // No connection was sealed, so no key was made.
     assert!(fixture.keys().await.is_empty());
+}
+
+/// Types with more than one secret, or whose secret has a second reader:
+/// every secret they hold is sealed, and none is left readable in the row.
+#[tokio::test]
+async fn ai_provider_channel_and_mcp_connections_are_stored_sealed() {
+    let fixture = Fixture::new().await;
+    let service = fixture.service(Some(fixture.sealed()));
+    let cases = [
+        (
+            "openai_api_key",
+            json!({"api_key": SECRET}),
+            vec!["api_key"],
+        ),
+        (
+            "gemini_api_key",
+            json!({"api_key": SECRET}),
+            vec!["api_key"],
+        ),
+        (
+            "slack_bot",
+            json!({"bot_token": SECRET, "signing_secret": "signing-CANARY"}),
+            vec!["bot_token", "signing_secret"],
+        ),
+        (
+            "mailgun",
+            json!({
+                "api_key": SECRET,
+                "domain": "mg.example.com",
+                "webhook_signing_key": "signing-CANARY",
+            }),
+            vec!["api_key", "webhook_signing_key"],
+        ),
+        // A Mailgun connection with no signing key: only the API key.
+        (
+            "mailgun",
+            json!({"api_key": SECRET, "domain": "mg.example.com"}),
+            vec!["api_key"],
+        ),
+        (
+            "mcp",
+            json!({
+                "url": "https://mcp.example.com/mcp",
+                "auth_mode": "bearer",
+                "bearer_token": SECRET,
+            }),
+            vec!["bearer_token"],
+        ),
+    ];
+    for (index, (integration_id, parameters, sealed_fields)) in cases.into_iter().enumerate() {
+        let request: CreateConnectionRequest = serde_json::from_value(json!({
+            "title": format!("{integration_id} {index}"),
+            "integrationId": integration_id,
+            "connectionParameters": parameters,
+        }))
+        .unwrap();
+        let id = service
+            .create_connection(request, TENANT)
+            .await
+            .unwrap_or_else(|error| panic!("{integration_id}: {error:?}"));
+
+        let (format, stored) = fixture.row(&id).await;
+        assert_eq!(format, "seal", "{integration_id}");
+        for field in &sealed_fields {
+            assert!(is_sealed(&stored[*field]), "{integration_id}.{field}");
+        }
+        assert!(!stored.to_string().contains("CANARY"), "{integration_id}");
+        // What a request presents is the secret that is sent, never one that
+        // only verifies.
+        let presented = runtara_connections::sealed::request_fields(integration_id, &stored);
+        assert_eq!(presented, [sealed_fields[0]], "{integration_id}");
+    }
+
+    // An MCP server with no auth holds no secret, so its row is not sealed.
+    let request: CreateConnectionRequest = serde_json::from_value(json!({
+        "title": "open mcp",
+        "integrationId": "mcp",
+        "connectionParameters": {"url": "https://mcp.example.com/mcp", "auth_mode": "none"},
+    }))
+    .unwrap();
+    let id = service.create_connection(request, TENANT).await.unwrap();
+    assert_eq!(fixture.row(&id).await.0, "cipher");
 }
 
 #[tokio::test]

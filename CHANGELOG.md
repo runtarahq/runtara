@@ -14,13 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Sealed credentials, off by default.** With `RUNTARA_SEALED_CREDENTIALS=1`,
-  the secret of a connection whose type sends one static secret
+  the secrets of a connection whose type holds static secrets
   (`shopify_access_token`, `hubspot_access_token`, `stripe_api_key`,
-  `pipedrive_api_token`, `shippo_api_token`, `jira_api_token`, `http_bearer`,
-  `http_basic`, `http_api_key`) is sealed by
-  [seal](https://github.com/runtarahq/seal) when the connection is saved: it
-  is stored with the one place it may be sent, and seal attaches it and sends
-  the request. seal runs in the server process, so the server can still open
+  `pipedrive_api_token`, `shippo_api_token`, `jira_api_token`,
+  `openai_api_key`, `gemini_api_key`, `slack_bot`, `mailgun`, `mcp`,
+  `http_bearer`, `http_basic`, `http_api_key`) are sealed by
+  [seal](https://github.com/runtarahq/seal) when the connection is saved. A
+  secret that is sent is stored with the one place it may go, and seal
+  attaches it and sends the request: an agent's, a model listing, or a
+  channel's reply. A webhook signing secret (Slack, Mailgun) can be sent
+  nowhere: seal checks a signature against it and answers yes or no. seal runs in the server process, so the server can still open
   every credential. `connection_data_entity.credential_format` says how a
   row's secrets are held (`cipher` or `seal`); existing rows and every other
   connection type are unchanged, and a row becomes sealed only when it is
