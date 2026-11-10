@@ -55,6 +55,7 @@ impl Fixture {
                 integration_id VARCHAR(255),
                 connection_subtype VARCHAR(255),
                 connection_parameters JSONB,
+                credential_format TEXT NOT NULL DEFAULT 'cipher',
                 rate_limit_config JSONB,
                 status VARCHAR(64) DEFAULT 'UNKNOWN'
                     -- As the server's schema allows (its migrations).

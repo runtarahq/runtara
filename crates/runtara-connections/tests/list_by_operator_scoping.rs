@@ -55,6 +55,7 @@ async fn create_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
             title VARCHAR(255) NOT NULL UNIQUE,
             connection_subtype VARCHAR(255) DEFAULT NULL,
             connection_parameters JSONB DEFAULT NULL,
+            credential_format TEXT NOT NULL DEFAULT 'cipher',
             integration_id VARCHAR(255) DEFAULT NULL,
             status VARCHAR(50) NOT NULL DEFAULT 'UNKNOWN',
             rate_limit_config JSONB DEFAULT NULL,
@@ -301,6 +302,7 @@ async fn native_descriptions_and_resources_enforce_tenant_and_safe_metadata() {
         connection_events: None,
         oauth: Default::default(),
         agent_access: Arc::new(runtara_connections::EveryAgent),
+        sealed: None,
     });
     assert!(
         facade

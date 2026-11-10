@@ -173,6 +173,9 @@ pub struct ConnectionsState {
     pub connection_events: crate::events::ConnectionEvents,
     pub oauth: OAuthOptions,
     pub agent_access: Arc<dyn AgentAccess>,
+    /// seal, if this deployment seals credentials. Without it, connections
+    /// are stored as they always were, and one already sealed cannot be used.
+    pub sealed: Option<Arc<crate::sealed::SealedCredentials>>,
 }
 
 impl ConnectionsState {
@@ -189,7 +192,23 @@ impl ConnectionsState {
             connection_events: config.connection_events,
             oauth: config.oauth,
             agent_access: config.agent_access,
+            sealed: None,
         }
+    }
+
+    /// Seals the secrets of connection types seal handles, from now on.
+    pub fn with_sealed_credentials(
+        mut self,
+        sealed: Option<Arc<crate::sealed::SealedCredentials>>,
+    ) -> Self {
+        self.sealed = sealed;
+        self
+    }
+}
+
+impl axum::extract::FromRef<ConnectionsState> for Option<Arc<crate::sealed::SealedCredentials>> {
+    fn from_ref(state: &ConnectionsState) -> Self {
+        state.sealed.clone()
     }
 }
 

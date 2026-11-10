@@ -43,6 +43,7 @@ impl PgFixture {
                 id VARCHAR(255) PRIMARY KEY,
                 tenant_id VARCHAR(255) NOT NULL,
                 connection_parameters JSONB DEFAULT NULL,
+                credential_format TEXT NOT NULL DEFAULT 'cipher',
                 refresh_token_hash TEXT DEFAULT NULL,
                 status VARCHAR(64) DEFAULT NULL,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

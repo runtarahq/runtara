@@ -24,6 +24,21 @@ pub fn refresh_token_hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
+/// How a connection's secrets are held, as `credential_format` records it.
+pub const FORMAT_CIPHER: &str = "cipher";
+/// See [`FORMAT_CIPHER`]: each secret inside the parameters is sealed by seal.
+pub const FORMAT_SEAL: &str = "seal";
+
+/// The format of the parameters about to be stored: sealed if any secret in
+/// them is a sealed value's marker (see [`crate::sealed`]).
+fn credential_format(parameters: Option<&serde_json::Value>) -> &'static str {
+    if parameters.is_some_and(crate::sealed::has_sealed_values) {
+        FORMAT_SEAL
+    } else {
+        FORMAT_CIPHER
+    }
+}
+
 /// Convert JSONB value from DB to RateLimitConfigDto
 fn parse_rate_limit_config(value: Option<serde_json::Value>) -> Option<RateLimitConfigDto> {
     value.and_then(|v| serde_json::from_value(v).ok())
@@ -183,8 +198,8 @@ impl ConnectionRepository {
         sqlx::query(
             r#"
             INSERT INTO connection_data_entity
-            (id, tenant_id, title, connection_subtype, connection_parameters, integration_id, valid_until, status, rate_limit_config, is_default_file_storage)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            (id, tenant_id, title, connection_subtype, connection_parameters, integration_id, valid_until, status, rate_limit_config, is_default_file_storage, credential_format)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             "#,
         )
         .bind(connection_id)
@@ -197,6 +212,7 @@ impl ConnectionRepository {
         .bind(status.as_str())
         .bind(rate_limit_json.as_ref())
         .bind(request.is_default_file_storage.unwrap_or(false))
+        .bind(credential_format(request.connection_parameters.as_ref()))
         .execute(&mut *tx)
         .await?;
 
@@ -491,6 +507,8 @@ impl ConnectionRepository {
         if values.parameters.is_some() {
             updates.push(format!("connection_parameters = ${}", param_idx));
             param_idx += 1;
+            updates.push(format!("credential_format = ${}", param_idx));
+            param_idx += 1;
         }
         if request.rate_limit_config.is_some() {
             updates.push(format!("rate_limit_config = ${}", param_idx));
@@ -534,7 +552,9 @@ impl ConnectionRepository {
             query = query.bind(title);
         }
         if let Some(ref connection_parameters) = sealed_parameters {
-            query = query.bind(connection_parameters);
+            query = query
+                .bind(connection_parameters)
+                .bind(credential_format(values.parameters));
         }
         if let Some(ref rate_limit_config) = request.rate_limit_config {
             let json_value =
@@ -806,10 +826,11 @@ impl ConnectionRepository {
                 Option<String>,            // connection_subtype
                 Option<serde_json::Value>, // connection_parameters
                 Option<serde_json::Value>, // rate_limit_config
+                String,                    // credential_format
             ),
         >(
             r#"
-            SELECT id, tenant_id, integration_id, connection_subtype, connection_parameters, rate_limit_config
+            SELECT id, tenant_id, integration_id, connection_subtype, connection_parameters, rate_limit_config, credential_format
             FROM connection_data_entity
             WHERE id = $1 AND tenant_id = $2
             "#,
@@ -831,6 +852,7 @@ impl ConnectionRepository {
                     connection_subtype,
                     connection_parameters,
                     rate_limit_config,
+                    credential_format,
                 )| {
                     let connection_parameters = self.unseal(&tid, &id, connection_parameters)?;
                     Ok::<_, sqlx::Error>(ConnectionWithParameters {
@@ -840,6 +862,7 @@ impl ConnectionRepository {
                         connection_subtype,
                         connection_parameters,
                         rate_limit_config,
+                        sealed: credential_format == FORMAT_SEAL,
                     })
                 },
             )
@@ -965,10 +988,11 @@ impl ConnectionRepository {
                 Option<String>,            // connection_subtype
                 Option<serde_json::Value>, // connection_parameters
                 Option<serde_json::Value>, // rate_limit_config
+                String,                    // credential_format
             ),
         >(
             r#"
-            SELECT id, tenant_id, integration_id, connection_subtype, connection_parameters, rate_limit_config
+            SELECT id, tenant_id, integration_id, connection_subtype, connection_parameters, rate_limit_config, credential_format
             FROM connection_data_entity
             WHERE id = $1
             "#,
@@ -986,6 +1010,7 @@ impl ConnectionRepository {
                     connection_subtype,
                     connection_parameters,
                     rate_limit_config,
+                    credential_format,
                 )| {
                     let connection_parameters = self.unseal(&tid, &id, connection_parameters)?;
                     Ok::<_, sqlx::Error>(ConnectionWithParameters {
@@ -995,6 +1020,7 @@ impl ConnectionRepository {
                         connection_subtype,
                         connection_parameters,
                         rate_limit_config,
+                        sealed: credential_format == FORMAT_SEAL,
                     })
                 },
             )
@@ -1026,6 +1052,7 @@ impl ConnectionRepository {
             SET connection_parameters = $3,
                 status = $4,
                 refresh_token_hash = $5,
+                credential_format = $6,
                 updated_at = NOW()
             WHERE id = $1 AND tenant_id = $2
             "#,
@@ -1040,6 +1067,7 @@ impl ConnectionRepository {
                 .and_then(|token| token.as_str())
                 .map(refresh_token_hash),
         )
+        .bind(credential_format(Some(parameters)))
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected())
@@ -1110,6 +1138,7 @@ impl ConnectionRepository {
             UPDATE connection_data_entity
             SET connection_parameters = $3,
                 refresh_token_hash = $4,
+                credential_format = $6,
                 updated_at = NOW()
             WHERE id = $1 AND tenant_id = $2
               AND (refresh_token_hash IS NULL OR refresh_token_hash = $5)
@@ -1120,6 +1149,7 @@ impl ConnectionRepository {
         .bind(&sealed)
         .bind(new_hash)
         .bind(expected_hash)
+        .bind(credential_format(Some(parameters)))
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected())
@@ -1282,6 +1312,10 @@ pub struct ConnectionWithParameters {
     pub connection_subtype: Option<String>,
     pub connection_parameters: Option<serde_json::Value>,
     pub rate_limit_config: Option<serde_json::Value>,
+    /// Whether the secrets among the parameters are sealed by seal: each is
+    /// then a marker (see [`crate::sealed`]), not a value, and a request that
+    /// uses them goes through seal.
+    pub sealed: bool,
 }
 
 impl ConnectionWithParameters {

@@ -59,6 +59,7 @@ impl PgFixture {
                 integration_id VARCHAR(255) DEFAULT NULL,
                 connection_subtype VARCHAR(255) DEFAULT NULL,
                 connection_parameters JSONB DEFAULT NULL,
+                credential_format TEXT NOT NULL DEFAULT 'cipher',
                 rate_limit_config JSONB DEFAULT NULL
             )
             "#,
