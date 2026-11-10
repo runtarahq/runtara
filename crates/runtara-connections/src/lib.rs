@@ -12,6 +12,7 @@ pub mod repository;
 pub mod resolution;
 pub mod resource_resolver;
 pub mod router;
+pub mod sealed;
 pub mod service;
 pub mod tenant;
 pub mod types;
