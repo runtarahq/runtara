@@ -218,16 +218,33 @@ impl ConnectionsFacade {
             ))
         })?;
         let empty_parameters = Value::Null;
-        crate::resource_resolver::resolve_resource(
-            &self.state.http_client,
-            integration_id,
-            connection
-                .connection_parameters
-                .as_ref()
-                .unwrap_or(&empty_parameters),
-            request,
-        )
-        .await
+        let parameters = connection
+            .connection_parameters
+            .as_ref()
+            .unwrap_or(&empty_parameters);
+        // A sealed connection's discovery request goes through seal, which
+        // attaches the secret the extractor can no longer read.
+        let presents_sealed = connection.sealed
+            && !crate::sealed::request_fields(integration_id, parameters).is_empty();
+        let fetcher = match (presents_sealed, self.state.sealed.as_deref()) {
+            (false, _) => crate::resource_resolver::Fetcher::plain(&self.state.http_client),
+            (true, Some(sealed)) => crate::resource_resolver::Fetcher::sealed(
+                &self.state.http_client,
+                crate::resource_resolver::SealedRoute {
+                    sealed,
+                    tenant_id,
+                    connection_id: id,
+                },
+            ),
+            (true, None) => {
+                return Err(ConnectionsError::AuthResolution(
+                    "the connection's credentials are sealed, and this deployment has no seal"
+                        .into(),
+                ));
+            }
+        };
+        crate::resource_resolver::resolve_resource(&fetcher, integration_id, parameters, request)
+            .await
     }
 
     /// List connections for a tenant (no secrets).
