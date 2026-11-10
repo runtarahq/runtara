@@ -484,6 +484,24 @@ fn secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
             ])
         }
         "mcp" => mcp_secrets(params),
+        // The private key of a client certificate. The certificate, and any
+        // CA the server is checked with, are public: they are part of the
+        // key's policy, so changing either needs the key again.
+        "http_mtls" => Some(vec![Secret {
+            field: "client_private_key_pem",
+            usage: Usage::Targets(vec![Target {
+                base_url: filled(params, "base_url")?.to_owned(),
+                inject: Inject::ClientCert {
+                    cert: Part::Literal(
+                        filled(params, "client_certificate_pem")?.trim().to_owned(),
+                    ),
+                    chain: None,
+                    ca: filled(params, "server_ca_pem").map(|ca| ca.trim().to_owned()),
+                    server_name: None,
+                },
+                methods: None,
+            }]),
+        }]),
         "aws_credentials" | "s3_compatible" => aws_secrets(integration_id, params),
         "azure_blob_storage" => azure_blob_secrets(params),
         "http_bearer" => one("token", filled(params, "base_url")?, bearer()),
@@ -574,6 +592,7 @@ pub const SEALABLE_TYPES: &[&str] = &[
     "aws_credentials",
     "s3_compatible",
     "azure_blob_storage",
+    "http_mtls",
     "http_bearer",
     "http_basic",
     "http_api_key",
@@ -821,6 +840,7 @@ mod tests {
             "base_url": "https://api.example.com", "url": "https://mcp.example.com/mcp",
             "access_key_id": "AKIA", "aws_access_key_id": "AKIA",
             "account_name": "account",
+            "client_certificate_pem": "-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----",
         });
         for integration_id in SEALABLE_TYPES {
             if !this_seal_can_seal(integration_id) {
@@ -837,6 +857,9 @@ mod tests {
                 .filter(|field| field.is_secret)
                 .map(|field| field.name)
                 .collect();
+            // A certificate is marked secret to keep it out of the console,
+            // but it is public, and seal is given it as it is.
+            secrets.retain(|name| !["client_certificate_pem", "server_ca_pem"].contains(name));
             secrets.sort_unstable();
             let sealed: Vec<String> = policies(integration_id, &params, &Allowances::default())
                 .unwrap_or_else(|| panic!("{integration_id} is sealed"))
@@ -1018,6 +1041,55 @@ mod tests {
             canonical(&policies["secret_access_key"])["rules"][0]["destination"]["host"],
             "s3.eu-west-1.amazonaws.com"
         );
+    }
+
+    #[test]
+    fn a_client_certificates_key_is_sealed_with_the_certificate_it_belongs_to() {
+        let certificate = "-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----";
+        let ca = "-----BEGIN CERTIFICATE-----\nBB==\n-----END CERTIFICATE-----";
+        let params = json!({
+            "base_url": "https://partner.example.com/api",
+            "client_certificate_pem": format!("{certificate}\n"),
+            "client_private_key_pem": "key",
+            "server_ca_pem": format!("\n{ca}\n"),
+        });
+        let (field, policy) = only("http_mtls", params.clone());
+        assert_eq!(field, "client_private_key_pem");
+        assert_eq!(
+            policy,
+            json!({"rules": [{
+                "destination": {
+                    "scheme": "https", "host": "partner.example.com", "path_prefix": "/api",
+                },
+                "inject": {"client_cert": {"cert": {"literal": certificate}, "ca": ca}},
+            }]})
+        );
+        assert_eq!(
+            request_fields("http_mtls", &params),
+            ["client_private_key_pem"]
+        );
+        assert!(injected_headers("http_mtls", &params).is_empty());
+
+        // No server CA: the usual roots.
+        let mut public = params.clone();
+        public["server_ca_pem"] = json!("");
+        let (_, policy) = only("http_mtls", public);
+        assert_eq!(policy["rules"][0]["inject"]["client_cert"].get("ca"), None);
+
+        // A client certificate is never offered over plain HTTP, whatever the
+        // deployment allows elsewhere.
+        let mut plain = params.clone();
+        plain["base_url"] = json!("http://127.0.0.1:8080");
+        let allowances = Allowances {
+            private_hosts: vec!["127.0.0.1:8080".to_owned()],
+            plain_http_hosts: vec!["127.0.0.1".to_owned()],
+            ..Allowances::default()
+        };
+        assert_eq!(policies("http_mtls", &plain, &allowances), None);
+        // No certificate, nothing to present.
+        let mut bare = params;
+        bare["client_certificate_pem"] = json!("");
+        assert_eq!(policies("http_mtls", &bare, &Allowances::default()), None);
     }
 
     #[test]

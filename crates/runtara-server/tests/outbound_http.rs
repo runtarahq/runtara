@@ -1486,3 +1486,138 @@ async fn a_sealed_storage_connections_presigned_url_comes_from_seal() -> anyhow:
     );
     Ok(())
 }
+
+/// A sealed client certificate key makes no TLS client in the proxy: seal
+/// presents the certificate on the connection it opens, checks the server
+/// against the connection's CA, and the proxy's pin still applies.
+#[tokio::test]
+async fn native_outbound_has_seal_present_a_sealed_client_certificate() -> anyhow::Result<()> {
+    use runtara_connections::sealed::keys::PgKeySource;
+    use runtara_connections::sealed::{Allowances, SealedCredentials, is_sealed};
+    allow_local_egress_for_this_test_binary();
+    init_server_config();
+    let pool = test_pool().await;
+    let tenant_id = format!("sealed-mtls-{}", Uuid::new_v4());
+    let MtlsFixture {
+        base_url,
+        client_certificate_pem,
+        client_private_key_pem,
+        server_ca_pem,
+        server,
+    } = mtls_fixture().await;
+    let sealed = Arc::new(
+        SealedCredentials::in_process(
+            Arc::new(PgKeySource::new(pool.clone())),
+            &[7_u8; 32],
+            Allowances {
+                private_hosts: vec!["127.0.0.1".into()],
+                ..Default::default()
+            },
+        )
+        .map_err(|error| anyhow::anyhow!(error))?,
+    );
+    let service = ConnectionService::new(
+        Arc::new(ConnectionRepository::new(
+            pool.clone(),
+            Arc::new(NoOpCipher),
+        )),
+        compatibility(),
+    )
+    .with_sealed(Some(sealed.clone()));
+    let connection_id = service
+        .create_connection(
+            CreateConnectionRequest {
+                title: format!("Sealed mTLS {tenant_id}"),
+                connection_subtype: None,
+                connection_parameters: Some(json!({
+                    "base_url": base_url,
+                    "client_certificate_pem": client_certificate_pem,
+                    "client_private_key_pem": client_private_key_pem,
+                    "server_ca_pem": server_ca_pem,
+                })),
+                integration_id: Some("http_mtls".to_string()),
+                rate_limit_config: None,
+                valid_until: None,
+                is_default_file_storage: None,
+                default_for: None,
+            },
+            &tenant_id,
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("sealed mTLS connection creation failed"))?;
+    let (format, stored): (String, serde_json::Value) = sqlx::query_as(
+        "SELECT credential_format, connection_parameters FROM connection_data_entity WHERE id = $1",
+    )
+    .bind(&connection_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(format, "seal");
+    assert!(is_sealed(&stored["client_private_key_pem"]));
+    assert!(!stored.to_string().contains("PRIVATE KEY"));
+    // The certificate is public, and stays readable.
+    assert_eq!(stored["client_certificate_pem"], client_certificate_pem);
+
+    // An edit that keeps the sealed key is checked without it.
+    let version = service
+        .get_connection(&connection_id, &tenant_id)
+        .await
+        .map_err(|_| anyhow::anyhow!("reading the sealed mTLS connection failed"))?
+        .edit_projection
+        .expect("a connection has an edit projection")
+        .version;
+    service
+        .update_connection(
+            &connection_id,
+            &tenant_id,
+            serde_json::from_value(json!({
+                "version": version,
+                "connectionParameterPatch": {"set": {"base_url": stored["base_url"]}},
+            }))?,
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("saving a sealed mTLS connection again failed: {error:?}")
+        })?;
+
+    let outbound = NativeOutboundHttp {
+        facade: Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
+            ConnectionsConfig {
+                sealed: Some(sealed),
+                agent_access: Arc::new(runtara_connections::EveryAgent),
+                db_pool: pool.clone(),
+                redis_manager: None,
+                public_base_url: "http://localhost".to_string(),
+                oauth_complete_url: None,
+                http_client: runtara_connections::net::build_hardened_client(),
+                cipher: Arc::new(NoOpCipher),
+                compatibility: compatibility(),
+                agent_catalog: Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                    Vec::new(),
+                )),
+                connection_events: None,
+                oauth: Default::default(),
+            },
+        ))),
+        client: runtara_connections::net::build_hardened_client(),
+    };
+    let response = outbound
+        .request(
+            &OutboundContext {
+                tenant_id: tenant_id.clone(),
+                instance_id: None,
+            },
+            connection_request(&connection_id, "/whoami"),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("sealed mTLS request failed: {}", error.code))?;
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&response.body)?,
+        json!({"mtls": true})
+    );
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("TLS server should receive one request")
+        .expect("TLS server task should succeed");
+    Ok(())
+}

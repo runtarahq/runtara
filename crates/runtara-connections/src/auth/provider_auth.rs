@@ -95,7 +95,11 @@ pub async fn resolve_connection_auth(
         ));
     }
     let descriptor = describe_connection_auth(connection_id, integration_id, params, headers);
-    let mtls_client = if integration_id == "http_mtls" {
+    // A sealed private key makes no client here: seal presents the
+    // certificate on the connection it opens.
+    let mtls_client = if integration_id == "http_mtls"
+        && !crate::sealed::is_sealed(&params["client_private_key_pem"])
+    {
         Some(net::build_hardened_mtls_client(params).map_err(|error| {
             token_cache::AuthResolutionError::permanent(format!(
                 "Invalid HTTP mTLS configuration: {error}"

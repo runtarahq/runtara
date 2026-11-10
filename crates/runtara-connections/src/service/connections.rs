@@ -177,7 +177,18 @@ fn validate_http_mtls_parameters(params: Option<&serde_json::Value>) -> Result<(
             "HTTP mTLS Base URL must not include a query or fragment".to_string(),
         ));
     }
-    crate::net::validate_mtls_client_parameters(params).map_err(|error| {
+    // A private key that stays sealed is a stand-in here: only the
+    // certificates can be checked.
+    let key_is_sealed = params
+        .get("client_private_key_pem")
+        .and_then(|key| key.as_str())
+        == Some(SEALED_STAND_IN);
+    let checked = if key_is_sealed {
+        crate::net::validate_mtls_certificates(params)
+    } else {
+        crate::net::validate_mtls_client_parameters(params)
+    };
+    checked.map_err(|error| {
         ServiceError::ValidationError(format!("Invalid HTTP mTLS configuration: {error}"))
     })
 }
@@ -398,11 +409,13 @@ fn apply_connection_parameter_patch_to_meta(
 
     let merged = serde_json::Value::Object(values);
     let definition = runtara_dsl::form::connection_form_definition(meta);
+    // The form sees a secret that stays sealed as the text it stands for.
+    let with_stand_ins = with_sealed_stand_ins(&merged);
     let form_values = serde_json::Value::Object(
         meta.fields
             .iter()
             .filter_map(|field| {
-                merged
+                with_stand_ins
                     .get(field.name)
                     .cloned()
                     .map(|value| (field.name.to_string(), value))

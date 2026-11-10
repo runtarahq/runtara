@@ -238,6 +238,35 @@ pub(crate) fn validate_mtls_client_parameters(
     Ok(())
 }
 
+/// Validate the public half of mTLS material at save time: the client
+/// certificate and any server CA parse as PEM. For a connection whose private
+/// key is sealed and so cannot be checked against its certificate here; seal
+/// refuses a key that does not match before it connects.
+pub(crate) fn validate_mtls_certificates(
+    params: &serde_json::Value,
+) -> Result<(), MtlsClientConfigError> {
+    let pem = |name: &str| {
+        params
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+    };
+    let certificates = pem("client_certificate_pem")
+        .and_then(|bundle| reqwest::Certificate::from_pem_bundle(bundle.as_bytes()).ok())
+        .ok_or(MtlsClientConfigError::InvalidClientIdentity)?;
+    if certificates.is_empty() {
+        return Err(MtlsClientConfigError::InvalidClientIdentity);
+    }
+    if let Some(bundle) = pem("server_ca_pem") {
+        let certificates = reqwest::Certificate::from_pem_bundle(bundle.as_bytes())
+            .map_err(|_| MtlsClientConfigError::InvalidServerCa)?;
+        if certificates.is_empty() {
+            return Err(MtlsClientConfigError::InvalidServerCa);
+        }
+    }
+    Ok(())
+}
+
 /// Build a request-scoped hardened mTLS client for an `http_mtls` connection.
 ///
 /// This preserves every regular credentialed-egress control (no redirects and

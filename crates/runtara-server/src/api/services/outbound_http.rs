@@ -601,7 +601,8 @@ async fn execute_request(
         // escape hatch. A manually-created or legacy record must not gain a
         // warn/off-mode path around that invariant; the Rustls client also
         // refuses HTTP as a second line of defense.
-        let uses_mtls = resolved.mtls_client.is_some();
+        // A sealed key has no client here, and is held to the same rule.
+        let uses_mtls = resolved.mtls_client.is_some() || integration_id == "http_mtls";
 
         // Record analytics off the request path. This can hit Redis and
         // PostgreSQL, and should not delay the upstream call.
