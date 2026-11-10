@@ -654,7 +654,11 @@ async fn execute_request(
         aws_signing = resolved.aws_signing;
         azure_signing = resolved.azure_signing;
         mtls_client = resolved.mtls_client;
-        if conn.sealed {
+        // A sealed connection whose settings use no credential (an MCP server
+        // with no auth) presents nothing, and is sent like any other.
+        if conn.sealed
+            && !runtara_connections::sealed::request_fields(integration_id, &params).is_empty()
+        {
             sealed_connection = Some((integration_id.to_string(), params.clone()));
         }
 

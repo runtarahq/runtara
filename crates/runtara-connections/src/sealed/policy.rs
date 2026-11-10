@@ -8,13 +8,13 @@
 
 use std::collections::BTreeMap;
 
-use runtara_agents::extractors::connection_types::SHIPPO_API_BASE_URL;
+use runtara_agents::extractors::connection_types::{GEMINI_API_BASE_URL, SHIPPO_API_BASE_URL};
 use runtara_agents::registry::find_connection_type;
 use seal_format::Policy;
-use seal_format::policy::{Destination, Host, Inject, Part, Rule, Scheme};
+use seal_format::policy::{Destination, HmacHash, Host, Inject, Part, Rule, Scheme, Verify};
 use serde_json::Value;
 
-use crate::auth::provider_auth::{jira_account_url, resolve_named_endpoint};
+use crate::auth::provider_auth::{jira_account_url, openai_proxy_base_url, resolve_named_endpoint};
 
 /// Destinations a deployment lets credentials go to that seal refuses by
 /// default: the development and test escape hatches of the outbound proxy.
@@ -40,13 +40,52 @@ impl Allowances {
     }
 }
 
-/// How a connection type's one secret is sent.
-struct StaticSecret {
+/// What a sealed secret is for.
+// A handful are built per connection and dropped at once: their size does not
+// matter, and boxing the injection would only obscure the table below.
+#[allow(clippy::large_enum_variant)]
+enum Usage {
+    /// Sent with the connection's requests.
+    Send {
+        /// The API the secret is for.
+        base_url: String,
+        inject: Inject,
+        /// The secret may go anywhere on the API's host, not only below the
+        /// base URL's path: for a type whose requests the proxy does not pin
+        /// to a path either.
+        any_path: bool,
+        /// Whether requests present it. A secret the connection holds but its
+        /// current settings do not use is sealed and left out.
+        presented: bool,
+    },
+    /// Never sent: checks that a message came from the provider.
+    Verify(HmacHash),
+}
+
+/// One secret parameter of a connection.
+struct Secret {
     /// The parameter holding the secret.
     field: &'static str,
-    /// The API the secret is for.
-    base_url: String,
-    inject: Inject,
+    usage: Usage,
+}
+
+fn sent(field: &'static str, base_url: &str, inject: Inject) -> Secret {
+    Secret {
+        field,
+        usage: Usage::Send {
+            base_url: base_url.to_owned(),
+            inject,
+            any_path: false,
+            presented: true,
+        },
+    }
+}
+
+fn verifies(field: &'static str) -> Secret {
+    Secret {
+        field,
+        usage: Usage::Verify(HmacHash::Sha256),
+    }
 }
 
 fn header(name: &str, format: &str) -> Inject {
@@ -60,63 +99,135 @@ fn bearer() -> Inject {
     header("Authorization", "Bearer {}")
 }
 
+fn basic(username: &str) -> Inject {
+    Inject::Basic {
+        username: Part::Literal(username.to_owned()),
+    }
+}
+
 fn filled<'a>(params: &'a Value, name: &str) -> Option<&'a str> {
     params[name]
         .as_str()
         .filter(|value| !value.trim().is_empty())
 }
 
-/// The connection types whose secret is sealed, and how each is sent. This
-/// mirrors what `describe_connection_auth` does for the same types.
-fn static_secret(integration_id: &str, params: &Value) -> Option<StaticSecret> {
-    let fixed = |field, base_url: &str, inject| {
-        Some(StaticSecret {
-            field,
-            base_url: base_url.to_owned(),
-            inject,
+/// The header an injection sets.
+fn header_of(inject: &Inject) -> Option<&str> {
+    match inject {
+        Inject::Header { name, .. } => Some(name),
+        Inject::Basic { .. } => Some("Authorization"),
+        _ => None,
+    }
+}
+
+/// An MCP server's secrets. The one its `auth_mode` names is sent; the other,
+/// if the connection still holds it, is sealed and left out. The server's URL
+/// is one endpoint, and the proxy does not hold requests to its path, so the
+/// secret may go anywhere on its host.
+fn mcp_secrets(params: &Value) -> Option<Vec<Secret>> {
+    let url = filled(params, "url")?;
+    let mode = params["auth_mode"].as_str().unwrap_or("none");
+    let secrets = [
+        ("bearer_token", bearer(), mode == "bearer"),
+        (
+            "api_key_value",
+            header(
+                filled(params, "api_key_header").unwrap_or("X-API-Key"),
+                "{}",
+            ),
+            mode == "api_key",
+        ),
+    ];
+    // A static header of the connection's own replaces the credential's
+    // today. seal would set the credential instead, so such a connection is
+    // not sealed.
+    let overridden = |inject: &Inject| {
+        params["extra_headers"].as_object().is_some_and(|extras| {
+            extras
+                .keys()
+                .any(|name| header_of(inject).is_some_and(|set| name.eq_ignore_ascii_case(set)))
         })
     };
+    if secrets
+        .iter()
+        .any(|(_, inject, presented)| *presented && overridden(inject))
+    {
+        return None;
+    }
+    Some(
+        secrets
+            .into_iter()
+            .map(|(field, inject, presented)| Secret {
+                field,
+                usage: Usage::Send {
+                    base_url: url.to_owned(),
+                    inject,
+                    any_path: true,
+                    presented,
+                },
+            })
+            .collect(),
+    )
+}
+
+/// The connection types whose secrets are sealed, and what each secret is
+/// for. This mirrors what `describe_connection_auth` does for the same types.
+fn secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
+    let one = |field, base_url: &str, inject| Some(vec![sent(field, base_url, inject)]);
     match integration_id {
-        "shopify_access_token" => fixed(
+        "openai_api_key" => one("api_key", &openai_proxy_base_url(params), bearer()),
+        "gemini_api_key" => one(
+            "api_key",
+            GEMINI_API_BASE_URL,
+            header("x-goog-api-key", "{}"),
+        ),
+        "shopify_access_token" => one(
             "access_token",
             &format!("https://{}", filled(params, "shop_domain")?),
             header("X-Shopify-Access-Token", "{}"),
         ),
-        "hubspot_access_token" => fixed("access_token", "https://api.hubapi.com", bearer()),
-        "stripe_api_key" => fixed("secret_key", "https://api.stripe.com", bearer()),
-        "pipedrive_api_token" => fixed(
+        "hubspot_access_token" => one("access_token", "https://api.hubapi.com", bearer()),
+        "stripe_api_key" => one("secret_key", "https://api.stripe.com", bearer()),
+        "pipedrive_api_token" => one(
             "api_token",
             "https://api.pipedrive.com",
             header("x-api-token", "{}"),
         ),
-        "shippo_api_token" => fixed(
+        "shippo_api_token" => one(
             "api_token",
             SHIPPO_API_BASE_URL,
             header("Authorization", "ShippoToken {}"),
         ),
-        "jira_api_token" => fixed(
+        "jira_api_token" => one(
             "api_token",
             &jira_account_url(params)?,
-            Inject::Basic {
-                username: Part::Literal(filled(params, "email")?.to_owned()),
-            },
+            basic(filled(params, "email")?),
         ),
-        "http_bearer" => fixed("token", filled(params, "base_url")?, bearer()),
+        "slack_bot" => Some(vec![
+            sent("bot_token", "https://slack.com", bearer()),
+            verifies("signing_secret"),
+        ]),
+        "mailgun" => {
+            let base_url = match params["region"].as_str().unwrap_or("us") {
+                "eu" => "https://api.eu.mailgun.net",
+                _ => "https://api.mailgun.net",
+            };
+            Some(vec![
+                sent("api_key", base_url, basic("api")),
+                verifies("webhook_signing_key"),
+            ])
+        }
+        "mcp" => mcp_secrets(params),
+        "http_bearer" => one("token", filled(params, "base_url")?, bearer()),
         "http_basic" => {
             let username = params["username"].as_str()?;
             // As `http_basic_auth` refuses it: the header could not be read back.
             if username.contains(':') {
                 return None;
             }
-            fixed(
-                "password",
-                filled(params, "base_url")?,
-                Inject::Basic {
-                    username: Part::Literal(username.to_owned()),
-                },
-            )
+            one("password", filled(params, "base_url")?, basic(username))
         }
-        "http_api_key" => fixed(
+        "http_api_key" => one(
             "api_key",
             filled(params, "base_url")?,
             header(filled(params, "header_name").unwrap_or("X-API-Key"), "{}"),
@@ -125,50 +236,84 @@ fn static_secret(integration_id: &str, params: &Value) -> Option<StaticSecret> {
     }
 }
 
-/// The request header seal sets for a connection's secret. A caller may not
-/// set it too, so the proxy drops any the agent sent before handing the
-/// request to seal, as it always overrode one.
-pub fn injected_header(integration_id: &str, params: &Value) -> Option<String> {
-    match static_secret(integration_id, params)?.inject {
-        Inject::Header { name, .. } => Some(name),
-        Inject::Basic { .. } => Some("Authorization".to_owned()),
-        _ => None,
-    }
+/// The parameters a connection's requests present to seal: its sealed secrets
+/// that are sent, and that its current settings use. A secret that only
+/// verifies is never among them, since it may go nowhere.
+pub fn request_fields(integration_id: &str, params: &Value) -> Vec<String> {
+    secrets(integration_id, params)
+        .into_iter()
+        .flatten()
+        .filter(|secret| {
+            matches!(
+                secret.usage,
+                Usage::Send {
+                    presented: true,
+                    ..
+                }
+            )
+        })
+        .map(|secret| secret.field.to_owned())
+        .collect()
+}
+
+/// The request headers seal sets for a connection's secrets. A caller may not
+/// set them too, so the proxy drops any the agent sent before handing the
+/// request to seal, as it always overrode them.
+pub fn injected_headers(integration_id: &str, params: &Value) -> Vec<String> {
+    secrets(integration_id, params)
+        .into_iter()
+        .flatten()
+        .filter_map(|secret| match &secret.usage {
+            Usage::Send {
+                inject,
+                presented: true,
+                ..
+            } => header_of(inject).map(str::to_owned),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Whether a connection type's secrets can be sealed at all, whatever its
 /// parameters.
-///
-/// A type is listed only when nothing but the outbound proxy uses its secret.
-/// `openai_api_key` and `gemini_api_key` are not: listing a provider's models
-/// reads the key directly. Nor are `slack_bot`, `mailgun` and `mcp`, whose
-/// secrets the channels and the MCP client read.
 pub fn is_sealable_type(integration_id: &str) -> bool {
     SEALABLE_TYPES.contains(&integration_id)
 }
 
 /// The connection types [`policies`] knows.
 pub const SEALABLE_TYPES: &[&str] = &[
+    "openai_api_key",
+    "gemini_api_key",
     "shopify_access_token",
     "hubspot_access_token",
     "stripe_api_key",
     "pipedrive_api_token",
     "shippo_api_token",
     "jira_api_token",
+    "slack_bot",
+    "mailgun",
+    "mcp",
     "http_bearer",
     "http_basic",
     "http_api_key",
 ];
 
-/// A rule that sends a secret to `base_url` and below, or `None` if seal cannot
-/// express the destination or this deployment does not allow it.
-fn rule_for(base_url: &str, inject: &Inject, allowances: &Allowances) -> Option<Rule> {
+/// A rule that sends a secret to `base_url` and below (or anywhere on its
+/// host, with `any_path`), or `None` if seal cannot express the destination or
+/// this deployment does not allow it.
+fn rule_for(
+    base_url: &str,
+    inject: &Inject,
+    any_path: bool,
+    allowances: &Allowances,
+) -> Option<Rule> {
     let url = url::Url::parse(base_url).ok()?;
-    if !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
+    if !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+    // A query or fragment is part of no destination. With `any_path` the URL
+    // names a host only, so they are beside the point.
+    if !any_path && (url.query().is_some() || url.fragment().is_some()) {
         return None;
     }
     let host = url.host_str()?.to_ascii_lowercase();
@@ -183,7 +328,7 @@ fn rule_for(base_url: &str, inject: &Inject, allowances: &Allowances) -> Option<
             scheme,
             host: Host::new(host.as_str()).ok()?,
             port: url.port(),
-            path_prefix: (!path.is_empty()).then(|| path.to_owned()),
+            path_prefix: (!any_path && !path.is_empty()).then(|| path.to_owned()),
         },
         inject.clone(),
     );
@@ -203,29 +348,49 @@ pub fn policies(
     params: &Value,
     allowances: &Allowances,
 ) -> Option<BTreeMap<String, Policy>> {
-    let secret = static_secret(integration_id, params)?;
-    let mut rules = vec![rule_for(&secret.base_url, &secret.inject, allowances)?];
-    // The type's other endpoints, which an agent selects by name. One whose
-    // URL does not render from these parameters cannot be selected either.
-    if let Some(meta) = find_connection_type(integration_id) {
-        for endpoint in meta.named_endpoints {
-            let Ok(resolved) = resolve_named_endpoint(meta, endpoint.name, params) else {
-                continue;
-            };
-            let rule = rule_for(&resolved.base_url, &secret.inject, allowances)?;
-            if !rules.contains(&rule) {
-                rules.push(rule);
+    let mut policies = BTreeMap::new();
+    for secret in secrets(integration_id, params)? {
+        let policy = match &secret.usage {
+            Usage::Verify(hash) => Policy {
+                rules: Vec::new(),
+                definitions: BTreeMap::new(),
+                shared: false,
+                verify: Some(Verify::Hmac { hash: *hash }),
+            },
+            Usage::Send {
+                base_url,
+                inject,
+                any_path,
+                ..
+            } => {
+                let mut rules = vec![rule_for(base_url, inject, *any_path, allowances)?];
+                // The type's other endpoints, which an agent selects by name.
+                // One whose URL does not render from these parameters cannot
+                // be selected either.
+                if let Some(meta) = find_connection_type(integration_id) {
+                    for endpoint in meta.named_endpoints {
+                        let Ok(resolved) = resolve_named_endpoint(meta, endpoint.name, params)
+                        else {
+                            continue;
+                        };
+                        let rule = rule_for(&resolved.base_url, inject, *any_path, allowances)?;
+                        if !rules.contains(&rule) {
+                            rules.push(rule);
+                        }
+                    }
+                }
+                Policy {
+                    rules,
+                    definitions: BTreeMap::new(),
+                    shared: false,
+                    verify: None,
+                }
             }
-        }
+        };
+        policy.validate().ok()?;
+        policies.insert(secret.field.to_owned(), policy);
     }
-    let policy = Policy {
-        rules,
-        definitions: BTreeMap::new(),
-        shared: false,
-        verify: None,
-    };
-    policy.validate().ok()?;
-    Some(BTreeMap::from([(secret.field.to_owned(), policy)]))
+    Some(policies)
 }
 
 #[cfg(test)]
@@ -355,16 +520,17 @@ mod tests {
             "api_key": "s", "access_token": "s", "secret_key": "s", "api_token": "s",
             "token": "s", "password": "s", "username": "u", "email": "e@example.com",
             "site": "acme", "shop_domain": "acme.myshopify.com",
-            "base_url": "https://api.example.com",
+            "base_url": "https://api.example.com", "url": "https://mcp.example.com/mcp",
         });
         for integration_id in SEALABLE_TYPES {
             let meta = find_connection_type(integration_id).unwrap();
-            let secrets: Vec<&str> = meta
+            let mut secrets: Vec<&str> = meta
                 .fields
                 .iter()
                 .filter(|field| field.is_secret)
                 .map(|field| field.name)
                 .collect();
+            secrets.sort_unstable();
             let sealed: Vec<String> = policies(integration_id, &params, &Allowances::default())
                 .unwrap_or_else(|| panic!("{integration_id} is sealed"))
                 .into_keys()
@@ -373,15 +539,178 @@ mod tests {
         }
     }
 
+    fn canonical(policy: &Policy) -> Value {
+        serde_json::from_slice(&policy.canonical_json().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn the_ai_providers_send_their_key_to_the_providers_api() {
+        let (field, policy) = only("openai_api_key", json!({"api_key": "s"}));
+        assert_eq!(field, "api_key");
+        assert_eq!(
+            policy,
+            json!({"rules": [{
+                "destination": {"scheme": "https", "host": "api.openai.com"},
+                "inject": {"header": {"name": "Authorization", "format": "Bearer {}"}},
+            }]})
+        );
+        // A gateway's base URL names the host; `/v1` is the request's.
+        let (_, policy) = only(
+            "openai_api_key",
+            json!({"api_key": "s", "base_url": "https://llm.example.com/v1/"}),
+        );
+        assert_eq!(
+            policy["rules"][0]["destination"],
+            json!({"scheme": "https", "host": "llm.example.com"})
+        );
+
+        let (field, policy) = only("gemini_api_key", json!({"api_key": "s"}));
+        assert_eq!(field, "api_key");
+        assert_eq!(
+            policy["rules"][0],
+            json!({
+                "destination": {
+                    "scheme": "https",
+                    "host": "generativelanguage.googleapis.com",
+                    "path_prefix": "/v1beta",
+                },
+                "inject": {"header": {"name": "x-goog-api-key", "format": "{}"}},
+            })
+        );
+    }
+
+    #[test]
+    fn a_channels_token_is_sent_and_its_signing_secret_only_verifies() {
+        let slack = policies("slack_bot", &json!({}), &Allowances::default()).unwrap();
+        let bearer = json!({"header": {"name": "Authorization", "format": "Bearer {}"}});
+        // The API, and the host files shared in a channel are fetched from.
+        assert_eq!(
+            canonical(&slack["bot_token"]),
+            json!({"rules": [
+                {
+                    "destination": {"scheme": "https", "host": "slack.com"},
+                    "inject": bearer,
+                },
+                {
+                    "destination": {
+                        "scheme": "https",
+                        "host": "files.slack.com",
+                        "path_prefix": "/files-pri",
+                    },
+                    "inject": bearer,
+                },
+            ]})
+        );
+        assert_eq!(
+            canonical(&slack["signing_secret"]),
+            json!({"verify": {"hmac": {"hash": "sha256"}}})
+        );
+        assert_eq!(request_fields("slack_bot", &json!({})), ["bot_token"]);
+        assert_eq!(injected_headers("slack_bot", &json!({})), ["Authorization"]);
+
+        let params = json!({"domain": "mg.example.com", "region": "eu"});
+        let mailgun = policies("mailgun", &params, &Allowances::default()).unwrap();
+        let api_key = canonical(&mailgun["api_key"]);
+        let rules = api_key["rules"].as_array().unwrap();
+        assert_eq!(
+            rules[0],
+            json!({
+                "destination": {"scheme": "https", "host": "api.eu.mailgun.net"},
+                "inject": {"basic": {"username": {"literal": "api"}}},
+            })
+        );
+        // Stored messages are fetched from the regional storage hosts, each
+        // for this connection's domain only.
+        assert!(rules.len() > 1 && rules.len() <= 16, "{}", rules.len());
+        for rule in &rules[1..] {
+            assert_eq!(
+                rule["destination"]["path_prefix"],
+                "/v3/domains/mg.example.com/messages"
+            );
+            assert_eq!(rule["inject"], rules[0]["inject"]);
+        }
+        assert_eq!(
+            canonical(&mailgun["webhook_signing_key"]),
+            json!({"verify": {"hmac": {"hash": "sha256"}}})
+        );
+        assert_eq!(request_fields("mailgun", &params), ["api_key"]);
+        // The US region is the default.
+        let us = policies(
+            "mailgun",
+            &json!({"domain": "d.example.com"}),
+            &Allowances::default(),
+        );
+        assert_eq!(
+            canonical(&us.unwrap()["api_key"])["rules"][0]["destination"]["host"],
+            "api.mailgun.net"
+        );
+    }
+
+    #[test]
+    fn an_mcp_server_gets_the_secret_its_auth_mode_names() {
+        let url = "https://mcp.example.com/servers/a/mcp?session=1";
+        let host = json!({"scheme": "https", "host": "mcp.example.com"});
+
+        let params = json!({"url": url, "auth_mode": "bearer"});
+        let bearer = policies("mcp", &params, &Allowances::default()).unwrap();
+        // Anywhere on the server's host: the proxy does not hold MCP requests
+        // to the URL's path either.
+        assert_eq!(
+            canonical(&bearer["bearer_token"]),
+            json!({"rules": [{
+                "destination": host,
+                "inject": {"header": {"name": "Authorization", "format": "Bearer {}"}},
+            }]})
+        );
+        assert_eq!(request_fields("mcp", &params), ["bearer_token"]);
+        assert_eq!(injected_headers("mcp", &params), ["Authorization"]);
+
+        let params = json!({"url": url, "auth_mode": "api_key", "api_key_header": "X-Mcp-Key"});
+        let api_key = policies("mcp", &params, &Allowances::default()).unwrap();
+        assert_eq!(
+            canonical(&api_key["api_key_value"])["rules"][0]["inject"],
+            json!({"header": {"name": "X-Mcp-Key", "format": "{}"}})
+        );
+        assert_eq!(request_fields("mcp", &params), ["api_key_value"]);
+        assert_eq!(injected_headers("mcp", &params), ["X-Mcp-Key"]);
+        // The secret of the other mode has a policy too, so that it is never
+        // stored unsealed; it is just not presented.
+        assert!(api_key.contains_key("bearer_token"));
+
+        // No auth: nothing is presented.
+        let params = json!({"url": url});
+        assert!(policies("mcp", &params, &Allowances::default()).is_some());
+        assert!(request_fields("mcp", &params).is_empty());
+        assert!(injected_headers("mcp", &params).is_empty());
+    }
+
+    #[test]
+    fn an_mcp_connection_whose_own_header_replaces_the_credential_is_not_sealed() {
+        let params = json!({
+            "url": "https://mcp.example.com/mcp",
+            "auth_mode": "bearer",
+            "extra_headers": {"authorization": "Custom scheme"},
+        });
+        assert_eq!(policies("mcp", &params, &Allowances::default()), None);
+        // A header that is not the credential's does not matter.
+        let params = json!({
+            "url": "https://mcp.example.com/mcp",
+            "auth_mode": "bearer",
+            "extra_headers": {"X-Team": "a"},
+        });
+        assert!(policies("mcp", &params, &Allowances::default()).is_some());
+        // Nor does one for a mode that is not in use.
+        let params = json!({
+            "url": "https://mcp.example.com/mcp",
+            "auth_mode": "api_key",
+            "extra_headers": {"Authorization": "Custom scheme"},
+        });
+        assert!(policies("mcp", &params, &Allowances::default()).is_some());
+    }
+
     #[test]
     fn a_type_seal_does_not_handle_yet_is_not_sealed() {
-        for integration_id in [
-            "quickbooks_online",
-            "aws_credentials",
-            "slack_bot",
-            "openai_api_key",
-            "nope",
-        ] {
+        for integration_id in ["quickbooks_online", "aws_credentials", "teams_bot", "nope"] {
             let params = json!({"api_key": "s", "base_url": "https://api.example.com"});
             assert_eq!(
                 policies(integration_id, &params, &Allowances::default()),
@@ -481,12 +810,12 @@ mod tests {
         ];
         for (integration_id, params, header) in cases {
             assert_eq!(
-                injected_header(integration_id, &params).as_deref(),
-                Some(header),
+                injected_headers(integration_id, &params),
+                [header],
                 "{integration_id}"
             );
         }
-        assert_eq!(injected_header("quickbooks_online", &json!({})), None);
+        assert!(injected_headers("quickbooks_online", &json!({})).is_empty());
     }
 
     #[test]

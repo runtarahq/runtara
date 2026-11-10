@@ -85,6 +85,7 @@ async fn seal_attaches_the_secret_and_sends_the_request() {
         .send(
             TENANT,
             CONNECTION,
+            "http_bearer",
             &stored,
             get(format!("{}/api/orders", server.uri())),
         )
@@ -115,7 +116,7 @@ async fn a_request_body_is_sent_as_given() {
         .unwrap();
 
     let response = sealed
-        .send(TENANT, CONNECTION, &stored, request)
+        .send(TENANT, CONNECTION, "http_bearer", &stored, request)
         .await
         .unwrap();
 
@@ -138,7 +139,7 @@ async fn seal_refuses_a_destination_outside_the_connections_base_url() {
         "https://example.com/api/orders".to_owned(),
     ] {
         let error = sealed
-            .send(TENANT, CONNECTION, &stored, get(url.clone()))
+            .send(TENANT, CONNECTION, "http_bearer", &stored, get(url.clone()))
             .await
             .expect_err(&url);
         assert_eq!(error.code, SealErrorCode::PolicyDenied, "{url}");
@@ -157,7 +158,13 @@ async fn a_sealed_value_opens_only_for_its_own_connection_and_tenant() {
 
     // Presented as another connection of the same tenant.
     let error = sealed
-        .send(TENANT, "another-connection", &stored, get(url.clone()))
+        .send(
+            TENANT,
+            "another-connection",
+            "http_bearer",
+            &stored,
+            get(url.clone()),
+        )
         .await
         .unwrap_err();
     assert_eq!(error.code, SealErrorCode::OpenFailed);
@@ -175,7 +182,7 @@ async fn a_sealed_value_opens_only_for_its_own_connection_and_tenant() {
         .await
         .unwrap();
     let error = sealed
-        .send("globex", CONNECTION, &stored, get(url))
+        .send("globex", CONNECTION, "http_bearer", &stored, get(url))
         .await
         .unwrap_err();
     assert_eq!(error.code, SealErrorCode::PolicyDenied);
@@ -439,6 +446,145 @@ async fn a_refusal_names_seals_code_and_an_invalid_request_is_not_sent() {
         "{invalid:?}"
     );
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+fn hmac_sha256(key: &str, message: &[u8]) -> Vec<u8> {
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key.as_bytes()).unwrap();
+    mac.update(message);
+    mac.finalize().into_bytes().to_vec()
+}
+
+#[tokio::test]
+async fn a_signing_secret_checks_a_webhooks_signature_without_being_read() {
+    let server = MockServer::start().await;
+    let sealed = sealed_for(&server);
+    let params = json!({"bot_token": "xoxb-CANARY", "signing_secret": SECRET});
+    let stored = sealed
+        .seal_parameters(TENANT, CONNECTION, "slack_bot", &params, None)
+        .await
+        .unwrap()
+        .expect("slack_bot is sealed");
+    assert!(is_sealed(&stored["bot_token"]) && is_sealed(&stored["signing_secret"]));
+    assert!(!stored.to_string().contains("CANARY"));
+
+    let message = b"v0:1700000000:{\"type\":\"event_callback\"}".to_vec();
+    let signature = hmac_sha256(SECRET, &message);
+    let check = |message: Vec<u8>, mac: Vec<u8>| {
+        sealed.verify(TENANT, CONNECTION, &stored, "signing_secret", message, mac)
+    };
+
+    assert!(check(message.clone(), signature.clone()).await.unwrap());
+    // Another message, another secret's code, or a shortened code: no.
+    assert!(
+        !check(b"v0:1700000001:{}".to_vec(), signature.clone())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !check(message.clone(), hmac_sha256("other", &message))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !check(message.clone(), signature[..16].to_vec())
+            .await
+            .unwrap()
+    );
+
+    // A secret that is sent cannot be made to check messages, and one the
+    // connection does not hold sealed cannot be asked about at all.
+    let token = sealed
+        .verify(
+            TENANT,
+            CONNECTION,
+            &stored,
+            "bot_token",
+            message.clone(),
+            signature.clone(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(token.code, SealErrorCode::PolicyDenied);
+    let missing = sealed
+        .verify(
+            TENANT,
+            CONNECTION,
+            &params,
+            "signing_secret",
+            message.clone(),
+            signature.clone(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code, SealErrorCode::BadRequest);
+    // Nor does it check for another connection.
+    let other = sealed
+        .verify(
+            TENANT,
+            "another-connection",
+            &stored,
+            "signing_secret",
+            message,
+            signature,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(other.code, SealErrorCode::OpenFailed);
+
+    // Requests present the token only: the signing secret goes nowhere.
+    assert_eq!(request_fields("slack_bot", &stored), ["bot_token"]);
+}
+
+#[tokio::test]
+async fn a_request_presents_only_the_secret_the_connections_settings_use() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .and(header("Authorization", "Bearer bearer-CANARY"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let sealed = sealed_for(&server);
+    // Both secrets are held; the mode names the bearer token.
+    let params = json!({
+        "url": format!("{}/mcp", server.uri()),
+        "auth_mode": "bearer",
+        "bearer_token": "bearer-CANARY",
+        "api_key_value": "key-CANARY",
+    });
+    let stored = sealed
+        .seal_parameters(TENANT, CONNECTION, "mcp", &params, None)
+        .await
+        .unwrap()
+        .expect("mcp is sealed");
+    assert!(is_sealed(&stored["bearer_token"]) && is_sealed(&stored["api_key_value"]));
+    assert_eq!(request_fields("mcp", &stored), ["bearer_token"]);
+
+    let response = sealed
+        .send_bounded(
+            TENANT,
+            CONNECTION,
+            "mcp",
+            &stored,
+            "POST",
+            &format!("{}/mcp", server.uri()),
+            headers(&[]),
+            Some(b"{}".to_vec()),
+            64 * 1024,
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200);
+    let received = &server.received_requests().await.unwrap()[0];
+    assert!(!received.headers.contains_key("x-api-key"));
+
+    // With no auth mode, nothing is presented: the request needs no seal.
+    let mut open = stored.clone();
+    open["auth_mode"] = json!("none");
+    assert!(request_fields("mcp", &open).is_empty());
+    // And a connection whose secrets are not sealed presents nothing either.
+    assert!(request_fields("mcp", &params).is_empty());
 }
 
 #[test]

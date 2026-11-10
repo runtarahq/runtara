@@ -253,28 +253,22 @@ impl SealedCredentials {
 
     /// Sends a request with a sealed connection's credentials. seal attaches
     /// them, and refuses a destination their policies do not allow.
+    ///
+    /// Only the secrets the connection's requests use are presented (see
+    /// [`policy::request_fields`]): one that only verifies may go nowhere, and
+    /// presenting it would have the whole request refused.
     pub async fn send(
         &self,
         tenant_id: &str,
         connection_id: &str,
+        integration_id: &str,
         parameters: &Value,
         request: http::Request<Option<Vec<u8>>>,
     ) -> Result<SealedResponse, SealError> {
-        let invalid = |detail: &str| SealError {
-            code: SealErrorCode::BadRequest,
-            detail: detail.to_owned(),
-        };
         let mut sealed = BTreeMap::new();
-        for (name, value) in parameters.as_object().into_iter().flatten() {
-            if !is_sealed(value) {
-                continue;
-            }
-            let envelope: Envelope =
-                serde_json::from_value(value[SEALED_MARKER]["envelope"].clone())
-                    .map_err(|_| invalid("a stored sealed value is not an envelope"))?;
-            let field = FieldName::new(name.as_str())
-                .map_err(|_| invalid("a sealed parameter's name is not a field name"))?;
-            sealed.insert(field, SealedValue::from(envelope));
+        for name in request_fields(integration_id, parameters) {
+            let (field, value) = presented(parameters, &name)?;
+            sealed.insert(field, value);
         }
         let request = request.map(|body| {
             Full::new(Bytes::from(body.unwrap_or_default()))
@@ -286,7 +280,7 @@ impl SealedCredentials {
             .send(SendRequest {
                 keyset: keys::keyset_for_tenant(tenant_id),
                 item: ItemId::new(connection_id)
-                    .map_err(|_| invalid("the connection's id is not an item id"))?,
+                    .map_err(|_| invalid_request("the connection's id is not an item id"))?,
                 sealed,
                 plain: BTreeMap::new(),
                 request,
@@ -294,6 +288,67 @@ impl SealedCredentials {
             .await?;
         Ok(response.response)
     }
+
+    /// Whether `mac` is the HMAC of `message` under a sealed signing secret:
+    /// a webhook's signature, checked without reading the secret. seal says
+    /// only yes or no. The caller builds the message as the provider signs it
+    /// and decodes the code to bytes, and checks any timestamp itself.
+    ///
+    /// An error means the check could not be made; treat it as a failed check.
+    pub async fn verify(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        parameters: &Value,
+        field: &str,
+        message: Vec<u8>,
+        mac: Vec<u8>,
+    ) -> Result<bool, SealError> {
+        let (field, value) = presented(parameters, field)?;
+        self.client
+            .verify(seal_client::VerifyRequest {
+                keyset: keys::keyset_for_tenant(tenant_id),
+                item: ItemId::new(connection_id)
+                    .map_err(|_| invalid_request("the connection's id is not an item id"))?,
+                field,
+                value,
+                message: Bytes::from(message),
+                mac,
+            })
+            .await
+    }
+}
+
+fn invalid_request(detail: &str) -> SealError {
+    SealError {
+        code: SealErrorCode::BadRequest,
+        detail: detail.to_owned(),
+    }
+}
+
+/// A connection's sealed parameter, as seal takes it.
+fn presented(parameters: &Value, name: &str) -> Result<(FieldName, SealedValue), SealError> {
+    let value = &parameters[name];
+    if !is_sealed(value) {
+        return Err(invalid_request(
+            "the connection holds no sealed value for this",
+        ));
+    }
+    let envelope: Envelope = serde_json::from_value(value[SEALED_MARKER]["envelope"].clone())
+        .map_err(|_| invalid_request("a stored sealed value is not an envelope"))?;
+    let field = FieldName::new(name)
+        .map_err(|_| invalid_request("a sealed parameter's name is not a field name"))?;
+    Ok((field, SealedValue::from(envelope)))
+}
+
+/// The sealed secrets a connection's requests present to seal. Empty means a
+/// request needs none: the connection's settings use no credential, or its
+/// secrets are not sealed.
+pub fn request_fields(integration_id: &str, parameters: &Value) -> Vec<String> {
+    policy::request_fields(integration_id, parameters)
+        .into_iter()
+        .filter(|name| is_sealed(&parameters[name.as_str()]))
+        .collect()
 }
 
 impl SealedCredentials {
@@ -315,22 +370,28 @@ impl SealedCredentials {
         body: Option<Vec<u8>>,
         limit: usize,
     ) -> Result<BoundedResponse, SendError> {
-        let injected = policy::injected_header(integration_id, parameters);
+        let injected = policy::injected_headers(integration_id, parameters);
         let mut builder = http::Request::builder().method(method).uri(url);
         for (name, value) in headers {
             let dropped = ["host", "content-length"]
                 .iter()
                 .any(|set_by_seal| name.eq_ignore_ascii_case(set_by_seal))
                 || injected
-                    .as_deref()
-                    .is_some_and(|injected| name.eq_ignore_ascii_case(injected));
+                    .iter()
+                    .any(|injected| name.eq_ignore_ascii_case(injected));
             if !dropped {
                 builder = builder.header(name, value);
             }
         }
         let request = builder.body(body).map_err(|_| SendError::InvalidRequest)?;
         let response = self
-            .send(tenant_id, connection_id, parameters, request)
+            .send(
+                tenant_id,
+                connection_id,
+                integration_id,
+                parameters,
+                request,
+            )
             .await
             .map_err(SendError::Seal)?;
 
