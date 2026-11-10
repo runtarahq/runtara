@@ -596,7 +596,7 @@ fn zendesk_account_url(params: &Value) -> Option<String> {
     zendesk_base_url(params["subdomain"].as_str()?).ok()
 }
 
-fn jira_account_url(params: &Value) -> Option<String> {
+pub(crate) fn jira_account_url(params: &Value) -> Option<String> {
     jira_base_url(params["site"].as_str()?, params["cloud_id"].as_str()).ok()
 }
 
