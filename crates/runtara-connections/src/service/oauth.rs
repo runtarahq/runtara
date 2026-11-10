@@ -1803,7 +1803,7 @@ mod tests {
             &callback("https://accounts.zoho.com"),
         ) {
             Err(OAuthError::AccountUnresolved(message)) => {
-                assert!(message.contains("in the `us` data centre"), "{message}")
+                assert!(message.contains("in the `us` data centre"))
             }
             other => panic!("{other:?}"),
         }
@@ -1814,7 +1814,7 @@ mod tests {
             &callback("https://evil.example"),
         ) {
             Err(OAuthError::AccountUnresolved(message)) => {
-                assert!(message.contains("no Zoho data centre"), "{message}")
+                assert!(message.contains("no Zoho data centre"))
             }
             other => panic!("{other:?}"),
         }
