@@ -130,6 +130,7 @@ impl Fixture {
     pub fn config(&self, tenants: Arc<dyn TenantHost>) -> ConnectionsConfig {
         let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![]));
         ConnectionsConfig {
+            sealed: None,
             agent_access: std::sync::Arc::new(runtara_connections::EveryAgent),
             db_pool: self.pool.clone(),
             redis_manager: Some(self.valkey.clone()),

@@ -135,6 +135,12 @@ impl ConnectionsFacade {
         ConnectionRepository::new(self.state.db_pool.clone(), self.state.cipher.clone())
     }
 
+    /// seal, if this deployment seals credentials. A connection that
+    /// resolves as sealed is used through it.
+    pub fn sealed(&self) -> Option<&Arc<crate::sealed::SealedCredentials>> {
+        self.state.sealed.as_ref()
+    }
+
     /// Build a rate-limit analytics service using the facade's configured
     /// PostgreSQL pool and shared Redis connection manager.
     pub fn rate_limit_service(&self) -> RateLimitService {

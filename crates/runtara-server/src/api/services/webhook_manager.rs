@@ -839,6 +839,7 @@ mod tests {
         };
         Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
             ConnectionsConfig {
+                sealed: None,
                 agent_access: std::sync::Arc::new(runtara_connections::EveryAgent),
                 db_pool: pool,
                 redis_manager: None,

@@ -125,6 +125,17 @@ fn static_secret(integration_id: &str, params: &Value) -> Option<StaticSecret> {
     }
 }
 
+/// The request header seal sets for a connection's secret. A caller may not
+/// set it too, so the proxy drops any the agent sent before handing the
+/// request to seal, as it always overrode one.
+pub fn injected_header(integration_id: &str, params: &Value) -> Option<String> {
+    match static_secret(integration_id, params)?.inject {
+        Inject::Header { name, .. } => Some(name),
+        Inject::Basic { .. } => Some("Authorization".to_owned()),
+        _ => None,
+    }
+}
+
 /// Whether a connection type's secrets can be sealed at all, whatever its
 /// parameters.
 ///
@@ -442,6 +453,40 @@ mod tests {
         let public = json!({"token": "s", "base_url": "https://api.example.com"});
         let policy = policies("http_bearer", &public, &allowances).unwrap()["token"].clone();
         assert!(!policy.rules[0].allow_plain_http && !policy.rules[0].allow_private_destination);
+    }
+
+    #[test]
+    fn the_header_seal_sets_is_named_for_the_proxy_to_drop() {
+        let cases = [
+            (
+                "http_bearer",
+                json!({"base_url": "https://a.example.com"}),
+                "Authorization",
+            ),
+            (
+                "http_basic",
+                json!({"base_url": "https://a.example.com", "username": "u"}),
+                "Authorization",
+            ),
+            (
+                "http_api_key",
+                json!({"base_url": "https://a.example.com", "header_name": "X-Token"}),
+                "X-Token",
+            ),
+            (
+                "shopify_access_token",
+                json!({"shop_domain": "acme.myshopify.com"}),
+                "X-Shopify-Access-Token",
+            ),
+        ];
+        for (integration_id, params, header) in cases {
+            assert_eq!(
+                injected_header(integration_id, &params).as_deref(),
+                Some(header),
+                "{integration_id}"
+            );
+        }
+        assert_eq!(injected_header("quickbooks_online", &json!({})), None);
     }
 
     #[test]

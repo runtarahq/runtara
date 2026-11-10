@@ -62,6 +62,28 @@ pub enum SealingError {
 /// A response from a request sent with sealed credentials.
 pub type SealedResponse = http::Response<seal_client::Body>;
 
+/// A response read whole, within a byte limit.
+#[derive(Debug)]
+pub struct BoundedResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+/// Why a request with sealed credentials got no response.
+#[derive(Debug)]
+pub enum SendError {
+    /// The request could not be formed: its method, URL or a header is not valid.
+    InvalidRequest,
+    /// seal refused or failed. `code` is seal's error code; the detail has
+    /// identifiers and static text only.
+    Seal(SealError),
+    /// The response is larger than the limit.
+    TooLarge,
+    /// The response's body failed part way.
+    BodyFailed,
+}
+
 /// seal, and what this deployment needs to use it for connections.
 pub struct SealedCredentials {
     client: Arc<dyn SealClient>,
@@ -272,6 +294,152 @@ impl SealedCredentials {
             .await?;
         Ok(response.response)
     }
+}
+
+impl SealedCredentials {
+    /// Sends a request for the outbound proxy and reads the response whole.
+    ///
+    /// The agent's own copy of the header seal sets is dropped, as are `Host`
+    /// and `Content-Length`, which seal sets from the URL and the body. The
+    /// response's headers and body together may not exceed `limit` bytes.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_bounded(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        integration_id: &str,
+        parameters: &Value,
+        method: &str,
+        url: &str,
+        headers: impl IntoIterator<Item = (String, String)>,
+        body: Option<Vec<u8>>,
+        limit: usize,
+    ) -> Result<BoundedResponse, SendError> {
+        let injected = policy::injected_header(integration_id, parameters);
+        let mut builder = http::Request::builder().method(method).uri(url);
+        for (name, value) in headers {
+            let dropped = ["host", "content-length"]
+                .iter()
+                .any(|set_by_seal| name.eq_ignore_ascii_case(set_by_seal))
+                || injected
+                    .as_deref()
+                    .is_some_and(|injected| name.eq_ignore_ascii_case(injected));
+            if !dropped {
+                builder = builder.header(name, value);
+            }
+        }
+        let request = builder.body(body).map_err(|_| SendError::InvalidRequest)?;
+        let response = self
+            .send(tenant_id, connection_id, parameters, request)
+            .await
+            .map_err(SendError::Seal)?;
+
+        let status = response.status().as_u16();
+        let headers: Vec<(String, String)> = response
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| Some((name.to_string(), value.to_str().ok()?.to_owned())))
+            .collect();
+        let header_bytes = headers.iter().fold(2_usize, |size, (name, value)| {
+            size.saturating_add(name.len())
+                .saturating_add(value.len())
+                .saturating_add(16)
+        });
+        let body_limit = limit.checked_sub(header_bytes).ok_or(SendError::TooLarge)?;
+        let mut upstream = response.into_body();
+        let mut body = Vec::new();
+        while let Some(frame) = upstream.frame().await {
+            let frame = frame.map_err(|_| SendError::BodyFailed)?;
+            if let Some(chunk) = frame.data_ref() {
+                if chunk.len() > body_limit.saturating_sub(body.len()) {
+                    return Err(SendError::TooLarge);
+                }
+                body.extend_from_slice(chunk);
+            }
+        }
+        Ok(BoundedResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+}
+
+/// Turns sealing on: connections of the types seal handles are sealed as
+/// they are saved. Off by default.
+pub const SEALED_CREDENTIALS_ENV: &str = "RUNTARA_SEALED_CREDENTIALS";
+
+/// The key that wraps tenants' seal keys: 32 bytes in base64. If unset, the key
+/// is derived from the credential encryption key.
+pub const WRAPPING_KEY_ENV: &str = "RUNTARA_SEAL_WRAPPING_KEY";
+
+/// Whether [`SEALED_CREDENTIALS_ENV`] turns sealing on.
+pub fn sealing_enabled(value: Option<&str>) -> bool {
+    matches!(
+        value
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("true" | "1" | "yes" | "on")
+    )
+}
+
+/// The wrapping key: `wrapping_key` (base64, 32 bytes) if set, else one
+/// derived from `encryption_key` (base64, as the credential cipher takes it).
+pub fn wrapping_key(
+    wrapping_key: Option<&str>,
+    encryption_key: Option<&str>,
+) -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
+    use base64::Engine;
+    let decode = |name: &str, value: &str| {
+        base64::engine::general_purpose::STANDARD
+            .decode(value.trim())
+            .map(zeroize::Zeroizing::new)
+            .map_err(|_| format!("{name} is not valid base64"))
+    };
+    fn set(value: Option<&str>) -> Option<&str> {
+        value.map(str::trim).filter(|value| !value.is_empty())
+    }
+    if let Some(value) = set(wrapping_key) {
+        let bytes = decode(WRAPPING_KEY_ENV, value)?;
+        let key: [u8; 32] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| format!("{WRAPPING_KEY_ENV} must be 32 bytes in base64"))?;
+        return Ok(zeroize::Zeroizing::new(key));
+    }
+    let Some(value) = set(encryption_key) else {
+        return Err(format!(
+            "{SEALED_CREDENTIALS_ENV} is on, but there is no key to wrap tenants' seal keys with: \
+             set {WRAPPING_KEY_ENV} (openssl rand -base64 32), or {}",
+            crate::crypto::ENCRYPTION_KEY_ENV
+        ));
+    };
+    let bytes = decode(crate::crypto::ENCRYPTION_KEY_ENV, value)?;
+    Ok(keys::wrapping_key_from_encryption_key(&bytes))
+}
+
+/// seal for this deployment, from its environment: `None` unless
+/// [`SEALED_CREDENTIALS_ENV`] turns it on. Tenants' keys are kept in `pool`.
+/// Needs a Tokio runtime.
+pub fn from_env(
+    pool: sqlx::PgPool,
+    allowances: Allowances,
+) -> Result<Option<Arc<SealedCredentials>>, String> {
+    if !sealing_enabled(std::env::var(SEALED_CREDENTIALS_ENV).ok().as_deref()) {
+        return Ok(None);
+    }
+    let key = wrapping_key(
+        std::env::var(WRAPPING_KEY_ENV).ok().as_deref(),
+        std::env::var(crate::crypto::ENCRYPTION_KEY_ENV)
+            .ok()
+            .as_deref(),
+    )?;
+    let sealed = SealedCredentials::in_process(
+        Arc::new(keys::PgKeySource::new(pool)),
+        key.as_ref(),
+        allowances,
+    )?;
+    Ok(Some(Arc::new(sealed)))
 }
 
 /// Whether a parameter's value is a sealed value's marker.

@@ -161,6 +161,7 @@ fn test_agent_catalog() -> Arc<runtara_dsl::agent_meta::AgentCatalog> {
 
 fn facade(pool: PgPool) -> ConnectionsFacade {
     ConnectionsFacade::new(ConnectionsState::from_config(ConnectionsConfig {
+        sealed: None,
         agent_access: std::sync::Arc::new(runtara_connections::EveryAgent),
         db_pool: pool,
         redis_manager: None,

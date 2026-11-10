@@ -309,8 +309,14 @@ fn describe_connection_auth(
             if let Some((email, token)) = credentials {
                 headers.insert("Authorization".into(), jira_basic_auth(email, token));
             }
+            // A sealed token is attached by seal, with the email, where the
+            // request is sent; the destination is still the account's.
+            let sealed =
+                filled("email").is_some() && crate::sealed::is_sealed(&params["api_token"]);
             ConnectionAuthDescriptor {
-                base_url: credentials.and_then(|_| jira_account_url(params)),
+                base_url: (credentials.is_some() || sealed)
+                    .then(|| jira_account_url(params))
+                    .flatten(),
                 aws_signing: None,
                 azure_signing: None,
                 deferred_auth: None,

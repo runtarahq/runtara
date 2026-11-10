@@ -1346,6 +1346,7 @@ pub async fn start_with(
 
     // Construct connections crate config and facade.
     let connections_config = runtara_connections::ConnectionsConfig {
+        sealed: None,
         db_pool: pool.clone(),
         redis_manager: redis_manager.clone(),
         public_base_url,

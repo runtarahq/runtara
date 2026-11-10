@@ -316,6 +316,183 @@ async fn sealing_the_same_secret_twice_gives_different_envelopes_under_one_polic
     );
 }
 
+fn headers(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    pairs
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+        .collect()
+}
+
+#[tokio::test]
+async fn the_proxys_request_keeps_its_headers_but_not_one_seal_sets() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/orders"))
+        .and(header("Authorization", format!("Bearer {SECRET}").as_str()))
+        .and(header("x-trace", "t-1"))
+        .and(wiremock::matchers::body_string("body"))
+        .respond_with(
+            ResponseTemplate::new(202)
+                .insert_header("x-request-id", "r-9")
+                .set_body_string("accepted"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let sealed = sealed_for(&server);
+    let stored = seal(&sealed, CONNECTION, &bearer_params(&server)).await;
+
+    let response = sealed
+        .send_bounded(
+            TENANT,
+            CONNECTION,
+            "http_bearer",
+            &stored,
+            "POST",
+            &format!("{}/api/orders", server.uri()),
+            // What an agent might send: its own credential, and headers that
+            // describe a request other than the one seal makes.
+            headers(&[
+                ("authorization", "Bearer agent-supplied"),
+                ("Host", "elsewhere.example.com"),
+                ("Content-Length", "999"),
+                ("x-trace", "t-1"),
+            ]),
+            Some(b"body".to_vec()),
+            64 * 1024,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, 202);
+    assert_eq!(response.body, b"accepted");
+    assert!(
+        response
+            .headers
+            .iter()
+            .any(|(name, value)| name == "x-request-id" && value == "r-9")
+    );
+}
+
+#[tokio::test]
+async fn a_response_over_the_limit_is_refused_whole() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'x'; 4096]))
+        .mount(&server)
+        .await;
+    let sealed = sealed_for(&server);
+    let stored = seal(&sealed, CONNECTION, &bearer_params(&server)).await;
+    let url = format!("{}/api/big", server.uri());
+    let send = |limit| {
+        sealed.send_bounded(
+            TENANT,
+            CONNECTION,
+            "http_bearer",
+            &stored,
+            "GET",
+            &url,
+            headers(&[]),
+            None,
+            limit,
+        )
+    };
+
+    assert!(matches!(send(1024).await, Err(SendError::TooLarge)));
+    // Not even room for the headers.
+    assert!(matches!(send(8).await, Err(SendError::TooLarge)));
+    assert_eq!(send(64 * 1024).await.unwrap().body.len(), 4096);
+}
+
+#[tokio::test]
+async fn a_refusal_names_seals_code_and_an_invalid_request_is_not_sent() {
+    let server = MockServer::start().await;
+    let sealed = sealed_for(&server);
+    let stored = seal(&sealed, CONNECTION, &bearer_params(&server)).await;
+    let send = |method: &'static str, url: String| {
+        let (sealed, stored) = (&sealed, &stored);
+        async move {
+            sealed
+                .send_bounded(
+                    TENANT,
+                    CONNECTION,
+                    "http_bearer",
+                    stored,
+                    method,
+                    &url,
+                    headers(&[]),
+                    None,
+                    1024,
+                )
+                .await
+        }
+    };
+
+    let refused = send("GET", format!("{}/outside", server.uri())).await;
+    assert!(
+        matches!(&refused, Err(SendError::Seal(error)) if error.code == SealErrorCode::PolicyDenied),
+        "{refused:?}"
+    );
+    let invalid = send("NOT A METHOD", format!("{}/api", server.uri())).await;
+    assert!(
+        matches!(invalid, Err(SendError::InvalidRequest)),
+        "{invalid:?}"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[test]
+fn sealing_is_off_unless_switched_on() {
+    for on in ["1", "true", "TRUE", " yes ", "on"] {
+        assert!(sealing_enabled(Some(on)), "{on}");
+    }
+    for off in [
+        None,
+        Some(""),
+        Some("0"),
+        Some("false"),
+        Some("off"),
+        Some("seal"),
+    ] {
+        assert!(!sealing_enabled(off), "{off:?}");
+    }
+}
+
+#[test]
+fn the_wrapping_key_is_its_own_setting_or_derived_from_the_encryption_key() {
+    use base64::Engine;
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let own = encode(&[1_u8; 32]);
+    let encryption = encode(&[2_u8; 32]);
+
+    // Its own setting is used as it is.
+    assert_eq!(
+        *wrapping_key(Some(&own), Some(&encryption)).unwrap(),
+        [1_u8; 32]
+    );
+    // Otherwise it is derived, and is not the encryption key itself.
+    let derived = wrapping_key(None, Some(&encryption)).unwrap();
+    assert_eq!(
+        *derived,
+        *keys::wrapping_key_from_encryption_key(&[2_u8; 32])
+    );
+    assert_ne!(*derived, [2_u8; 32]);
+    assert_eq!(
+        *wrapping_key(Some("  "), Some(&encryption)).unwrap(),
+        *derived
+    );
+
+    for (own, encryption) in [
+        (None, None),
+        (Some("not base64!"), None),
+        (Some(encode(&[1_u8; 16]).as_str()), None),
+        (None, Some("not base64!")),
+    ] {
+        let error = wrapping_key(own, encryption).unwrap_err();
+        assert!(error.contains("RUNTARA_"), "{error}");
+    }
+}
+
 #[test]
 fn only_a_lone_marker_object_is_a_sealed_value() {
     assert!(is_sealed(&json!({ SEALED_MARKER: {} })));
