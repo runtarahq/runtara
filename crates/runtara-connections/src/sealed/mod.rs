@@ -304,6 +304,45 @@ impl SealedCredentials {
         Ok(response.response)
     }
 
+    /// A presigned URL (S3) or a URL with a shared access signature (Azure
+    /// Blob) for one object of a sealed storage connection, lasting
+    /// `expires_s` seconds. seal refuses an object, a method or a lifetime
+    /// the key's policy does not allow.
+    ///
+    /// Unlike everything else seal returns, the URL is a credential: whoever
+    /// holds it can use it until it expires. Never log it.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn presign(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        integration_id: &str,
+        parameters: &Value,
+        method: &str,
+        url: &str,
+        expires_s: u32,
+    ) -> Result<zeroize::Zeroizing<String>, SealError> {
+        let mut sealed = BTreeMap::new();
+        for name in request_fields(integration_id, parameters) {
+            let (field, value) = presented(parameters, &name)?;
+            sealed.insert(field, value);
+        }
+        let method = http::Method::from_bytes(method.as_bytes())
+            .map_err(|_| invalid_request("the method is not valid"))?;
+        self.client
+            .presign(seal_client::PresignRequest {
+                keyset: keys::keyset_for_tenant(tenant_id),
+                item: ItemId::new(connection_id)
+                    .map_err(|_| invalid_request("the connection's id is not an item id"))?,
+                sealed,
+                plain: BTreeMap::new(),
+                method,
+                url: url.to_owned(),
+                expires_s,
+            })
+            .await
+    }
+
     /// Whether `mac` is the HMAC of `message` under a sealed signing secret:
     /// a webhook's signature, checked without reading the secret. seal says
     /// only yes or no. The caller builds the message as the provider signs it

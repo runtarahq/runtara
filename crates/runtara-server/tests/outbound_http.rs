@@ -1310,3 +1310,179 @@ async fn native_outbound_has_seal_sign_a_sealed_storage_connections_request() ->
     assert!(!format!("{headers:?}").contains("agent-supplied"));
     Ok(())
 }
+
+/// A sealed storage key is never handed to the presigning guest: the host
+/// answers the capability by having seal presign the URL. A readable key is
+/// left to the guest, as before.
+#[tokio::test]
+async fn a_sealed_storage_connections_presigned_url_comes_from_seal() -> anyhow::Result<()> {
+    use base64::Engine;
+    use runtara_connections::sealed::keys::PgKeySource;
+    use runtara_connections::sealed::{Allowances, SealedCredentials};
+    use runtara_server::api::services::trusted::BuiltinTrustedCredentials;
+    allow_local_egress_for_this_test_binary();
+    init_server_config();
+    let pool = test_pool().await;
+    let account_key = base64::engine::general_purpose::STANDARD.encode("synthetic-account-key");
+    let sealed = Arc::new(
+        SealedCredentials::in_process(
+            Arc::new(PgKeySource::new(pool.clone())),
+            &[7_u8; 32],
+            Allowances::default(),
+        )
+        .map_err(|error| anyhow::anyhow!(error))?,
+    );
+    let tenant = format!("sealed-presign-{}", Uuid::new_v4());
+    let parameters = json!({"account_name": "acme", "account_key": account_key});
+    let create = |sealed: Option<Arc<SealedCredentials>>| {
+        let (pool, tenant, parameters) = (pool.clone(), tenant.clone(), parameters.clone());
+        async move {
+            ConnectionService::new(
+                Arc::new(ConnectionRepository::new(pool, Arc::new(NoOpCipher))),
+                compatibility(),
+            )
+            .with_sealed(sealed)
+            .create_connection(
+                CreateConnectionRequest {
+                    title: format!("Presign {}", Uuid::new_v4()),
+                    integration_id: Some("azure_blob_storage".into()),
+                    connection_subtype: None,
+                    connection_parameters: Some(parameters),
+                    rate_limit_config: None,
+                    valid_until: None,
+                    is_default_file_storage: None,
+                    default_for: None,
+                },
+                &tenant,
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("connection creation failed"))
+        }
+    };
+    let sealed_connection = create(Some(sealed.clone())).await?;
+    let readable_connection = create(None).await?;
+
+    let credentials = BuiltinTrustedCredentials(Arc::new(ConnectionsFacade::new(
+        ConnectionsState::from_config(ConnectionsConfig {
+            sealed: Some(sealed),
+            agent_access: Arc::new(runtara_connections::EveryAgent),
+            db_pool: pool.clone(),
+            redis_manager: None,
+            public_base_url: "http://localhost".to_string(),
+            oauth_complete_url: None,
+            http_client: runtara_connections::net::build_hardened_client(),
+            cipher: Arc::new(NoOpCipher),
+            compatibility: compatibility(),
+            agent_catalog: Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                Vec::new(),
+            )),
+            connection_events: None,
+            oauth: Default::default(),
+        }),
+    )));
+    let allowed = ["azure_blob_storage".to_string()];
+    let answer = |connection: String, capability: &'static str, input: serde_json::Value| {
+        let (credentials, tenant, allowed) = (&credentials, &tenant, &allowed);
+        async move {
+            credentials
+                .answer_for_sealed(
+                    tenant,
+                    capability,
+                    &connection,
+                    allowed,
+                    &serde_json::to_vec(&input).unwrap(),
+                )
+                .await
+        }
+    };
+    let download = json!({
+        "bucket": "exports", "key": "reports/q1 summary.csv", "operation": "download",
+        "expires_in_seconds": 900, "content_type": "text/csv",
+    });
+
+    let output = answer(
+        sealed_connection.clone(),
+        "storage-generate-presigned-url",
+        download.clone(),
+    )
+    .await
+    .expect("the host answers for a sealed connection")
+    .map_err(|error| anyhow::anyhow!(error))?;
+    let output: serde_json::Value = serde_json::from_slice(&output)?;
+    assert_eq!(output["success"], true, "{output}");
+    assert_eq!(output["expires_in_seconds"], 900);
+    let url = url::Url::parse(output["url"].as_str().unwrap())?;
+    assert_eq!(url.host_str(), Some("acme.blob.core.windows.net"));
+    assert_eq!(url.path(), "/exports/reports/q1%20summary.csv");
+    let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+    // Read only, one blob, with the content type asked for, and signed.
+    assert_eq!(query.get("sp").map(String::as_str), Some("r"));
+    assert_eq!(query.get("sr").map(String::as_str), Some("b"));
+    assert_eq!(query.get("rsct").map(String::as_str), Some("text/csv"));
+    assert!(
+        query
+            .get("sig")
+            .is_some_and(|signature| !signature.is_empty())
+    );
+    assert!(!url.as_str().contains(&account_key));
+
+    // What the guest refuses, the host refuses the same way.
+    let mut unsupported = download.clone();
+    unsupported["operation"] = json!("rename");
+    let output = answer(
+        sealed_connection.clone(),
+        "storage-generate-presigned-url",
+        unsupported,
+    )
+    .await
+    .unwrap()
+    .map_err(|error| anyhow::anyhow!(error))?;
+    let output: serde_json::Value = serde_json::from_slice(&output)?;
+    assert_eq!(output["success"], false);
+    assert!(
+        output["error"]
+            .as_str()
+            .unwrap()
+            .contains("Unsupported operation")
+    );
+    let missing = answer(
+        sealed_connection.clone(),
+        "storage-generate-presigned-url",
+        json!({"bucket": "exports", "operation": "download"}),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(missing.contains("INVALID_INPUT"), "{missing}");
+    let escaping = answer(
+        sealed_connection.clone(),
+        "storage-generate-presigned-url",
+        json!({"bucket": "exports", "key": "a?comp=list", "operation": "download"}),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(escaping.contains("INVALID_PATH"), "{escaping}");
+    // No other capability gets a sealed key.
+    let other = answer(
+        sealed_connection,
+        "storage-something-else",
+        download.clone(),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(other.contains("TRUSTED_CREDENTIALS_UNAVAILABLE"), "{other}");
+
+    // A readable key goes to the guest.
+    assert!(
+        answer(
+            readable_connection,
+            "storage-generate-presigned-url",
+            download
+        )
+        .await
+        .is_none()
+    );
+    Ok(())
+}
