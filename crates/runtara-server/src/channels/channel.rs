@@ -15,6 +15,9 @@ pub enum ReplyAuth {
     Bearer(String),
     /// A password this process holds, sent with basic auth.
     Basic { username: String, password: String },
+    /// A token this process holds, which the provider takes in the URL's
+    /// path: the caller writes it there.
+    InPath(String),
     /// The connection's secret is sealed: seal attaches it and sends the
     /// reply, and refuses any destination the secret's policy does not allow.
     Sealed {
@@ -111,11 +114,14 @@ impl ReplyAuth {
                     Self::Basic { username, password } => {
                         request.basic_auth(username, Some(password))
                     }
+                    Self::InPath(_) => request,
                     Self::Sealed { .. } => unreachable!("handled above"),
                 };
-                let response = request.send().await?;
+                // The URL may hold the token, and reqwest's errors name it.
+                let response = request.send().await.map_err(|e| e.without_url())?;
                 let status = response.status().as_u16();
-                (status, response.bytes().await?.to_vec())
+                let bytes = response.bytes().await.map_err(|e| e.without_url())?;
+                (status, bytes.to_vec())
             }
         };
         Ok((status, serde_json::from_slice(&bytes)?))
@@ -127,13 +133,37 @@ impl ReplyAuth {
 // ---------------------------------------------------------------------------
 
 pub struct TelegramChannel {
-    token: String,
+    auth: ReplyAuth,
+    api_base: String,
     client: reqwest::Client,
 }
 
 impl TelegramChannel {
-    pub fn new(token: String, client: reqwest::Client) -> Self {
-        Self { token, client }
+    pub fn new(auth: ReplyAuth, client: reqwest::Client) -> Self {
+        Self::with_api_base(
+            auth,
+            runtara_connections::sealed::policy::TELEGRAM_API_BASE.to_string(),
+            client,
+        )
+    }
+
+    /// A channel whose Bot API is at `api_base`.
+    pub fn with_api_base(auth: ReplyAuth, api_base: String, client: reqwest::Client) -> Self {
+        Self {
+            auth,
+            api_base,
+            client,
+        }
+    }
+}
+
+/// The URL of a Bot API method. Telegram takes the token in the path; seal
+/// puts a sealed one there itself, so the URL then names the method only.
+pub fn telegram_method_url(api_base: &str, auth: &ReplyAuth, method: &str) -> String {
+    let api_base = api_base.trim_end_matches('/');
+    match auth {
+        ReplyAuth::InPath(token) => format!("{api_base}/bot{token}/{method}"),
+        _ => format!("{api_base}/{method}"),
     }
 }
 
@@ -150,22 +180,25 @@ impl Channel for TelegramChannel {
                 return Ok(());
             }
 
-            let url = format!("https://api.telegram.org/bot{}/sendMessage", self.token);
+            let url = telegram_method_url(&self.api_base, &self.auth, "sendMessage");
 
             // Telegram has a 4096 char limit per message. Split if needed.
             for chunk in split_message(&text, 4096) {
-                let resp = self
-                    .client
-                    .post(&url)
-                    .json(&json!({
-                        "chat_id": conversation_id,
-                        "text": chunk,
-                    }))
-                    .send()
+                let request = json!({
+                    "chat_id": conversation_id,
+                    "text": chunk,
+                });
+                let (status, body) = self
+                    .auth
+                    .post_json(
+                        &self.client,
+                        &url,
+                        "application/json",
+                        serde_json::to_vec(&request)?,
+                    )
                     .await?;
 
-                if !resp.status().is_success() {
-                    let body = resp.text().await.unwrap_or_default();
+                if !(200..300).contains(&status) {
                     tracing::warn!(
                         chat_id = %conversation_id,
                         status = %body,
@@ -652,6 +685,77 @@ mod tests {
         // Without seal the reply is not sent, with or without a credential.
         let error = reply(&of(&facade(None)), &server).await.unwrap_err();
         assert!(error.to_string().contains("sealed"), "{error}");
+    }
+
+    /// A Bot API that takes `sendMessage` for one bot only.
+    async fn telegram(token: &str) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{token}/sendMessage")))
+            .and(body_string("{\"chat_id\":\"42\",\"text\":\"hi\"}"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn a_telegram_reply_names_the_bot_in_the_path() {
+        let server = telegram("1:readable").await;
+        let channel = TelegramChannel::with_api_base(
+            ReplyAuth::InPath("1:readable".into()),
+            server.uri(),
+            reqwest::Client::new(),
+        );
+        channel.send_text("42", "hi").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_telegram_reply_with_a_sealed_token_is_sent_by_seal() {
+        let server = telegram("1:sealed-CANARY").await;
+        let address = server.address();
+        let sealed = Arc::new(
+            SealedCredentials::in_process(
+                Arc::new(MemoryKeySource::default()),
+                &[7_u8; 32],
+                Allowances {
+                    private_hosts: vec![format!("{}:{}", address.ip(), address.port())],
+                    plain_http_hosts: vec![address.ip().to_string()],
+                    api_bases: [("telegram_bot".to_string(), server.uri())].into(),
+                },
+            )
+            .unwrap(),
+        );
+        let parameters = sealed
+            .seal_parameters(
+                "acme",
+                "c-1",
+                "telegram_bot",
+                &json!({"bot_token": "1:sealed-CANARY"}),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let auth = ReplyAuth::of(
+            &facade(Some(sealed)),
+            "acme",
+            "c-1",
+            "telegram_bot",
+            &parameters,
+            "bot_token",
+            ReplyAuth::InPath,
+        )
+        .unwrap();
+        assert!(matches!(auth, ReplyAuth::Sealed { .. }));
+        // The channel writes no token: the URL names the method only.
+        assert_eq!(
+            telegram_method_url(&server.uri(), &auth, "sendMessage"),
+            format!("{}/sendMessage", server.uri())
+        );
+        let channel = TelegramChannel::with_api_base(auth, server.uri(), reqwest::Client::new());
+        channel.send_text("42", "hi").await.unwrap();
     }
 
     #[tokio::test]

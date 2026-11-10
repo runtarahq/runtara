@@ -685,13 +685,16 @@ impl ChannelRouter {
         let params = &route.params;
         Ok(match route.integration_id.as_str() {
             "telegram_bot" => {
-                let bot_token = params["bot_token"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("Missing bot_token in connection"))?;
-                Arc::new(TelegramChannel::new(
-                    bot_token.to_string(),
-                    self.http_client.clone(),
-                ))
+                let auth = super::channel::ReplyAuth::of(
+                    &self.connections,
+                    &route.tenant_id,
+                    connection_id,
+                    "telegram_bot",
+                    params,
+                    "bot_token",
+                    super::channel::ReplyAuth::InPath,
+                )?;
+                Arc::new(TelegramChannel::new(auth, self.http_client.clone()))
             }
             "slack_bot" => {
                 let auth = super::channel::ReplyAuth::of(

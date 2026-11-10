@@ -209,18 +209,16 @@ async fn a_sealable_connection_is_stored_sealed_and_says_so() {
 async fn connections_that_are_not_sealed_stay_as_they_were() {
     let fixture = Fixture::new().await;
 
-    // A type seal does not handle yet, with sealing on.
+    // A destination seal cannot express (a base URL with a query), with
+    // sealing on.
     let service = fixture.service(Some(fixture.sealed()));
-    let request: CreateConnectionRequest = serde_json::from_value(json!({
-        "title": "bot",
-        "integrationId": "telegram_bot",
-        "connectionParameters": {"bot_token": SECRET},
-    }))
-    .unwrap();
-    let id = service.create_connection(request, TENANT).await.unwrap();
+    let id = service
+        .create_connection(bearer("odd", "https://api.example.com/v1?tenant=1"), TENANT)
+        .await
+        .unwrap();
     let (format, stored) = fixture.row(&id).await;
     assert_eq!(format, "cipher");
-    assert_eq!(stored["bot_token"], SECRET);
+    assert_eq!(stored["token"], SECRET);
     let resolved = fixture
         .repository()
         .get_with_parameters(&id, TENANT)
