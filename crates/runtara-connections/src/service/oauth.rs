@@ -172,6 +172,9 @@ pub struct OAuthService {
     flows: Option<FlowStore>,
     tenantless_callback: bool,
     apps: Option<Arc<dyn OAuthApps>>,
+    /// seal, if this deployment seals: the tokens a flow brings are sealed
+    /// as they are stored.
+    sealed: Option<Arc<crate::sealed::SealedCredentials>>,
 }
 
 impl OAuthService {
@@ -183,6 +186,43 @@ impl OAuthService {
             flows: None,
             tenantless_callback: true,
             apps: None,
+            sealed: None,
+        }
+    }
+
+    /// Seal the tokens flows bring with `sealed`.
+    pub fn with_sealed(mut self, sealed: Option<Arc<crate::sealed::SealedCredentials>>) -> Self {
+        self.sealed = sealed;
+        self
+    }
+
+    /// A connection's parameters as they are stored: with its tokens sealed,
+    /// if this deployment seals and the type's tokens can be. `stored` is
+    /// what the connection holds now.
+    async fn with_sealed_tokens(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        integration_id: &str,
+        params: Value,
+        stored: &Value,
+    ) -> Result<Value, OAuthError> {
+        let Some(sealed) = &self.sealed else {
+            return Ok(params);
+        };
+        match sealed
+            .seal_parameters(
+                tenant_id,
+                connection_id,
+                integration_id,
+                &params,
+                Some(stored),
+            )
+            .await
+        {
+            Ok(Some(sealed)) => Ok(sealed),
+            Ok(None) => Ok(params),
+            Err(error) => Err(OAuthError::Internal(error.to_string())),
         }
     }
 
@@ -211,7 +251,8 @@ impl OAuthService {
             state.public_base_url.clone(),
         )
         .with_tenantless_callback(state.oauth.tenantless_callback)
-        .with_apps(state.oauth.apps.clone());
+        .with_apps(state.oauth.apps.clone())
+        .with_sealed(state.sealed.clone());
         match &state.redis_manager {
             Some(valkey) => service.with_flows(valkey.clone()),
             None => service,
@@ -547,6 +588,15 @@ impl OAuthService {
             }
         };
 
+        let updated_params = self
+            .with_sealed_tokens(
+                tenant_id,
+                &flow.connection_id,
+                &flow.integration_id,
+                updated_params,
+                &params,
+            )
+            .await?;
         self.connection_repo
             .update_parameters_and_status(
                 &flow.connection_id,
@@ -569,15 +619,26 @@ impl OAuthService {
         tenant_id: &str,
         connection_id: &str,
     ) -> Result<(Value, Option<Value>), OAuthError> {
+        let (params, pending, _) = self.pending_of(tenant_id, connection_id).await?;
+        Ok((params, pending))
+    }
+
+    /// [`Self::pending`], with the connection's type.
+    async fn pending_of(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+    ) -> Result<(Value, Option<Value>, String), OAuthError> {
         let conn = self
             .connection_repo
             .get_with_parameters(connection_id, tenant_id)
             .await
             .map_err(|e| OAuthError::Internal(e.to_string()))?
             .ok_or(OAuthError::ConnectionNotFound)?;
+        let integration_id = conn.integration_id.unwrap_or_default();
         let params = conn.connection_parameters.unwrap_or(json!({}));
         let pending = params.get(PENDING_OAUTH_PARAM).cloned();
-        Ok((params, pending))
+        Ok((params, pending, integration_id))
     }
 
     /// What a pending connection shows whoever is to confirm it.
@@ -613,7 +674,8 @@ impl OAuthService {
         connection_id: &str,
         pending_id: &str,
     ) -> Result<(), OAuthError> {
-        let (mut params, pending) = self.pending(tenant_id, connection_id).await?;
+        let (mut params, pending, integration_id) =
+            self.pending_of(tenant_id, connection_id).await?;
         let pending = pending.ok_or(OAuthError::NotPending)?;
         if !pending_named(&pending, pending_id) {
             return Err(OAuthError::PendingChanged);
@@ -623,12 +685,17 @@ impl OAuthService {
                 .await?;
             return Err(OAuthError::ConfirmationExpired);
         }
+        let stored = params.clone();
         if let Some(obj) = params.as_object_mut() {
             obj.remove(PENDING_OAUTH_PARAM);
             if let Some(fields) = pending["fields"].as_object() {
                 obj.extend(fields.clone());
             }
         }
+        // The tokens become the connection's, and are sealed as they do.
+        let params = self
+            .with_sealed_tokens(tenant_id, connection_id, &integration_id, params, &stored)
+            .await?;
         self.connection_repo
             .update_parameters_and_status(
                 connection_id,

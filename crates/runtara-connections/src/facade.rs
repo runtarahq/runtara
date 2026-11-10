@@ -17,7 +17,7 @@ use crate::auth::provider_auth::{self, ResolvedConnectionAuth, RotatedCredential
 use crate::config::ConnectionsState;
 use crate::error::ConnectionsError;
 use crate::repository::connections::{
-    ConnectionRepository, ConnectionWithParameters, refresh_token_hash,
+    ConnectionRepository, ConnectionWithParameters, refresh_token_guard, refresh_token_hash,
 };
 use crate::resolution::{ConnectionDescriptor, ConnectionResourcePage, ConnectionResourceRequest};
 use crate::resource_resolver::resources_for_integration;
@@ -526,6 +526,35 @@ impl ConnectionsFacade {
             )
             .await?;
         }
+        // The pair a refresh through seal brought back, already sealed.
+        if let Some(rotated) = &resolved.rotated_sealed {
+            let mut merged = params.clone();
+            if let Some(obj) = merged.as_object_mut() {
+                obj.insert("access_token".to_string(), rotated.access_token.clone());
+                // A provider may omit the refresh token: the one held stays.
+                if let Some(refresh_token) = &rotated.refresh_token {
+                    obj.insert("refresh_token".to_string(), refresh_token.clone());
+                }
+                if let Some(expires_at) = rotated.token_expires_at {
+                    obj.insert(
+                        "token_expires_at".to_string(),
+                        Value::String(expires_at.to_rfc3339()),
+                    );
+                }
+            }
+            let expected_hash = refresh_token_guard(&params["refresh_token"]);
+            let new_hash = refresh_token_guard(&merged["refresh_token"]);
+            self.persist_rotation(
+                connection_id,
+                tenant_id,
+                integration_id,
+                params,
+                &merged,
+                expected_hash.as_deref(),
+                new_hash.as_deref(),
+            )
+            .await?;
+        }
 
         Ok(resolved)
     }
@@ -603,16 +632,34 @@ impl ConnectionsFacade {
 
         let expected_hash = old_refresh.map(refresh_token_hash);
         let new_hash = new_refresh.map(refresh_token_hash);
+        self.persist_rotation(
+            connection_id,
+            tenant_id,
+            integration_id,
+            params,
+            &merged,
+            expected_hash.as_deref(),
+            new_hash.as_deref(),
+        )
+        .await
+    }
 
+    /// Store a connection's refreshed tokens (`merged`), unless another
+    /// process stored a later rotation first.
+    #[allow(clippy::too_many_arguments)]
+    async fn persist_rotation(
+        &self,
+        connection_id: &str,
+        tenant_id: &str,
+        integration_id: &str,
+        params: &Value,
+        merged: &Value,
+        expected_hash: Option<&str>,
+        new_hash: Option<&str>,
+    ) -> Result<(), ConnectionsError> {
         match self
             .repo()
-            .persist_refreshed_oauth(
-                connection_id,
-                tenant_id,
-                &merged,
-                expected_hash.as_deref(),
-                new_hash.as_deref(),
-            )
+            .persist_refreshed_oauth(connection_id, tenant_id, merged, expected_hash, new_hash)
             .await
         {
             // Lost the optimistic race: another process rotated concurrently and already

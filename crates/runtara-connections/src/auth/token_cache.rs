@@ -312,6 +312,57 @@ impl TokenCacheKey {
     }
 }
 
+/// What [`refreshed_token`] found.
+pub(crate) enum Refreshed {
+    /// A token kept from an earlier refresh, still fresh.
+    Kept(String),
+    /// The token endpoint's answer to a refresh made now.
+    Now(TokenResponse),
+}
+
+/// A refresh-token grant's access token: the kept one while it is fresh,
+/// else from `refresh`, which only one caller at a time runs for a
+/// connection. A provider that rotates refresh tokens voids the old one on
+/// use, so two refreshes at once would void each other. A refresh that just
+/// failed is not tried again at once.
+pub(crate) async fn refreshed_token<F, Fut>(
+    cache_key: &TokenCacheKey,
+    refresh: F,
+) -> Result<Refreshed, AuthResolutionError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<TokenResponse, AuthResolutionError>>,
+{
+    if let Some(token) = get_fresh_cached_token(cache_key) {
+        return Ok(Refreshed::Kept(token));
+    }
+    let lock = refresh_lock(cache_key);
+    let _guard = lock.lock().await;
+    if let Some(token) = get_fresh_cached_token(cache_key) {
+        return Ok(Refreshed::Kept(token));
+    }
+    if let Some(error) = recent_refresh_error(cache_key) {
+        return Err(error);
+    }
+    match refresh().await {
+        Ok(response) => {
+            clear_refresh_error(cache_key);
+            cache_token(
+                cache_key,
+                CachedAccessToken {
+                    access_token: response.access_token.clone(),
+                    expires_at: response.expires_at,
+                },
+            );
+            Ok(Refreshed::Now(response))
+        }
+        Err(error) => {
+            record_refresh_error(cache_key, &error);
+            Err(error)
+        }
+    }
+}
+
 pub(crate) async fn resolve_cached_token<F, Fut>(
     cache_key: &TokenCacheKey,
     fetch: F,

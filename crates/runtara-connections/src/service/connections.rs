@@ -1172,6 +1172,13 @@ impl ConnectionService {
                 })
             })
             .unwrap_or(false);
+        // Sealed tokens the edit leaves sealed for somewhere else are no use
+        // either: they go, and the connection needs a new authorization.
+        let authorization_change_requires_reconnect = authorization_change_requires_reconnect
+            || match (&self.sealed, effective_parameters.as_ref()) {
+                (Some(sealed), Some(merged)) => sealed.holds_stale_tokens(&integration_id, merged),
+                _ => false,
+            };
         let effective_status = authorization_change_requires_reconnect
             .then_some(ConnectionStatus::RequiresReconnection);
         if authorization_change_requires_reconnect
@@ -1298,6 +1305,20 @@ impl ConnectionService {
             Ok(Some(app)) => crate::oauth_apps::with_app_credentials(&params, &app),
             _ => params,
         };
+        // A sealed token is named to the provider by seal.
+        if let Some(sealed) = &self.sealed
+            && crate::sealed::has_sealed_values(&params)
+        {
+            let authorization =
+                crate::auth::provider_auth::revoke_authorization(oauth_config, &params);
+            if let Err(e) = sealed
+                .revoke_token(tenant_id, id, integration_id, &params, authorization)
+                .await
+            {
+                tracing::warn!(connection_id = id, error = %e, "provider token revocation failed on disconnect (continuing)");
+            }
+            return;
+        }
         let client = crate::net::shared_hardened_client();
         if let Err(e) =
             crate::auth::provider_auth::revoke_oauth_token(client, oauth_config, &params).await

@@ -33,6 +33,9 @@ pub struct ResolvedConnectionAuth {
     /// the sealed access token a request presents. The token was got through
     /// seal and is never readable here.
     pub sealed_parameters: Option<Value>,
+    /// The sealed tokens a refresh through seal brought back, to be stored
+    /// with the connection. `None` unless a refresh was made now.
+    pub rotated_sealed: Option<crate::sealed::RotatedSealed>,
 }
 
 /// Access + (possibly rotated) refresh token captured when an OAuth refresh fires,
@@ -170,6 +173,22 @@ pub async fn resolve_connection_auth_with_seal(
         presenting[crate::sealed::policy::ACCESS_TOKEN_FIELD] = token;
         sealed_parameters = Some(presenting);
     }
+    // A sealed refresh token gets the next pair through seal, sealed too.
+    let mut rotated_sealed = None;
+    if crate::sealed::policy::sealed_authorized_tokens(integration_id, params).is_some() {
+        let sealed = sealed.ok_or_else(|| {
+            token_cache::AuthResolutionError::permanent(
+                "the connection's credentials are sealed, and this deployment has no seal",
+            )
+        })?;
+        let (token, rotated) = sealed
+            .refreshed_access_token(events, tenant_id, connection_id, integration_id, params)
+            .await?;
+        let mut presenting = params.clone();
+        presenting[crate::sealed::policy::ACCESS_TOKEN_FIELD] = token;
+        sealed_parameters = Some(presenting);
+        rotated_sealed = rotated;
+    }
 
     Ok(ResolvedConnectionAuth {
         base_url: descriptor.base_url,
@@ -178,6 +197,7 @@ pub async fn resolve_connection_auth_with_seal(
         mtls_client,
         rotated_credentials,
         sealed_parameters,
+        rotated_sealed,
     })
 }
 
@@ -942,7 +962,7 @@ fn describe_oauth_authcode_auth(
 /// host when the connection's `environment` param is `"sandbox"`, then append any
 /// `{param}`-templated path (e.g. QuickBooks `/v3/company/{realm_id}`). Returns `None`
 /// when the descriptor declares no base URL.
-fn resolve_oauth_base_url(cfg: &OAuthConfig, params: &Value) -> Option<String> {
+pub(crate) fn resolve_oauth_base_url(cfg: &OAuthConfig, params: &Value) -> Option<String> {
     // Params-driven (generic) types: the base URL is the connection's own.
     if cfg.params_driven {
         return first_string_param(params, &["base_url"])
@@ -1204,6 +1224,24 @@ pub(crate) fn build_revoke_request(
         TokenEndpointAuth::FormBody => None,
     };
     Some((basic, body, effective.revocation_endpoint))
+}
+
+/// The `Authorization` header a provider wants on a revocation request: the
+/// client's own credentials, for a provider that authenticates the client
+/// with HTTP Basic.
+pub(crate) fn revoke_authorization(oauth_config: &OAuthConfig, params: &Value) -> Option<String> {
+    let effective = resolve_effective_oauth_config(oauth_config, params);
+    match effective.token_endpoint_auth {
+        TokenEndpointAuth::HttpBasic => {
+            let client_id = params["client_id"].as_str().unwrap_or("");
+            let client_secret = params["client_secret"].as_str().unwrap_or("");
+            Some(format!(
+                "Basic {}",
+                BASE64.encode(format!("{client_id}:{client_secret}"))
+            ))
+        }
+        TokenEndpointAuth::FormBody => None,
+    }
 }
 
 /// Best-effort provider-side token revocation, called on disconnect. A no-op when the

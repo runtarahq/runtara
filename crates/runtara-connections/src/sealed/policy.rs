@@ -78,8 +78,37 @@ enum Usage {
     /// An OAuth client's secret: sent to its token endpoint only, where the
     /// access token that comes back is sealed for the API.
     ClientSecret(TokenGrant),
+    /// A token of an authorization-code connection: the access token, sent
+    /// to the API, or the refresh token, sent to the token endpoint for the
+    /// next pair, which comes back sealed.
+    Token(TokenRole, AuthorizedTokens),
     /// Never sent: checks that a message came from the provider.
     Verify(HmacHash),
+}
+
+/// Which of an authorization's two tokens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TokenRole {
+    Access,
+    Refresh,
+}
+
+/// The field a sealed refresh token is presented as.
+pub const REFRESH_TOKEN_FIELD: &str = "refresh_token";
+
+/// The definition of what refresh tokens are for.
+const REFRESH_DEFINITION: &str = "refresh";
+
+/// Where the tokens of an authorization-code connection may go.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorizedTokens {
+    /// The token endpoint, where a refresh token gets the next pair.
+    pub token_url: String,
+    /// The APIs the access token may go to, each with whether it may go
+    /// anywhere on the host.
+    api: Vec<(String, bool)>,
+    /// Where either token may be revoked.
+    pub revocation_url: Option<String>,
 }
 
 /// The field a sealed access token is presented as: the name seal seals it
@@ -488,6 +517,118 @@ pub fn sealed_token_grant(integration_id: &str, params: &Value) -> Option<TokenG
         .flatten()
 }
 
+/// Where the tokens of an authorization-code connection may go, if the type
+/// is one.
+pub fn authorized_tokens(integration_id: &str, params: &Value) -> Option<AuthorizedTokens> {
+    let meta = find_connection_type(integration_id)?;
+    let config = meta.oauth_config?;
+    let effective = crate::auth::provider_auth::resolve_effective_oauth_config(config, params);
+    if effective.token_url.is_empty() {
+        return None;
+    }
+    let base_url = crate::auth::provider_auth::resolve_oauth_base_url(config, params)?;
+    // A base that takes part of its path from the authorization itself (a
+    // QuickBooks company) is not known until a flow completes, and the
+    // proxy holds requests to it. The token is sealed for the API's host.
+    let mut api = vec![(base_url, !config.base_url_path_template.is_empty())];
+    for endpoint in meta.named_endpoints {
+        if let Ok(resolved) = resolve_named_endpoint(meta, endpoint.name, params) {
+            api.push((resolved.base_url, false));
+        }
+    }
+    Some(AuthorizedTokens {
+        token_url: effective.token_url,
+        api,
+        revocation_url: Some(effective.revocation_endpoint).filter(|url| !url.is_empty()),
+    })
+}
+
+/// Where the tokens of a connection whose refresh token is sealed may go.
+pub fn sealed_authorized_tokens(integration_id: &str, params: &Value) -> Option<AuthorizedTokens> {
+    super::is_sealed(&params[REFRESH_TOKEN_FIELD])
+        .then(|| authorized_tokens(integration_id, params))
+        .flatten()
+}
+
+/// The policy of one of an authorization's tokens. Each names both
+/// definitions, so that the pair a refresh brings back has these same
+/// policies, however many times it is refreshed.
+fn token_policy(
+    role: TokenRole,
+    tokens: &AuthorizedTokens,
+    allowances: &Allowances,
+) -> Option<Policy> {
+    // Runtara revokes with a JSON body naming the token.
+    let revoke = |rules: &mut Vec<Rule>| {
+        if let Some(url) = &tokens.revocation_url {
+            let inject = Inject::JsonField {
+                pointer: "/token".to_owned(),
+            };
+            rules.push(rule_for(url, &inject, false, allowances)?);
+        }
+        Some(())
+    };
+
+    let mut to_api = Vec::new();
+    for (base_url, any_path) in &tokens.api {
+        let rule = rule_for(base_url, &bearer(), *any_path, allowances)?;
+        if !to_api.contains(&rule) {
+            to_api.push(rule);
+        }
+    }
+    revoke(&mut to_api)?;
+
+    let mut refresh = rule_for(
+        &tokens.token_url,
+        &Inject::FormField {
+            name: REFRESH_TOKEN_FIELD.to_owned(),
+        },
+        false,
+        allowances,
+    )?;
+    let sealed_as = |at: &str, field: &str, definition: &str| {
+        Some(SealedField {
+            at: at.to_owned(),
+            as_field: FieldName::new(field).ok()?,
+            policy: PolicyName::new(definition).ok()?,
+            expose_claims: Vec::new(),
+        })
+    };
+    refresh.seal_response = Some(SealResponse {
+        format: ResponseFormat::Json,
+        fields: vec![
+            sealed_as("/access_token", ACCESS_TOKEN_FIELD, API_DEFINITION)?,
+            sealed_as("/refresh_token", REFRESH_TOKEN_FIELD, REFRESH_DEFINITION)?,
+        ],
+    });
+    let mut to_token_endpoint = vec![refresh];
+    revoke(&mut to_token_endpoint)?;
+
+    let definitions = BTreeMap::from([
+        (
+            PolicyName::new(API_DEFINITION).ok()?,
+            Definition {
+                rules: to_api.clone(),
+            },
+        ),
+        (
+            PolicyName::new(REFRESH_DEFINITION).ok()?,
+            Definition {
+                rules: to_token_endpoint.clone(),
+            },
+        ),
+    ]);
+    Some(Policy {
+        rules: match role {
+            TokenRole::Access => to_api,
+            TokenRole::Refresh => to_token_endpoint,
+        },
+        definitions,
+        shared: false,
+        verify: None,
+    })
+}
+
 /// The policy of a client secret, and of the access tokens it gets.
 fn client_secret_policy(grant: &TokenGrant, allowances: &Allowances) -> Option<Policy> {
     let mut to_token_endpoint = rule_for(&grant.token_url, &grant.client, false, allowances)?;
@@ -657,6 +798,19 @@ fn secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
             }]),
         }]),
         "aws_credentials" | "s3_compatible" => aws_secrets(integration_id, params),
+        _ if authorized_tokens(integration_id, params).is_some() => {
+            let tokens = authorized_tokens(integration_id, params)?;
+            Some(vec![
+                Secret {
+                    field: ACCESS_TOKEN_FIELD,
+                    usage: Usage::Token(TokenRole::Access, tokens.clone()),
+                },
+                Secret {
+                    field: REFRESH_TOKEN_FIELD,
+                    usage: Usage::Token(TokenRole::Refresh, tokens),
+                },
+            ])
+        }
         _ if client_secret_field(integration_id).is_some() => Some(vec![Secret {
             field: client_secret_field(integration_id)?,
             usage: Usage::ClientSecret(token_grant(integration_id, params)?),
@@ -699,6 +853,7 @@ pub fn request_fields(integration_id: &str, params: &Value) -> Vec<String> {
                     presented: true,
                     ..
                 } | Usage::Targets(_)
+                    | Usage::Token(TokenRole::Access, _)
             )
         })
         .map(|secret| secret.field.to_owned())
@@ -719,6 +874,10 @@ pub fn injected_headers(integration_id: &str, params: &Value) -> Vec<String> {
             } => vec![inject],
             Usage::Targets(targets) => targets.iter().map(|target| &target.inject).collect(),
             Usage::ClientSecret(grant) => vec![&grant.token],
+            Usage::Token(TokenRole::Access, _) => {
+                headers.push("Authorization".to_owned());
+                Vec::new()
+            }
             _ => Vec::new(),
         };
         for header in injects.into_iter().flat_map(headers_of) {
@@ -763,6 +922,10 @@ pub const SEALABLE_TYPES: &[&str] = &[
     "zendesk_client_credentials",
     "ups_client_credentials",
     "teams_bot",
+    "hubspot_private_app",
+    "quickbooks_online",
+    "xero_oauth",
+    "http_oauth2_authorization_code",
     "http_bearer",
     "http_basic",
     "http_api_key",
@@ -827,6 +990,13 @@ pub fn policies(
                 shared: false,
                 verify: Some(Verify::Hmac { hash: *hash }),
             },
+            Usage::Token(role, tokens) => {
+                let mut tokens = tokens.clone();
+                if let Some(api_base) = allowances.api_bases.get(integration_id) {
+                    tokens.api = vec![(api_base.clone(), true)];
+                }
+                token_policy(*role, &tokens, allowances)?
+            }
             Usage::ClientSecret(grant) => {
                 let mut grant = grant.clone();
                 if let Some(api_base) = allowances.api_bases.get(integration_id) {
@@ -1003,7 +1173,7 @@ mod tests {
             );
             assert!(is_sealable_type(integration_id));
         }
-        assert!(!is_sealable_type("quickbooks_online"));
+        assert!(!is_sealable_type("postgres"));
     }
 
     /// The secret's parameter is one the type marks secret, so that nothing
@@ -1043,6 +1213,11 @@ mod tests {
             secrets.retain(|name| {
                 !["client_certificate_pem", "server_ca_pem", "client_id"].contains(name)
             });
+            // An authorization's tokens are what is sealed of it; they are
+            // the provider's, not fields of the type.
+            if meta.oauth_config.is_some() {
+                secrets = vec!["access_token", "refresh_token"];
+            }
             secrets.sort_unstable();
             let sealed: Vec<String> = policies(integration_id, &params, &Allowances::default())
                 .unwrap_or_else(|| panic!("{integration_id} is sealed"))
@@ -1423,6 +1598,91 @@ mod tests {
     }
 
     #[test]
+    fn an_authorizations_tokens_go_to_the_api_and_back_for_the_next_pair() {
+        let params = json!({"client_id": "cid", "client_secret": "s", "realm_id": "123"});
+        let policies = policies("quickbooks_online", &params, &Allowances::default()).unwrap();
+        assert_eq!(
+            policies.keys().collect::<Vec<_>>(),
+            ["access_token", "refresh_token"]
+        );
+        let bearer = json!({"header": {"name": "Authorization", "format": "Bearer {}"}});
+        let revoke = json!({
+            "destination": {
+                "scheme": "https", "host": "developer.api.intuit.com",
+                "path_prefix": "/v2/oauth2/tokens/revoke",
+            },
+            "inject": {"json_field": {"pointer": "/token"}},
+        });
+        // The API's host (the company is the proxy's to hold a request to),
+        // the type's other endpoint, and revocation.
+        let to_api = json!([
+            {
+                "destination": {"scheme": "https", "host": "quickbooks.api.intuit.com"},
+                "inject": bearer,
+            },
+            {
+                "destination": {
+                    "scheme": "https", "host": "qb.api.intuit.com", "path_prefix": "/graphql",
+                },
+                "inject": bearer,
+            },
+            revoke,
+        ]);
+        let to_token_endpoint = json!([
+            {
+                "destination": {
+                    "scheme": "https", "host": "oauth.platform.intuit.com",
+                    "path_prefix": "/oauth2/v1/tokens/bearer",
+                },
+                "inject": {"form_field": {"name": "refresh_token"}},
+                "seal_response": {"format": "json", "fields": [
+                    {"at": "/access_token", "as": "access_token", "policy": "api"},
+                    {"at": "/refresh_token", "as": "refresh_token", "policy": "refresh"},
+                ]},
+            },
+            revoke,
+        ]);
+        let definitions = json!({
+            "api": {"rules": to_api},
+            "refresh": {"rules": to_token_endpoint},
+        });
+        assert_eq!(
+            canonical(&policies["access_token"]),
+            json!({"rules": to_api, "definitions": definitions})
+        );
+        assert_eq!(
+            canonical(&policies["refresh_token"]),
+            json!({"rules": to_token_endpoint, "definitions": definitions})
+        );
+        // What seal gives a refreshed token is the policy its marker names.
+        let refresh = &policies["refresh_token"];
+        for (field, definition) in [("access_token", "api"), ("refresh_token", "refresh")] {
+            assert_eq!(
+                refresh
+                    .for_response_field(&PolicyName::new(definition).unwrap())
+                    .unwrap(),
+                policies[field],
+                "{field}"
+            );
+        }
+        // A request presents the access token only.
+        assert_eq!(
+            request_fields("quickbooks_online", &params),
+            ["access_token"]
+        );
+        assert_eq!(
+            injected_headers("quickbooks_online", &params),
+            ["Authorization"]
+        );
+        // The company does not change what the tokens are sealed for.
+        let other = json!({"client_id": "cid", "client_secret": "s", "realm_id": "456"});
+        assert_eq!(
+            super::policies("quickbooks_online", &other, &Allowances::default()).unwrap(),
+            policies
+        );
+    }
+
+    #[test]
     fn a_teams_bots_token_goes_to_the_bot_connector() {
         let (field, policy) = client_secret(
             "teams_bot",
@@ -1726,7 +1986,7 @@ mod tests {
 
     #[test]
     fn a_type_seal_does_not_handle_yet_is_not_sealed() {
-        for integration_id in ["quickbooks_online", "xero_oauth", "postgres", "nope"] {
+        for integration_id in ["postgres", "nope"] {
             let params = json!({"api_key": "s", "base_url": "https://api.example.com"});
             assert_eq!(
                 policies(integration_id, &params, &Allowances::default()),
@@ -1832,7 +2092,7 @@ mod tests {
                 "{integration_id}"
             );
         }
-        assert!(injected_headers("quickbooks_online", &json!({})).is_empty());
+        assert!(injected_headers("nope", &json!({})).is_empty());
     }
 
     #[test]

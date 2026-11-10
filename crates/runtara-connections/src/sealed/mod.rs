@@ -29,6 +29,7 @@ use seal_keys::{KeySource, Keyring, KeyringConfig};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+pub use oauth::RotatedSealed;
 pub use policy::Allowances;
 pub use seal_client::{ErrorCode as SealErrorCode, SealError};
 
@@ -342,6 +343,85 @@ impl SealedCredentials {
                 expires_s,
             })
             .await
+    }
+
+    /// Whether a connection holds sealed OAuth tokens that its parameters no
+    /// longer allow: they were sealed for another token endpoint or API, and
+    /// only a new authorization replaces them.
+    pub fn holds_stale_tokens(&self, integration_id: &str, parameters: &Value) -> bool {
+        let policies = policy::policies(integration_id, parameters, &self.allowances);
+        [policy::ACCESS_TOKEN_FIELD, policy::REFRESH_TOKEN_FIELD]
+            .iter()
+            .filter(|field| is_sealed(&parameters[**field]))
+            .any(|field| {
+                let current = policies
+                    .as_ref()
+                    .and_then(|policies| policies.get(*field))
+                    .and_then(|policy| policy_fingerprint(policy).ok());
+                parameters[*field][SEALED_MARKER]["policy"].as_str() != current.as_deref()
+            })
+    }
+
+    /// Revokes a connection's sealed token at the provider: the refresh
+    /// token, or the access token if that is all it holds. `authorization`
+    /// is the client's own, where the provider wants it. `Ok(false)` if the
+    /// connection has no sealed token or nowhere to revoke it.
+    pub async fn revoke_token(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        integration_id: &str,
+        parameters: &Value,
+        authorization: Option<String>,
+    ) -> Result<bool, String> {
+        let Some(url) = policy::authorized_tokens(integration_id, parameters)
+            .and_then(|tokens| tokens.revocation_url)
+        else {
+            return Ok(false);
+        };
+        let Some(field) = [policy::REFRESH_TOKEN_FIELD, policy::ACCESS_TOKEN_FIELD]
+            .into_iter()
+            .find(|field| is_sealed(&parameters[*field]))
+        else {
+            return Ok(false);
+        };
+        crate::net::validate_credentialed_endpoint(&url)
+            .map_err(|reason| format!("refusing to send the revocation request: {reason}"))?;
+        let (name, value) = presented(parameters, field).map_err(|error| error.detail)?;
+        let mut request = http::Request::builder()
+            .method("POST")
+            .uri(url)
+            .header("content-type", "application/json");
+        if let Some(authorization) = authorization {
+            request = request.header("authorization", authorization);
+        }
+        // seal names the token in the body, as its policy says.
+        let request = request
+            .body(
+                Full::new(Bytes::from_static(b"{}"))
+                    .map_err(|never| match never {})
+                    .boxed_unsync(),
+            )
+            .map_err(|_| "the revocation endpoint's URL is not valid".to_string())?;
+        let sent = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.client.send(SendRequest {
+                keyset: keys::keyset_for_tenant(tenant_id),
+                item: ItemId::new(connection_id)
+                    .map_err(|_| "the connection's id is not an item id".to_string())?,
+                sealed: BTreeMap::from([(name, value)]),
+                plain: BTreeMap::new(),
+                request,
+            }),
+        )
+        .await
+        .map_err(|_| "revocation request timed out".to_string())?
+        .map_err(|error| format!("revocation request failed: {error}"))?;
+        let status = sent.response.status();
+        if !status.is_success() {
+            return Err(format!("revocation endpoint returned {status}"));
+        }
+        Ok(true)
     }
 
     /// Whether `mac` is the HMAC of `message` under a sealed signing secret:

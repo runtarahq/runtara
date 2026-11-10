@@ -43,6 +43,7 @@ impl SealedCredentials {
         presented_fields: &[&str],
         url: &str,
         content_type: &str,
+        authorization: Option<String>,
         body: Vec<u8>,
     ) -> Result<TokenReply, AuthResolutionError> {
         token_cache::check_token_endpoint(url)?;
@@ -56,11 +57,16 @@ impl SealedCredentials {
             })?;
             sealed.insert(field, value);
         }
-        let request = http::Request::builder()
+        let mut request = http::Request::builder()
             .method("POST")
             .uri(url)
             .header("content-type", content_type)
-            .header("accept", "application/json")
+            .header("accept", "application/json");
+        // A client secret this process holds, sent as the provider takes it.
+        if let Some(authorization) = authorization {
+            request = request.header("authorization", authorization);
+        }
+        let request = request
             .body(
                 Full::new(Bytes::from(body))
                     .map_err(|never| match never {})
@@ -184,6 +190,7 @@ impl SealedCredentials {
                     &[secret_field],
                     &token_url,
                     content_type,
+                    None,
                     body,
                 )
                 .await?;
@@ -194,6 +201,163 @@ impl SealedCredentials {
         })
         .await?;
         marker_of(&envelope)
+    }
+}
+
+/// The tokens a refresh brought back, sealed, as the markers a connection
+/// stores.
+pub struct RotatedSealed {
+    pub access_token: Value,
+    /// The next refresh token, if the provider rotated it.
+    pub refresh_token: Option<Value>,
+    pub token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl SealedCredentials {
+    /// The access token of a connection whose refresh token is sealed
+    /// (authorization-code grant), as the marker a request presents, with
+    /// the pair to store if a refresh was made now.
+    ///
+    /// The stored access token is used while it is fresh. Otherwise seal
+    /// sends the refresh token to the token endpoint, and the pair that
+    /// comes back is already sealed. `parameters` hold the client's id and
+    /// secret as the token endpoint takes them: a client secret is not
+    /// sealed for this grant, and is this process's to send.
+    pub(crate) async fn refreshed_access_token(
+        &self,
+        events: &crate::events::ConnectionEvents,
+        tenant_id: &str,
+        connection_id: &str,
+        integration_id: &str,
+        parameters: &Value,
+    ) -> Result<(Value, Option<RotatedSealed>), AuthResolutionError> {
+        use runtara_dsl::agent_meta::TokenEndpointAuth;
+        let unsupported =
+            || AuthResolutionError::permanent("The connection's token refresh cannot be formed");
+        let tokens =
+            policy::sealed_authorized_tokens(integration_id, parameters).ok_or_else(unsupported)?;
+
+        // The stored token, while it is fresh: no request, and no lock.
+        let stored = &parameters[policy::ACCESS_TOKEN_FIELD];
+        if super::is_sealed(stored)
+            && token_cache::token_is_fresh(token_cache::parse_expiry(
+                parameters["token_expires_at"].as_str(),
+            ))
+        {
+            return Ok((stored.clone(), None));
+        }
+
+        let config = runtara_agents::registry::find_connection_type(integration_id)
+            .and_then(|meta| meta.oauth_config)
+            .ok_or_else(unsupported)?;
+        let effective =
+            crate::auth::provider_auth::resolve_effective_oauth_config(config, parameters);
+        let missing = |name: &str| {
+            AuthResolutionError::permanent(format!("The connection has no {name} to refresh with"))
+        };
+        let client_id = parameters["client_id"]
+            .as_str()
+            .ok_or_else(|| missing("client_id"))?;
+        let client_secret = parameters["client_secret"]
+            .as_str()
+            .ok_or_else(|| missing("client_secret"))?;
+
+        let cache_key = token_cache::build_token_cache_key(
+            connection_id,
+            &["oauth_refresh", integration_id, &tokens.token_url],
+        )
+        .sealed();
+        let refreshed = token_cache::refreshed_token(&cache_key, || async {
+            // The grant, with the client's credentials as the provider takes
+            // them. seal adds the refresh token.
+            let (authorization, body) = token_cache::token_request_parts(
+                effective.token_endpoint_auth,
+                vec![("grant_type".to_string(), "refresh_token".to_string())],
+                client_id,
+                client_secret,
+            );
+            debug_assert!(
+                authorization.is_some()
+                    == matches!(effective.token_endpoint_auth, TokenEndpointAuth::HttpBasic)
+            );
+            let outcome = async {
+                let reply = self
+                    .token_request(
+                        tenant_id,
+                        connection_id,
+                        parameters,
+                        &[policy::REFRESH_TOKEN_FIELD],
+                        &tokens.token_url,
+                        "application/x-www-form-urlencoded",
+                        authorization,
+                        body.into_bytes(),
+                    )
+                    .await?;
+                let refresh_field = FieldName::new(policy::REFRESH_TOKEN_FIELD).map_err(|_| {
+                    AuthResolutionError::permanent("The refresh token's field is not valid")
+                })?;
+                Ok(token_cache::TokenResponse {
+                    access_token: sealed_access_token(&reply)?,
+                    expires_at: token_cache::token_expiry(
+                        &reply.body,
+                        token_cache::DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
+                    ),
+                    refresh_token: reply
+                        .sealed
+                        .get(&refresh_field)
+                        .and_then(|envelope| serde_json::to_string(envelope).ok()),
+                })
+            }
+            .await;
+            // Every refresh made is a sign of the connection's health.
+            crate::events::emit(
+                events,
+                Some(tenant_id),
+                crate::events::ConnectionLifecycleEvent::TokenRefreshed {
+                    connection_id: connection_id.to_string(),
+                    integration: integration_id.to_string(),
+                    success: outcome.is_ok(),
+                },
+            );
+            outcome
+        })
+        .await?;
+
+        match refreshed {
+            token_cache::Refreshed::Kept(envelope) => Ok((marker_of(&envelope)?, None)),
+            token_cache::Refreshed::Now(response) => {
+                // The markers a connection stores name the policy inside.
+                let policies = policy::policies(integration_id, parameters, &self.allowances)
+                    .ok_or_else(unsupported)?;
+                let stored_marker = |envelope: &str, field: &str| {
+                    let envelope: Envelope = serde_json::from_str(envelope).map_err(|_| {
+                        AuthResolutionError::transient("A sealed token is not readable")
+                    })?;
+                    let fingerprint = policies
+                        .get(field)
+                        .and_then(|policy| super::policy_fingerprint(policy).ok())
+                        .ok_or_else(unsupported)?;
+                    super::marker(&envelope, &fingerprint).map_err(|_| {
+                        AuthResolutionError::transient("A sealed token is not readable")
+                    })
+                };
+                let access_token =
+                    stored_marker(&response.access_token, policy::ACCESS_TOKEN_FIELD)?;
+                let refresh_token = response
+                    .refresh_token
+                    .as_deref()
+                    .map(|envelope| stored_marker(envelope, policy::REFRESH_TOKEN_FIELD))
+                    .transpose()?;
+                Ok((
+                    access_token.clone(),
+                    Some(RotatedSealed {
+                        access_token,
+                        refresh_token,
+                        token_expires_at: response.expires_at,
+                    }),
+                ))
+            }
+        }
     }
 }
 

@@ -19,6 +19,19 @@ use sqlx::PgPool;
 /// SHA-256 (hex) of a refresh token — a non-reversible fingerprint stored in the
 /// `refresh_token_hash` column for the rotation optimistic-concurrency guard. The
 /// token value itself is never persisted in plaintext.
+/// The rotation guard of a stored refresh token: the hash of the token, or
+/// of its envelope when it is sealed. Each rotation seals a new envelope, so
+/// the guard tells one stored token from the next either way.
+pub fn refresh_token_guard(stored: &serde_json::Value) -> Option<String> {
+    match stored {
+        serde_json::Value::String(token) => Some(refresh_token_hash(token)),
+        sealed if crate::sealed::is_sealed(sealed) => Some(refresh_token_hash(
+            &sealed[crate::sealed::SEALED_MARKER]["envelope"].to_string(),
+        )),
+        _ => None,
+    }
+}
+
 pub fn refresh_token_hash(token: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(token.as_bytes()))
@@ -1064,8 +1077,7 @@ impl ConnectionRepository {
         .bind(
             parameters
                 .get("refresh_token")
-                .and_then(|token| token.as_str())
-                .map(refresh_token_hash),
+                .and_then(refresh_token_guard),
         )
         .bind(credential_format(Some(parameters)))
         .execute(&self.pool)

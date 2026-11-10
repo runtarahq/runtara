@@ -202,6 +202,21 @@ async fn a_sealed_value_opens_only_for_its_own_connection_and_tenant() {
 async fn a_type_that_is_not_sealed_is_left_alone() {
     let server = MockServer::start().await;
     let sealed = sealed_for(&server);
+    let params = json!({"host": "db.example.com", "password": SECRET});
+
+    let stored = sealed
+        .seal_parameters(TENANT, CONNECTION, "not_a_sealed_type", &params, None)
+        .await
+        .unwrap();
+
+    assert_eq!(stored, None);
+}
+
+#[tokio::test]
+async fn an_oauth_connection_not_yet_authorized_has_no_token_to_seal() {
+    let server = MockServer::start().await;
+    let sealed = sealed_for(&server);
+    // The client's secret is this process's to send for this grant.
     let params = json!({"client_id": "id", "client_secret": SECRET});
 
     let stored = sealed
@@ -209,7 +224,7 @@ async fn a_type_that_is_not_sealed_is_left_alone() {
         .await
         .unwrap();
 
-    assert_eq!(stored, None);
+    assert_eq!(stored, Some(params));
 }
 
 #[tokio::test]

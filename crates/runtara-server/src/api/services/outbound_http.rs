@@ -1518,6 +1518,7 @@ mod tests {
             mtls_client: None,
             rotated_credentials: None,
             sealed_parameters: None,
+            rotated_sealed: None,
         }
     }
 
@@ -1581,6 +1582,7 @@ mod tests {
             mtls_client: None,
             rotated_credentials: None,
             sealed_parameters: None,
+            rotated_sealed: None,
         };
         apply_aws_service_override(Some("sqs"), &mut resolved);
 
@@ -1607,6 +1609,7 @@ mod tests {
             mtls_client: None,
             rotated_credentials: None,
             sealed_parameters: None,
+            rotated_sealed: None,
         }
     }
 
@@ -1813,6 +1816,7 @@ mod tests {
             mtls_client: None,
             rotated_credentials: None,
             sealed_parameters: None,
+            rotated_sealed: None,
         }
     }
 

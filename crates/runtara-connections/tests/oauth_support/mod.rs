@@ -30,6 +30,8 @@ pub const BASE: &str = "https://platform.example.com";
 pub struct Fixture {
     pub pool: PgPool,
     pub valkey: redis::aio::ConnectionManager,
+    /// seal, for the tests of a deployment that seals. None by default.
+    pub sealed: Option<Arc<runtara_connections::sealed::SealedCredentials>>,
     _pg: ContainerAsync<Postgres>,
     _valkey: ValkeyFixture,
 }
@@ -93,6 +95,7 @@ impl Fixture {
         Self {
             pool,
             valkey: valkey.manager.clone(),
+            sealed: None,
             _pg: pg,
             _valkey: valkey,
         }
@@ -125,12 +128,13 @@ impl Fixture {
     pub fn service(&self) -> OAuthService {
         OAuthService::new(self.pool.clone(), Arc::new(NoOpCipher), BASE.to_string())
             .with_flows(self.valkey.clone())
+            .with_sealed(self.sealed.clone())
     }
 
     pub fn config(&self, tenants: Arc<dyn TenantHost>) -> ConnectionsConfig {
         let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![]));
         ConnectionsConfig {
-            sealed: None,
+            sealed: self.sealed.clone(),
             agent_access: std::sync::Arc::new(runtara_connections::EveryAgent),
             db_pool: self.pool.clone(),
             redis_manager: Some(self.valkey.clone()),
