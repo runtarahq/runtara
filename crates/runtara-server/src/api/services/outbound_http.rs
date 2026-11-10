@@ -731,7 +731,10 @@ async fn execute_request(
     let body_bytes = request.body;
 
     // ── AWS SigV4 signing (if needed) ───────────────────────────────────
-    if let Some(ref aws) = aws_signing {
+    // A sealed key signs nothing here: seal signs the request it sends.
+    if let Some(ref aws) = aws_signing
+        && sealed_connection.is_none()
+    {
         let parsed_url = url::Url::parse(&final_url).map_err(|e| {
             (
                 400,
@@ -791,22 +794,25 @@ async fn execute_request(
             final_headers.insert(key, absolute);
         }
 
-        let payload = body_bytes.as_deref().unwrap_or(b"");
-        remove_headers(&mut final_headers, &["authorization", "x-ms-date"]);
-        runtara_connections::auth::azure_signing::sign_request_shared_key(
-            &method,
-            &parsed_url,
-            &mut final_headers,
-            payload,
-            &azure.account_name,
-            &azure.account_key,
-        )
-        .map_err(|e| {
-            (
-                400,
-                json!({"error": format!("Azure Shared Key signing failed: {}", e)}),
+        // A sealed key signs nothing here: seal signs the request it sends.
+        if sealed_connection.is_none() {
+            let payload = body_bytes.as_deref().unwrap_or(b"");
+            remove_headers(&mut final_headers, &["authorization", "x-ms-date"]);
+            runtara_connections::auth::azure_signing::sign_request_shared_key(
+                &method,
+                &parsed_url,
+                &mut final_headers,
+                payload,
+                &azure.account_name,
+                &azure.account_key,
             )
-        })?;
+            .map_err(|e| {
+                (
+                    400,
+                    json!({"error": format!("Azure Shared Key signing failed: {}", e)}),
+                )
+            })?;
+        }
     }
 
     // ── Sealed credentials: seal sends the request ───────────────────────

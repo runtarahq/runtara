@@ -12,6 +12,8 @@
 
 pub mod keys;
 pub mod policy;
+#[cfg(any(test, feature = "test-util"))]
+pub mod testing;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -269,6 +271,19 @@ impl SealedCredentials {
         for name in request_fields(integration_id, parameters) {
             let (field, value) = presented(parameters, &name)?;
             sealed.insert(field, value);
+        }
+        let mut request = request;
+        // SigV4 signs the body's hash. This process holds the body, so it
+        // says the hash and seal signs with it, without holding the body too.
+        if policy::signs_with_sigv4(integration_id, parameters) {
+            let hash = hex::encode(Sha256::digest(
+                request.body().as_deref().unwrap_or_default(),
+            ));
+            request.headers_mut().insert(
+                "x-amz-content-sha256",
+                http::HeaderValue::from_str(&hash)
+                    .map_err(|_| invalid_request("the body's hash is not a header value"))?,
+            );
         }
         let request = request.map(|body| {
             Full::new(Bytes::from(body.unwrap_or_default()))

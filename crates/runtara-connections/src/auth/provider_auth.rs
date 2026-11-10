@@ -1212,7 +1212,7 @@ pub fn openai_proxy_base_url(params: &Value) -> String {
     base_url.strip_suffix("/v1").unwrap_or(base_url).to_string()
 }
 
-fn first_string_param(params: &Value, keys: &[&str]) -> Option<String> {
+pub(crate) fn first_string_param(params: &Value, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| {
         params[*key]
             .as_str()
@@ -1222,7 +1222,7 @@ fn first_string_param(params: &Value, keys: &[&str]) -> Option<String> {
     })
 }
 
-fn normalize_endpoint(endpoint: &str) -> String {
+pub(crate) fn normalize_endpoint(endpoint: &str) -> String {
     if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
         endpoint.to_string()
     } else {
@@ -1241,7 +1241,7 @@ pub fn aws_default_endpoint(service: &str, region: &str) -> String {
     format!("https://{service}.{region}.amazonaws.com")
 }
 
-fn resolve_azure_blob_base_url(params: &Value, account_name: &str) -> Option<String> {
+pub(crate) fn resolve_azure_blob_base_url(params: &Value, account_name: &str) -> Option<String> {
     if let Some(raw) = first_string_param(params, &["endpoint_override", "endpoint"]) {
         let trimmed = raw.trim_end_matches('/').to_string();
         let normalized = normalize_endpoint(&trimmed);

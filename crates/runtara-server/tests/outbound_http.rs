@@ -1174,3 +1174,139 @@ async fn native_outbound_sends_a_sealed_connections_request_through_seal() -> an
     assert_eq!(unavailable.code, "SEALED_CREDENTIALS_UNAVAILABLE");
     Ok(())
 }
+
+/// A sealed storage key signs nothing in the proxy: seal signs the request it
+/// sends, and the agent's own signing headers are dropped.
+#[tokio::test]
+async fn native_outbound_has_seal_sign_a_sealed_storage_connections_request() -> anyhow::Result<()>
+{
+    use base64::Engine;
+    use runtara_connections::sealed::keys::PgKeySource;
+    use runtara_connections::sealed::{Allowances, SealedCredentials, is_sealed, testing};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    allow_local_egress_for_this_test_binary();
+    init_server_config();
+    let pool = test_pool().await;
+    let provider = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(201))
+        .expect(1)
+        .mount(&provider)
+        .await;
+    let account_key = base64::engine::general_purpose::STANDARD.encode("synthetic-account-key");
+
+    let sealed = Arc::new(
+        SealedCredentials::in_process(
+            Arc::new(PgKeySource::new(pool.clone())),
+            &[7_u8; 32],
+            Allowances {
+                private_hosts: vec!["127.0.0.1".into()],
+                plain_http_hosts: vec!["127.0.0.1".into()],
+                ..Default::default()
+            },
+        )
+        .map_err(|error| anyhow::anyhow!(error))?,
+    );
+    let tenant = format!("sealed-storage-{}", Uuid::new_v4());
+    let connection = ConnectionService::new(
+        Arc::new(ConnectionRepository::new(
+            pool.clone(),
+            Arc::new(NoOpCipher),
+        )),
+        compatibility(),
+    )
+    .with_sealed(Some(sealed.clone()))
+    .create_connection(
+        CreateConnectionRequest {
+            title: format!("Sealed storage {}", Uuid::new_v4()),
+            integration_id: Some("azure_blob_storage".into()),
+            connection_subtype: None,
+            // An endpoint addressed by path, as Azurite's is.
+            connection_parameters: Some(json!({
+                "account_name": "devstore",
+                "account_key": account_key,
+                "endpoint_override": provider.uri(),
+            })),
+            rate_limit_config: None,
+            valid_until: None,
+            is_default_file_storage: None,
+            default_for: None,
+        },
+        &tenant,
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("sealed connection creation failed"))?;
+    let (format, stored): (String, serde_json::Value) = sqlx::query_as(
+        "SELECT credential_format, connection_parameters FROM connection_data_entity WHERE id = $1",
+    )
+    .bind(&connection)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(format, "seal");
+    assert!(is_sealed(&stored["account_key"]));
+    assert!(!stored.to_string().contains(&account_key));
+
+    let outbound = NativeOutboundHttp {
+        facade: Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
+            ConnectionsConfig {
+                sealed: Some(sealed),
+                agent_access: Arc::new(runtara_connections::EveryAgent),
+                db_pool: pool.clone(),
+                redis_manager: None,
+                public_base_url: "http://localhost".to_string(),
+                oauth_complete_url: None,
+                http_client: runtara_connections::net::build_hardened_client(),
+                cipher: Arc::new(NoOpCipher),
+                compatibility: compatibility(),
+                agent_catalog: Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                    Vec::new(),
+                )),
+                connection_events: None,
+                oauth: Default::default(),
+            },
+        ))),
+        client: runtara_connections::net::build_hardened_client(),
+    };
+    let mut put = connection_request(&connection, "/container/blob.txt");
+    put.method = "PUT".into();
+    put.body = Some(b"hello".to_vec());
+    put.headers = vec![
+        ("Content-Type".into(), "text/plain".into()),
+        ("x-ms-blob-type".into(), "BlockBlob".into()),
+        (
+            "Authorization".into(),
+            "SharedKey devstore:agent-supplied".into(),
+        ),
+    ];
+    let response = outbound
+        .request(
+            &OutboundContext {
+                tenant_id: tenant,
+                instance_id: None,
+            },
+            put,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("sealed request failed: {}", error.code))?;
+    assert_eq!(response.status, 201);
+
+    let received = &provider.received_requests().await.unwrap()[0];
+    let headers: Vec<(String, String)> = received
+        .headers
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.to_str().unwrap().to_owned()))
+        .collect();
+    assert_eq!(received.url.path(), "/devstore/container/blob.txt");
+    testing::check_shared_key(
+        "PUT",
+        &received.url,
+        &headers,
+        b"hello",
+        "devstore",
+        &account_key,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+    assert!(!format!("{headers:?}").contains("agent-supplied"));
+    Ok(())
+}

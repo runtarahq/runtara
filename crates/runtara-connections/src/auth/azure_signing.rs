@@ -41,7 +41,7 @@ pub fn sign_request_shared_key(
     apply_shared_key_signature(method, url, headers, body, account_name, &key_bytes)
 }
 
-fn apply_shared_key_signature(
+pub(crate) fn apply_shared_key_signature(
     method: &str,
     url: &url::Url,
     headers: &mut HashMap<String, String>,
