@@ -508,7 +508,7 @@ async fn two_instances_seal_a_tenants_connections_to_the_same_key() {
     );
 }
 
-/// Connections stored before sealing was on are sealed in place: each as it
+/// Connections an earlier release stored readable are sealed in place: each as it
 /// would be on its next save, one tenant at a time or all. What seal cannot
 /// hold is counted and left as it is. A dry run writes nothing.
 #[tokio::test]

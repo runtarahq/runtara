@@ -1173,14 +1173,17 @@ impl ConnectionRepository {
         Ok(result.rows_affected())
     }
 
-    /// Seal the secrets of connections stored before sealing was on, for one
-    /// tenant or for all: each is sealed as it would be on its next save.
+    /// Seal the secrets of connections an earlier release stored readable,
+    /// for one tenant or for all: each is sealed as it would be on its next
+    /// save.
     ///
-    /// A connection is left as it is where seal does not handle its type or
-    /// cannot express where its secret goes. One written meanwhile is left
-    /// to that write. With `dry_run`, nothing is written, and the count is
-    /// of what would be sealed. Sealing is one-way: a sealed secret is not
-    /// stored readable again.
+    /// A connection whose secret seal cannot hold (its type is not one this
+    /// build knows, or its secret goes somewhere seal cannot express) is
+    /// counted as unsealable and left as it is: it cannot be used until it is
+    /// entered again. One written meanwhile is left to that write. With
+    /// `dry_run`, nothing is written, and the count is of what would be
+    /// sealed. Sealing is one-way: a sealed secret is not stored readable
+    /// again.
     pub async fn seal_existing(
         &self,
         sealed: &crate::sealed::SealedCredentials,
