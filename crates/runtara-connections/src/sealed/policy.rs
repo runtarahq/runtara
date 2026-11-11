@@ -59,6 +59,47 @@ impl Allowances {
 /// Telegram's Bot API.
 pub const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 
+/// The field a Telegram webhook's secret token is sealed as. It is not a
+/// parameter of the connection: a trigger holds it, for the connection its
+/// webhook is registered on.
+pub const WEBHOOK_SECRET_FIELD: &str = "webhook_secret";
+
+/// The policy of the token Telegram sends back with each webhook call.
+///
+/// It goes to `setWebhook` only, beside the bot token that seal puts in the
+/// path, and only to register `webhook_url`: Telegram sends the token to
+/// whatever URL is registered, and the path is filled by whichever bot token
+/// is presented. It is never sent anywhere else; a call's token is checked
+/// against it, and seal answers yes or no.
+pub fn telegram_webhook_secret_policy(
+    webhook_url: &str,
+    allowances: &Allowances,
+) -> Option<Policy> {
+    let api_base = allowances
+        .api_bases
+        .get("telegram_bot")
+        .map_or(TELEGRAM_API_BASE, String::as_str);
+    let mut rule = rule_for(
+        &format!("{}/setWebhook", api_base.trim_end_matches('/')),
+        &Inject::FormField {
+            name: "secret_token".to_owned(),
+        },
+        false,
+        allowances,
+    )?;
+    rule.methods = Some(vec![Method::Post]);
+    rule.allow_injected_path = Some("/bot{}".to_owned());
+    rule.require_form = BTreeMap::from([("url".to_owned(), vec![webhook_url.to_owned()])]);
+    let policy = Policy {
+        rules: vec![rule],
+        definitions: BTreeMap::new(),
+        shared: false,
+        verify: Some(Verify::Equals),
+    };
+    policy.validate().ok()?;
+    Some(policy)
+}
+
 /// What a sealed secret is for.
 // A handful are built per connection and dropped at once: their size does not
 // matter, and boxing the injection would only obscure the table below.
@@ -1161,6 +1202,11 @@ fn secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
 /// that are sent, and that its current settings use. A secret that only
 /// verifies is never among them, since it may go nowhere.
 pub fn request_fields(integration_id: &str, params: &Value) -> Vec<String> {
+    // A webhook's registration presents the webhook's secret token beside
+    // the bot token. It is among the parameters only for that request.
+    if integration_id == "telegram_bot" {
+        return vec!["bot_token".to_owned(), WEBHOOK_SECRET_FIELD.to_owned()];
+    }
     // A client secret goes to its token endpoint only. What a request
     // presents is the access token got with it.
     if client_secret_field(integration_id).is_some() {
@@ -2518,7 +2564,34 @@ mod tests {
                 "inject": {"path": {"prefix": "/bot{}"}},
             }]})
         );
-        assert_eq!(request_fields("telegram_bot", &json!({})), ["bot_token"]);
+        // The webhook's secret token goes with it, for the one request that
+        // registers the webhook: only then is it among the parameters.
+        assert_eq!(
+            request_fields("telegram_bot", &json!({})),
+            ["bot_token", "webhook_secret"]
+        );
+        assert_eq!(
+            canonical(
+                &telegram_webhook_secret_policy(
+                    "https://runtime.example.com/hook",
+                    &Allowances::default()
+                )
+                .unwrap()
+            ),
+            json!({
+                "rules": [{
+                    "destination": {
+                        "scheme": "https", "host": "api.telegram.org",
+                        "path_prefix": "/setWebhook",
+                    },
+                    "methods": ["POST"],
+                    "inject": {"form_field": {"name": "secret_token"}},
+                    "require_form": {"url": ["https://runtime.example.com/hook"]},
+                    "allow_injected_path": "/bot{}",
+                }],
+                "verify": "equals",
+            })
+        );
         // No header is seal's to set.
         assert!(injected_headers("telegram_bot", &json!({})).is_empty());
     }

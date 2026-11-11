@@ -1088,3 +1088,118 @@ async fn a_database_url_is_stored_as_its_sealed_password_and_its_target() {
         None => assert!(!policy::seal_logs_in_unverified()),
     }
 }
+
+#[tokio::test]
+async fn a_webhooks_secret_token_registers_one_url_and_is_checked_without_being_read() {
+    let token = "123456:ABC-DEF_canary";
+    let secret = "0123456789abcdef-webhook-CANARY";
+    let webhook_url = "https://runtime.example.com/api/events/acme/webhook/telegram/c-1";
+    let server = MockServer::start().await;
+    // seal puts the bot token in the path and the secret token in the form.
+    Mock::given(method("POST"))
+        .and(path(format!("/bot{token}/setWebhook")))
+        .and(wiremock::matchers::body_string_contains(format!(
+            "secret_token={secret}"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{\"ok\":true}"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let sealed = sealed_standing_in(&server, &["telegram_bot"]);
+    let mut connection = sealed
+        .seal_parameters(
+            TENANT,
+            CONNECTION,
+            "telegram_bot",
+            &json!({"bot_token": token}),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let marker = sealed
+        .seal_webhook_secret(TENANT, CONNECTION, webhook_url, secret)
+        .await
+        .unwrap();
+    assert!(is_sealed(&marker));
+    assert!(!marker.to_string().contains(secret));
+    assert!(sealed.webhook_secret_is_current(CONNECTION, webhook_url, &marker));
+    // Another connection's, or one for a URL since changed, is not.
+    assert!(!sealed.webhook_secret_is_current("another-connection", webhook_url, &marker));
+    assert!(!sealed.webhook_secret_is_current(
+        CONNECTION,
+        "https://elsewhere.example.com/hook",
+        &marker
+    ));
+
+    // Registration presents both, for that URL only.
+    connection[policy::WEBHOOK_SECRET_FIELD] = marker.clone();
+    let register = |url: &'static str| {
+        let (sealed, connection, endpoint) =
+            (&sealed, &connection, format!("{}/setWebhook", server.uri()));
+        async move {
+            let form = format!(
+                "url={}&allowed_updates=%5B%22message%22%5D",
+                urlencoding::encode(url)
+            );
+            sealed
+                .send_bounded(
+                    TENANT,
+                    CONNECTION,
+                    "telegram_bot",
+                    connection,
+                    "POST",
+                    &endpoint,
+                    [(
+                        "content-type".to_owned(),
+                        "application/x-www-form-urlencoded".to_owned(),
+                    )],
+                    Some(form.into_bytes()),
+                    64 * 1024,
+                )
+                .await
+        }
+    };
+    assert_eq!(register(webhook_url).await.unwrap().status, 200);
+    // Telegram would send the token to whatever URL is registered.
+    let elsewhere = register("https://attacker.example.com/hook").await;
+    assert!(
+        matches!(elsewhere, Err(SendError::Seal(_))),
+        "{elsewhere:?}"
+    );
+
+    // A call's token is checked against it; nothing reads it.
+    let check = |presented: &'static str| {
+        let (sealed, marker) = (&sealed, &marker);
+        async move {
+            sealed
+                .verify_webhook_secret(TENANT, CONNECTION, marker, presented)
+                .await
+        }
+    };
+    assert_eq!(check(secret).await, Ok(true));
+    assert_eq!(check("0123456789abcdef-webhook-CANARX").await, Ok(false));
+    assert_eq!(check("").await, Ok(false));
+    // It is this connection's: presented for another, it does not open.
+    assert!(
+        sealed
+            .verify_webhook_secret(TENANT, "another-connection", &marker, secret)
+            .await
+            .is_err()
+    );
+    // A request that is not the webhook's registration does not present it.
+    let reply = sealed
+        .send_bounded(
+            TENANT,
+            CONNECTION,
+            "telegram_bot",
+            &connection,
+            "POST",
+            &format!("{}/sendMessage", server.uri()),
+            [],
+            None,
+            64 * 1024,
+        )
+        .await;
+    assert!(matches!(reply, Err(SendError::Seal(_))), "{reply:?}");
+}

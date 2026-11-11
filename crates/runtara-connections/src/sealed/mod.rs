@@ -473,6 +473,78 @@ impl SealedCredentials {
         Ok(true)
     }
 
+    /// Seals the secret token of a Telegram webhook registered for a
+    /// connection at `webhook_url`. Telegram sends it back with each call.
+    /// The marker names the connection too: a trigger moved to another
+    /// connection holds a token that is not that connection's.
+    pub async fn seal_webhook_secret(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        webhook_url: &str,
+        token: &str,
+    ) -> Result<Value, SealingError> {
+        let policy = policy::telegram_webhook_secret_policy(webhook_url, &self.allowances)
+            .ok_or_else(|| SealingError::Seal("the webhook's URL names no rule".to_owned()))?;
+        let (keyset, kid, public) = self.sealing_key(tenant_id).await.map_err(seal_failed)?;
+        let binding = Binding {
+            keyset: &keyset,
+            item: &item(connection_id)?,
+            field: &field_name(policy::WEBHOOK_SECRET_FIELD)?,
+        };
+        let envelope = seal_format::seal(&public, &kid, binding, token.as_bytes(), &policy)
+            .map_err(|error| SealingError::Seal(error.to_string()))?;
+        let mut marker = marker(&envelope, &policy_fingerprint(&policy)?)?;
+        marker[SEALED_MARKER]["connection"] = Value::String(connection_id.to_owned());
+        Ok(marker)
+    }
+
+    /// Whether a sealed webhook secret token is the one a webhook registered
+    /// for this connection at `webhook_url` would have: sealed for this
+    /// connection, and for that URL.
+    pub fn webhook_secret_is_current(
+        &self,
+        connection_id: &str,
+        webhook_url: &str,
+        marker: &Value,
+    ) -> bool {
+        let current = policy::telegram_webhook_secret_policy(webhook_url, &self.allowances)
+            .and_then(|policy| policy_fingerprint(&policy).ok());
+        marker[SEALED_MARKER]["connection"].as_str() == Some(connection_id)
+            && current.is_some()
+            && marker[SEALED_MARKER]["policy"].as_str() == current.as_deref()
+    }
+
+    /// Whether `presented` is a sealed webhook secret token: the one that
+    /// came with a webhook call, checked without reading the sealed one.
+    /// seal says only yes or no.
+    ///
+    /// An error means the check could not be made; treat it as a failed
+    /// check.
+    pub async fn verify_webhook_secret(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        marker: &Value,
+        presented: &str,
+    ) -> Result<bool, SealError> {
+        let envelope: Envelope = serde_json::from_value(marker[SEALED_MARKER]["envelope"].clone())
+            .map_err(|_| invalid_request("a stored sealed value is not an envelope"))?;
+        self.client
+            .verify(seal_client::VerifyRequest {
+                keyset: keys::keyset_for_tenant(tenant_id),
+                item: ItemId::new(connection_id)
+                    .map_err(|_| invalid_request("the connection's id is not an item id"))?,
+                field: FieldName::new(policy::WEBHOOK_SECRET_FIELD)
+                    .map_err(|_| invalid_request("the field is not a field name"))?,
+                value: SealedValue::from(envelope),
+                // A token covers no message.
+                message: Bytes::new(),
+                mac: presented.as_bytes().to_vec(),
+            })
+            .await
+    }
+
     /// Whether `mac` is the HMAC of `message` under a sealed signing secret:
     /// a webhook's signature, checked without reading the secret. seal says
     /// only yes or no. The caller builds the message as the provider signs it
