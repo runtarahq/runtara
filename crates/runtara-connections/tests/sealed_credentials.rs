@@ -247,32 +247,19 @@ async fn a_secret_seal_cannot_hold_is_refused_and_nothing_is_stored() {
             .unwrap(),
             "sslmode=verify-full",
         ),
-        // A credential among the headers an MCP connection sends as they
-        // are: it has a sealed place of its own.
+        // An MCP header of the connection's own in the credential's place.
         (
             serde_json::from_value(json!({
-                "title": "smuggled",
-                "integrationId": "mcp",
-                "connectionParameters": {
-                    "url": "https://mcp.example.com/mcp", "auth_mode": "none",
-                    "extra_headers": {"X-Team": "a", "X-Api-Key": SECRET},
-                },
-            }))
-            .unwrap(),
-            "`extra_headers` carries a credential in `X-Api-Key`",
-        ),
-        (
-            serde_json::from_value(json!({
-                "title": "beside",
+                "title": "replaced",
                 "integrationId": "mcp",
                 "connectionParameters": {
                     "url": "https://mcp.example.com/mcp", "auth_mode": "bearer",
                     "bearer_token": "another-secret",
-                    "extra_headers": {"Cookie": SECRET},
+                    "extra_headers": {"Authorization": SECRET},
                 },
             }))
             .unwrap(),
-            "`extra_headers` carries a credential in `Cookie`",
+            "replaces the credential's own",
         ),
     ] {
         let error = service
@@ -320,8 +307,7 @@ async fn a_secret_seal_cannot_hold_is_refused_and_nothing_is_stored() {
         "integrationId": "mcp",
         "connectionParameters": {
             "url": "https://mcp.example.com/mcp", "auth_mode": "none",
-            // Headers that are no credential are sent as they are.
-            "extra_headers": {"X-Team": "a", "Mcp-Session-Id": "s", "X-Author": "me"},
+            "extra_headers": {},
         },
     }))
     .unwrap();
@@ -907,4 +893,81 @@ async fn sealed_secrets_survive_a_rotation_of_the_key_their_keys_are_wrapped_wit
             .await
             .is_err()
     );
+}
+
+/// Any extra header of an MCP connection may carry a credential, so each
+/// value is sealed where it is, under its header's name. An edit shows them
+/// blank: one left blank is kept, one entered is sealed, one left out goes.
+#[tokio::test]
+async fn an_mcp_connections_extra_headers_are_stored_sealed() {
+    let fixture = Fixture::new().await;
+    let service = fixture.service(Some(fixture.sealed()));
+    let request: CreateConnectionRequest = serde_json::from_value(json!({
+        "title": "headers",
+        "integrationId": "mcp",
+        "connectionParameters": {
+            "url": "https://mcp.example.com/mcp", "auth_mode": "none",
+            "extra_headers": {"X-Team": "team-CANARY", "X-Api-Key": SECRET},
+        },
+    }))
+    .unwrap();
+    let id = service.create_connection(request, TENANT).await.unwrap();
+
+    let (format, stored) = fixture.row(&id).await;
+    assert_eq!(format, "seal");
+    for header in ["X-Team", "X-Api-Key"] {
+        assert!(is_sealed(&stored["extra_headers"][header]), "{header}");
+    }
+    assert!(!stored.to_string().contains(SECRET));
+    assert!(!stored.to_string().contains("CANARY"));
+
+    // Nothing shows a value.
+    let projection = service
+        .get_connection(&id, TENANT)
+        .await
+        .unwrap()
+        .edit_projection
+        .unwrap();
+    assert_eq!(
+        projection.values["extra_headers"],
+        json!({"X-Team": "", "X-Api-Key": ""})
+    );
+
+    // Left blank: kept. Entered: sealed. Left out: gone.
+    patch(
+        &service,
+        &id,
+        json!({"set": {"extra_headers": {"X-Team": "", "X-New": "new-CANARY"}}}),
+    )
+    .await
+    .unwrap();
+    let (_, edited) = fixture.row(&id).await;
+    assert_eq!(
+        edited["extra_headers"]["X-Team"],
+        stored["extra_headers"]["X-Team"]
+    );
+    assert!(is_sealed(&edited["extra_headers"]["X-New"]));
+    assert!(edited["extra_headers"].get("X-Api-Key").is_none());
+    assert!(!edited.to_string().contains("CANARY"));
+
+    // A sealed value is this connection's header's: it cannot be supplied.
+    let forged = patch(
+        &service,
+        &id,
+        json!({"set": {"extra_headers": {
+            "X-Other": stored["extra_headers"]["X-Api-Key"],
+        }}}),
+    )
+    .await;
+    assert!(matches!(forged, Err(ServiceError::ValidationError(_))));
+
+    // Moving the server moves where the headers go: they are entered again.
+    let moved = patch(
+        &service,
+        &id,
+        json!({"set": {"url": "https://other.example.com/mcp"}}),
+    )
+    .await;
+    assert!(matches!(moved, Err(ServiceError::ValidationError(_))));
+    assert_eq!(fixture.row(&id).await.1, edited);
 }

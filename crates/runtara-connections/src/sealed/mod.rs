@@ -271,13 +271,52 @@ impl SealedCredentials {
                 _ => {}
             }
         }
+        // Each extra header of an MCP connection is a secret of its own,
+        // sealed where it is: in the map, under the header's name.
+        let held = stored.map(|stored| &stored[policy::EXTRA_HEADERS_FIELD]);
+        if integration_id == "mcp"
+            && let Some(extras) = sealed
+                .get_mut(policy::EXTRA_HEADERS_FIELD)
+                .and_then(Value::as_object_mut)
+        {
+            for (header, value) in extras.iter_mut() {
+                let parameter = policy::extra_header_parameter(header);
+                let policy = policy::extra_header_policy(parameters, header, &self.allowances)
+                    .ok_or_else(|| SealingError::CannotSeal {
+                        reason: policy::why_unsealable(
+                            integration_id,
+                            parameters,
+                            &self.allowances,
+                        ),
+                    })?;
+                match value {
+                    Value::String(secret) if !secret.is_empty() => {
+                        if key.is_none() {
+                            key = Some(self.sealing_key(tenant_id).await.map_err(seal_failed)?);
+                        }
+                        let key = key.as_ref().expect("the key was just set");
+                        *value = seal_one(
+                            key,
+                            connection_id,
+                            &policy::extra_header_field(header),
+                            secret,
+                            &policy,
+                        )?;
+                    }
+                    kept if is_sealed(kept) => {
+                        let unchanged = held.map(|held| &held[header.as_str()]) == Some(&*kept)
+                            && kept[SEALED_MARKER]["policy"].as_str()
+                                == Some(policy_fingerprint(&policy)?.as_str());
+                        if !unchanged {
+                            return Err(SealingError::SecretRequired { field: parameter });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         let sealed = Value::Object(sealed);
         // A secret the type's policies do not cover would be stored readable.
-        if let Some(header) = policy::credential_extra_headers(integration_id, &sealed).first() {
-            return Err(SealingError::CannotSeal {
-                reason: policy::credential_header_refusal(header),
-            });
-        }
         if let Some(field) = policy::readable_secrets(integration_id, &sealed).first() {
             return Err(SealingError::CannotSeal {
                 reason: format!("`{field}` is a secret this connection has no use for"),
@@ -677,7 +716,15 @@ fn plain_parts(
 
 /// A connection's sealed parameter, as seal takes it.
 fn presented(parameters: &Value, name: &str) -> Result<(FieldName, SealedValue), SealError> {
-    let value = &parameters[name];
+    // An extra header's value is in the map of them, and sealed under a
+    // name made from the header's.
+    let header = policy::extra_header_of(name);
+    let field = header.map(policy::extra_header_field);
+    let name = field.as_deref().unwrap_or(name);
+    let value = match header {
+        Some(header) => &parameters[policy::EXTRA_HEADERS_FIELD][header],
+        None => &parameters[name],
+    };
     if !is_sealed(value) {
         return Err(invalid_request(
             "the connection holds no sealed value for this",
@@ -696,7 +743,10 @@ fn presented(parameters: &Value, name: &str) -> Result<(FieldName, SealedValue),
 pub fn request_fields(integration_id: &str, parameters: &Value) -> Vec<String> {
     policy::request_fields(integration_id, parameters)
         .into_iter()
-        .filter(|name| is_sealed(&parameters[name.as_str()]))
+        .filter(|name| match policy::extra_header_of(name) {
+            Some(header) => is_sealed(&parameters[policy::EXTRA_HEADERS_FIELD][header]),
+            None => is_sealed(&parameters[name.as_str()]),
+        })
         .collect()
 }
 
@@ -955,9 +1005,14 @@ pub fn is_sealed(value: &Value) -> bool {
 
 /// Whether any of a connection's parameters is sealed.
 pub fn has_sealed_values(parameters: &Value) -> bool {
-    parameters
-        .as_object()
-        .is_some_and(|fields| fields.values().any(is_sealed))
+    parameters.as_object().is_some_and(|fields| {
+        fields.values().any(is_sealed)
+            // An MCP connection's extra headers are sealed in their map.
+            || fields
+                .get(policy::EXTRA_HEADERS_FIELD)
+                .and_then(Value::as_object)
+                .is_some_and(|extras| extras.values().any(is_sealed))
+    })
 }
 
 fn marker(envelope: &Envelope, fingerprint: &str) -> Result<Value, SealingError> {

@@ -1234,6 +1234,10 @@ pub fn request_fields(integration_id: &str, params: &Value) -> Vec<String> {
             )
         })
         .map(|secret| secret.field.to_owned())
+        // Each extra header of an MCP connection goes with every request.
+        .chain(
+            extra_headers(integration_id, params).map(|(header, _)| extra_header_parameter(header)),
+        )
         .collect()
 }
 
@@ -1274,45 +1278,64 @@ pub fn injected_headers(integration_id: &str, params: &Value) -> Vec<String> {
 /// are, and they are stored as they are.
 const PUBLIC_SECRET_FIELDS: &[&str] = &["client_certificate_pem", "server_ca_pem", "client_id"];
 
-/// The parameter of an MCP connection that holds headers sent as they are.
-/// They are configuration, shown and edited as such, and no place for a
-/// credential.
-const EXTRA_HEADERS_FIELD: &str = "extra_headers";
+/// The parameter of an MCP connection that holds the extra headers each of
+/// its requests carries. Any of them may be a credential, so each value is a
+/// secret: sealed for the connection's server, and attached by seal.
+pub const EXTRA_HEADERS_FIELD: &str = "extra_headers";
 
-/// The headers among an MCP connection's extra ones that carry a credential,
-/// by what they are called: such a header would be stored and sent readable.
-/// A credential is the connection's bearer token or API key, which is sealed.
-pub fn credential_extra_headers(integration_id: &str, params: &Value) -> Vec<String> {
-    if integration_id != "mcp" {
-        return Vec::new();
-    }
-    let Some(extras) = params[EXTRA_HEADERS_FIELD].as_object() else {
-        return Vec::new();
+/// The name a request knows an extra header's sealed value by.
+pub fn extra_header_parameter(header: &str) -> String {
+    format!("{EXTRA_HEADERS_FIELD}.{header}")
+}
+
+/// The extra header a request's parameter name is for, if it is one.
+pub fn extra_header_of(parameter: &str) -> Option<&str> {
+    parameter
+        .strip_prefix(EXTRA_HEADERS_FIELD)?
+        .strip_prefix('.')
+}
+
+/// The field an extra header's value is sealed as: header names are not
+/// field names, and differ only by case.
+pub fn extra_header_field(header: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = hex::encode(Sha256::digest(header.to_ascii_lowercase().as_bytes()));
+    format!("xh_{}", &digest[..32])
+}
+
+/// The extra headers of an MCP connection, by name.
+pub fn extra_headers<'a>(
+    integration_id: &str,
+    params: &'a Value,
+) -> impl Iterator<Item = (&'a String, &'a Value)> {
+    (integration_id == "mcp")
+        .then(|| params[EXTRA_HEADERS_FIELD].as_object())
+        .flatten()
+        .into_iter()
+        .flatten()
+}
+
+/// The policy of an extra header's value: sent as that header, to the
+/// connection's server and nowhere else.
+pub fn extra_header_policy(
+    params: &Value,
+    header: &str,
+    allowances: &Allowances,
+) -> Option<Policy> {
+    let rule = rule_for(
+        filled(params, "url")?,
+        &self::header(header, "{}"),
+        true,
+        allowances,
+    )?;
+    let policy = Policy {
+        rules: vec![rule],
+        definitions: BTreeMap::new(),
+        shared: false,
+        verify: None,
     };
-    extras
-        .iter()
-        .filter(|(_, value)| value.as_str().is_some_and(|value| !value.trim().is_empty()))
-        .map(|(name, _)| name)
-        .filter(|name| {
-            // By the words of its name: `Authorization`, `X-Api-Key`,
-            // `X-Auth-Token`, `Cookie`.
-            let name = name.to_ascii_lowercase();
-            let words: Vec<&str> = name.split(['-', '_']).collect();
-            words.iter().any(|word| {
-                [
-                    "authorization",
-                    "auth",
-                    "cookie",
-                    "token",
-                    "secret",
-                    "password",
-                    "apikey",
-                ]
-                .contains(word)
-            }) || words.windows(2).any(|pair| pair == ["api", "key"])
-        })
-        .cloned()
-        .collect()
+    policy.validate().ok()?;
+    Some(policy)
 }
 
 /// The secrets a connection's parameters hold readable, by parameter name:
@@ -1352,9 +1375,9 @@ pub fn readable_secrets(integration_id: &str, params: &Value) -> Vec<String> {
         .filter(|name| readable(name))
         .map(str::to_owned)
         .chain(
-            credential_extra_headers(integration_id, params)
-                .into_iter()
-                .map(|header| format!("{EXTRA_HEADERS_FIELD}.{header}")),
+            extra_headers(integration_id, params)
+                .filter(|(_, value)| value.as_str().is_some_and(|value| !value.is_empty()))
+                .map(|(header, _)| extra_header_parameter(header)),
         )
         .collect()
 }
@@ -1376,9 +1399,6 @@ pub fn why_unsealable(integration_id: &str, params: &Value, allowances: &Allowan
     };
     if !is_sealable_type(integration_id) {
         return format!("`{integration_id}` is not a connection type this deployment knows");
-    }
-    if let Some(header) = credential_extra_headers(integration_id, params).first() {
-        return credential_header_refusal(header);
     }
     if integration_id == "postgres" {
         return format!(
@@ -1413,14 +1433,6 @@ pub fn why_unsealable(integration_id: &str, params: &Value, allowances: &Allowan
         }
     }
     "its parameters do not name a destination its credentials can be held for".to_owned()
-}
-
-/// Why an extra header that carries a credential is refused.
-pub fn credential_header_refusal(header: &str) -> String {
-    format!(
-        "`{EXTRA_HEADERS_FIELD}` carries a credential in `{header}`, which would be stored \
-         readable: enter it as the connection's bearer token or API key"
-    )
 }
 
 /// What about a URL keeps a secret from being sealed for it, if anything.

@@ -302,7 +302,7 @@ fn build_edit_projection(
             } else if field.access != runtara_dsl::form::FieldAccessMode::Write
                 && let Some(value) = current
             {
-                values.insert(field.name.to_string(), value.clone());
+                values.insert(field.name.to_string(), shown(value));
             }
         }
     }
@@ -529,6 +529,39 @@ pub struct ConnectionService {
     sealed: Arc<crate::sealed::SealedCredentials>,
 }
 
+/// A parameter that is no secret field, as an edit shows it. A map may still
+/// hold sealed values (an MCP connection's extra headers): each is shown
+/// blank, and an edit that leaves it blank keeps it.
+fn shown(value: &serde_json::Value) -> serde_json::Value {
+    let mut value = value.clone();
+    if let Some(entries) = value.as_object_mut() {
+        for entry in entries.values_mut() {
+            if crate::sealed::is_sealed(entry) {
+                *entry = serde_json::Value::String(String::new());
+            }
+        }
+    }
+    value
+}
+
+/// An edit shows a sealed extra header blank ([`shown`]): one sent back blank
+/// is the one the connection holds, not a header with no value.
+fn keep_sealed_extra_headers(merged: &mut serde_json::Value, stored: &serde_json::Value) {
+    let field = crate::sealed::policy::EXTRA_HEADERS_FIELD;
+    let Some(held) = stored[field].as_object() else {
+        return;
+    };
+    for (header, value) in merged[field].as_object_mut().into_iter().flatten() {
+        if value.as_str() == Some("")
+            && let Some(kept) = held
+                .get(header)
+                .filter(|kept| crate::sealed::is_sealed(kept))
+        {
+            *value = kept.clone();
+        }
+    }
+}
+
 /// What stands in for a sealed secret while a connection is checked against
 /// its type's form, which asks for a value. Never stored.
 const SEALED_STAND_IN: &str = "(sealed)";
@@ -540,6 +573,17 @@ fn with_sealed_stand_ins(params: &serde_json::Value) -> serde_json::Value {
         for value in fields.values_mut() {
             if crate::sealed::is_sealed(value) {
                 *value = serde_json::Value::String(SEALED_STAND_IN.into());
+            }
+            // A map of secrets holds a sealed value under each name.
+            for entry in value
+                .as_object_mut()
+                .into_iter()
+                .flatten()
+                .map(|(_, entry)| entry)
+            {
+                if crate::sealed::is_sealed(entry) {
+                    *entry = serde_json::Value::String(SEALED_STAND_IN.into());
+                }
             }
         }
     }
@@ -553,12 +597,21 @@ fn reject_supplied_markers(
     stored: Option<&serde_json::Value>,
 ) -> Result<(), ServiceError> {
     for (name, value) in params.as_object().into_iter().flatten() {
-        if crate::sealed::is_sealed(value)
-            && stored.and_then(|stored| stored.get(name)) != Some(value)
-        {
+        let held = stored.and_then(|stored| stored.get(name));
+        if crate::sealed::is_sealed(value) && held != Some(value) {
             return Err(ServiceError::ValidationError(format!(
                 "Connection field '{name}' has a reserved form"
             )));
+        }
+        // Nor inside a map of secrets.
+        for (entry, value) in value.as_object().into_iter().flatten() {
+            if crate::sealed::is_sealed(value)
+                && held.and_then(|held| held.get(entry)) != Some(value)
+            {
+                return Err(ServiceError::ValidationError(format!(
+                    "Connection field '{name}.{entry}' has a reserved form"
+                )));
+            }
         }
     }
     Ok(())
@@ -1096,6 +1149,9 @@ impl ConnectionService {
         // Validate the EFFECTIVE (merged) parameters against the type schema — a
         // partial edit (e.g. only `environment`) must still satisfy required fields
         // that live in the preserved existing params.
+        if let Some(merged) = effective_parameters.as_mut() {
+            keep_sealed_extra_headers(merged, &old_params);
+        }
         if let Some(merged) = effective_parameters.as_ref() {
             // A secret that stays sealed is the marker the connection holds.
             reject_supplied_markers(merged, Some(&old_params))?;

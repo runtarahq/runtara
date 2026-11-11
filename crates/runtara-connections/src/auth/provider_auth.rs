@@ -339,22 +339,13 @@ pub(crate) fn describe_connection_auth(
         // The agent (runtara-agent-mcp) sends its JSON-RPC bodies through
         // the proxy; seal attaches the bearer token or API key of the
         // connection's `auth_mode`.
-        "mcp" => {
-            // Extra static headers configured on the connection.
-            if let Some(extras) = params["extra_headers"].as_object() {
-                for (k, v) in extras {
-                    if let Some(s) = v.as_str() {
-                        headers.insert(k.clone(), s.to_string());
-                    }
-                }
-            }
-            ConnectionAuthDescriptor {
-                base_url: params["url"].as_str().map(|u| u.to_string()),
-                aws_signing: None,
-                azure_signing: None,
-                deferred_auth: None,
-            }
-        }
+        // The connection's extra headers are sealed too, and seal's to set.
+        "mcp" => ConnectionAuthDescriptor {
+            base_url: params["url"].as_str().map(|u| u.to_string()),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: None,
+        },
         "aws_credentials" | "s3_compatible" => {
             let region = first_string_param(params, &["region", "aws_region"])
                 .unwrap_or_else(|| "us-east-1".to_string());
@@ -2030,7 +2021,7 @@ mod tests {
     }
 
     #[test]
-    fn mcp_extra_headers_are_forwarded() {
+    fn mcp_extra_headers_are_left_to_seal() {
         let params = json!({
             "url": "https://mcp.example.com/jsonrpc",
             "auth_mode": "none",
@@ -2038,7 +2029,6 @@ mod tests {
         });
         let mut headers = HashMap::new();
         let _ = describe_connection_auth("c", "mcp", &params, &mut headers);
-        assert_eq!(headers.get("X-Custom"), Some(&"yes".to_string()));
-        assert_eq!(headers.get("Mcp-Session-Id"), Some(&"sess1".to_string()));
+        assert!(headers.is_empty(), "{headers:?}");
     }
 }

@@ -631,6 +631,119 @@ async fn a_request_presents_only_the_secret_the_connections_settings_use() {
     assert!(request_fields("mcp", &params).is_empty());
 }
 
+/// The extra headers of an MCP connection are secrets of their own: seal
+/// sets each on the connection's requests, and nothing else holds a value.
+#[tokio::test]
+async fn an_mcp_connections_extra_headers_are_sent_by_seal() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .and(header("Authorization", "Bearer bearer-CANARY"))
+        .and(header("X-Team", "team-CANARY"))
+        .and(header("X-Api-Key", "key-CANARY"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/open"))
+        .and(header("X-Team", "team-CANARY"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let sealed = sealed_for(&server);
+    let send = |connection: &'static str, stored: Value, route: &'static str| {
+        let (sealed, url) = (&sealed, format!("{}{route}", server.uri()));
+        async move {
+            sealed
+                .send_bounded(
+                    TENANT,
+                    connection,
+                    "mcp",
+                    &stored,
+                    "POST",
+                    &url,
+                    headers(&[]),
+                    Some(b"{}".to_vec()),
+                    64 * 1024,
+                )
+                .await
+        }
+    };
+
+    let stored = sealed
+        .seal_parameters(
+            TENANT,
+            CONNECTION,
+            "mcp",
+            &json!({
+                "url": format!("{}/mcp", server.uri()),
+                "auth_mode": "bearer",
+                "bearer_token": "bearer-CANARY",
+                "extra_headers": {"X-Team": "team-CANARY", "X-Api-Key": "key-CANARY"},
+            }),
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("mcp is sealed");
+    assert!(!stored.to_string().contains("CANARY"));
+    assert_eq!(
+        request_fields("mcp", &stored),
+        [
+            "bearer_token",
+            "extra_headers.X-Api-Key",
+            "extra_headers.X-Team"
+        ]
+    );
+    assert_eq!(
+        send(CONNECTION, stored.clone(), "/mcp")
+            .await
+            .unwrap()
+            .status,
+        200
+    );
+    // They go to the connection's server, and nowhere else.
+    let elsewhere = sealed
+        .send_bounded(
+            TENANT,
+            CONNECTION,
+            "mcp",
+            &stored,
+            "POST",
+            "https://elsewhere.example.com/mcp",
+            headers(&[]),
+            None,
+            64 * 1024,
+        )
+        .await;
+    assert!(
+        matches!(elsewhere, Err(SendError::Seal(_))),
+        "{elsewhere:?}"
+    );
+
+    // With no auth mode, the headers are still seal's to send.
+    let open = sealed
+        .seal_parameters(
+            TENANT,
+            "c-open",
+            "mcp",
+            &json!({
+                "url": format!("{}/open", server.uri()),
+                "auth_mode": "none",
+                "extra_headers": {"X-Team": "team-CANARY"},
+            }),
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("its headers are sealed");
+    assert!(has_sealed_values(&open));
+    assert_eq!(request_fields("mcp", &open), ["extra_headers.X-Team"]);
+    assert_eq!(send("c-open", open, "/open").await.unwrap().status, 200);
+}
+
 #[test]
 fn the_wrapping_key_is_its_own_setting_or_derived_from_the_encryption_key() {
     use base64::Engine;
