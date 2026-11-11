@@ -27,11 +27,14 @@ use crate::valkey_support::ValkeyFixture;
 
 pub const BASE: &str = "https://platform.example.com";
 
+/// The type of the connections here.
+pub const TYPE: &str = "http_oauth2_authorization_code";
+
 pub struct Fixture {
     pub pool: PgPool,
     pub valkey: redis::aio::ConnectionManager,
-    /// seal, for the tests of a deployment that seals. None by default.
-    pub sealed: Option<Arc<runtara_connections::sealed::SealedCredentials>>,
+    /// seal, as every deployment has it, reaching loopback.
+    pub sealed: Arc<runtara_connections::sealed::SealedCredentials>,
     _pg: ContainerAsync<Postgres>,
     _valkey: ValkeyFixture,
 }
@@ -95,23 +98,71 @@ impl Fixture {
         Self {
             pool,
             valkey: valkey.manager.clone(),
-            sealed: None,
+            sealed: runtara_connections::sealed::SealedCredentials::for_tests(),
             _pg: pg,
             _valkey: valkey,
         }
     }
 
+    /// A connection as a save stores it: with its secrets sealed.
     pub async fn insert(&self, id: &str, tenant: &str, params: serde_json::Value) {
+        // What a test sealed itself is stored as it is.
+        let params = if runtara_connections::sealed::has_sealed_values(&params) {
+            params
+        } else {
+            self.sealed
+                .seal_parameters(tenant, id, TYPE, &params, None)
+                .await
+                .expect("the connection's secrets are sealed")
+                .unwrap_or(params)
+        };
+        let format = if runtara_connections::sealed::has_sealed_values(&params) {
+            "seal"
+        } else {
+            "cipher"
+        };
         sqlx::query(
-            "INSERT INTO connection_data_entity (id, tenant_id, integration_id, connection_parameters) \
-             VALUES ($1, $2, 'http_oauth2_authorization_code', $3)",
+            "INSERT INTO connection_data_entity \
+             (id, tenant_id, integration_id, connection_parameters, credential_format) \
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(id)
         .bind(tenant)
+        .bind(TYPE)
         .bind(params)
+        .bind(format)
         .execute(&self.pool)
         .await
         .expect("insert connection");
+    }
+
+    /// The access token a connection holds, as its API receives it: a sealed
+    /// token can be read nowhere else. `api` is the connection's `base_url`.
+    pub async fn access_token(&self, tenant: &str, id: &str, api: &MockServer) -> String {
+        Mock::given(method("GET"))
+            .and(path("/whoami"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(api)
+            .await;
+        let (stored, _) = self.stored(id).await;
+        let request = http::Request::get(format!("{}/whoami", api.uri()))
+            .body(None)
+            .unwrap();
+        self.sealed
+            .send(tenant, id, TYPE, &stored, request)
+            .await
+            .expect("seal sends a request with the connection's token");
+        let requests = api.received_requests().await.unwrap();
+        let sent = requests
+            .iter()
+            .rev()
+            .find(|request| request.url.path() == "/whoami")
+            .expect("the API was called");
+        sent.headers["authorization"]
+            .to_str()
+            .unwrap()
+            .trim_start_matches("Bearer ")
+            .to_owned()
     }
 
     pub async fn stored(&self, id: &str) -> (serde_json::Value, String) {
@@ -126,9 +177,13 @@ impl Fixture {
     }
 
     pub fn service(&self) -> OAuthService {
-        OAuthService::new(self.pool.clone(), Arc::new(NoOpCipher), BASE.to_string())
-            .with_flows(self.valkey.clone())
-            .with_sealed(self.sealed.clone())
+        OAuthService::new(
+            self.pool.clone(),
+            Arc::new(NoOpCipher),
+            BASE.to_string(),
+            self.sealed.clone(),
+        )
+        .with_flows(self.valkey.clone())
     }
 
     pub fn config(&self, tenants: Arc<dyn TenantHost>) -> ConnectionsConfig {
@@ -185,7 +240,8 @@ pub fn params(provider: &MockServer, callback: Option<&str>) -> serde_json::Valu
         "token_url": format!("{}/oauth/token", provider.uri()),
         "client_id": "cid",
         "client_secret": "csec",
-        "base_url": "https://api.example.com"
+        // The provider's API, on the same stand-in.
+        "base_url": provider.uri()
     });
     if let Some(callback) = callback {
         params["oauth_callback"] = json!(callback);

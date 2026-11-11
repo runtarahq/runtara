@@ -212,11 +212,7 @@ async fn admit_sealed(
     if !is_sealed(&params[PG_URL_FIELD]) {
         return None;
     }
-    let Some(sealed) = facade.sealed().cloned() else {
-        return Some(Err(
-            "its password is sealed, and this deployment has no seal".to_string(),
-        ));
-    };
+    let sealed = facade.sealed().clone();
     Some(super::database_guard::admit_sealed(sealed, tenant_id, connection_id, params).await)
 }
 

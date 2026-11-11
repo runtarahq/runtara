@@ -81,6 +81,7 @@ async fn quickbooks_authorize_url_is_descriptor_driven() {
         fixture.pool.clone(),
         Arc::new(NoOpCipher),
         "https://platform.example.com".to_string(),
+        runtara_connections::sealed::SealedCredentials::for_tests(),
     )
     .with_flows(valkey.manager.clone());
 

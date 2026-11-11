@@ -89,11 +89,7 @@ impl ReplyAuth {
                 integration_id,
                 parameters,
             } => {
-                let sealed = connections.sealed().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "the connection's credentials are sealed, and this deployment has no seal"
-                    )
-                })?;
+                let sealed = connections.sealed();
                 let response = sealed
                     .send_bounded(
                         tenant_id,
@@ -599,7 +595,7 @@ mod tests {
     fn facade(sealed: Option<Arc<SealedCredentials>>) -> Arc<ConnectionsFacade> {
         Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
             ConnectionsConfig {
-                sealed,
+                sealed: sealed.unwrap_or_else(SealedCredentials::for_tests),
                 agent_access: Arc::new(runtara_connections::EveryAgent),
                 db_pool: sqlx::PgPool::connect_lazy("postgres://unused@127.0.0.1:1/unused")
                     .unwrap(),
@@ -710,9 +706,9 @@ mod tests {
         let (status, body) = reply(&auth, &server).await.unwrap();
         assert_eq!((status, body["ok"].as_bool()), (200, Some(true)));
 
-        // Without seal the reply is not sent, with or without a credential.
+        // A seal without this tenant's keys cannot send it.
         let error = reply(&of(&facade(None)), &server).await.unwrap_err();
-        assert!(error.to_string().contains("sealed"), "{error}");
+        assert!(error.to_string().contains("KEYSET_UNKNOWN"), "{error}");
     }
 
     /// A Bot API that takes `sendMessage` for one bot only.

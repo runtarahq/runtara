@@ -86,6 +86,7 @@ impl PgFixture {
                 Arc::new(NoOpCipher),
             )),
             Arc::new(IntegrationCompatibility::new(HashMap::new())),
+            runtara_connections::sealed::SealedCredentials::for_tests(),
         )
     }
 }

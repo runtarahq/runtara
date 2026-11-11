@@ -833,20 +833,7 @@ async fn execute_request(
     if let (Some((integration_id, params)), Some(connection_id)) =
         (&sealed_connection, request.connection_id.as_deref())
     {
-        let Some(sealed) = facade.sealed() else {
-            tracing::error!(
-                target: "proxy",
-                connection_id,
-                "connection is sealed, but this deployment has no seal"
-            );
-            return Err((
-                502,
-                json!({
-                    "error": "Connection credentials are sealed and cannot be used here",
-                    "code": "SEALED_CREDENTIALS_UNAVAILABLE",
-                }),
-            ));
-        };
+        let sealed = facade.sealed();
         let upstream = sealed
             .send_bounded(
                 tenant_id,

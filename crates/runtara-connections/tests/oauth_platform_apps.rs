@@ -398,7 +398,10 @@ async fn moving_between_a_platform_app_and_the_tenants_own_needs_reauthorization
     assert_eq!(status, "REQUIRES_RECONNECTION");
     assert!(stored.get("oauth_app").is_none());
     assert_eq!(stored["client_id"], "own-client-2");
-    assert_eq!(stored["client_secret"], "own-secret-2");
+    assert!(runtara_connections::sealed::is_sealed(
+        &stored["client_secret"]
+    ));
+    assert!(!stored.to_string().contains("own-secret-2"));
 }
 
 #[tokio::test]

@@ -1232,10 +1232,20 @@ impl ConnectionRepository {
                 {
                     sealed_parameters
                 }
-                // Not a type seal handles, a destination it cannot express,
-                // or nothing entered to seal.
+                // Nothing entered to seal.
                 Ok(_) => {
                     stats.unchanged += 1;
+                    continue;
+                }
+                // A secret seal cannot hold: the connection is left as it
+                // is, and cannot be used until it is entered again in a form
+                // seal can hold.
+                Err(crate::sealed::SealingError::CannotSeal { reason }) => {
+                    stats.unsealable += 1;
+                    tracing::warn!(
+                        connection_id = %id, tenant_id = %tenant, %integration_id, %reason,
+                        "seal: the connection's credentials cannot be sealed"
+                    );
                     continue;
                 }
                 Err(error) => {
@@ -1433,9 +1443,12 @@ pub struct SealingStats {
     pub scanned: usize,
     /// Connections whose secrets were sealed (or would be, in a dry run).
     pub sealed: usize,
-    /// Connections left as they are: of a type seal does not handle, with a
-    /// destination seal cannot express, or with no secret to seal.
+    /// Connections left as they are: they hold no secret.
     pub unchanged: usize,
+    /// Connections left as they are though they hold a secret: seal cannot
+    /// hold it (the type is not one it handles, or the destination is one it
+    /// cannot express). They cannot be used until entered again.
+    pub unsealable: usize,
     /// Connections that could not be read or sealed, and were left alone.
     pub failed: usize,
 }

@@ -200,16 +200,23 @@ async fn a_sealed_value_opens_only_for_its_own_connection_and_tenant() {
 }
 
 #[tokio::test]
-async fn a_type_that_is_not_sealed_is_left_alone() {
+async fn a_type_seal_does_not_know_is_refused_with_whatever_it_holds() {
     let server = MockServer::start().await;
     let sealed = sealed_for(&server);
     let params = json!({"host": "db.example.com", "password": SECRET});
 
-    let stored = sealed
+    let error = sealed
         .seal_parameters(TENANT, CONNECTION, "not_a_sealed_type", &params, None)
         .await
-        .unwrap();
+        .unwrap_err();
 
+    assert!(matches!(error, SealingError::CannotSeal { .. }), "{error}");
+    assert!(!error.to_string().contains(SECRET));
+    // With nothing in it, there is nothing to refuse.
+    let stored = sealed
+        .seal_parameters(TENANT, CONNECTION, "not_a_sealed_type", &json!({}), None)
+        .await
+        .unwrap();
     assert_eq!(stored, None);
 }
 
@@ -625,23 +632,6 @@ async fn a_request_presents_only_the_secret_the_connections_settings_use() {
 }
 
 #[test]
-fn sealing_is_off_unless_switched_on() {
-    for on in ["1", "true", "TRUE", " yes ", "on"] {
-        assert!(sealing_enabled(Some(on)), "{on}");
-    }
-    for off in [
-        None,
-        Some(""),
-        Some("0"),
-        Some("false"),
-        Some("off"),
-        Some("seal"),
-    ] {
-        assert!(!sealing_enabled(off), "{off:?}");
-    }
-}
-
-#[test]
 fn the_wrapping_key_is_its_own_setting_or_derived_from_the_encryption_key() {
     use base64::Engine;
     let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
@@ -1054,17 +1044,18 @@ async fn a_database_url_is_stored_as_its_sealed_password_and_its_target() {
         .unwrap();
     assert_eq!(again, stored);
 
-    // A URL seal could not log in for is not sealed, and is stored whole.
+    // A URL seal could not log in for is refused: it is not stored whole.
     let odd = json!({
         "database_url": format!(
             "postgres://app:{SECRET}@db.example.com/orders?sslmode=verify-full&sslrootcert=/ca.pem"
         ),
     });
-    let stored = sealed
+    let error = sealed
         .seal_parameters(TENANT, CONNECTION, "postgres", &odd, None)
         .await
-        .unwrap();
-    assert_eq!(stored, None);
+        .unwrap_err();
+    assert!(matches!(error, SealingError::CannotSeal { .. }), "{error}");
+    assert!(!error.to_string().contains(SECRET));
 
     // A URL that does not ask for a verified server is sealed for what it
     // asks, by a seal that can log in so; an earlier seal leaves it whole.

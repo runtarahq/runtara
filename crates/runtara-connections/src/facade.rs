@@ -167,32 +167,28 @@ impl ConnectionsFacade {
             return Ok(SignatureCheck::Invalid);
         };
         let valid = if sealed {
-            let seal = self.state.sealed.as_ref().ok_or_else(|| {
-                ConnectionsError::AuthResolution(
-                    "the connection's signing secret is sealed, and this deployment has no seal"
+            self.state
+                .sealed
+                .verify(
+                    tenant_id,
+                    &connection.id,
+                    parameters,
+                    field,
+                    message.to_vec(),
+                    signature,
+                )
+                .await
+                .map_err(|error| {
+                    // seal's detail has identifiers and static text only.
+                    ConnectionsError::AuthResolution(
+                        format!(
+                            "the signature could not be checked: {}: {}",
+                            error.code.as_str(),
+                            error.detail
+                        )
                         .into(),
-                )
-            })?;
-            seal.verify(
-                tenant_id,
-                &connection.id,
-                parameters,
-                field,
-                message.to_vec(),
-                signature,
-            )
-            .await
-            .map_err(|error| {
-                // seal's detail has identifiers and static text only.
-                ConnectionsError::AuthResolution(
-                    format!(
-                        "the signature could not be checked: {}: {}",
-                        error.code.as_str(),
-                        error.detail
                     )
-                    .into(),
-                )
-            })?
+                })?
         } else {
             let mut mac = Hmac::<sha2::Sha256>::new_from_slice(
                 secret.as_str().unwrap_or_default().as_bytes(),
@@ -214,10 +210,9 @@ impl ConnectionsFacade {
         ConnectionRepository::new(self.state.db_pool.clone(), self.state.cipher.clone())
     }
 
-    /// seal, if this deployment seals credentials. A connection that
-    /// resolves as sealed is used through it.
-    pub fn sealed(&self) -> Option<&Arc<crate::sealed::SealedCredentials>> {
-        self.state.sealed.as_ref()
+    /// seal, which holds every connection's secrets and uses them.
+    pub fn sealed(&self) -> &Arc<crate::sealed::SealedCredentials> {
+        &self.state.sealed
     }
 
     /// Build a rate-limit analytics service using the facade's configured
@@ -305,22 +300,17 @@ impl ConnectionsFacade {
         // attaches the secret the extractor can no longer read.
         let presents_sealed = connection.sealed
             && !crate::sealed::request_fields(integration_id, parameters).is_empty();
-        let fetcher = match (presents_sealed, self.state.sealed.as_deref()) {
-            (false, _) => crate::resource_resolver::Fetcher::plain(&self.state.http_client),
-            (true, Some(sealed)) => crate::resource_resolver::Fetcher::sealed(
+        let fetcher = if presents_sealed {
+            crate::resource_resolver::Fetcher::sealed(
                 &self.state.http_client,
                 crate::resource_resolver::SealedRoute {
-                    sealed,
+                    sealed: &self.state.sealed,
                     tenant_id,
                     connection_id: id,
                 },
-            ),
-            (true, None) => {
-                return Err(ConnectionsError::AuthResolution(
-                    "the connection's credentials are sealed, and this deployment has no seal"
-                        .into(),
-                ));
-            }
+            )
+        } else {
+            crate::resource_resolver::Fetcher::plain(&self.state.http_client)
         };
         crate::resource_resolver::resolve_resource(&fetcher, integration_id, parameters, request)
             .await
@@ -496,7 +486,7 @@ impl ConnectionsFacade {
             effective.as_ref().unwrap_or(params),
             headers,
             &self.state.connection_events,
-            self.state.sealed.as_deref(),
+            Some(&self.state.sealed),
         )
         .await
         {
@@ -971,7 +961,7 @@ mod signature_tests {
             connection_events: None,
             oauth: Default::default(),
             agent_access: Arc::new(crate::config::EveryAgent),
-            sealed,
+            sealed: sealed.unwrap_or_else(SealedCredentials::for_tests),
         })
     }
 

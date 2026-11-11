@@ -225,9 +225,7 @@ impl ChannelRouter {
             && let Some(sealed_secret) =
                 crate::api::services::webhook_manager::sealed_webhook_secret(stored)
         {
-            let sealed = self.connections.sealed().ok_or_else(|| {
-                anyhow::anyhow!("The webhook secret is sealed, and this deployment has no seal")
-            })?;
+            let sealed = self.connections.sealed();
             return match sealed
                 .verify_webhook_secret(&tenant_id, connection_id, &sealed_secret, header)
                 .await

@@ -1344,8 +1344,7 @@ pub async fn start_with(
         },
     };
 
-    // Sealed credentials (RUNTARA_SEALED_CREDENTIALS): seal holds the secrets
-    // of the connection types it handles, and sends their requests. The
+    // seal holds every connection's secrets, and sends their requests. The
     // proxy's development allowances are seal's too.
     let sealed_credentials =
         match runtara_connections::sealed::from_env(pool.clone(), crate::seal_allowances()) {
@@ -1355,12 +1354,10 @@ pub async fn start_with(
                 std::process::exit(1);
             }
         };
-    if let Some(sealed) = &sealed_credentials {
-        tracing::info!(
-            mode = sealed.mode(),
-            "Sealed credentials ENABLED: secrets of sealable connection types are held by seal"
-        );
-    }
+    tracing::info!(
+        mode = sealed_credentials.mode(),
+        "Connection secrets are held by seal"
+    );
 
     // Construct connections crate config and facade.
     let connections_config = runtara_connections::ConnectionsConfig {

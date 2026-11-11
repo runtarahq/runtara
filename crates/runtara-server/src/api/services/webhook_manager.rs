@@ -302,12 +302,7 @@ impl WebhookManager {
                 connection_id,
                 parameters,
             } => {
-                let sealed = self.facade.sealed().ok_or_else(|| {
-                    WebhookError::NotApplied(
-                        "the connection's credentials are sealed, and this deployment has no seal"
-                            .into(),
-                    )
-                })?;
+                let sealed = self.facade.sealed();
                 let headers =
                     body.map(|_| ("content-type".to_string(), "application/json".to_string()));
                 let body = body
@@ -391,11 +386,7 @@ impl WebhookManager {
                 "the webhook's secret is sealed, and the connection's bot token is not".into(),
             ));
         };
-        let sealed = self.facade.sealed().ok_or_else(|| {
-            WebhookError::NotApplied(
-                "the webhook's secret is sealed, and this deployment has no seal".into(),
-            )
-        })?;
+        let sealed = self.facade.sealed();
         let mut presenting = parameters.clone();
         presenting[runtara_connections::sealed::policy::WEBHOOK_SECRET_FIELD] = sealed_secret;
         // A form, which seal holds to the one URL: Telegram reads a list in
@@ -468,10 +459,7 @@ impl WebhookManager {
                 .is_some_and(|params| runtara_connections::sealed::is_sealed(&params["bot_token"]));
         let webhook_url = self.telegram_webhook_url(tenant_id, connection_id);
         held_webhook_secret(
-            self.facade
-                .sealed()
-                .filter(|_| seals)
-                .map(|sealed| &**sealed),
+            seals.then(|| &**self.facade.sealed()),
             tenant_id,
             connection_id,
             webhook_url.as_deref(),
@@ -1154,7 +1142,8 @@ mod tests {
         };
         Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
             ConnectionsConfig {
-                sealed,
+                sealed: sealed
+                    .unwrap_or_else(runtara_connections::sealed::SealedCredentials::for_tests),
                 agent_access: std::sync::Arc::new(runtara_connections::EveryAgent),
                 db_pool: pool,
                 redis_manager: None,

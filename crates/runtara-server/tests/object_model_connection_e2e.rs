@@ -161,7 +161,7 @@ fn test_agent_catalog() -> Arc<runtara_dsl::agent_meta::AgentCatalog> {
 
 fn facade(pool: PgPool) -> ConnectionsFacade {
     ConnectionsFacade::new(ConnectionsState::from_config(ConnectionsConfig {
-        sealed: None,
+        sealed: runtara_connections::sealed::SealedCredentials::for_tests(),
         agent_access: std::sync::Arc::new(runtara_connections::EveryAgent),
         db_pool: pool,
         redis_manager: None,
@@ -220,7 +220,11 @@ async fn object_model_routes_schemas_to_selected_connection_database() {
         fixture.server_pool.clone(),
         Arc::new(NoOpCipher),
     ));
-    let connection_service = ConnectionService::new(repo, test_compatibility());
+    let connection_service = ConnectionService::new(
+        repo,
+        test_compatibility(),
+        runtara_connections::sealed::SealedCredentials::for_tests(),
+    );
     let alternate_connection_id = connection_service
         .create_connection(
             CreateConnectionRequest {

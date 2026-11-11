@@ -188,9 +188,7 @@ impl BuiltinTrustedCredentials {
                 "The connection's credentials are sealed and cannot be given to this capability",
             ));
         }
-        let sealed = self.0.sealed().ok_or_else(|| {
-            unavailable("The connection's credentials are sealed, and this deployment has no seal")
-        })?;
+        let sealed = self.0.sealed();
         let invalid = || error("INVALID_INPUT", "Bucket and object key are required");
         let input: serde_json::Value = serde_json::from_slice(input).map_err(|_| invalid())?;
         let filled = |name: &str| input[name].as_str().filter(|value| !value.is_empty());

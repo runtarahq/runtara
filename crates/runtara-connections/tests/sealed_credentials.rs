@@ -104,8 +104,8 @@ impl Fixture {
         ConnectionService::new(
             repository,
             Arc::new(IntegrationCompatibility::new(HashMap::new())),
+            sealed.unwrap_or_else(runtara_connections::sealed::SealedCredentials::for_tests),
         )
-        .with_sealed(sealed)
     }
 
     fn repository(&self) -> ConnectionRepository {
@@ -206,39 +206,77 @@ async fn a_sealable_connection_is_stored_sealed_and_says_so() {
 }
 
 #[tokio::test]
-async fn connections_that_are_not_sealed_stay_as_they_were() {
+async fn a_secret_seal_cannot_hold_is_refused_and_nothing_is_stored() {
     let fixture = Fixture::new().await;
-
-    // A destination seal cannot express (a base URL with a query), with
-    // sealing on.
     let service = fixture.service(Some(fixture.sealed()));
-    let id = service
-        .create_connection(bearer("odd", "https://api.example.com/v1?tenant=1"), TENANT)
-        .await
-        .unwrap();
-    let (format, stored) = fixture.row(&id).await;
-    assert_eq!(format, "cipher");
-    assert_eq!(stored["token"], SECRET);
-    let resolved = fixture
-        .repository()
-        .get_with_parameters(&id, TENANT)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(!resolved.sealed);
 
-    // A sealable type, with sealing off.
-    let service = fixture.service(None);
+    // Each with why, and never with the secret.
+    for (request, reason) in [
+        // A destination seal cannot express.
+        (
+            bearer("odd", "https://api.example.com/v1?tenant=1"),
+            "`base_url` must not carry a query or fragment",
+        ),
+        (
+            serde_json::from_value(json!({
+                "title": "db",
+                "integrationId": "postgres",
+                "connectionParameters": {
+                    "database_url": format!("postgres://app:{SECRET}@db.example.com/orders"),
+                },
+            }))
+            .unwrap(),
+            "sslmode=verify-full",
+        ),
+    ] {
+        let error = service
+            .create_connection(request, TENANT)
+            .await
+            .expect_err("a secret seal cannot hold is not stored");
+        let ServiceError::ValidationError(message) = error else {
+            panic!("refused as invalid input, not {error:?}");
+        };
+        assert!(message.contains(reason), "{message}");
+        assert!(!message.contains(SECRET), "{message}");
+    }
+    let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM connection_data_entity")
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 0);
+
+    // An edit that would leave a sealed secret with nowhere to go is refused
+    // too, and the connection stays as it was.
     let id = service
         .create_connection(bearer("api", "https://api.example.com/v1"), TENANT)
         .await
         .unwrap();
-    let (format, stored) = fixture.row(&id).await;
-    assert_eq!(format, "cipher");
-    assert_eq!(stored["token"], SECRET);
+    let before = fixture.row(&id).await;
+    for write in [json!({}), json!({"token": "another-secret"})] {
+        let error = patch(
+            &service,
+            &id,
+            json!({"set": {"base_url": "https://api.example.com/v1?tenant=1"}, "write": write}),
+        )
+        .await
+        .expect_err("the edit is refused");
+        assert!(
+            matches!(error, ServiceError::ValidationError(_)),
+            "{error:?}"
+        );
+    }
+    assert_eq!(fixture.row(&id).await, before);
+    assert_eq!(before.0, "seal");
 
-    // No connection was sealed, so no key was made.
-    assert!(fixture.keys().await.is_empty());
+    // A connection with no secret is stored as it is.
+    let none: CreateConnectionRequest = serde_json::from_value(json!({
+        "title": "open",
+        "integrationId": "mcp",
+        "connectionParameters": {"url": "https://mcp.example.com/mcp", "auth_mode": "none"},
+    }))
+    .unwrap();
+    let id = service.create_connection(none, TENANT).await.unwrap();
+    assert_eq!(fixture.row(&id).await.0, "cipher");
 }
 
 /// Types with more than one secret, or whose secret has a second reader:
@@ -452,29 +490,38 @@ async fn two_instances_seal_a_tenants_connections_to_the_same_key() {
 }
 
 /// Connections stored before sealing was on are sealed in place: each as it
-/// would be on its next save, one tenant at a time or all, and only what
-/// seal can hold. A dry run writes nothing.
+/// would be on its next save, one tenant at a time or all. What seal cannot
+/// hold is counted and left as it is. A dry run writes nothing.
 #[tokio::test]
 async fn existing_connections_are_sealed_in_place() {
     use runtara_connections::repository::connections::{SealingStats, refresh_token_guard};
     let fixture = Fixture::new().await;
-    let unsealed = fixture.service(None);
-    let sealable = unsealed
-        .create_connection(bearer("api", "https://api.example.com/v1"), TENANT)
-        .await
-        .unwrap();
-    // A destination seal cannot express: left as it is.
-    let unexpressible = unsealed
-        .create_connection(bearer("odd", "https://api.example.com/v1?tenant=1"), TENANT)
-        .await
-        .unwrap();
-    let elsewhere = unsealed
-        .create_connection(
-            bearer("theirs", "https://api.example.com/v1"),
-            "other-tenant",
+    // Rows as they were stored before the seal: readable.
+    let sealable = "api-1".to_owned();
+    let unexpressible = "odd-1".to_owned();
+    let elsewhere = "theirs-1".to_owned();
+    for (id, tenant, base_url) in [
+        (&sealable, TENANT, "https://api.example.com/v1"),
+        // A destination seal cannot express: left as it is.
+        (
+            &unexpressible,
+            TENANT,
+            "https://api.example.com/v1?tenant=1",
+        ),
+        (&elsewhere, "other-tenant", "https://api.example.com/v1"),
+    ] {
+        sqlx::query(
+            "INSERT INTO connection_data_entity \
+             (id, tenant_id, title, integration_id, connection_parameters) \
+             VALUES ($1, $2, $1, 'http_bearer', $3)",
         )
+        .bind(id)
+        .bind(tenant)
+        .bind(json!({"token": SECRET, "base_url": base_url}))
+        .execute(&fixture.pool)
         .await
         .unwrap();
+    }
     // An authorized OAuth connection, with the rotation guard of its
     // readable refresh token, and a type seal does not handle.
     for (id, integration_id, parameters, guard) in [
@@ -524,7 +571,8 @@ async fn existing_connections_are_sealed_in_place() {
         SealingStats {
             scanned: 4,
             sealed: 2,
-            unchanged: 2,
+            unchanged: 0,
+            unsealable: 2,
             failed: 0
         }
     );
@@ -558,7 +606,7 @@ async fn existing_connections_are_sealed_in_place() {
     .unwrap();
     assert_eq!(guard, refresh_token_guard(&oauth["refresh_token"]));
     assert!(guard.is_some());
-    // What seal cannot hold stays readable, and stays as it was.
+    // What seal cannot hold is left as it was, to be entered again.
     for (id, field) in [(unexpressible.as_str(), "token"), ("sftp-1", "password")] {
         let (format, stored) = fixture.row(id).await;
         assert_eq!(format, "cipher", "{id}");
@@ -586,7 +634,8 @@ async fn existing_connections_are_sealed_in_place() {
         SealingStats {
             scanned: 3,
             sealed: 1,
-            unchanged: 2,
+            unchanged: 0,
+            unsealable: 2,
             failed: 0
         }
     );

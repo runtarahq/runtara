@@ -2734,7 +2734,7 @@ pub(crate) fn graph_validate_routes(
     };
     let connections = Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
         ConnectionsConfig {
-            sealed: None,
+            sealed: runtara_connections::sealed::SealedCredentials::for_tests(),
             agent_access: std::sync::Arc::new(runtara_connections::EveryAgent),
             db_pool: pool.clone(),
             redis_manager: None,

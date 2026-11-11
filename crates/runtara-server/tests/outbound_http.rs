@@ -92,7 +92,7 @@ fn facade_with_redis(
     redis_manager: Option<redis::aio::ConnectionManager>,
 ) -> ConnectionsFacade {
     ConnectionsFacade::new(ConnectionsState::from_config(ConnectionsConfig {
-        sealed: None,
+        sealed: runtara_connections::sealed::SealedCredentials::for_tests(),
         agent_access: std::sync::Arc::new(runtara_connections::EveryAgent),
         db_pool: pool,
         redis_manager,
@@ -189,7 +189,7 @@ async fn mtls_fixture() -> MtlsFixture {
 }
 
 #[tokio::test]
-async fn outbound_uses_persisted_http_mtls_identity_and_private_server_ca() {
+async fn a_mismatched_mtls_key_is_refused_when_the_connection_is_saved() {
     allow_local_egress_for_this_test_binary();
     init_server_config();
     let pool = test_pool().await;
@@ -197,7 +197,7 @@ async fn outbound_uses_persisted_http_mtls_identity_and_private_server_ca() {
     let MtlsFixture {
         base_url,
         client_certificate_pem,
-        client_private_key_pem,
+        client_private_key_pem: _,
         server_ca_pem,
         server,
     } = mtls_fixture().await;
@@ -208,6 +208,7 @@ async fn outbound_uses_persisted_http_mtls_identity_and_private_server_ca() {
             Arc::new(NoOpCipher),
         )),
         compatibility.clone(),
+        runtara_connections::sealed::SealedCredentials::for_tests(),
     );
 
     // The create path exercises the exact public descriptor and save-time
@@ -243,85 +244,9 @@ async fn outbound_uses_persisted_http_mtls_identity_and_private_server_ca() {
         mismatch_message.contains("mTLS client could not be initialized"),
         "certificate/key mismatch should fail while building Rustls config"
     );
-
-    let connection_id = service
-        .create_connection(
-            CreateConnectionRequest {
-                title: format!("mTLS valid {tenant_id}"),
-                connection_subtype: None,
-                connection_parameters: Some(json!({
-                    "base_url": base_url,
-                    "client_certificate_pem": client_certificate_pem,
-                    "client_private_key_pem": client_private_key_pem,
-                    "server_ca_pem": server_ca_pem,
-                })),
-                integration_id: Some("http_mtls".to_string()),
-                rate_limit_config: None,
-                valid_until: None,
-                is_default_file_storage: None,
-                default_for: None,
-            },
-            &tenant_id,
-        )
-        .await
-        .expect("create valid mTLS connection");
-
-    let facade = facade(pool.clone(), compatibility);
-    let outbound = NativeOutboundHttp {
-        facade: Arc::new(facade),
-        client: runtara_connections::net::build_hardened_client(),
-    };
-    let response = outbound
-        .request(
-            &OutboundContext {
-                tenant_id: tenant_id.clone(),
-                instance_id: None,
-            },
-            RequestOptions {
-                method: "GET".into(),
-                destination: Destination::Connection(ConnectionDestination {
-                    connection_id: connection_id.clone(),
-                    url: "/whoami".into(),
-                    ai_provider: None,
-                    aws_service: None,
-                    endpoint_ref: None,
-                    endpoint: None,
-                }),
-                headers: Vec::new(),
-                body: None,
-                timeout_ms: Some(5_000),
-                max_response_bytes: None,
-            },
-        )
-        .await
-        .expect("native outbound mTLS request");
-    assert_eq!(response.status, 200);
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&response.body).unwrap(),
-        json!({"mtls": true})
-    );
-
-    tokio::time::timeout(Duration::from_secs(5), server)
-        .await
-        .expect("TLS server should receive one request")
-        .expect("TLS server task should succeed");
-
-    // The outbound service records analytics asynchronously; let that best-effort task
-    // reach the database before removing this test's isolated rows.
-    tokio::task::yield_now().await;
-    let _ = sqlx::query("DELETE FROM rate_limit_events WHERE tenant_id = $1")
-        .bind(&tenant_id)
-        .execute(&pool)
-        .await;
-    let _ = sqlx::query("DELETE FROM connection_defaults WHERE tenant_id = $1")
-        .bind(&tenant_id)
-        .execute(&pool)
-        .await;
-    let _ = sqlx::query("DELETE FROM connection_data_entity WHERE id = $1 AND tenant_id = $2")
-        .bind(&connection_id)
-        .bind(&tenant_id)
-        .execute(&pool)
-        .await;
+    // A valid pair is saved sealed, and seal presents it: see
+    // `native_outbound_has_seal_present_a_sealed_client_certificate`.
+    server.abort();
 }
 
 /// Only the mock provider listens on HTTP. The WASM-to-host boundary is native.
@@ -380,6 +305,7 @@ async fn real_http_component_uses_stored_credentials_without_internal_listener()
             Arc::new(NoOpCipher),
         )),
         compatibility.clone(),
+        runtara_connections::sealed::SealedCredentials::for_tests(),
     );
     let connection_id = connections
         .create_connection(
@@ -586,6 +512,7 @@ async fn synthetic_connection(
             Arc::new(NoOpCipher),
         )),
         compatibility(),
+        runtara_connections::sealed::SealedCredentials::for_tests(),
     )
     .create_connection(
         CreateConnectionRequest {
@@ -643,7 +570,9 @@ async fn native_destination_controls_pin_urls_and_verify_endpoint_bindings() -> 
         &pool,
         &tenant,
         "http_bearer",
-        json!({"base_url":format!("{}/original", provider.uri()), "token":"synthetic-pin-token"}),
+        // The token is sealed for this base: a binding may narrow where a
+        // request goes, never move it outside.
+        json!({"base_url":format!("{}/bound", provider.uri()), "token":"synthetic-pin-token"}),
     )
     .await?;
     let outbound = NativeOutboundHttp {
@@ -758,22 +687,44 @@ async fn native_outbound_refreshes_oauth_and_persists_rotation_before_reuse() ->
         .mount(&provider)
         .await;
     let tenant = format!("oauth-outbound-{}", Uuid::new_v4());
-    let connection = synthetic_connection(
-        &pool,
-        &tenant,
-        "http_oauth2_authorization_code",
-        json!({
-            "base_url":format!("{}/api", provider.uri()),
-            "auth_url":format!("{}/oauth/authorize", provider.uri()),
-            "token_url":format!("{}/oauth/token", provider.uri()),
-            "client_id":"synthetic-client", "client_secret":"synthetic-client-secret",
-            "token_auth":"basic"
-        }),
+    // A connection as an earlier release stored it, authorized: readable.
+    let connection = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO connection_data_entity \
+         (id, tenant_id, title, integration_id, connection_parameters, status) \
+         VALUES ($1, $2, $1, 'http_oauth2_authorization_code', $3, 'ACTIVE')",
     )
+    .bind(&connection)
+    .bind(&tenant)
+    .bind(json!({
+        "base_url":format!("{}/api", provider.uri()),
+        "auth_url":format!("{}/oauth/authorize", provider.uri()),
+        "token_url":format!("{}/oauth/token", provider.uri()),
+        "client_id":"synthetic-client", "client_secret":"synthetic-client-secret",
+        "token_auth":"basic",
+        "access_token":"synthetic-expired-access", "refresh_token":"synthetic-old-refresh",
+        "token_expires_at":"2020-01-01T00:00:00Z"
+    }))
+    .execute(&pool)
     .await?;
-    sqlx::query("UPDATE connection_data_entity SET connection_parameters=connection_parameters || $1, status='ACTIVE' WHERE id=$2")
-        .bind(json!({"access_token":"synthetic-expired-access", "refresh_token":"synthetic-old-refresh", "token_expires_at":"2020-01-01T00:00:00Z"}))
-        .bind(&connection).execute(&pool).await?;
+    // Sealed in place, as the server does on start: the tokens are then as
+    // an authorization leaves them, with the guard of the refresh token.
+    let sealing = ConnectionRepository::new(pool.clone(), Arc::new(NoOpCipher))
+        .seal_existing(
+            &runtara_connections::sealed::SealedCredentials::for_tests(),
+            Some(&tenant),
+            false,
+        )
+        .await?;
+    assert_eq!((sealing.sealed, sealing.failed), (1, 0));
+    let before: serde_json::Value =
+        sqlx::query_scalar("SELECT connection_parameters FROM connection_data_entity WHERE id=$1")
+            .bind(&connection)
+            .fetch_one(&pool)
+            .await?;
+    for token in ["access_token", "refresh_token"] {
+        assert!(runtara_connections::sealed::is_sealed(&before[token]));
+    }
     let outbound = NativeOutboundHttp {
         facade: Arc::new(facade(pool.clone(), compatibility())),
         client: runtara_connections::net::build_hardened_client(),
@@ -791,7 +742,7 @@ async fn native_outbound_refreshes_oauth_and_persists_rotation_before_reuse() ->
             .bind(&connection)
             .fetch_one(&pool)
             .await?;
-    assert!(after_cancel["access_token"] == "synthetic-expired-access");
+    assert!(after_cancel == before);
     for _ in 0..2 {
         let response = outbound
             .request(&context, connection_request(&connection, "/resource"))
@@ -806,8 +757,11 @@ async fn native_outbound_refreshes_oauth_and_persists_rotation_before_reuse() ->
             .bind(connection)
             .fetch_one(&pool)
             .await?;
-    assert!(stored["access_token"] == "synthetic-new-access");
-    assert!(stored["refresh_token"] == "synthetic-new-refresh");
+    // The pair came back sealed, and replaced the one before.
+    for token in ["access_token", "refresh_token"] {
+        assert!(runtara_connections::sealed::is_sealed(&stored[token]));
+        assert!(stored[token] != before[token]);
+    }
     assert!(stored["token_expires_at"] != "2020-01-01T00:00:00Z");
     provider.verify().await;
     Ok(())
@@ -1077,8 +1031,8 @@ async fn native_outbound_sends_a_sealed_connections_request_through_seal() -> an
             Arc::new(NoOpCipher),
         )),
         compatibility(),
+        sealed.clone(),
     )
-    .with_sealed(Some(sealed.clone()))
     .create_connection(
         CreateConnectionRequest {
             title: format!("Sealed outbound {}", Uuid::new_v4()),
@@ -1128,7 +1082,7 @@ async fn native_outbound_sends_a_sealed_connections_request_through_seal() -> an
         }))
     };
     let outbound = NativeOutboundHttp {
-        facade: Arc::new(facade_with(Some(sealed))),
+        facade: Arc::new(facade_with(sealed)),
         client: runtara_connections::net::build_hardened_client(),
     };
     let context = OutboundContext {
@@ -1162,16 +1116,6 @@ async fn native_outbound_sends_a_sealed_connections_request_through_seal() -> an
         .unwrap_err();
     assert_eq!(denied.status, Some(403));
 
-    // A deployment without seal cannot use a sealed connection.
-    let without_seal = NativeOutboundHttp {
-        facade: Arc::new(facade_with(None)),
-        client: runtara_connections::net::build_hardened_client(),
-    };
-    let unavailable = without_seal
-        .request(&context, connection_request(&connection, "/orders"))
-        .await
-        .unwrap_err();
-    assert_eq!(unavailable.code, "SEALED_CREDENTIALS_UNAVAILABLE");
     Ok(())
 }
 
@@ -1215,8 +1159,8 @@ async fn native_outbound_has_seal_sign_a_sealed_storage_connections_request() ->
             Arc::new(NoOpCipher),
         )),
         compatibility(),
+        sealed.clone(),
     )
-    .with_sealed(Some(sealed.clone()))
     .create_connection(
         CreateConnectionRequest {
             title: format!("Sealed storage {}", Uuid::new_v4()),
@@ -1250,7 +1194,7 @@ async fn native_outbound_has_seal_sign_a_sealed_storage_connections_request() ->
     let outbound = NativeOutboundHttp {
         facade: Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
             ConnectionsConfig {
-                sealed: Some(sealed),
+                sealed,
                 agent_access: Arc::new(runtara_connections::EveryAgent),
                 db_pool: pool.clone(),
                 redis_manager: None,
@@ -1340,8 +1284,8 @@ async fn a_sealed_storage_connections_presigned_url_comes_from_seal() -> anyhow:
             ConnectionService::new(
                 Arc::new(ConnectionRepository::new(pool, Arc::new(NoOpCipher))),
                 compatibility(),
+                sealed.unwrap_or_else(runtara_connections::sealed::SealedCredentials::for_tests),
             )
-            .with_sealed(sealed)
             .create_connection(
                 CreateConnectionRequest {
                     title: format!("Presign {}", Uuid::new_v4()),
@@ -1360,11 +1304,10 @@ async fn a_sealed_storage_connections_presigned_url_comes_from_seal() -> anyhow:
         }
     };
     let sealed_connection = create(Some(sealed.clone())).await?;
-    let readable_connection = create(None).await?;
 
     let credentials = BuiltinTrustedCredentials(Arc::new(ConnectionsFacade::new(
         ConnectionsState::from_config(ConnectionsConfig {
-            sealed: Some(sealed),
+            sealed,
             agent_access: Arc::new(runtara_connections::EveryAgent),
             db_pool: pool.clone(),
             redis_manager: None,
@@ -1474,16 +1417,6 @@ async fn a_sealed_storage_connections_presigned_url_comes_from_seal() -> anyhow:
     .unwrap_err();
     assert!(other.contains("TRUSTED_CREDENTIALS_UNAVAILABLE"), "{other}");
 
-    // A readable key goes to the guest.
-    assert!(
-        answer(
-            readable_connection,
-            "storage-generate-presigned-url",
-            download
-        )
-        .await
-        .is_none()
-    );
     Ok(())
 }
 
@@ -1522,8 +1455,8 @@ async fn native_outbound_has_seal_present_a_sealed_client_certificate() -> anyho
             Arc::new(NoOpCipher),
         )),
         compatibility(),
-    )
-    .with_sealed(Some(sealed.clone()));
+        sealed.clone(),
+    );
     let connection_id = service
         .create_connection(
             CreateConnectionRequest {
@@ -1582,7 +1515,7 @@ async fn native_outbound_has_seal_present_a_sealed_client_certificate() -> anyho
     let outbound = NativeOutboundHttp {
         facade: Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
             ConnectionsConfig {
-                sealed: Some(sealed),
+                sealed,
                 agent_access: Arc::new(runtara_connections::EveryAgent),
                 db_pool: pool.clone(),
                 redis_manager: None,
@@ -1673,8 +1606,8 @@ async fn native_outbound_presents_a_token_got_with_a_sealed_client_secret() -> a
             Arc::new(NoOpCipher),
         )),
         compatibility(),
+        sealed.clone(),
     )
-    .with_sealed(Some(sealed.clone()))
     .create_connection(
         CreateConnectionRequest {
             title: format!("Sealed client {}", Uuid::new_v4()),
@@ -1709,7 +1642,7 @@ async fn native_outbound_presents_a_token_got_with_a_sealed_client_secret() -> a
     let outbound = NativeOutboundHttp {
         facade: Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
             ConnectionsConfig {
-                sealed: Some(sealed),
+                sealed,
                 agent_access: Arc::new(runtara_connections::EveryAgent),
                 db_pool: pool.clone(),
                 redis_manager: None,

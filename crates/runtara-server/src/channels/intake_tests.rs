@@ -279,7 +279,8 @@ impl Harness {
         ));
         let connections = Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
             ConnectionsConfig {
-                sealed,
+                sealed: sealed
+                    .unwrap_or_else(runtara_connections::sealed::SealedCredentials::for_tests),
                 agent_access: std::sync::Arc::new(runtara_connections::EveryAgent),
                 db_pool: self.pool.clone(),
                 redis_manager: None,

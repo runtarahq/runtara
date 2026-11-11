@@ -58,6 +58,10 @@ pub enum SealingError {
         "`{field}` must be entered again: the change alters where this credential is sent or how"
     )]
     SecretRequired { field: String },
+    /// The parameters hold a secret seal cannot hold, and nothing else may:
+    /// why, in words for whoever entered them.
+    #[error("this connection's credentials cannot be stored: {reason}")]
+    CannotSeal { reason: String },
     /// seal refused or failed. Never includes a value.
     #[error("sealing failed: {0}")]
     Seal(String),
@@ -193,8 +197,9 @@ impl SealedCredentials {
 
     /// The parameters to store for a connection, with each secret sealed.
     ///
-    /// `Ok(None)` means the connection is not sealed (see [`policy::policies`])
-    /// and is stored as it always was.
+    /// `Ok(None)` means the parameters hold no secret, and are stored as they
+    /// are. A secret is stored sealed or not at all: parameters with one seal
+    /// cannot hold (see [`policy::policies`]) are refused, with the reason.
     ///
     /// `stored` is what the connection holds now, if it exists. A secret may be
     /// left as its marker only if `stored` has that very marker, and the policy
@@ -225,7 +230,10 @@ impl SealedCredentials {
                 Some(field) => Err(SealingError::SecretRequired {
                     field: (*field).clone(),
                 }),
-                None => Ok(None),
+                None if policy::readable_secrets(integration_id, parameters).is_empty() => Ok(None),
+                None => Err(SealingError::CannotSeal {
+                    reason: policy::why_unsealable(integration_id, parameters, &self.allowances),
+                }),
             };
         };
         // A marker anywhere but a secret's own field is not one this made.
@@ -268,7 +276,14 @@ impl SealedCredentials {
                 _ => {}
             }
         }
-        Ok(Some(Value::Object(sealed)))
+        let sealed = Value::Object(sealed);
+        // A secret the type's policies do not cover would be stored readable.
+        if let Some(field) = policy::readable_secrets(integration_id, &sealed).first() {
+            return Err(SealingError::CannotSeal {
+                reason: format!("`{field}` is a secret this connection has no use for"),
+            });
+        }
+        Ok(Some(sealed))
     }
 
     /// Sends a request with a sealed connection's credentials. seal attaches
@@ -715,23 +730,9 @@ impl SealedCredentials {
     }
 }
 
-/// Turns sealing on: connections of the types seal handles are sealed as
-/// they are saved. Off by default.
-pub const SEALED_CREDENTIALS_ENV: &str = "RUNTARA_SEALED_CREDENTIALS";
-
 /// The key that wraps tenants' seal keys: 32 bytes in base64. If unset, the key
 /// is derived from the credential encryption key.
 pub const WRAPPING_KEY_ENV: &str = "RUNTARA_SEAL_WRAPPING_KEY";
-
-/// Whether [`SEALED_CREDENTIALS_ENV`] turns sealing on.
-pub fn sealing_enabled(value: Option<&str>) -> bool {
-    matches!(
-        value
-            .map(|value| value.trim().to_ascii_lowercase())
-            .as_deref(),
-        Some("true" | "1" | "yes" | "on")
-    )
-}
 
 /// The wrapping key: `wrapping_key` (base64, 32 bytes) if set, else one
 /// derived from `encryption_key` (base64, as the credential cipher takes it).
@@ -759,7 +760,7 @@ pub fn wrapping_key(
     }
     let Some(value) = set(encryption_key) else {
         return Err(format!(
-            "{SEALED_CREDENTIALS_ENV} is on, but there is no key to wrap tenants' seal keys with: \
+            "there is no key to wrap tenants' seal keys with: \
              set {WRAPPING_KEY_ENV} (openssl rand -base64 32), or {}",
             crate::crypto::ENCRYPTION_KEY_ENV
         ));
@@ -768,16 +769,13 @@ pub fn wrapping_key(
     Ok(keys::wrapping_key_from_encryption_key(&bytes))
 }
 
-/// seal for this deployment, from its environment: `None` unless
-/// [`SEALED_CREDENTIALS_ENV`] turns it on. Tenants' keys are kept in `pool`.
-/// Needs a Tokio runtime.
+/// seal for this deployment, from its environment. Tenants' keys are kept in
+/// `pool`, wrapped by [`WRAPPING_KEY_ENV`] or, without it, a key derived
+/// from the credential encryption key. Needs a Tokio runtime.
 pub fn from_env(
     pool: sqlx::PgPool,
     allowances: Allowances,
-) -> Result<Option<Arc<SealedCredentials>>, String> {
-    if !sealing_enabled(std::env::var(SEALED_CREDENTIALS_ENV).ok().as_deref()) {
-        return Ok(None);
-    }
+) -> Result<Arc<SealedCredentials>, String> {
     let key = wrapping_key(
         std::env::var(WRAPPING_KEY_ENV).ok().as_deref(),
         std::env::var(crate::crypto::ENCRYPTION_KEY_ENV)
@@ -789,7 +787,40 @@ pub fn from_env(
         key.as_ref(),
         allowances,
     )?;
-    Ok(Some(Arc::new(sealed)))
+    Ok(Arc::new(sealed))
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl SealedCredentials {
+    /// seal for a test, as a development deployment has it: in this process,
+    /// and allowed to reach loopback, where a test's stand-in for a provider
+    /// listens. Needs a Tokio runtime.
+    ///
+    /// Every seal made here shares one set of keys, as the instances of one
+    /// deployment do: what one seals, another opens.
+    pub fn for_tests() -> Arc<Self> {
+        let loopback = || vec!["127.0.0.1".to_owned(), "localhost".to_owned()];
+        Self::for_tests_with(Allowances {
+            private_hosts: loopback(),
+            plain_http_hosts: loopback(),
+            private_databases: true,
+            ..Allowances::default()
+        })
+    }
+
+    /// [`Self::for_tests`], with only what a test lets seal reach.
+    pub fn for_tests_with(allowances: Allowances) -> Arc<Self> {
+        static KEYS: std::sync::OnceLock<Arc<MemoryKeySource>> = std::sync::OnceLock::new();
+        Arc::new(
+            Self::in_process(
+                KEYS.get_or_init(|| Arc::new(MemoryKeySource::default()))
+                    .clone(),
+                &[7_u8; 32],
+                allowances,
+            )
+            .expect("seal starts in a test"),
+        )
+    }
 }
 
 /// Whether a parameter's value is a sealed value's marker.

@@ -302,7 +302,7 @@ async fn native_descriptions_and_resources_enforce_tenant_and_safe_metadata() {
         connection_events: None,
         oauth: Default::default(),
         agent_access: Arc::new(runtara_connections::EveryAgent),
-        sealed: None,
+        sealed: runtara_connections::sealed::SealedCredentials::for_tests(),
     });
     assert!(
         facade

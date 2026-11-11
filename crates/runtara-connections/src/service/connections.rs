@@ -526,7 +526,7 @@ pub struct ConnectionService {
     rate_limit_service: Option<Arc<RateLimitService>>,
     tenantless_oauth_callback: bool,
     oauth_apps: Option<Arc<dyn crate::oauth_apps::OAuthApps>>,
-    sealed: Option<Arc<crate::sealed::SealedCredentials>>,
+    sealed: Arc<crate::sealed::SealedCredentials>,
 }
 
 /// What stands in for a sealed secret while a connection is checked against
@@ -566,7 +566,8 @@ fn reject_supplied_markers(
 
 fn sealing_error(error: crate::sealed::SealingError) -> ServiceError {
     match error {
-        crate::sealed::SealingError::SecretRequired { .. } => {
+        crate::sealed::SealingError::SecretRequired { .. }
+        | crate::sealed::SealingError::CannotSeal { .. } => {
             ServiceError::ValidationError(error.to_string())
         }
         crate::sealed::SealingError::Seal(_) => {
@@ -606,9 +607,12 @@ fn requested_app(value: &serde_json::Value) -> Result<String, ServiceError> {
 }
 
 impl ConnectionService {
+    /// A service that seals every connection's secrets with `sealed` as the
+    /// connection is saved.
     pub fn new(
         repository: Arc<ConnectionRepository>,
         compatibility: Arc<IntegrationCompatibility>,
+        sealed: Arc<crate::sealed::SealedCredentials>,
     ) -> Self {
         Self {
             repository,
@@ -616,14 +620,8 @@ impl ConnectionService {
             rate_limit_service: None,
             tenantless_oauth_callback: false,
             oauth_apps: None,
-            sealed: None,
+            sealed,
         }
-    }
-
-    /// Seal the secrets of connection types seal handles as they are saved.
-    pub fn with_sealed(mut self, sealed: Option<Arc<crate::sealed::SealedCredentials>>) -> Self {
-        self.sealed = sealed;
-        self
     }
 
     /// Run as `oauth` configures OAuth: the redirect URI new connections get,
@@ -685,6 +683,7 @@ impl ConnectionService {
         repository: Arc<ConnectionRepository>,
         compatibility: Arc<IntegrationCompatibility>,
         rate_limit_service: Arc<RateLimitService>,
+        sealed: Arc<crate::sealed::SealedCredentials>,
     ) -> Self {
         Self {
             repository,
@@ -692,7 +691,7 @@ impl ConnectionService {
             rate_limit_service: Some(rate_limit_service),
             tenantless_oauth_callback: false,
             oauth_apps: None,
-            sealed: None,
+            sealed,
         }
     }
 
@@ -888,9 +887,10 @@ impl ConnectionService {
         let connection_id = Uuid::new_v4().to_string();
 
         // Seal the secrets, now that the connection they are bound to has an
-        // id. A type seal does not handle is stored as it always was.
-        if let (Some(sealed), Some(params)) = (&self.sealed, request.connection_parameters.as_ref())
-            && let Some(stored) = sealed
+        // id. One seal cannot hold is refused: none is stored readable.
+        if let Some(params) = request.connection_parameters.as_ref()
+            && let Some(stored) = self
+                .sealed
                 .seal_parameters(tenant_id, &connection_id, &integration_id, params, None)
                 .await
                 .map_err(sealing_error)?
@@ -1175,10 +1175,9 @@ impl ConnectionService {
         // Sealed tokens the edit leaves sealed for somewhere else are no use
         // either: they go, and the connection needs a new authorization.
         let authorization_change_requires_reconnect = authorization_change_requires_reconnect
-            || match (&self.sealed, effective_parameters.as_ref()) {
-                (Some(sealed), Some(merged)) => sealed.holds_stale_tokens(&integration_id, merged),
-                _ => false,
-            };
+            || effective_parameters
+                .as_ref()
+                .is_some_and(|merged| self.sealed.holds_stale_tokens(&integration_id, merged));
         let effective_status = authorization_change_requires_reconnect
             .then_some(ConnectionStatus::RequiresReconnection);
         if authorization_change_requires_reconnect
@@ -1197,8 +1196,9 @@ impl ConnectionService {
 
         // Seal secrets entered now. One left sealed stays as it is, unless the
         // edit changes where it is sent or how: then it must be entered again.
-        if let (Some(sealed), Some(merged)) = (&self.sealed, effective_parameters.as_ref())
-            && let Some(stored) = sealed
+        if let Some(merged) = effective_parameters.as_ref()
+            && let Some(stored) = self
+                .sealed
                 .seal_parameters(tenant_id, id, &integration_id, merged, Some(&old_params))
                 .await
                 .map_err(sealing_error)?
@@ -1306,9 +1306,8 @@ impl ConnectionService {
             _ => params,
         };
         // A sealed token is named to the provider by seal.
-        if let Some(sealed) = &self.sealed
-            && crate::sealed::has_sealed_values(&params)
-        {
+        if crate::sealed::has_sealed_values(&params) {
+            let sealed = &self.sealed;
             let authorization =
                 crate::auth::provider_auth::revoke_authorization(oauth_config, &params);
             if let Err(e) = sealed

@@ -96,7 +96,11 @@ fn service(pool: &PgPool) -> ConnectionService {
         Arc::new(NoOpCipher),
     ));
     let compat = Arc::new(IntegrationCompatibility::new(HashMap::new()));
-    ConnectionService::new(repo, compat)
+    ConnectionService::new(
+        repo,
+        compat,
+        runtara_connections::sealed::SealedCredentials::for_tests(),
+    )
 }
 
 async fn create(svc: &ConnectionService, tenant: &str, body: serde_json::Value) -> String {
@@ -294,10 +298,12 @@ async fn editing_params_applies_descriptor_owned_reauthorization() {
     assert!(after.get("access_token").is_none());
     assert!(after.get("refresh_token").is_none());
     assert_eq!(after["realm_id"], "123456789");
-    assert_eq!(
-        after["client_secret"], "QBSEC",
-        "untouched secret keeps existing"
+    // The untouched secret is kept, and sealed with the save.
+    assert!(
+        runtara_connections::sealed::is_sealed(&after["client_secret"]),
+        "untouched secret is kept, sealed"
     );
+    assert!(!after.to_string().contains("QBSEC"));
     assert_eq!(status_of(&fx.pool, &id).await, "REQUIRES_RECONNECTION");
 
     let stale_request = serde_json::from_value(json!({
@@ -346,15 +352,37 @@ async fn editing_params_applies_descriptor_owned_reauthorization() {
     )
     .await;
     let g1 = params_of(&fx.pool, &g).await;
-    assert_eq!(g1["access_token"], "at-g", "unmarked edit keeps tokens");
+    assert!(
+        runtara_connections::sealed::is_sealed(&g1["access_token"]),
+        "unmarked edit keeps tokens, sealed"
+    );
     assert_eq!(g1["pkce"], false);
+
+    // The client secret is sealed for the token endpoint it was saved with:
+    // moving that endpoint needs the secret entered again.
+    let moved_alone: runtara_connections::types::UpdateConnectionRequest =
+        serde_json::from_value(json!({
+            "version": svc.get_connection(&g, "t").await.unwrap().updated_at,
+            "connectionParameterPatch": {
+                "set": { "token_url": "https://other.example.com/token" }
+            }
+        }))
+        .unwrap();
+    assert!(matches!(
+        svc.update_connection(&g, "t", moved_alone).await,
+        Err(runtara_connections::service::connections::ServiceError::ValidationError(_))
+    ));
+    assert_eq!(params_of(&fx.pool, &g).await, g1);
 
     // Changing the token_url (an endpoint) strips the captured tokens (rule E).
     update(
         &svc,
         &g,
         "t",
-        json!({ "connectionParameterPatch": { "set": { "token_url": "https://other.example.com/token" } } }),
+        json!({ "connectionParameterPatch": {
+            "set": { "token_url": "https://other.example.com/token" },
+            "write": { "client_secret": "s" }
+        } }),
     )
     .await;
     let g2 = params_of(&fx.pool, &g).await;
@@ -449,6 +477,10 @@ async fn explicit_secret_replace_clear_and_forbidden_clear_are_enforced() {
         .unwrap();
     assert!(projection.secret_state["bearer_token"].configured);
     assert!(projection.secret_state["bearer_token"].clearable);
+    let before_replace = params_of(&fx.pool, &id).await;
+    assert!(runtara_connections::sealed::is_sealed(
+        &before_replace["bearer_token"]
+    ));
 
     update(
         &svc,
@@ -462,10 +494,13 @@ async fn explicit_secret_replace_clear_and_forbidden_clear_are_enforced() {
         }),
     )
     .await;
-    assert_eq!(
-        params_of(&fx.pool, &id).await["bearer_token"],
-        "new-password"
-    );
+    // The replacement is stored sealed, and is not the secret it replaced.
+    let replaced = params_of(&fx.pool, &id).await;
+    assert!(runtara_connections::sealed::is_sealed(
+        &replaced["bearer_token"]
+    ));
+    assert_ne!(replaced["bearer_token"], before_replace["bearer_token"]);
+    assert!(!replaced.to_string().contains("new-password"));
 
     let projection = svc
         .get_connection(&id, "t")
@@ -489,7 +524,9 @@ async fn explicit_secret_replace_clear_and_forbidden_clear_are_enforced() {
     .await;
     let switched = params_of(&fx.pool, &id).await;
     assert!(switched.get("bearer_token").is_none());
-    assert_eq!(switched["api_key_value"], "key-material");
+    assert!(runtara_connections::sealed::is_sealed(
+        &switched["api_key_value"]
+    ));
     assert_eq!(status_of(&fx.pool, &id).await, "ACTIVE");
 
     let qb = create(
@@ -519,14 +556,15 @@ async fn explicit_secret_replace_clear_and_forbidden_clear_are_enforced() {
             }
         }))
         .unwrap();
+    let before_forbidden = params_of(&fx.pool, &qb).await;
+    assert!(runtara_connections::sealed::is_sealed(
+        &before_forbidden["client_secret"]
+    ));
     assert!(matches!(
         svc.update_connection(&qb, "t", forbidden).await,
         Err(runtara_connections::service::connections::ServiceError::ValidationError(_))
     ));
-    assert_eq!(
-        params_of(&fx.pool, &qb).await["client_secret"],
-        "required-secret"
-    );
+    assert_eq!(params_of(&fx.pool, &qb).await, before_forbidden);
 }
 
 #[tokio::test]

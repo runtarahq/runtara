@@ -174,11 +174,17 @@ pub struct OAuthService {
     apps: Option<Arc<dyn OAuthApps>>,
     /// seal, if this deployment seals: the tokens a flow brings are sealed
     /// as they are stored.
-    sealed: Option<Arc<crate::sealed::SealedCredentials>>,
+    sealed: Arc<crate::sealed::SealedCredentials>,
 }
 
 impl OAuthService {
-    pub fn new(pool: PgPool, cipher: Arc<dyn CredentialCipher>, public_base_url: String) -> Self {
+    /// A service that seals the tokens flows bring with `sealed`.
+    pub fn new(
+        pool: PgPool,
+        cipher: Arc<dyn CredentialCipher>,
+        public_base_url: String,
+        sealed: Arc<crate::sealed::SealedCredentials>,
+    ) -> Self {
         Self {
             oauth_repo: OAuthRepository::new(pool.clone()),
             connection_repo: ConnectionRepository::new(pool, cipher),
@@ -186,14 +192,8 @@ impl OAuthService {
             flows: None,
             tenantless_callback: true,
             apps: None,
-            sealed: None,
+            sealed,
         }
-    }
-
-    /// Seal the tokens flows bring with `sealed`.
-    pub fn with_sealed(mut self, sealed: Option<Arc<crate::sealed::SealedCredentials>>) -> Self {
-        self.sealed = sealed;
-        self
     }
 
     /// A connection's parameters as they are stored: with its tokens sealed,
@@ -207,9 +207,7 @@ impl OAuthService {
         params: Value,
         stored: &Value,
     ) -> Result<Value, OAuthError> {
-        let Some(sealed) = &self.sealed else {
-            return Ok(params);
-        };
+        let sealed = &self.sealed;
         // Tokens seal sealed as they came from the provider are the
         // connection's to hold, as if it held them already: they are kept if
         // their policy is the one the type calls for.
@@ -261,10 +259,10 @@ impl OAuthService {
             state.db_pool.clone(),
             state.cipher.clone(),
             state.public_base_url.clone(),
+            state.sealed.clone(),
         )
         .with_tenantless_callback(state.oauth.tenantless_callback)
-        .with_apps(state.oauth.apps.clone())
-        .with_sealed(state.sealed.clone());
+        .with_apps(state.oauth.apps.clone());
         match &state.redis_manager {
             Some(valkey) => service.with_flows(valkey.clone()),
             None => service,
@@ -540,9 +538,9 @@ impl OAuthService {
 
         // Exchange authorization code for tokens (sending the PKCE verifier if the
         // authorize step generated one).
-        let sealed_client = self.sealed.as_ref().filter(|_| {
+        let sealed_client =
             crate::sealed::policy::sealed_authorized_client(&flow.integration_id, &params)
-        });
+                .then_some(&self.sealed);
         // What the access token says of the consent it came from, where seal
         // read it: a sealed token cannot be read here.
         let mut access_token_claims = None;
@@ -875,7 +873,7 @@ impl OAuthService {
             // Tokens that were sealed as they came are named to the provider
             // by seal.
             let outcome = match &self.sealed {
-                Some(sealed) if crate::sealed::has_sealed_values(&revoked) => sealed
+                sealed if crate::sealed::has_sealed_values(&revoked) => sealed
                     .revoke_token(
                         tenant_id,
                         connection_id,
