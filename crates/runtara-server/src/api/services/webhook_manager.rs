@@ -19,47 +19,18 @@ use crate::api::repositories::triggers::TriggerRepository;
 /// They run inline in API requests after the database change has committed,
 /// and every caller treats a failure as best-effort, so a stalled platform
 /// must turn into a logged failure rather than a request that never returns.
-const PLATFORM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const PLATFORM_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-
-fn platform_http_client(connect_timeout: Duration, request_timeout: Duration) -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(connect_timeout)
-        .timeout(request_timeout)
-        .build()
-        .expect("failed to build reqwest client")
-}
-
-/// Map a failed platform call to a `WebhookError` without the request URL.
-/// Telegram puts the bot token in the URL path, and reqwest's error text
-/// includes the URL, so keeping it would leak the token wherever the error
-/// is logged.
-///
-/// A connect failure means the request never reached the platform, so it
-/// certainly applied nothing. Any later failure (a timeout waiting for the
-/// reply, a dropped connection, an unreadable reply) leaves the outcome
-/// unknown: the platform may have applied the request.
-fn platform_error(error: reqwest::Error) -> WebhookError {
-    let unreached = error.is_connect();
-    let message = error.without_url().to_string();
-    if unreached {
-        WebhookError::NotApplied(message)
-    } else {
-        WebhookError::PlatformError(message)
-    }
-}
 
 /// Manages webhook registration with external platforms.
 ///
 /// Called by the trigger service when Channel triggers are created/updated/deleted.
 pub struct WebhookManager {
     facade: Arc<ConnectionsFacade>,
-    http_client: reqwest::Client,
     /// Public base URL of this runtime instance (e.g. "https://runtime.example.com")
     base_url: Option<String>,
     /// Base URL of the Telegram Bot API.
     telegram_api_base: String,
-    /// The bound on a platform call seal sends, as `http_client`'s own.
+    /// The bound on a platform call, which seal sends.
     request_timeout: Duration,
 }
 
@@ -70,7 +41,6 @@ impl WebhookManager {
         let base_url = std::env::var("WEBHOOK_BASE_URL").ok();
         Self {
             facade,
-            http_client: platform_http_client(PLATFORM_CONNECT_TIMEOUT, PLATFORM_REQUEST_TIMEOUT),
             base_url,
             telegram_api_base: TELEGRAM_API_BASE.to_string(),
             request_timeout: PLATFORM_REQUEST_TIMEOUT,
@@ -86,7 +56,6 @@ impl WebhookManager {
     ) -> Self {
         Self {
             facade,
-            http_client: platform_http_client(Duration::from_secs(1), request_timeout),
             base_url,
             telegram_api_base,
             request_timeout,
@@ -263,17 +232,14 @@ impl WebhookManager {
         connection_id: &str,
         params: &Value,
     ) -> Result<TelegramBot, WebhookError> {
-        if runtara_connections::sealed::is_sealed(&params["bot_token"]) {
-            return Ok(TelegramBot::Sealed {
-                tenant_id: tenant_id.to_string(),
-                connection_id: connection_id.to_string(),
-                parameters: params.clone(),
-            });
+        if !runtara_connections::sealed::is_sealed(&params["bot_token"]) {
+            return Err(WebhookError::InvalidConnection("Missing bot_token".into()));
         }
-        params["bot_token"]
-            .as_str()
-            .map(|token| TelegramBot::Token(token.to_string()))
-            .ok_or_else(|| WebhookError::InvalidConnection("Missing bot_token".into()))
+        Ok(TelegramBot {
+            tenant_id: tenant_id.to_string(),
+            connection_id: connection_id.to_string(),
+            parameters: params.clone(),
+        })
     }
 
     /// Calls a Bot API method and returns Telegram's reply.
@@ -284,54 +250,34 @@ impl WebhookManager {
         body: Option<&Value>,
     ) -> Result<Value, WebhookError> {
         let api_base = self.telegram_api_base.trim_end_matches('/');
-        match bot {
-            TelegramBot::Token(token) => {
-                let mut request = self
-                    .http_client
-                    .post(format!("{api_base}/bot{token}/{method}"));
-                if let Some(body) = body {
-                    request = request.json(body);
-                }
-                let response = request.send().await.map_err(platform_error)?;
-                response.json().await.map_err(platform_error)
-            }
-            // seal puts the token in the path and sends the request; the URL
-            // here names the method only.
-            TelegramBot::Sealed {
-                tenant_id,
-                connection_id,
-                parameters,
-            } => {
-                let sealed = self.facade.sealed();
-                let headers =
-                    body.map(|_| ("content-type".to_string(), "application/json".to_string()));
-                let body = body
-                    .map(serde_json::to_vec)
-                    .transpose()
-                    .map_err(|e| WebhookError::NotApplied(e.to_string()))?;
-                let response = tokio::time::timeout(
-                    self.request_timeout,
-                    sealed.send_bounded(
-                        tenant_id,
-                        connection_id,
-                        "telegram_bot",
-                        parameters,
-                        "POST",
-                        &format!("{api_base}/{method}"),
-                        headers,
-                        body,
-                        MAX_PLATFORM_REPLY_BYTES,
-                    ),
-                )
-                .await
-                // No reply in time: Telegram may have applied the request.
-                .map_err(|_| WebhookError::PlatformError("the request timed out".into()))?
-                .map_err(sealed_platform_error)?;
-                serde_json::from_slice(&response.body).map_err(|_| {
-                    WebhookError::PlatformError("the platform's reply is not JSON".into())
-                })
-            }
-        }
+        // seal puts the token in the path and sends the request; the URL
+        // here names the method only.
+        let sealed = self.facade.sealed();
+        let headers = body.map(|_| ("content-type".to_string(), "application/json".to_string()));
+        let body = body
+            .map(serde_json::to_vec)
+            .transpose()
+            .map_err(|e| WebhookError::NotApplied(e.to_string()))?;
+        let response = tokio::time::timeout(
+            self.request_timeout,
+            sealed.send_bounded(
+                &bot.tenant_id,
+                &bot.connection_id,
+                "telegram_bot",
+                &bot.parameters,
+                "POST",
+                &format!("{api_base}/{method}"),
+                headers,
+                body,
+                MAX_PLATFORM_REPLY_BYTES,
+            ),
+        )
+        .await
+        // No reply in time: Telegram may have applied the request.
+        .map_err(|_| WebhookError::PlatformError("the request timed out".into()))?
+        .map_err(sealed_platform_error)?;
+        serde_json::from_slice(&response.body)
+            .map_err(|_| WebhookError::PlatformError("the platform's reply is not JSON".into()))
     }
 
     async fn telegram_set_webhook(
@@ -376,16 +322,11 @@ impl WebhookManager {
         webhook_url: &str,
         sealed_secret: Value,
     ) -> Result<(), WebhookError> {
-        let TelegramBot::Sealed {
+        let TelegramBot {
             tenant_id,
             connection_id,
             parameters,
-        } = bot
-        else {
-            return Err(WebhookError::InvalidConnection(
-                "the webhook's secret is sealed, and the connection's bot token is not".into(),
-            ));
-        };
+        } = bot;
         let sealed = self.facade.sealed();
         let mut presenting = parameters.clone();
         presenting[runtara_connections::sealed::policy::WEBHOOK_SECRET_FIELD] = sealed_secret;
@@ -494,16 +435,12 @@ impl WebhookManager {
 /// The largest reply read from a platform's API through seal.
 const MAX_PLATFORM_REPLY_BYTES: usize = 1024 * 1024;
 
-/// How calls to the Bot API carry a connection's token.
-enum TelegramBot {
-    /// A token this process holds, written into each URL's path.
-    Token(String),
-    /// The token is sealed: seal puts it in the path and sends the request.
-    Sealed {
-        tenant_id: String,
-        connection_id: String,
-        parameters: Value,
-    },
+/// A connection whose calls to the Bot API carry its sealed token: seal puts
+/// it in the path and sends the request.
+struct TelegramBot {
+    tenant_id: String,
+    connection_id: String,
+    parameters: Value,
 }
 
 /// Map a platform call seal did not complete to a `WebhookError`. As for
@@ -1023,7 +960,6 @@ mod tests {
     use super::*;
     use axum::http::StatusCode;
     use std::net::SocketAddr;
-    use std::time::Instant;
 
     /// A platform that accepts connections and holds them open without ever
     /// responding.
@@ -1128,10 +1064,6 @@ mod tests {
         (format!("http://{addr}"), received)
     }
 
-    pub(super) fn connections_facade(pool: PgPool) -> Arc<ConnectionsFacade> {
-        connections_facade_with_seal(pool, None)
-    }
-
     pub(super) fn connections_facade_with_seal(
         pool: PgPool,
         sealed: Option<Arc<runtara_connections::sealed::SealedCredentials>>,
@@ -1168,31 +1100,10 @@ mod tests {
     /// Request budget for a platform that never answers: the call must time out.
     const SILENT_PLATFORM_BUDGET: Duration = Duration::from_millis(500);
 
-    /// One `setWebhook` call against `telegram_api_base`, with no database.
+    /// One `setWebhook` call against `telegram_api_base`, with no database:
+    /// seal in this process, with `telegram_api_base` standing in for
+    /// Telegram, and a connection whose token it sealed.
     async fn set_webhook_against(
-        telegram_api_base: String,
-        request_timeout: Duration,
-    ) -> Result<(), WebhookError> {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgresql://localhost:1/unused")
-            .unwrap();
-        WebhookManager::for_test(
-            connections_facade(pool),
-            Some("http://runtime.test".into()),
-            telegram_api_base,
-            request_timeout,
-        )
-        .telegram_set_webhook(
-            &TelegramBot::Token("000000:test-token".into()),
-            "http://runtime.test/hook",
-            "secret",
-        )
-        .await
-    }
-
-    /// [`set_webhook_against`], for a connection whose token is sealed: seal
-    /// in this process, with `telegram_api_base` standing in for Telegram.
-    async fn set_sealed_webhook_against(
         telegram_api_base: String,
         request_timeout: Duration,
     ) -> Result<(), WebhookError> {
@@ -1233,7 +1144,6 @@ mod tests {
             request_timeout,
         );
         let bot = manager.telegram_bot("acme", "c-1", &parameters).unwrap();
-        assert!(matches!(bot, TelegramBot::Sealed { .. }));
         manager
             .telegram_set_webhook(&bot, "http://runtime.test/hook", "secret")
             .await
@@ -1333,17 +1243,6 @@ mod tests {
         );
         assert!(elsewhere.platform_unchanged());
         assert_eq!(received.lock().unwrap().len(), 1);
-
-        // A sealed secret cannot go with a bot token this process holds.
-        let readable = TelegramBot::Token("000000:readable".into());
-        let refused = manager
-            .telegram_set_webhook(&readable, webhook_url, &secret)
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(refused, WebhookError::InvalidConnection(_)),
-            "{refused}"
-        );
     }
 
     /// Which secret a connection's webhook can hold: sealed where the
@@ -1422,7 +1321,7 @@ mod tests {
     #[tokio::test]
     async fn a_sealed_token_registers_the_webhook_through_seal() {
         let (base, received) = fake_telegram(ACCEPTED).await;
-        set_sealed_webhook_against(base, ANSWERING_PLATFORM_BUDGET)
+        set_webhook_against(base, ANSWERING_PLATFORM_BUDGET)
             .await
             .unwrap();
         // seal wrote the token into the path; the secret token went as given.
@@ -1438,7 +1337,7 @@ mod tests {
     #[tokio::test]
     async fn a_sealed_tokens_failures_say_whether_telegram_was_changed() {
         let (base, received) = fake_telegram(REFUSED).await;
-        let error = set_sealed_webhook_against(base, ANSWERING_PLATFORM_BUDGET)
+        let error = set_webhook_against(base, ANSWERING_PLATFORM_BUDGET)
             .await
             .unwrap_err();
         assert!(matches!(error, WebhookError::NotApplied(_)), "{error}");
@@ -1447,62 +1346,23 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
-        let error = set_sealed_webhook_against(format!("http://{addr}"), ANSWERING_PLATFORM_BUDGET)
+        let error = set_webhook_against(format!("http://{addr}"), ANSWERING_PLATFORM_BUDGET)
             .await
             .unwrap_err();
         assert!(matches!(error, WebhookError::NotApplied(_)), "{error}");
 
         let (base, _) = fake_telegram(APPLIED_REPLY_LOST).await;
-        let error = set_sealed_webhook_against(base, ANSWERING_PLATFORM_BUDGET)
+        let error = set_webhook_against(base, ANSWERING_PLATFORM_BUDGET)
             .await
             .unwrap_err();
         assert!(matches!(error, WebhookError::PlatformError(_)), "{error}");
 
         let addr = silent_platform().await;
-        let error = set_sealed_webhook_against(format!("http://{addr}"), SILENT_PLATFORM_BUDGET)
+        let error = set_webhook_against(format!("http://{addr}"), SILENT_PLATFORM_BUDGET)
             .await
             .unwrap_err();
         assert!(matches!(error, WebhookError::PlatformError(_)), "{error}");
         assert!(!error.to_string().contains("sealed-token"), "{error}");
-    }
-
-    #[tokio::test]
-    async fn platform_client_gives_up_on_a_platform_that_never_answers() {
-        let addr = silent_platform().await;
-
-        let client = platform_http_client(Duration::from_secs(1), Duration::from_millis(300));
-        let started = Instant::now();
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            client.post(format!("http://{addr}/setWebhook")).send(),
-        )
-        .await
-        .expect("the client's own timeout must fire before the guard");
-
-        let error = result.expect_err("a platform that never answers is an error");
-        assert!(error.is_timeout(), "expected a timeout, got: {error}");
-        assert!(started.elapsed() < Duration::from_secs(2));
-    }
-
-    #[tokio::test]
-    async fn platform_error_does_not_leak_the_bot_token_in_the_url() {
-        let addr = silent_platform().await;
-        let client = platform_http_client(Duration::from_secs(1), Duration::from_millis(300));
-        let token = "123456:token-that-must-not-be-logged";
-
-        let error = client
-            .post(format!("http://{addr}/bot{token}/setWebhook"))
-            .send()
-            .await
-            .expect_err("a platform that never answers is an error");
-        assert!(
-            error.to_string().contains(token),
-            "precondition: reqwest's own error text carries the URL"
-        );
-
-        let message = platform_error(error).to_string();
-        assert!(!message.contains(token), "token leaked: {message}");
-        assert!(!message.contains("/bot"), "URL leaked: {message}");
     }
 
     #[tokio::test]

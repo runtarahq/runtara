@@ -135,10 +135,6 @@ pub struct ChannelRouter {
     /// Rows accepted before this instant belong to an earlier process and are
     /// dispatched again by `recover_pending`.
     started_at: chrono::DateTime<chrono::Utc>,
-    http_client: reqwest::Client,
-    /// Hardened egress client (no redirects + DNS guard) for credentialed
-    /// channel replies (Teams).
-    hardened_client: reqwest::Client,
     /// Shared, live service-URL map for Teams, keyed by
     /// `(connection_id, conversation_id)`. Handed to every `TeamsChannel` by
     /// Arc clone (not snapshot) so replies can always resolve a serviceUrl that
@@ -163,8 +159,6 @@ impl ChannelRouter {
             connections,
             engine,
             valkey,
-            http_client: reqwest::Client::new(),
-            hardened_client: runtara_connections::net::build_hardened_client(),
             teams_service_urls: Arc::new(DashMap::new()),
         }
     }
@@ -708,9 +702,8 @@ impl ChannelRouter {
                     "telegram_bot",
                     params,
                     "bot_token",
-                    super::channel::ReplyAuth::InPath,
                 )?;
-                Arc::new(TelegramChannel::new(auth, self.http_client.clone()))
+                Arc::new(TelegramChannel::new(auth))
             }
             "slack_bot" => {
                 let auth = super::channel::ReplyAuth::of(
@@ -720,12 +713,8 @@ impl ChannelRouter {
                     "slack_bot",
                     params,
                     "bot_token",
-                    super::channel::ReplyAuth::Bearer,
                 )?;
-                Arc::new(super::channel::SlackChannel::new(
-                    auth,
-                    self.http_client.clone(),
-                ))
+                Arc::new(super::channel::SlackChannel::new(auth))
             }
             "teams_bot" => {
                 // The adapter mints its token through the facade (correct
@@ -738,7 +727,6 @@ impl ChannelRouter {
                     connection_id.to_string(),
                     params.clone(),
                     self.connections.clone(),
-                    self.hardened_client.clone(),
                     self.teams_service_urls.clone(),
                 ))
             }
@@ -750,10 +738,6 @@ impl ChannelRouter {
                     "mailgun",
                     params,
                     "api_key",
-                    |password| super::channel::ReplyAuth::Basic {
-                        username: "api".to_string(),
-                        password,
-                    },
                 )?;
                 let domain = params["domain"]
                     .as_str()
@@ -763,7 +747,6 @@ impl ChannelRouter {
                     auth,
                     domain.to_string(),
                     region.to_string(),
-                    self.http_client.clone(),
                 ))
             }
             other => anyhow::bail!("Unsupported channel connection type: {}", other),

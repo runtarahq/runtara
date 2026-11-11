@@ -639,6 +639,22 @@ async fn seal_readable_credentials(
         pool.clone(),
         cipher,
     );
+    // The platform's own database URL, which earlier releases copied into
+    // each tenant's default connection, is the operator's and no tenant
+    // secret: such a connection now stands for the platform database.
+    if let Some(platform_url) = crate::config::object_model_database_url() {
+        match repository.adopt_platform_database(&platform_url).await {
+            Ok(0) => {}
+            Ok(adopted) => tracing::info!(
+                adopted,
+                "Default object-model connections now stand for the platform database"
+            ),
+            Err(e) => tracing::error!(
+                error = %e,
+                "Could not convert default object-model connections holding the platform's URL"
+            ),
+        }
+    }
     match repository.seal_existing(sealed, None, false).await {
         Ok(stats) if stats.sealed + stats.unsealable + stats.failed == 0 => {}
         Ok(stats) => {
@@ -1583,17 +1599,21 @@ pub async fn start_with(
         }
     });
 
-    // Each served tenant gets the platform database as its default connection.
+    // Each served tenant gets the platform database as its default
+    // connection. The connection stands for that database and holds no URL:
+    // the URL is the operator's, and stays in the configuration.
     for tenant_id in config::served_tenants() {
         let default_connection = match &object_model_database_url {
-            Some(object_model_database_url) => Some(
+            Some(_) => Some(
                 connections_facade
                     .ensure_default_connection(
                         tenant_id,
                         "object_model",
                         format!("Default Object Model Database ({})", tenant_id),
                         "postgres".to_string(),
-                        serde_json::json!({ "database_url": object_model_database_url }),
+                        serde_json::json!({
+                            runtara_connections::repository::connections::PLATFORM_DATABASE_PARAM: true
+                        }),
                     )
                     .await,
             ),

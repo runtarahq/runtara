@@ -87,14 +87,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carries a query, a fragment or credentials, plain HTTP for a host not in
   `RUNTARA_PROXY_ALLOW_HTTP_HOSTS`, a Postgres URL as above, an `http_basic`
   username with a colon, an MCP header of the connection's own in the
-  credential's place, or a connection type this build does not know. This
-  includes the default object-model connection the server makes for each
-  tenant from `OBJECT_MODEL_DATABASE_URL`: where that URL cannot be sealed
-  the connection is not made, and the tenant uses the platform database
-  directly, as a tenant with no default connection does. A default
-  connection an earlier release made from such a URL is unsealable like any
-  other, and object-model requests through it fail until it is entered
-  again.
+  credential's place, or a connection type this build does not know.
+
+  The default object-model connection the server makes for each tenant no
+  longer holds a copy of `OBJECT_MODEL_DATABASE_URL`: it stands for the
+  platform's database (`platform_database: true`) and holds no secret, and
+  the URL stays the operator's, in the configuration. The copies earlier
+  releases stored are converted when the server starts. Entering a URL in
+  such a connection makes it the tenant's own, sealed like any other.
 
   Connections an earlier release stored readable are sealed when the server
   starts, or by `runtara-server seal-connections [--tenant-id <id>]

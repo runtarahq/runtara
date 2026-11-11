@@ -244,8 +244,10 @@ async fn object_model_routes_schemas_to_selected_connection_database() {
         .await
         .expect("create alternate object_model connection");
 
+    let platform_url = fixture.default_object_url.clone();
     let manager = Arc::new(ObjectStoreManager::new(fixture.default_object_url));
     let schemas = SchemaService::new(manager.clone(), facade.clone());
+    let connections = facade.clone();
     use runtara_component_host::DatabaseHost;
     use runtara_database_contract::{Outcome, QueryRequest, ResultSpec, SqlValue};
     let database = runtara_server::api::services::database::NativeDatabase {
@@ -352,5 +354,89 @@ async fn object_model_routes_schemas_to_selected_connection_database() {
         assert_eq!(error.message, "Database connection is unavailable");
         assert_eq!(error.outcome, Outcome::NotStarted);
         assert!(!error.retryable);
+    }
+
+    // A default connection that stands for the platform's own database holds
+    // no URL: whoever uses it uses the platform's database. That is how the
+    // server makes each tenant's default, and what the copy of the platform's
+    // URL an earlier release stored becomes.
+    use runtara_connections::repository::connections::PLATFORM_DATABASE_PARAM;
+    let standing = "tenant_platform_default";
+    let standing_connection = connections
+        .ensure_default_connection(
+            standing,
+            "object_model",
+            "Platform Object Model DB".to_string(),
+            "postgres".to_string(),
+            json!({ PLATFORM_DATABASE_PARAM: true }),
+        )
+        .await
+        .expect("a connection standing for the platform database");
+    let legacy = "tenant_legacy_default";
+    sqlx::query(
+        "INSERT INTO connection_data_entity \
+         (id, tenant_id, title, integration_id, connection_parameters, status) \
+         VALUES ('legacy-default', $1, 'Legacy Object Model DB', 'postgres', $2, 'ACTIVE')",
+    )
+    .bind(legacy)
+    .bind(json!({ "database_url": platform_url }))
+    .execute(&fixture.server_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO connection_defaults (tenant_id, default_for, connection_id) \
+         VALUES ($1, 'object_model', 'legacy-default')",
+    )
+    .bind(legacy)
+    .execute(&fixture.server_pool)
+    .await
+    .unwrap();
+    let repository = ConnectionRepository::new(fixture.server_pool.clone(), Arc::new(NoOpCipher));
+    assert_eq!(
+        repository
+            .adopt_platform_database(&platform_url)
+            .await
+            .unwrap(),
+        1,
+        "only the copy of the platform's URL is converted"
+    );
+    let (stored,): (serde_json::Value,) = sqlx::query_as(
+        "SELECT connection_parameters FROM connection_data_entity WHERE id = 'legacy-default'",
+    )
+    .fetch_one(&fixture.server_pool)
+    .await
+    .unwrap();
+    assert_eq!(stored, json!({ PLATFORM_DATABASE_PARAM: true }));
+
+    for (tenant, short, connection) in [
+        (standing, "standing", Some(standing_connection.as_str())),
+        (standing, "standing", None),
+        (legacy, "legacy", Some("legacy-default")),
+        (legacy, "legacy", None),
+    ] {
+        let how = if connection.is_some() {
+            "named"
+        } else {
+            "default"
+        };
+        schemas
+            .create_schema(
+                schema_request(&format!("{short}_orders_{how}")),
+                tenant,
+                connection,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{tenant} {connection:?}: {error:?}"));
+    }
+    // Both ways reach one database: the platform's.
+    for (tenant, short) in [(standing, "standing"), (legacy, "legacy")] {
+        let (schemas, _) = schemas.list_schemas(tenant, 0, 100, None).await.unwrap();
+        let names: Vec<_> = schemas.iter().map(|schema| schema.name.as_str()).collect();
+        for how in ["named", "default"] {
+            assert!(
+                names.contains(&format!("{short}_orders_{how}").as_str()),
+                "{tenant}: {names:?}"
+            );
+        }
     }
 }
