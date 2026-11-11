@@ -606,3 +606,95 @@ async fn existing_connections_are_sealed_in_place() {
         ]
     );
 }
+
+/// A tenant that leaves has its seal keys destroyed: what was sealed for it
+/// can no longer be opened, here or from any copy of its rows, and no other
+/// tenant is touched.
+#[tokio::test]
+async fn a_leaving_tenants_keys_are_destroyed_and_its_secrets_with_them() {
+    let fixture = Fixture::new().await;
+    let sealed = fixture.sealed();
+    let service = fixture.service(Some(sealed.clone()));
+    let leaving = service
+        .create_connection(bearer("api", "https://api.example.com/v1"), TENANT)
+        .await
+        .unwrap();
+    let staying = service
+        .create_connection(
+            bearer("theirs", "https://api.example.com/v1"),
+            "other-tenant",
+        )
+        .await
+        .unwrap();
+    assert_eq!(fixture.keys().await.len(), 2);
+    let (_, stored_leaving) = fixture.row(&leaving).await;
+    let (_, stored_staying) = fixture.row(&staying).await;
+    // Both open before: a request to a host that does not exist gets as far
+    // as the network, not refused for its secret.
+    let attempt = |tenant: &'static str, connection: String, stored: Value| {
+        let sealed = sealed.clone();
+        async move {
+            sealed
+                .send_bounded(
+                    tenant,
+                    &connection,
+                    "http_bearer",
+                    &stored,
+                    "GET",
+                    "https://api.example.com/v1/orders",
+                    [],
+                    None,
+                    1024,
+                )
+                .await
+        }
+    };
+    let code = |outcome: Result<_, runtara_connections::sealed::SendError>| match outcome {
+        Err(runtara_connections::sealed::SendError::Seal(error)) => error.code.as_str().to_owned(),
+        Ok(_) => "sent".to_owned(),
+        Err(other) => format!("{other:?}"),
+    };
+
+    sealed.destroy_tenant_keys(TENANT).await.unwrap();
+
+    assert_eq!(
+        fixture.keys().await,
+        [("other-tenant".to_owned(), "other-tenant".to_owned())]
+    );
+    // The leaving tenant's secret no longer opens, at once and for good: a
+    // new instance over the same table cannot open it either.
+    for seal in [sealed.clone(), fixture.sealed()] {
+        let outcome = seal
+            .send_bounded(
+                TENANT,
+                &leaving,
+                "http_bearer",
+                &stored_leaving,
+                "GET",
+                "https://api.example.com/v1/orders",
+                [],
+                None,
+                1024,
+            )
+            .await;
+        let refused = code(outcome);
+        assert!(
+            ["KEYSET_UNKNOWN", "OPEN_FAILED", "KEYS_UNAVAILABLE"].contains(&refused.as_str()),
+            "{refused}"
+        );
+    }
+    // The other tenant's still does: it fails, if at all, on the network.
+    let other = code(attempt("other-tenant", staying, stored_staying).await);
+    assert!(
+        ![
+            "KEYSET_UNKNOWN",
+            "OPEN_FAILED",
+            "KEYS_UNAVAILABLE",
+            "POLICY_DENIED"
+        ]
+        .contains(&other.as_str()),
+        "{other}"
+    );
+    // Destroying what is already gone is not an error.
+    sealed.destroy_tenant_keys(TENANT).await.unwrap();
+}

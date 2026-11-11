@@ -35,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     where seal puts it.
   - **A webhook signing secret** (Slack, Mailgun) can be sent nowhere: seal
     checks a signature against it and answers yes or no.
+  - **A Telegram webhook's secret token**, which a Channel trigger holds:
+    where the connection's bot token is sealed, registration seals it too.
+    seal sends it beside the bot token to register the connection's own
+    webhook URL and no other, and checks the token of each inbound call
+    against it.
   - **A key that signs requests** (`azure_blob_storage`, `aws_credentials`,
     `s3_compatible`): seal signs the request it sends, and a session token
     goes only with its key. A presigned URL or shared access signature for a
@@ -77,7 +82,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Connections stored before sealing was on are sealed when they are next
   saved, or all at once by `runtara-server seal-connections [--tenant-id
   <id>] [--dry-run]`. Sealing is one-way: a sealed secret is not stored
-  readable again.
+  readable again. When a tenant leaves, `runtara-server destroy-seal-keys
+  --tenant-id <id> --confirm <id>` destroys its seal keys: everything
+  sealed for it, in the database and in every copy of its rows, can then no
+  longer be opened.
 
 - **`connector_gen` generates from a spec you write, and takes more of an API.**
   `spec: {path: openapi.yaml, sha256: …}` reads a spec kept in the crate, for a

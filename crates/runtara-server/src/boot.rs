@@ -102,6 +102,15 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
         None => None,
     };
 
+    let destroy_seal_keys = match crate::destroy_seal_keys::parse_args(std::env::args_os()) {
+        Some(Ok(args)) => Some(args),
+        Some(Err(msg)) => {
+            eprintln!("{msg}");
+            std::process::exit(2);
+        }
+        None => None,
+    };
+
     dotenvy::dotenv().ok();
 
     // The server's primary database: workflows, connections, API keys, triggers.
@@ -140,6 +149,14 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
         crate::observability::init_cli_logging();
         if let Err(msg) = crate::reencrypt::run(pool, args, options.credential_cipher.clone()).await
         {
+            eprintln!("❌ {msg}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    if let Some(args) = destroy_seal_keys {
+        crate::observability::init_cli_logging();
+        if let Err(msg) = crate::destroy_seal_keys::run(pool, args).await {
             eprintln!("❌ {msg}");
             std::process::exit(1);
         }

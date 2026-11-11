@@ -473,6 +473,23 @@ impl SealedCredentials {
         Ok(true)
     }
 
+    /// Destroys a tenant's seal keys, for a tenant that is leaving: every
+    /// secret sealed for it, in this database and in every copy of its rows,
+    /// can no longer be opened. This cannot be undone. A backup of the key
+    /// table still opens them while the wrapping key exists.
+    pub async fn destroy_tenant_keys(&self, tenant_id: &str) -> Result<(), SealError> {
+        match self
+            .client
+            .destroy_keyset(&keys::keyset_for_tenant(tenant_id))
+            .await
+        {
+            // A tenant with no keys, or whose keys are already gone, has
+            // nothing left to open: offboarding can be run again.
+            Err(error) if error.code == SealErrorCode::KeysetUnknown => Ok(()),
+            outcome => outcome,
+        }
+    }
+
     /// Seals the secret token of a Telegram webhook registered for a
     /// connection at `webhook_url`. Telegram sends it back with each call.
     /// The marker names the connection too: a trigger moved to another
@@ -843,6 +860,14 @@ impl KeySource for MemoryKeySource {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(key.clone());
+        Ok(())
+    }
+
+    async fn delete_keyset(&self, keyset: &KeysetId) -> Result<(), seal_keys::KeyError> {
+        self.keys
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|key| key.keyset != *keyset);
         Ok(())
     }
 }

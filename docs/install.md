@@ -144,7 +144,9 @@ secret with the one place it may go; the [changelog](../CHANGELOG.md) lists
 what is sealed. Connections are sealed as they are saved. To seal the ones
 stored before, run `runtara-server seal-connections --dry-run` with the
 service's environment to see how many it would seal, then without `--dry-run`.
-Sealing is one-way.
+Sealing is one-way. When a tenant leaves, `runtara-server destroy-seal-keys
+--tenant-id <id> --confirm <id>` destroys its seal keys, after which nothing
+sealed for it can be opened; this cannot be undone.
 
 ### Authentication
 

@@ -148,6 +148,18 @@ impl KeySource for PgKeySource {
         }
         Ok(())
     }
+
+    async fn delete_keyset(&self, keyset: &KeysetId) -> Result<(), KeyError> {
+        sqlx::query("DELETE FROM seal_wrapped_key WHERE keyset = $1")
+            .bind(keyset.as_str())
+            .execute(&self.pool)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "could not delete seal keys");
+                KeyError::Unavailable
+            })?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
