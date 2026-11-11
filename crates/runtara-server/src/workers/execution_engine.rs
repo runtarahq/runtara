@@ -782,7 +782,7 @@ impl ExecutionEngine {
     /// figure between the increment and this call; an unchecked `fetch_sub`
     /// would wrap to `u64::MAX` and wedge the gate closed for the tenant.
     fn release_local_reservation(&self, tenant_id: &str) {
-        let _ = self.reservations_for(tenant_id).fetch_update(
+        let _ = self.reservations_for(tenant_id).try_update(
             Ordering::SeqCst,
             Ordering::SeqCst,
             |held| Some(held.saturating_sub(1)),

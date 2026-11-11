@@ -87,10 +87,8 @@ fn collect_action_keys(graph: &Value, keys: &mut BTreeMap<String, String>) {
                 });
             }
             collect_action_keys(step, keys);
-            for field in ["subgraph"] {
-                if let Some(nested) = step.get(field) {
-                    collect_action_keys(nested, keys);
-                }
+            if let Some(nested) = step.get("subgraph") {
+                collect_action_keys(nested, keys);
             }
         }
     }

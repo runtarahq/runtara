@@ -70,7 +70,7 @@ edition = "2024"
 # crate metadata rather than implied only by the toolchain file, and so cargo
 # reports a clear "requires rustc X" instead of a random type error on an older
 # compiler.
-rust-version = "1.97"
+rust-version = "1.99"
 version = "10.0.0"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/runtarahq/runtara"

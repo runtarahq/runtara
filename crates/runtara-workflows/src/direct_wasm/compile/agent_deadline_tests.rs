@@ -305,7 +305,7 @@ impl RuntimeHost for Host {
             .filter(|prefix| key.starts_with(prefix.as_str()))
             .filter(|_| {
                 self.checkpoint_signal_remaining
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                         remaining.checked_sub(1)
                     })
                     .is_ok()

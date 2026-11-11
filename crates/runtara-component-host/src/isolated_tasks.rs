@@ -296,7 +296,7 @@ impl IsolatedTasks {
         max_result_bytes: usize,
     ) -> Result<Self, TaskError> {
         let owner = NEXT_OWNER
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map_err(|_| TaskError::IdExhausted)?;
         // Avoid Semaphore's panic for an invalid operator-provided bound.
         if max_tasks > Semaphore::MAX_PERMITS {

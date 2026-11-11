@@ -146,6 +146,8 @@ impl RunCredentials {
 
     /// The binding a request's credential names, once its launch's start is
     /// confirmed; otherwise the refusal to answer with.
+    // The refusal is the response the middleware returns as is.
+    #[allow(clippy::result_large_err)]
     pub async fn authorize(&self, headers: &HeaderMap) -> Result<Binding, Response> {
         let refused = |status: StatusCode| status.into_response();
         let credential = headers
