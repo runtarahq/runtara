@@ -93,11 +93,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carries a query, a fragment or credentials, plain HTTP for a host not in
   `RUNTARA_PROXY_ALLOW_HTTP_HOSTS`, a Postgres URL as above, an `http_basic`
   username with a colon, an MCP header of the connection's own in the
-  credential's place, or a connection type this build does not know. An MCP
-  connection's `extra_headers` are sent as they are and are no place for a
-  credential: one named as a credential is (`Authorization`, `Cookie`,
-  `X-Api-Key`, a `token`, `secret` or `password`) is refused, and belongs in
-  the bearer token or API key.
+  credential's place, or a connection type this build does not know.
+
+  An MCP connection's `extra_headers` may carry a credential under any name,
+  so each value is sealed too, for the connection's server, and seal sets
+  the headers on its requests. The API shows the header names with blank
+  values: in an edit, a value left blank is kept, one entered replaces it,
+  and a header left out is removed. Changing the server's URL needs the
+  header values entered again.
 
   The default object-model connection the server makes for each tenant no
   longer holds a copy of `OBJECT_MODEL_DATABASE_URL`: it stands for the
