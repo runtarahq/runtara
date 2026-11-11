@@ -85,6 +85,11 @@ enum Usage {
     /// to the API, or the refresh token, sent to the token endpoint for the
     /// next pair, which comes back sealed.
     Token(TokenRole, AuthorizedTokens),
+    /// The client secret of an authorization-code connection: sent to the
+    /// token endpoint, with a code or beside a refresh token, where the
+    /// tokens that come back are sealed; and to the revocation endpoint,
+    /// where the provider wants the client to say who it is.
+    AuthorizedClient(AuthorizedTokens, Inject),
     /// A database password: seal logs in with it, and relays the session.
     Postgres(PgTarget),
     /// Never sent: checks that a message came from the provider.
@@ -217,7 +222,17 @@ pub struct AuthorizedTokens {
     api: Vec<(String, bool)>,
     /// Where either token may be revoked.
     pub revocation_url: Option<String>,
+    /// Claims of the access token this process is told, where the provider
+    /// puts what a connection needs in the token itself.
+    claims: Vec<String>,
 }
+
+/// The field an authorization-code connection's client secret is held in.
+pub const CLIENT_SECRET_FIELD: &str = "client_secret";
+
+/// The claim of a Xero access token naming the consent it came from, by
+/// which the organisation just authorized is told from the user's others.
+pub const XERO_EVENT_CLAIM: &str = "authentication_event_id";
 
 /// The field a sealed access token is presented as: the name seal seals it
 /// under as it comes back from the token endpoint.
@@ -648,7 +663,49 @@ pub fn authorized_tokens(integration_id: &str, params: &Value) -> Option<Authori
         token_url: effective.token_url,
         api,
         revocation_url: Some(effective.revocation_endpoint).filter(|url| !url.is_empty()),
+        claims: match integration_id {
+            "xero_oauth" => vec![XERO_EVENT_CLAIM.to_owned()],
+            _ => Vec::new(),
+        },
     })
+}
+
+/// How an authorization-code connection's own client secret is sent to its
+/// token endpoint, if the connection holds one: a connection on a platform
+/// OAuth app does not.
+fn authorized_client(integration_id: &str, params: &Value) -> Option<Inject> {
+    use runtara_dsl::agent_meta::TokenEndpointAuth;
+    if !holds(params, CLIENT_SECRET_FIELD)
+        || params.get(crate::oauth_apps::OAUTH_APP_PARAM).is_some()
+    {
+        return None;
+    }
+    let config = find_connection_type(integration_id)?.oauth_config?;
+    let effective = crate::auth::provider_auth::resolve_effective_oauth_config(config, params);
+    Some(match effective.token_endpoint_auth {
+        TokenEndpointAuth::HttpBasic => basic(filled(params, "client_id")?),
+        TokenEndpointAuth::FormBody => Inject::FormField {
+            name: CLIENT_SECRET_FIELD.to_owned(),
+        },
+    })
+}
+
+/// Whether an authorization-code connection's client secret is sealed, and
+/// so seal's to send.
+pub fn sealed_authorized_client(integration_id: &str, params: &Value) -> bool {
+    super::is_sealed(&params[CLIENT_SECRET_FIELD])
+        && authorized_client(integration_id, params).is_some()
+        && authorized_tokens(integration_id, params).is_some()
+}
+
+/// Whether a sealed client secret is also sent when a token is revoked: where
+/// the provider has the client authenticate with HTTP Basic.
+pub fn client_secret_revokes(integration_id: &str, params: &Value) -> bool {
+    sealed_authorized_client(integration_id, params)
+        && matches!(
+            authorized_client(integration_id, params),
+            Some(Inject::Basic { .. })
+        )
 }
 
 /// Where the tokens of a connection whose refresh token is sealed may go.
@@ -658,14 +715,17 @@ pub fn sealed_authorized_tokens(integration_id: &str, params: &Value) -> Option<
         .flatten()
 }
 
-/// The policy of one of an authorization's tokens. Each names both
-/// definitions, so that the pair a refresh brings back has these same
-/// policies, however many times it is refreshed.
-fn token_policy(
-    role: TokenRole,
-    tokens: &AuthorizedTokens,
-    allowances: &Allowances,
-) -> Option<Policy> {
+/// What an authorization's tokens are sealed for: the rules of the access
+/// token, those of the refresh token, the definitions naming both, and how
+/// a token endpoint's answer is sealed.
+struct TokenRules {
+    to_api: Vec<Rule>,
+    to_token_endpoint: Vec<Rule>,
+    definitions: BTreeMap<PolicyName, Definition>,
+    seal_response: SealResponse,
+}
+
+fn token_rules(tokens: &AuthorizedTokens, allowances: &Allowances) -> Option<TokenRules> {
     // Runtara revokes with a JSON body naming the token.
     let revoke = |rules: &mut Vec<Rule>| {
         if let Some(url) = &tokens.revocation_url {
@@ -686,6 +746,23 @@ fn token_policy(
     }
     revoke(&mut to_api)?;
 
+    let seal_response = SealResponse {
+        format: ResponseFormat::Json,
+        fields: vec![
+            SealedField {
+                at: "/access_token".to_owned(),
+                as_field: FieldName::new(ACCESS_TOKEN_FIELD).ok()?,
+                policy: PolicyName::new(API_DEFINITION).ok()?,
+                expose_claims: tokens.claims.clone(),
+            },
+            SealedField {
+                at: "/refresh_token".to_owned(),
+                as_field: FieldName::new(REFRESH_TOKEN_FIELD).ok()?,
+                policy: PolicyName::new(REFRESH_DEFINITION).ok()?,
+                expose_claims: Vec::new(),
+            },
+        ],
+    };
     let mut refresh = rule_for(
         &tokens.token_url,
         &Inject::FormField {
@@ -694,21 +771,7 @@ fn token_policy(
         false,
         allowances,
     )?;
-    let sealed_as = |at: &str, field: &str, definition: &str| {
-        Some(SealedField {
-            at: at.to_owned(),
-            as_field: FieldName::new(field).ok()?,
-            policy: PolicyName::new(definition).ok()?,
-            expose_claims: Vec::new(),
-        })
-    };
-    refresh.seal_response = Some(SealResponse {
-        format: ResponseFormat::Json,
-        fields: vec![
-            sealed_as("/access_token", ACCESS_TOKEN_FIELD, API_DEFINITION)?,
-            sealed_as("/refresh_token", REFRESH_TOKEN_FIELD, REFRESH_DEFINITION)?,
-        ],
-    });
+    refresh.seal_response = Some(seal_response.clone());
     let mut to_token_endpoint = vec![refresh];
     revoke(&mut to_token_endpoint)?;
 
@@ -726,12 +789,53 @@ fn token_policy(
             },
         ),
     ]);
+    Some(TokenRules {
+        to_api,
+        to_token_endpoint,
+        definitions,
+        seal_response,
+    })
+}
+
+/// The policy of one of an authorization's tokens. Each names both
+/// definitions, so that the pair a refresh brings back has these same
+/// policies, however many times it is refreshed.
+fn token_policy(
+    role: TokenRole,
+    tokens: &AuthorizedTokens,
+    allowances: &Allowances,
+) -> Option<Policy> {
+    let rules = token_rules(tokens, allowances)?;
     Some(Policy {
         rules: match role {
-            TokenRole::Access => to_api,
-            TokenRole::Refresh => to_token_endpoint,
+            TokenRole::Access => rules.to_api,
+            TokenRole::Refresh => rules.to_token_endpoint,
         },
-        definitions,
+        definitions: rules.definitions,
+        shared: false,
+        verify: None,
+    })
+}
+
+/// The policy of an authorization-code connection's client secret: to the
+/// token endpoint, where what comes back is sealed as the tokens' own
+/// policies say, and to the revocation endpoint if the client authenticates
+/// there.
+fn authorized_client_policy(
+    tokens: &AuthorizedTokens,
+    client: &Inject,
+    allowances: &Allowances,
+) -> Option<Policy> {
+    let rules = token_rules(tokens, allowances)?;
+    let mut to_token_endpoint = rule_for(&tokens.token_url, client, false, allowances)?;
+    to_token_endpoint.seal_response = Some(rules.seal_response);
+    let mut client_rules = vec![to_token_endpoint];
+    if let (Some(url), Inject::Basic { .. }) = (&tokens.revocation_url, client) {
+        client_rules.push(rule_for(url, client, false, allowances)?);
+    }
+    Some(Policy {
+        rules: client_rules,
+        definitions: rules.definitions,
         shared: false,
         verify: None,
     })
@@ -920,16 +1024,23 @@ fn secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
         }]),
         _ if authorized_tokens(integration_id, params).is_some() => {
             let tokens = authorized_tokens(integration_id, params)?;
-            Some(vec![
+            let mut secrets = vec![
                 Secret {
                     field: ACCESS_TOKEN_FIELD,
                     usage: Usage::Token(TokenRole::Access, tokens.clone()),
                 },
                 Secret {
                     field: REFRESH_TOKEN_FIELD,
-                    usage: Usage::Token(TokenRole::Refresh, tokens),
+                    usage: Usage::Token(TokenRole::Refresh, tokens.clone()),
                 },
-            ])
+            ];
+            if let Some(client) = authorized_client(integration_id, params) {
+                secrets.push(Secret {
+                    field: CLIENT_SECRET_FIELD,
+                    usage: Usage::AuthorizedClient(tokens, client),
+                });
+            }
+            Some(secrets)
         }
         _ if client_secret_field(integration_id).is_some() => Some(vec![Secret {
             field: client_secret_field(integration_id)?,
@@ -1148,6 +1259,13 @@ pub fn policies(
                     tokens.api = vec![(api_base.clone(), true)];
                 }
                 token_policy(*role, &tokens, allowances)?
+            }
+            Usage::AuthorizedClient(tokens, client) => {
+                let mut tokens = tokens.clone();
+                if let Some(api_base) = allowances.api_bases.get(integration_id) {
+                    tokens.api = vec![(api_base.clone(), true)];
+                }
+                authorized_client_policy(&tokens, client, allowances)?
             }
             Usage::ClientSecret(grant) => {
                 let mut grant = grant.clone();
@@ -1369,7 +1487,7 @@ mod tests {
             // An authorization's tokens are what is sealed of it; they are
             // the provider's, not fields of the type.
             if meta.oauth_config.is_some() {
-                secrets = vec!["access_token", "refresh_token"];
+                secrets = vec!["access_token", "client_secret", "refresh_token"];
             }
             secrets.sort_unstable();
             let sealed: Vec<String> = policies(integration_id, &params, &Allowances::default())
@@ -1756,7 +1874,7 @@ mod tests {
         let policies = policies("quickbooks_online", &params, &Allowances::default()).unwrap();
         assert_eq!(
             policies.keys().collect::<Vec<_>>(),
-            ["access_token", "refresh_token"]
+            ["access_token", "client_secret", "refresh_token"]
         );
         let bearer = json!({"header": {"name": "Authorization", "format": "Bearer {}"}});
         let revoke = json!({
@@ -1818,6 +1936,52 @@ mod tests {
                 "{field}"
             );
         }
+        // The client's secret goes to the token endpoint, where what comes
+        // back is sealed as the tokens' own policies say, and to revocation:
+        // Intuit has the client say who it is with HTTP Basic at both.
+        let basic = json!({"basic": {"username": {"literal": "cid"}}});
+        assert_eq!(
+            canonical(&policies["client_secret"]),
+            json!({
+                "rules": [
+                    {
+                        "destination": to_token_endpoint[0]["destination"],
+                        "inject": basic,
+                        "seal_response": to_token_endpoint[0]["seal_response"],
+                    },
+                    {"destination": revoke["destination"], "inject": basic},
+                ],
+                "definitions": definitions,
+            })
+        );
+        assert!(client_secret_revokes(
+            "quickbooks_online",
+            &json!({"client_id": "cid", "client_secret": {"$sealed": {}}})
+        ));
+        // A connection on a platform OAuth app holds no client secret.
+        let on_app = json!({"oauth_app": "intuit", "client_id": "cid", "client_secret": "s"});
+        assert_eq!(
+            super::policies("quickbooks_online", &on_app, &Allowances::default())
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["access_token", "refresh_token"]
+        );
+        // Xero's access token says which consent it came from, and this
+        // process is told that much of it.
+        let xero = super::policies(
+            "xero_oauth",
+            &json!({"client_id": "cid", "client_secret": "s"}),
+            &Allowances::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            canonical(&xero["refresh_token"])["rules"][0]["seal_response"]["fields"][0],
+            json!({
+                "at": "/access_token", "as": "access_token", "policy": "api",
+                "expose_claims": ["authentication_event_id"],
+            })
+        );
         // A request presents the access token only.
         assert_eq!(
             request_fields("quickbooks_online", &params),

@@ -214,18 +214,30 @@ async fn a_type_that_is_not_sealed_is_left_alone() {
 }
 
 #[tokio::test]
-async fn an_oauth_connection_not_yet_authorized_has_no_token_to_seal() {
+async fn an_oauth_connection_not_yet_authorized_has_its_client_secret_sealed() {
     let server = MockServer::start().await;
     let sealed = sealed_for(&server);
-    // The client's secret is this process's to send for this grant.
     let params = json!({"client_id": "id", "client_secret": SECRET});
 
     let stored = sealed
         .seal_parameters(TENANT, CONNECTION, "quickbooks_online", &params, None)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("the client secret is sealed");
 
-    assert_eq!(stored, Some(params));
+    // It has no tokens yet; its client secret is seal's to send with a code.
+    assert!(is_sealed(&stored["client_secret"]));
+    assert_eq!(stored["client_id"], "id");
+    assert!(!stored.to_string().contains(SECRET));
+    assert!(stored.get("access_token").is_none());
+
+    // On a platform OAuth app it holds no client secret, and nothing is sealed.
+    let on_app = json!({"oauth_app": "intuit"});
+    let stored = sealed
+        .seal_parameters(TENANT, CONNECTION, "quickbooks_online", &on_app, None)
+        .await
+        .unwrap();
+    assert_eq!(stored, Some(on_app));
 }
 
 #[tokio::test]

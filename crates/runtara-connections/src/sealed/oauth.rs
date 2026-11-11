@@ -29,6 +29,9 @@ const MAX_TOKEN_RESPONSE_BYTES: usize = 256 * 1024;
 pub(crate) struct TokenReply {
     pub body: Value,
     pub sealed: BTreeMap<FieldName, Envelope>,
+    /// Claims of a sealed token its policy has this process told, by field:
+    /// each a JSON object.
+    pub claims: BTreeMap<FieldName, String>,
 }
 
 impl SealedCredentials {
@@ -107,6 +110,7 @@ impl SealedCredentials {
         })?;
 
         let status = sent.response.status().as_u16();
+        let claims = sent.claims;
         let mut upstream = sent.response.into_body();
         let mut bytes = Vec::new();
         while let Some(frame) = tokio::time::timeout(TOKEN_REQUEST_TIMEOUT, upstream.frame())
@@ -132,6 +136,7 @@ impl SealedCredentials {
         Ok(TokenReply {
             body,
             sealed: sent.sealed_fields,
+            claims,
         })
     }
 
@@ -231,7 +236,6 @@ impl SealedCredentials {
         integration_id: &str,
         parameters: &Value,
     ) -> Result<(Value, Option<RotatedSealed>), AuthResolutionError> {
-        use runtara_dsl::agent_meta::TokenEndpointAuth;
         let unsupported =
             || AuthResolutionError::permanent("The connection's token refresh cannot be formed");
         let tokens =
@@ -258,9 +262,14 @@ impl SealedCredentials {
         let client_id = parameters["client_id"]
             .as_str()
             .ok_or_else(|| missing("client_id"))?;
-        let client_secret = parameters["client_secret"]
-            .as_str()
-            .ok_or_else(|| missing("client_secret"))?;
+        // A sealed client secret is seal's to send, beside the refresh
+        // token; a readable one is this process's.
+        let sealed_client = policy::sealed_authorized_client(integration_id, parameters);
+        let client_secret = match parameters[policy::CLIENT_SECRET_FIELD].as_str() {
+            Some(client_secret) => client_secret,
+            None if sealed_client => "",
+            None => return Err(missing("client_secret")),
+        };
 
         let cache_key = token_cache::build_token_cache_key(
             connection_id,
@@ -270,23 +279,29 @@ impl SealedCredentials {
         let refreshed = token_cache::refreshed_token(&cache_key, || async {
             // The grant, with the client's credentials as the provider takes
             // them. seal adds the refresh token.
-            let (authorization, body) = token_cache::token_request_parts(
-                effective.token_endpoint_auth,
-                vec![("grant_type".to_string(), "refresh_token".to_string())],
-                client_id,
-                client_secret,
-            );
-            debug_assert!(
-                authorization.is_some()
-                    == matches!(effective.token_endpoint_auth, TokenEndpointAuth::HttpBasic)
-            );
+            let grant = vec![("grant_type".to_string(), "refresh_token".to_string())];
+            let (authorization, body, presented) = if sealed_client {
+                (
+                    None,
+                    client_form(effective.token_endpoint_auth, grant, client_id),
+                    &[policy::REFRESH_TOKEN_FIELD, policy::CLIENT_SECRET_FIELD][..],
+                )
+            } else {
+                let (authorization, body) = token_cache::token_request_parts(
+                    effective.token_endpoint_auth,
+                    grant,
+                    client_id,
+                    client_secret,
+                );
+                (authorization, body, &[policy::REFRESH_TOKEN_FIELD][..])
+            };
             let outcome = async {
                 let reply = self
                     .token_request(
                         tenant_id,
                         connection_id,
                         parameters,
-                        &[policy::REFRESH_TOKEN_FIELD],
+                        presented,
                         &tokens.token_url,
                         "application/x-www-form-urlencoded",
                         authorization,
@@ -326,27 +341,23 @@ impl SealedCredentials {
         match refreshed {
             token_cache::Refreshed::Kept(envelope) => Ok((marker_of(&envelope)?, None)),
             token_cache::Refreshed::Now(response) => {
-                // The markers a connection stores name the policy inside.
-                let policies = policy::policies(integration_id, parameters, &self.allowances)
-                    .ok_or_else(unsupported)?;
-                let stored_marker = |envelope: &str, field: &str| {
-                    let envelope: Envelope = serde_json::from_str(envelope).map_err(|_| {
-                        AuthResolutionError::transient("A sealed token is not readable")
-                    })?;
-                    let fingerprint = policies
-                        .get(field)
-                        .and_then(|policy| super::policy_fingerprint(policy).ok())
-                        .ok_or_else(unsupported)?;
-                    super::marker(&envelope, &fingerprint).map_err(|_| {
-                        AuthResolutionError::transient("A sealed token is not readable")
-                    })
-                };
-                let access_token =
-                    stored_marker(&response.access_token, policy::ACCESS_TOKEN_FIELD)?;
+                let access_token = self.stored_token(
+                    integration_id,
+                    parameters,
+                    policy::ACCESS_TOKEN_FIELD,
+                    &response.access_token,
+                )?;
                 let refresh_token = response
                     .refresh_token
                     .as_deref()
-                    .map(|envelope| stored_marker(envelope, policy::REFRESH_TOKEN_FIELD))
+                    .map(|envelope| {
+                        self.stored_token(
+                            integration_id,
+                            parameters,
+                            policy::REFRESH_TOKEN_FIELD,
+                            envelope,
+                        )
+                    })
                     .transpose()?;
                 Ok((
                     access_token.clone(),
@@ -359,6 +370,136 @@ impl SealedCredentials {
             }
         }
     }
+}
+
+/// What an authorization code was exchanged for: the pair, sealed, as the
+/// markers a connection stores.
+pub struct SealedGrant {
+    pub access_token: Value,
+    pub refresh_token: Option<Value>,
+    /// The token endpoint's `expires_in`, as it sent it.
+    pub expires_in: Value,
+    /// The claims of the access token this process is told, if the type's
+    /// policy names any.
+    pub claims: Option<Value>,
+}
+
+impl SealedCredentials {
+    /// A sealed token as the marker a connection stores: it names the policy
+    /// sealed inside, which is the one the connection's type calls for.
+    fn stored_token(
+        &self,
+        integration_id: &str,
+        parameters: &Value,
+        field: &str,
+        envelope: &str,
+    ) -> Result<Value, AuthResolutionError> {
+        let unreadable = || AuthResolutionError::transient("A sealed token is not readable");
+        let envelope: Envelope = serde_json::from_str(envelope).map_err(|_| unreadable())?;
+        let fingerprint = policy::policies(integration_id, parameters, &self.allowances)
+            .and_then(|policies| super::policy_fingerprint(policies.get(field)?).ok())
+            .ok_or_else(|| {
+                AuthResolutionError::permanent("The connection's tokens cannot be sealed")
+            })?;
+        super::marker(&envelope, &fingerprint).map_err(|_| unreadable())
+    }
+
+    /// Exchanges an authorization code for tokens, for a connection whose
+    /// client secret is sealed: seal sends the secret with the code, and the
+    /// pair comes back already sealed.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn exchange_code(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        integration_id: &str,
+        parameters: &Value,
+        code: &str,
+        redirect_uri: &str,
+        code_verifier: Option<&str>,
+    ) -> Result<SealedGrant, AuthResolutionError> {
+        let unsupported =
+            || AuthResolutionError::permanent("The connection's code exchange cannot be formed");
+        if !policy::sealed_authorized_client(integration_id, parameters) {
+            return Err(unsupported());
+        }
+        let tokens =
+            policy::authorized_tokens(integration_id, parameters).ok_or_else(unsupported)?;
+        let config = runtara_agents::registry::find_connection_type(integration_id)
+            .and_then(|meta| meta.oauth_config)
+            .ok_or_else(unsupported)?;
+        let effective =
+            crate::auth::provider_auth::resolve_effective_oauth_config(config, parameters);
+        let client_id = parameters["client_id"].as_str().ok_or_else(|| {
+            AuthResolutionError::permanent("The connection has no client_id to exchange with")
+        })?;
+        let mut grant = vec![
+            ("grant_type".to_string(), "authorization_code".to_string()),
+            ("code".to_string(), code.to_string()),
+            ("redirect_uri".to_string(), redirect_uri.to_string()),
+        ];
+        if let Some(verifier) = code_verifier {
+            grant.push(("code_verifier".to_string(), verifier.to_string()));
+        }
+        let reply = self
+            .token_request(
+                tenant_id,
+                connection_id,
+                parameters,
+                &[policy::CLIENT_SECRET_FIELD],
+                &tokens.token_url,
+                "application/x-www-form-urlencoded",
+                None,
+                client_form(effective.token_endpoint_auth, grant, client_id).into_bytes(),
+            )
+            .await?;
+        let access_field = FieldName::new(policy::ACCESS_TOKEN_FIELD)
+            .map_err(|_| AuthResolutionError::permanent("The access token's field is not valid"))?;
+        let refresh_field = FieldName::new(policy::REFRESH_TOKEN_FIELD).map_err(|_| {
+            AuthResolutionError::permanent("The refresh token's field is not valid")
+        })?;
+        let refresh_token = reply
+            .sealed
+            .get(&refresh_field)
+            .and_then(|envelope| serde_json::to_string(envelope).ok())
+            .map(|envelope| {
+                self.stored_token(
+                    integration_id,
+                    parameters,
+                    policy::REFRESH_TOKEN_FIELD,
+                    &envelope,
+                )
+            })
+            .transpose()?;
+        Ok(SealedGrant {
+            access_token: self.stored_token(
+                integration_id,
+                parameters,
+                policy::ACCESS_TOKEN_FIELD,
+                &sealed_access_token(&reply)?,
+            )?,
+            refresh_token,
+            expires_in: reply.body["expires_in"].clone(),
+            claims: reply
+                .claims
+                .get(&access_field)
+                .and_then(|claims| serde_json::from_str(claims).ok()),
+        })
+    }
+}
+
+/// A token request's form for a client whose secret seal adds: the grant,
+/// and the client's id where the provider takes the client's credentials in
+/// the body. Where it takes them in a Basic header, seal makes the header.
+fn client_form(
+    auth: runtara_dsl::agent_meta::TokenEndpointAuth,
+    mut grant: Vec<(String, String)>,
+    client_id: &str,
+) -> String {
+    if matches!(auth, runtara_dsl::agent_meta::TokenEndpointAuth::FormBody) {
+        grant.push(("client_id".to_string(), client_id.to_string()));
+    }
+    token_cache::form_urlencoded(&grant)
 }
 
 /// The sealed access token of a reply, as text to keep.

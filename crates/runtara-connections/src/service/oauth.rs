@@ -210,13 +210,25 @@ impl OAuthService {
         let Some(sealed) = &self.sealed else {
             return Ok(params);
         };
+        // Tokens seal sealed as they came from the provider are the
+        // connection's to hold, as if it held them already: they are kept if
+        // their policy is the one the type calls for.
+        let mut held = stored.clone();
+        for token in [
+            crate::sealed::policy::ACCESS_TOKEN_FIELD,
+            crate::sealed::policy::REFRESH_TOKEN_FIELD,
+        ] {
+            if crate::sealed::is_sealed(&params[token]) {
+                held[token] = params[token].clone();
+            }
+        }
         match sealed
             .seal_parameters(
                 tenant_id,
                 connection_id,
                 integration_id,
                 &params,
-                Some(stored),
+                Some(&held),
             )
             .await
         {
@@ -525,30 +537,81 @@ impl OAuthService {
         let client_id = effective["client_id"]
             .as_str()
             .ok_or(OAuthError::MissingParameter("client_id".to_string()))?;
-        let client_secret = effective["client_secret"]
-            .as_str()
-            .ok_or(OAuthError::MissingParameter("client_secret".to_string()))?;
 
         // Exchange authorization code for tokens (sending the PKCE verifier if the
         // authorize step generated one).
-        let token_response = exchange_code(
-            oauth_config,
-            &effective,
-            code,
-            client_id,
-            client_secret,
-            &flow.redirect_uri,
-            flow.code_verifier.as_deref(),
-        )
-        .await
-        .inspect_err(|error| {
-            if let (Some(app), OAuthError::TokenExchangeFailed(message)) = (&app, error) {
-                oauth_apps::record_provider_error(&app.app_id, "exchange", message);
+        let sealed_client = self.sealed.as_ref().filter(|_| {
+            crate::sealed::policy::sealed_authorized_client(&flow.integration_id, &params)
+        });
+        // What the access token says of the consent it came from, where seal
+        // read it: a sealed token cannot be read here.
+        let mut access_token_claims = None;
+        let token_response = match sealed_client {
+            // A sealed client secret is seal's to send: the pair comes back
+            // already sealed.
+            Some(sealed) => {
+                let grant = sealed
+                    .exchange_code(
+                        tenant_id,
+                        &flow.connection_id,
+                        &flow.integration_id,
+                        &params,
+                        code,
+                        &flow.redirect_uri,
+                        flow.code_verifier.as_deref(),
+                    )
+                    .await
+                    .map_err(|error| OAuthError::TokenExchangeFailed(error.message))?;
+                access_token_claims = grant.claims;
+                let mut response = json!({
+                    "access_token": grant.access_token,
+                    "expires_in": grant.expires_in,
+                });
+                if let Some(refresh_token) = grant.refresh_token {
+                    response["refresh_token"] = refresh_token;
+                }
+                response
             }
-        })?;
+            None => {
+                let client_secret = effective["client_secret"]
+                    .as_str()
+                    .ok_or(OAuthError::MissingParameter("client_secret".to_string()))?;
+                exchange_code(
+                    oauth_config,
+                    &effective,
+                    code,
+                    client_id,
+                    client_secret,
+                    &flow.redirect_uri,
+                    flow.code_verifier.as_deref(),
+                )
+                .await
+                .inspect_err(|error| {
+                    if let (Some(app), OAuthError::TokenExchangeFailed(message)) = (&app, error) {
+                        oauth_apps::record_provider_error(&app.app_id, "exchange", message);
+                    }
+                })?
+            }
+        };
 
         let mut granted = granted_fields(&token_response, oauth_config, callback_params)?;
-        add_provider_account_fields(&flow.integration_id, &mut granted, &params).await?;
+        match sealed_client {
+            Some(sealed) => {
+                add_provider_account_fields_through_seal(
+                    sealed,
+                    tenant_id,
+                    &flow.connection_id,
+                    &flow.integration_id,
+                    &mut granted,
+                    &params,
+                    access_token_claims.as_ref(),
+                )
+                .await?
+            }
+            None => {
+                add_provider_account_fields(&flow.integration_id, &mut granted, &params).await?
+            }
+        }
         let mut updated_params = params.clone();
         let status = match started_by {
             None => {
@@ -809,13 +872,29 @@ impl OAuthService {
                 obj.remove("refresh_token");
                 obj.extend(fields.clone());
             }
-            if let Err(error) = crate::auth::provider_auth::revoke_oauth_token(
-                crate::net::shared_hardened_client(),
-                oauth_config,
-                &revoked,
-            )
-            .await
-            {
+            // Tokens that were sealed as they came are named to the provider
+            // by seal.
+            let outcome = match &self.sealed {
+                Some(sealed) if crate::sealed::has_sealed_values(&revoked) => sealed
+                    .revoke_token(
+                        tenant_id,
+                        connection_id,
+                        &integration_id,
+                        &revoked,
+                        crate::auth::provider_auth::revoke_authorization(oauth_config, &revoked),
+                    )
+                    .await
+                    .map(|_| ()),
+                _ => {
+                    crate::auth::provider_auth::revoke_oauth_token(
+                        crate::net::shared_hardened_client(),
+                        oauth_config,
+                        &revoked,
+                    )
+                    .await
+                }
+            };
+            if let Err(error) = outcome {
                 tracing::warn!(
                     connection_id,
                     %error,
@@ -934,6 +1013,65 @@ async fn add_provider_account_fields(
     Ok(())
 }
 
+/// [`add_provider_account_fields`], for tokens that came back sealed: the
+/// lookup goes through seal, which attaches the token, and what the token
+/// says of its consent is what seal read from it.
+async fn add_provider_account_fields_through_seal(
+    sealed: &crate::sealed::SealedCredentials,
+    tenant_id: &str,
+    connection_id: &str,
+    integration_id: &str,
+    granted: &mut serde_json::Map<String, Value>,
+    params: &Value,
+    access_token_claims: Option<&Value>,
+) -> Result<(), OAuthError> {
+    if integration_id != "xero_oauth" {
+        return Ok(());
+    }
+    let unresolved =
+        |cause: String| OAuthError::AccountUnresolved(format!("Xero organisations: {cause}"));
+    let mut presenting = params.clone();
+    presenting[crate::sealed::policy::ACCESS_TOKEN_FIELD] = granted
+        .get(crate::sealed::policy::ACCESS_TOKEN_FIELD)
+        .cloned()
+        .ok_or_else(|| OAuthError::TokenExchangeFailed("no access_token".to_string()))?;
+    let response = sealed
+        .send_bounded(
+            tenant_id,
+            connection_id,
+            integration_id,
+            &presenting,
+            "GET",
+            XERO_CONNECTIONS_URL,
+            [("accept".to_string(), "application/json".to_string())],
+            None,
+            1024 * 1024,
+        )
+        .await
+        .map_err(|error| match error {
+            // seal's detail has identifiers and static text only.
+            crate::sealed::SendError::Seal(error) => unresolved(error.to_string()),
+            other => unresolved(format!("{other:?}")),
+        })?;
+    if !(200..300).contains(&response.status) {
+        return Err(unresolved(format!("HTTP {}", response.status)));
+    }
+    let connections: Value =
+        serde_json::from_slice(&response.body).map_err(|e| unresolved(e.to_string()))?;
+    let event = access_token_claims
+        .and_then(|claims| claims[crate::sealed::policy::XERO_EVENT_CLAIM].as_str())
+        .map(str::to_owned);
+    let (tenant_id, tenant_name) =
+        select_xero_tenant_of_event(&connections, event, params["tenant_id"].as_str())
+            .map_err(OAuthError::AccountUnresolved)?;
+    granted.insert("tenant_id".to_string(), Value::String(tenant_id));
+    granted.insert(
+        "tenant_name".to_string(),
+        tenant_name.map_or(Value::Null, Value::String),
+    );
+    Ok(())
+}
+
 /// The fields a Xero connection stores for the organisation it uses. The name
 /// is always written, `null` when Xero gives none, so that a name from an
 /// earlier organisation does not stay.
@@ -969,6 +1107,20 @@ fn select_xero_tenant(
     access_token: &str,
     previous: Option<&str>,
 ) -> Result<(String, Option<String>), String> {
+    select_xero_tenant_of_event(
+        connections,
+        jwt_claim(access_token, crate::sealed::policy::XERO_EVENT_CLAIM),
+        previous,
+    )
+}
+
+/// [`select_xero_tenant`], given the consent the access token names
+/// (its `authentication_event_id`), however that was read.
+fn select_xero_tenant_of_event(
+    connections: &Value,
+    event: Option<String>,
+    previous: Option<&str>,
+) -> Result<(String, Option<String>), String> {
     let organisations: Vec<&Value> = connections
         .as_array()
         .ok_or("Xero's connections list is not a list")?
@@ -976,7 +1128,7 @@ fn select_xero_tenant(
         .filter(|c| c["tenantType"].as_str() == Some("ORGANISATION"))
         .collect();
     let previous = previous.filter(|tenant| !tenant.is_empty());
-    let authorized: Vec<&Value> = match jwt_claim(access_token, "authentication_event_id") {
+    let authorized: Vec<&Value> = match event {
         Some(event) => organisations
             .iter()
             .copied()

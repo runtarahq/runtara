@@ -1234,7 +1234,8 @@ pub(crate) fn revoke_authorization(oauth_config: &OAuthConfig, params: &Value) -
     match effective.token_endpoint_auth {
         TokenEndpointAuth::HttpBasic => {
             let client_id = params["client_id"].as_str().unwrap_or("");
-            let client_secret = params["client_secret"].as_str().unwrap_or("");
+            // A sealed secret is not this process's to send.
+            let client_secret = params["client_secret"].as_str()?;
             Some(format!(
                 "Basic {}",
                 BASE64.encode(format!("{client_id}:{client_secret}"))

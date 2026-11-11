@@ -29,7 +29,7 @@ use seal_keys::{KeySource, Keyring, KeyringConfig};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-pub use oauth::RotatedSealed;
+pub use oauth::{RotatedSealed, SealedGrant};
 pub use policy::Allowances;
 pub use seal_client::{ErrorCode as SealErrorCode, SealError};
 
@@ -425,11 +425,18 @@ impl SealedCredentials {
         crate::net::validate_credentialed_endpoint(&url)
             .map_err(|reason| format!("refusing to send the revocation request: {reason}"))?;
         let (name, value) = presented(parameters, field).map_err(|error| error.detail)?;
+        let mut values = BTreeMap::from([(name, value)]);
         let mut request = http::Request::builder()
             .method("POST")
             .uri(url)
             .header("content-type", "application/json");
-        if let Some(authorization) = authorization {
+        // A sealed client secret is seal's to send, where the provider has
+        // the client say who it is; a readable one came as `authorization`.
+        if policy::client_secret_revokes(integration_id, parameters) {
+            let (name, value) =
+                presented(parameters, policy::CLIENT_SECRET_FIELD).map_err(|error| error.detail)?;
+            values.insert(name, value);
+        } else if let Some(authorization) = authorization {
             request = request.header("authorization", authorization);
         }
         // seal names the token in the body, as its policy says.
@@ -446,7 +453,7 @@ impl SealedCredentials {
                 keyset: keys::keyset_for_tenant(tenant_id),
                 item: ItemId::new(connection_id)
                     .map_err(|_| "the connection's id is not an item id".to_string())?,
-                sealed: BTreeMap::from([(name, value)]),
+                sealed: values,
                 plain: BTreeMap::new(),
                 request,
             }),

@@ -56,9 +56,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     A sealed `teams_bot` reaches `smba.trafficmanager.net` only.
   - **The tokens of an authorization-code connection**
     (`hubspot_private_app`, `quickbooks_online`, `xero_oauth`,
-    `http_oauth2_authorization_code`): sealed when a flow completes or is
-    confirmed. A refresh goes through seal, and the next pair comes back
-    sealed. The client's own secret is not sealed for these yet.
+    `http_oauth2_authorization_code`), and the client secret the connection
+    holds: seal sends the secret with the authorization code, and the pair
+    comes back already sealed. A refresh and a revocation go through seal
+    too. A connection whose client secret is still readable, or is a
+    platform OAuth app's, has its tokens sealed as they become the
+    connection's. With sealed tokens, the HubSpot account is not named to
+    whoever confirms a flow started without a browser.
   - **A Postgres password** (`postgres`), for a URL with
     `sslmode=verify-full` and nothing else in its query: seal verifies the
     server, logs in, and relays the session. Any other URL stays as it was,
