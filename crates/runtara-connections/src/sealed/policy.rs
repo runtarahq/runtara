@@ -39,6 +39,9 @@ pub struct Allowances {
     /// Certificate authorities seal trusts besides the public ones, each in
     /// PEM: for a database or provider whose certificate a private CA signed.
     pub extra_roots: Vec<String>,
+    /// Whether database connections may reach private addresses: where the
+    /// deployment's own address guard for them is off.
+    pub private_databases: bool,
 }
 
 impl Allowances {
@@ -111,6 +114,51 @@ pub struct PgTarget {
     pub port: u16,
     pub database: String,
     pub user: String,
+    /// How the session to the server is protected, as the URL asked.
+    pub tls: PgProtection,
+}
+
+/// How a Postgres URL asks for its session to be protected, as seal has it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PgProtection {
+    /// `sslmode=verify-full`: TLS, to a server whose certificate is verified.
+    Verified,
+    /// `sslmode=require`: TLS, to a server that need not prove who it is.
+    Unverified,
+    /// `sslmode=disable`: no TLS.
+    Plaintext,
+}
+
+impl PgProtection {
+    fn of(sslmode: Option<&str>) -> Option<Self> {
+        match sslmode {
+            Some("verify-full") => Some(Self::Verified),
+            Some("require") => Some(Self::Unverified),
+            Some("disable") => Some(Self::Plaintext),
+            // `prefer` and `allow` (and a URL that names no mode, which gets
+            // `prefer`) use TLS only if the server happens to offer it, and
+            // `verify-ca` checks the CA and not the name: seal has no mode
+            // for either, and picking one would change what the connection
+            // does. Anything else is not a mode.
+            _ => None,
+        }
+    }
+
+    /// What seal calls it in a policy.
+    fn in_policy(self) -> &'static str {
+        match self {
+            Self::Verified => "verify_full",
+            Self::Unverified => "unverified",
+            Self::Plaintext => "plaintext",
+        }
+    }
+}
+
+/// Whether this build's seal can log in to a Postgres server it does not
+/// verify, or that has no TLS. Without it, only a URL that asks for a
+/// verified server is sealed.
+pub fn seal_logs_in_unverified() -> bool {
+    serde_json::from_value::<PgTls>(json!("plaintext")).is_ok()
 }
 
 fn percent_decoded(value: &str) -> Option<String> {
@@ -122,11 +170,10 @@ fn percent_decoded(value: &str) -> Option<String> {
 /// A Postgres URL seal can log in for, as the URL without its password, and
 /// the password.
 ///
-/// seal always verifies the server's certificate against its host name, so
-/// only a URL that asks for that (`sslmode=verify-full`) is sealed: any other
-/// may be for a server whose certificate would not verify, and sealing it
-/// would break the connection. Nothing else may be in the query, since seal,
-/// not the URL, decides how the session is opened.
+/// The URL's `sslmode` says how the session is protected, and seal is held
+/// to the same: it verifies the server only where the URL asked for that, so
+/// a connection that works is not broken by sealing it. Nothing else may be
+/// in the query, since seal, not the URL, decides how the session is opened.
 fn split_postgres_url(url: &str) -> Option<(String, String)> {
     let parsed = url::Url::parse(url.trim()).ok()?;
     if !matches!(parsed.scheme(), "postgres" | "postgresql") {
@@ -143,16 +190,25 @@ fn split_postgres_url(url: &str) -> Option<(String, String)> {
         .strip_prefix('/')
         .filter(|database| !database.is_empty() && !database.contains('/'))?;
     let mut query = parsed.query_pairs();
-    let verifies = matches!(
-        (query.next(), query.next()),
-        (Some((key, value)), None) if key == "sslmode" && value == "verify-full"
-    );
-    if !verifies || parsed.fragment().is_some() {
+    let sslmode = match (query.next(), query.next()) {
+        (None, _) => None,
+        (Some((key, value)), None) if key == "sslmode" => Some(value.into_owned()),
+        _ => return None,
+    };
+    let protection = PgProtection::of(sslmode.as_deref())?;
+    if parsed.fragment().is_some() {
         return None;
     }
     let port = parsed.port().unwrap_or(5432);
+    let target = format!("postgres://{user}@{host}:{port}/{database}");
     Some((
-        format!("postgres://{user}@{host}:{port}/{database}"),
+        match protection {
+            PgProtection::Verified => target,
+            // The mode stays with the target: it is part of what the
+            // password is sealed for.
+            PgProtection::Unverified => format!("{target}?sslmode=require"),
+            PgProtection::Plaintext => format!("{target}?sslmode=disable"),
+        },
         password,
     ))
 }
@@ -160,11 +216,20 @@ fn split_postgres_url(url: &str) -> Option<(String, String)> {
 /// The database of a sealed Postgres connection, from its stored target.
 pub fn postgres_target(params: &Value) -> Option<PgTarget> {
     let parsed = url::Url::parse(filled(params, PG_TARGET_FIELD)?).ok()?;
+    let sslmode = parsed
+        .query_pairs()
+        .find(|(key, _)| key == "sslmode")
+        .map(|(_, value)| value.into_owned());
     Some(PgTarget {
         host: parsed.host_str()?.to_ascii_lowercase(),
         port: parsed.port()?,
         database: percent_decoded(parsed.path().strip_prefix('/')?)?,
         user: percent_decoded(parsed.username())?,
+        // A target with no mode is a verified one: it is stored bare.
+        tls: match sslmode.as_deref() {
+            None => PgProtection::Verified,
+            mode => PgProtection::of(mode)?,
+        },
     })
 }
 
@@ -262,6 +327,9 @@ struct Target {
     inject: Inject,
     /// The methods the secret may be used with there; any, if `None`.
     methods: Option<Vec<Method>>,
+    /// Parts of the credential that are not secret and that each request
+    /// names, by field.
+    plain: Vec<&'static str>,
 }
 
 /// One secret parameter of a connection.
@@ -346,23 +414,35 @@ fn presign_methods() -> Vec<Method> {
     vec![Method::Get, Method::Head, Method::Put, Method::Delete]
 }
 
-/// AWS services whose regional endpoint is
-/// `https://{service}.{region}.amazonaws.com`, which a sealed AWS connection
-/// may sign for. A rule names one host and one service, so a connection is
-/// sealed for these; an agent that signs for another is refused.
-pub const AWS_SERVICES: &[&str] = &[
-    "bedrock",
-    "sqs",
-    "sns",
-    "dynamodb",
-    "lambda",
-    "kinesis",
-    "sts",
-    "events",
-    "states",
-    "secretsmanager",
-    "ssm",
-];
+/// The plain field a request names its AWS service in, for a key that is
+/// used across services.
+pub const AWS_SERVICE_FIELD: &str = "aws_service";
+
+/// The service an AWS connection signs for when a request names none.
+const AWS_DEFAULT_SERVICE: &str = "bedrock";
+
+/// The parts of a connection's credential that are not secret and that each
+/// request names to seal, by field: the AWS service a request is for. A
+/// request that says which (`aws_service` among its parameters) is signed
+/// for that; otherwise for the connection's own, as the proxy signs.
+pub fn plain_fields(integration_id: &str, params: &Value) -> BTreeMap<String, String> {
+    let names_service = secrets(integration_id, params)
+        .into_iter()
+        .flatten()
+        .any(|secret| match &secret.usage {
+            Usage::Targets(targets) => targets
+                .iter()
+                .any(|target| target.plain.contains(&AWS_SERVICE_FIELD)),
+            _ => false,
+        });
+    if !names_service {
+        return BTreeMap::new();
+    }
+    let service = filled(params, AWS_SERVICE_FIELD)
+        .or_else(|| filled(params, "service"))
+        .unwrap_or(AWS_DEFAULT_SERVICE);
+    BTreeMap::from([(AWS_SERVICE_FIELD.to_owned(), service.to_owned())])
+}
 
 /// Whether this build's seal lets a SigV4 request name its operation in
 /// `X-Amz-Target`, which SQS, DynamoDB and other JSON services need.
@@ -424,11 +504,15 @@ fn aws_secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
         .unwrap_or_else(|| "us-east-1".to_owned());
     let endpoint = filled(params, "endpoint").map(normalize_endpoint);
 
-    // Each host signed for, and the service it is.
-    let destinations: Vec<(String, String)> = if storage {
+    // Each host signed for, and the service it is there. An AWS key is
+    // used for whatever service each request is for, on that service's own
+    // host, so the request names the service and the key is sealed for the
+    // hosts under AWS's domain: the key itself is never sent, only a
+    // signature good for the one request. Storage is one service.
+    let destinations: Vec<(String, Option<&str>)> = if storage {
         vec![(
             endpoint.unwrap_or_else(|| format!("https://s3.{region}.amazonaws.com")),
-            "s3".to_owned(),
+            Some("s3"),
         )]
     } else {
         // Without the operation's header, half of AWS cannot be called; such
@@ -436,30 +520,21 @@ fn aws_secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
         if !seal_takes_amz_target() {
             return None;
         }
-        match endpoint {
-            // An endpoint of the connection's own is one host, and the
-            // service signed for there is the calling agent's to name. seal
-            // signs for one, so the connection must say which.
-            Some(endpoint) => vec![(endpoint, filled(params, "service")?.to_owned())],
-            None => std::iter::once((
-                format!("https://bedrock-runtime.{region}.amazonaws.com"),
-                "bedrock".to_owned(),
-            ))
-            .chain(AWS_SERVICES.iter().map(|service| {
-                (
-                    crate::auth::provider_auth::aws_default_endpoint(service, &region),
-                    (*service).to_owned(),
-                )
-            }))
-            .collect(),
-        }
+        vec![(
+            // An endpoint of the connection's own is one host.
+            endpoint.unwrap_or_else(|| "https://*.amazonaws.com".to_owned()),
+            None,
+        )]
     };
 
     let with_token = holds(params, token_field);
-    let sigv4 = |service: &str, presign: bool| {
+    let sigv4 = |service: Option<&str>, presign: bool| {
         let mut options = json!({
             "region": region,
-            "service": service,
+            "service": match service {
+                Some(service) => json!(service),
+                None => json!({"field": AWS_SERVICE_FIELD}),
+            },
             "access_key_id": {"literal": access_key_id},
             "payload": ["caller_hash", "computed"],
         });
@@ -481,22 +556,29 @@ fn aws_secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
     let mut key_targets = Vec::new();
     let mut token_targets = Vec::new();
     for (base_url, service) in &destinations {
+        let plain = match service {
+            Some(_) => Vec::new(),
+            None => vec![AWS_SERVICE_FIELD],
+        };
         if storage {
             key_targets.push(Target {
                 base_url: base_url.clone(),
-                inject: sigv4(service, true)?,
+                inject: sigv4(*service, true)?,
                 methods: Some(presign_methods()),
+                plain: plain.clone(),
             });
         }
         key_targets.push(Target {
             base_url: base_url.clone(),
-            inject: sigv4(service, false)?,
+            inject: sigv4(*service, false)?,
             methods: None,
+            plain,
         });
         token_targets.push(Target {
             base_url: base_url.clone(),
             inject: Inject::Companion {},
             methods: None,
+            plain: Vec::new(),
         });
     }
     let mut secrets = vec![Secret {
@@ -530,11 +612,13 @@ fn azure_blob_secrets(params: &Value) -> Option<Vec<Secret>> {
                 base_url: base_url.clone(),
                 inject: shared_key(true)?,
                 methods: Some(presign_methods()),
+                plain: Vec::new(),
             },
             Target {
                 base_url,
                 inject: shared_key(false)?,
                 methods: None,
+                plain: Vec::new(),
             },
         ]),
     }])
@@ -551,11 +635,15 @@ const CLIENT_CREDENTIALS_TYPES: &[(&str, &str)] = &[
     ("teams_bot", "app_password"),
 ];
 
-/// The Bot Connector, where a Teams bot's replies go. A conversation names
-/// its own service URL on this host; seal takes no wildcard, so the regional
-/// hosts and the other Bot Framework channels are not reached with a sealed
-/// secret.
-const TEAMS_BOT_CONNECTOR: &str = "https://smba.trafficmanager.net";
+/// The Bot Connector hosts, where a Teams bot's replies go: the ones a
+/// conversation's service URL may name (see the server's check of it). Every
+/// name under these domains is Microsoft's.
+const TEAMS_BOT_CONNECTORS: &[&str] = &[
+    "smba.trafficmanager.net",
+    "*.smba.trafficmanager.net",
+    "botframework.com",
+    "*.botframework.com",
+];
 
 /// What stands for a secret while a connection's token request is worked
 /// out: the request's shape is taken, and the stand-in never sent.
@@ -617,7 +705,10 @@ fn token_grant(integration_id: &str, params: &Value) -> Option<TokenGrant> {
         },
     };
     let api = match integration_id {
-        "teams_bot" => vec![(TEAMS_BOT_CONNECTOR.to_owned(), true)],
+        "teams_bot" => TEAMS_BOT_CONNECTORS
+            .iter()
+            .map(|host| (format!("https://{host}"), true))
+            .collect(),
         _ => vec![(base_url?, false)],
     };
     Some(TokenGrant {
@@ -1015,6 +1106,7 @@ fn secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
                     server_name: None,
                 },
                 methods: None,
+                plain: Vec::new(),
             }]),
         }]),
         "aws_credentials" | "s3_compatible" => aws_secrets(integration_id, params),
@@ -1227,25 +1319,41 @@ pub fn policies(
                 verify: Some(Verify::Hmac { hash: *hash }),
             },
             Usage::Postgres(target) => {
+                // From its JSON form: a mode this build's seal does not have
+                // makes no destination, and the connection is not sealed.
+                let destination: Destination = serde_json::from_value(json!({
+                    "scheme": "postgres",
+                    "host": target.host,
+                    "port": target.port,
+                    "databases": [target.database],
+                    "user": {"literal": target.user},
+                    "tls": target.tls.in_policy(),
+                }))
+                .ok()?;
+                // A session with no TLS is as plain HTTP is: for a host the
+                // deployment lets be reached that way.
+                if target.tls == PgProtection::Plaintext
+                    && !allowances.allows_plain_http(&target.host)
+                {
+                    return None;
+                }
+                let verified = target.tls == PgProtection::Verified;
                 let mut rule = Rule::new(
-                    Destination::Postgres {
-                        host: Host::new(target.host.as_str()).ok()?,
-                        port: target.port,
-                        databases: vec![target.database.clone()],
-                        user: Part::Literal(target.user.clone()),
-                        tls: PgTls::VerifyFull,
-                        allow_replication: false,
-                    },
-                    // As the connection logged in before it was sealed: with
-                    // whatever the server asks for, over a verified session.
+                    destination,
+                    // To a verified server, as the connection logged in
+                    // before it was sealed: with whatever the server asks
+                    // for. To one that is not, seal logs in with SCRAM only,
+                    // so the password is never sent.
                     Inject::PgPassword {
-                        allow_md5: true,
-                        allow_cleartext_password: true,
+                        allow_md5: verified,
+                        allow_cleartext_password: verified,
                         require_channel_binding: false,
                     },
                 );
-                rule.allow_private_destination =
-                    allowances.allows_private(&target.host, Some(target.port));
+                // A deployment that lets its database connections reach
+                // private addresses lets seal reach them too.
+                rule.allow_private_destination = allowances.private_databases
+                    || allowances.allows_private(&target.host, Some(target.port));
                 Policy {
                     rules: vec![rule],
                     definitions: BTreeMap::new(),
@@ -1279,6 +1387,9 @@ pub fn policies(
                 for target in targets {
                     let mut rule = rule_for(&target.base_url, &target.inject, false, allowances)?;
                     rule.methods = target.methods.clone();
+                    for field in &target.plain {
+                        rule.plain.push(FieldName::new(*field).ok()?);
+                    }
                     if !rules.contains(&rule) {
                         rules.push(rule);
                     }
@@ -1508,39 +1619,45 @@ mod tests {
         }
     }
 
+    /// The policy of an AWS key, if this build's seal can hold one: it must
+    /// let a request name its operation, and its service.
+    fn aws_policies(params: &Value) -> Option<BTreeMap<String, Policy>> {
+        let policies = policies("aws_credentials", params, &Allowances::default());
+        if policies.is_none() {
+            let names_service = inject_from(json!({"aws_sigv4": {
+                "region": "us-east-1", "service": {"field": "aws_service"},
+                "access_key_id": {"literal": "probe"}, "payload": ["computed"],
+            }}))
+            .is_some();
+            assert!(!seal_takes_amz_target() || !names_service);
+        }
+        policies
+    }
+
     #[test]
-    fn an_aws_key_signs_for_bedrock_and_the_regional_services() {
+    fn an_aws_key_signs_for_the_service_each_request_names() {
         let params = json!({
             "aws_access_key_id": "AKIA", "aws_secret_access_key": "s", "aws_region": "eu-west-1",
         });
-        let Some(policies) = policies("aws_credentials", &params, &Allowances::default()) else {
-            assert!(!seal_takes_amz_target());
+        let Some(policies) = aws_policies(&params) else {
             return;
         };
         assert_eq!(policies.len(), 1);
-        let policy = canonical(&policies["aws_secret_access_key"]);
-        let rules = policy["rules"].as_array().unwrap();
-        assert_eq!(rules.len(), AWS_SERVICES.len() + 1);
+        // One rule, for the hosts under AWS's domain: the key is never sent,
+        // only a signature good for the one request.
         assert_eq!(
-            rules[0],
-            json!({
-                "destination": {
-                    "scheme": "https",
-                    "host": "bedrock-runtime.eu-west-1.amazonaws.com",
-                },
+            canonical(&policies["aws_secret_access_key"]),
+            json!({"rules": [{
+                "destination": {"scheme": "https", "host": "*.amazonaws.com"},
                 "inject": {"aws_sigv4": {
                     "region": "eu-west-1",
-                    "service": "bedrock",
+                    "service": {"field": "aws_service"},
                     "access_key_id": {"literal": "AKIA"},
                     "payload": ["caller_hash", "computed"],
                 }},
-            })
+                "plain": ["aws_service"],
+            }]})
         );
-        let sqs = rules
-            .iter()
-            .find(|rule| rule["destination"]["host"] == "sqs.eu-west-1.amazonaws.com")
-            .expect("a rule for SQS");
-        assert_eq!(sqs["inject"]["aws_sigv4"]["service"], "sqs");
         assert_eq!(
             request_fields("aws_credentials", &params),
             ["aws_secret_access_key"]
@@ -1559,19 +1676,34 @@ mod tests {
             "http_bearer",
             &json!({"base_url": "https://a.example.com"})
         ));
+
+        // A request says which service it is for; one that does not is for
+        // the connection's own, Bedrock unless it says otherwise.
+        let service =
+            |params: &Value| plain_fields("aws_credentials", params)["aws_service"].clone();
+        assert_eq!(service(&params), "bedrock");
+        let mut named = params.clone();
+        named["service"] = json!("sns");
+        assert_eq!(service(&named), "sns");
+        named["aws_service"] = json!("sqs");
+        assert_eq!(service(&named), "sqs");
+        // No other type names anything in the plain.
+        assert!(
+            plain_fields("http_bearer", &json!({"base_url": "https://a.example.com"})).is_empty()
+        );
     }
 
     #[test]
     fn an_aws_session_token_goes_only_with_the_key_it_belongs_to() {
-        if !seal_takes_amz_target() {
-            return;
-        }
-        // The names the parameters were stored under are the ones sealed.
+        // The names the parameters were stored under are the ones sealed, and
+        // an endpoint of the connection's own is the one host signed for.
         let params = json!({
             "access_key_id": "AKIA", "secret_access_key": "s", "session_token": "t",
-            "region": "us-east-1", "endpoint": "https://sqs.internal.example.com", "service": "sqs",
+            "region": "us-east-1", "endpoint": "https://sqs.internal.example.com",
         });
-        let policies = policies("aws_credentials", &params, &Allowances::default()).unwrap();
+        let Some(policies) = aws_policies(&params) else {
+            return;
+        };
         let key = canonical(&policies["secret_access_key"]);
         assert_eq!(
             key["rules"],
@@ -1579,11 +1711,12 @@ mod tests {
                 "destination": {"scheme": "https", "host": "sqs.internal.example.com"},
                 "inject": {"aws_sigv4": {
                     "region": "us-east-1",
-                    "service": "sqs",
+                    "service": {"field": "aws_service"},
                     "access_key_id": {"literal": "AKIA"},
                     "session_token": {"field": "session_token"},
                     "payload": ["caller_hash", "computed"],
                 }},
+                "plain": ["aws_service"],
             }])
         );
         assert_eq!(
@@ -1604,23 +1737,9 @@ mod tests {
             request_fields("aws_credentials", &stored),
             ["secret_access_key", "session_token"]
         );
-    }
-
-    #[test]
-    fn an_aws_endpoint_of_the_connections_own_must_say_its_service() {
-        // One host is signed for as one service, and only the connection can
-        // say which.
-        let params = json!({
-            "aws_access_key_id": "AKIA", "aws_secret_access_key": "s",
-            "endpoint": "https://vpce.example.com",
-        });
-        assert_eq!(
-            policies("aws_credentials", &params, &Allowances::default()),
-            None
-        );
         // No access key id, no signature.
         assert_eq!(
-            policies(
+            super::policies(
                 "aws_credentials",
                 &json!({"aws_secret_access_key": "s"}),
                 &Allowances::default()
@@ -2021,6 +2140,7 @@ mod tests {
                 port: 5432,
                 database: "orders".into(),
                 user: "app@acme".into(),
+                tls: PgProtection::Verified,
             })
         );
         let (field, policy) = only("postgres", prepared.clone());
@@ -2056,13 +2176,95 @@ mod tests {
         assert_eq!(super::prepared("http_bearer", &entered), entered);
     }
 
+    /// A URL that does not ask for a verified server is sealed for what it
+    /// does ask: seal is held to the URL's own mode, and to no less.
+    #[test]
+    fn a_database_url_is_sealed_for_the_protection_it_asks_for() {
+        // A session with no TLS is for a host the deployment lets be reached
+        // in the clear, as plain HTTP is.
+        let in_the_clear = Allowances {
+            plain_http_hosts: vec!["db.example.com".to_owned()],
+            ..Allowances::default()
+        };
+        for (url, target, tls, allowances) in [
+            (
+                "postgres://app:pw@db.example.com/orders?sslmode=require",
+                "postgres://app@db.example.com:5432/orders?sslmode=require",
+                "unverified",
+                Allowances::default(),
+            ),
+            (
+                "postgres://app:pw@db.example.com/orders?sslmode=disable",
+                "postgres://app@db.example.com:5432/orders?sslmode=disable",
+                "plaintext",
+                in_the_clear.clone(),
+            ),
+        ] {
+            let prepared = prepared("postgres", &json!({"database_url": url}));
+            assert_eq!(
+                prepared,
+                json!({"database_url": "pw", "database_target": target}),
+                "{url}"
+            );
+            assert_eq!(
+                postgres_target(&prepared).unwrap().tls.in_policy(),
+                tls,
+                "{url}"
+            );
+            // seal before it had these modes names no such destination, and
+            // the connection is then not sealed.
+            let Some(policies) = policies("postgres", &prepared, &allowances) else {
+                assert!(!seal_logs_in_unverified(), "{url}");
+                continue;
+            };
+            let policy = canonical(&policies["database_url"]);
+            assert_eq!(policy["rules"][0]["destination"]["tls"], tls, "{url}");
+            // Not to a verified server: SCRAM only, so the password is never
+            // sent.
+            assert_eq!(
+                policy["rules"][0]["inject"],
+                json!({"pg_password": {}}),
+                "{url}"
+            );
+        }
+        // Without that allowance, a URL with no TLS is not sealed.
+        let disabled = prepared(
+            "postgres",
+            &json!({"database_url": "postgres://app:pw@db.example.com/orders?sslmode=disable"}),
+        );
+        assert_eq!(
+            policies("postgres", &disabled, &Allowances::default()),
+            None
+        );
+
+        // Where the deployment lets database connections reach private
+        // addresses, seal may too.
+        let internal = prepared(
+            "postgres",
+            &json!({"database_url": "postgres://app:pw@db.example.com/orders?sslmode=verify-full"}),
+        );
+        let allowed = Allowances {
+            private_databases: true,
+            ..Allowances::default()
+        };
+        let reaches_private = |allowances: &Allowances| {
+            policies("postgres", &internal, allowances).unwrap()["database_url"].rules[0]
+                .allow_private_destination
+        };
+        assert!(reaches_private(&allowed));
+        assert!(!reaches_private(&Allowances::default()));
+    }
+
     #[test]
     fn a_database_url_seal_could_not_log_in_for_is_left_whole() {
         for url in [
-            // seal always verifies the server; these do not ask for that.
+            // Modes seal has none for: TLS only if the server happens to
+            // offer it, or the CA checked and not the name.
             "postgres://app:pw@db.example.com/orders",
-            "postgres://app:pw@db.example.com/orders?sslmode=require",
-            "postgres://app:pw@db.example.com/orders?sslmode=disable",
+            "postgres://app:pw@db.example.com/orders?sslmode=prefer",
+            "postgres://app:pw@db.example.com/orders?sslmode=allow",
+            "postgres://app:pw@db.example.com/orders?sslmode=verify-ca",
+            "postgres://app:pw@db.example.com/orders?sslmode=nonsense",
             // seal, not the URL, decides how the session is opened.
             "postgres://app:pw@db.example.com/orders?sslmode=verify-full&sslrootcert=/ca.pem",
             "postgres://app:pw@db.example.com/orders?sslmode=verify-full&host=/tmp",
@@ -2098,13 +2300,30 @@ mod tests {
             policy["rules"][0]["destination"]["path_prefix"],
             "/tenant-1/oauth2/v2.0/token"
         );
-        // A conversation's service URL is a path on this host.
+        // A conversation names its own service URL, on one of the hosts the
+        // server accepts one from.
+        let hosts: Vec<&str> = policy["definitions"]["api"]["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|rule| {
+                assert_eq!(
+                    rule["inject"],
+                    json!({"header": {"name": "Authorization", "format": "Bearer {}"}})
+                );
+                assert_eq!(rule["destination"]["scheme"], "https");
+                assert_eq!(rule["destination"].get("path_prefix"), None);
+                rule["destination"]["host"].as_str().unwrap()
+            })
+            .collect();
         assert_eq!(
-            policy["definitions"]["api"]["rules"],
-            json!([{
-                "destination": {"scheme": "https", "host": "smba.trafficmanager.net"},
-                "inject": {"header": {"name": "Authorization", "format": "Bearer {}"}},
-            }])
+            hosts,
+            [
+                "smba.trafficmanager.net",
+                "*.smba.trafficmanager.net",
+                "botframework.com",
+                "*.botframework.com",
+            ]
         );
     }
 

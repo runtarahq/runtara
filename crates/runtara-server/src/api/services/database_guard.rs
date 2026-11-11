@@ -132,6 +132,9 @@ pub(crate) async fn admit_sealed(
     .await?;
     let mut url = url::Url::parse(parameters[PG_TARGET_FIELD].as_str().unwrap_or_default())
         .map_err(|_| "the connection's database target does not parse".to_string())?;
+    // The pool speaks to the relay in the clear, whatever the session to the
+    // server is: that leg is seal's.
+    url.set_query(None);
     url.query_pairs_mut()
         .append_pair("sslmode", "disable")
         .append_pair("host", &directory);
@@ -599,6 +602,44 @@ exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/certs/server.crt 
             .unwrap();
         assert_eq!(sum, 42);
 
+        // A URL that asks for TLS without verifying the server (`require`) is
+        // sealed for that: seal, trusting no CA of this test's, still logs in.
+        if runtara_connections::sealed::policy::seal_logs_in_unverified() {
+            let trusting_nothing = std::sync::Arc::new(
+                SealedCredentials::in_process(
+                    std::sync::Arc::new(MemoryKeySource::default()),
+                    &[7_u8; 32],
+                    Allowances {
+                        private_hosts: vec![format!("127.0.0.1:{port}")],
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+            );
+            let entered = serde_json::json!({
+                "database_url": format!(
+                    "postgres://app:synthetic-database-password@127.0.0.1:{port}/orders?sslmode=require"
+                ),
+            });
+            let stored = trusting_nothing
+                .seal_parameters("acme", "c-require", "postgres", &entered, None)
+                .await
+                .unwrap()
+                .expect("a URL that asks for unverified TLS is sealed for it");
+            let unverified_url = admit_sealed(trusting_nothing, "acme", "c-require", &stored)
+                .await
+                .unwrap();
+            let mut unverified = sqlx::postgres::PgConnection::connect(&unverified_url)
+                .await
+                .expect("seal logs in without verifying the server");
+            let encrypted: bool =
+                sqlx::query_scalar("SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()")
+                    .fetch_one(&mut unverified)
+                    .await
+                    .unwrap();
+            assert!(encrypted);
+        }
+
         // A wrong password is the server's to refuse, and reaches the pool as
         // a failed connection.
         let wrong = seal("not-the-password", "c-wrong").await;
@@ -620,6 +661,109 @@ exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/certs/server.crt 
                 .await
                 .is_err()
         );
+    }
+
+    /// A URL that does not ask for a verified server is sealed for what it
+    /// asks: `sslmode=disable` reaches a database with no TLS, and seal logs
+    /// in there with SCRAM, so the password is never sent.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sealed_connection_to_a_database_without_tls_logs_in_through_seal() {
+        use runtara_connections::sealed::{Allowances, MemoryKeySource, SealedCredentials, policy};
+        use sqlx::{Connection, Row};
+        use testcontainers::core::{IntoContainerPort, WaitFor};
+        use testcontainers::runners::AsyncRunner;
+        use testcontainers::{GenericImage, ImageExt};
+
+        // seal before it could log in without TLS leaves such a connection
+        // readable: there is then nothing sealed to check.
+        if !policy::seal_logs_in_unverified() {
+            eprintln!("skipped: this build's seal seals only verified Postgres connections");
+            return;
+        }
+        // As the image comes: no TLS, and SCRAM for every host.
+        let container = GenericImage::new("postgres", "16-alpine")
+            .with_exposed_port(5432.tcp())
+            .with_wait_for(WaitFor::message_on_stderr(
+                "database system is ready to accept connections",
+            ))
+            .with_env_var("POSTGRES_USER", "app")
+            .with_env_var("POSTGRES_PASSWORD", "synthetic-database-password")
+            .with_env_var("POSTGRES_DB", "orders")
+            .start()
+            .await
+            .expect("required Docker Postgres container must start");
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+
+        let sealed = std::sync::Arc::new(
+            SealedCredentials::in_process(
+                std::sync::Arc::new(MemoryKeySource::default()),
+                &[7_u8; 32],
+                // As a deployment whose address guard for databases is off,
+                // and that lets this host be reached in the clear.
+                Allowances {
+                    private_databases: true,
+                    plain_http_hosts: vec!["127.0.0.1".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        {
+            let (mode, connection) = ("disable", "c-plain");
+            let entered = serde_json::json!({
+                "database_url": format!(
+                    "postgres://app:synthetic-database-password@127.0.0.1:{port}/orders?sslmode={mode}"
+                ),
+            });
+            let stored = sealed
+                .seal_parameters("acme", connection, "postgres", &entered, None)
+                .await
+                .unwrap()
+                .expect("the connection is sealed for the protection its URL asks for");
+            assert!(!stored.to_string().contains("synthetic-database-password"));
+            let url = admit_sealed(sealed.clone(), "acme", connection, &stored)
+                .await
+                .unwrap();
+            assert!(!url.contains("synthetic-database-password"), "{url}");
+
+            let mut opened = None;
+            for _ in 0..50 {
+                match sqlx::postgres::PgConnection::connect(&url).await {
+                    Ok(open) => {
+                        opened = Some(open);
+                        break;
+                    }
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
+                }
+            }
+            let mut opened = opened.expect("seal logs in to the database");
+            let row = sqlx::query(
+                "SELECT current_user::text, ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+            )
+            .fetch_one(&mut opened)
+            .await
+            .unwrap();
+            assert_eq!(row.get::<String, _>(0), "app", "{mode}");
+            // The server has no TLS, so the session has none.
+            assert!(!row.get::<bool, _>(1), "{mode}");
+        }
+
+        // A URL that asks for TLS is not given a session without it.
+        let required = serde_json::json!({
+            "database_url": format!(
+                "postgres://app:synthetic-database-password@127.0.0.1:{port}/orders?sslmode=require"
+            ),
+        });
+        let stored = sealed
+            .seal_parameters("acme", "c-require", "postgres", &required, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let url = admit_sealed(sealed.clone(), "acme", "c-require", &stored)
+            .await
+            .unwrap();
+        assert!(sqlx::postgres::PgConnection::connect(&url).await.is_err());
     }
 
     #[tokio::test]

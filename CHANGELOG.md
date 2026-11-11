@@ -39,11 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `s3_compatible`): seal signs the request it sends, and a session token
     goes only with its key. A presigned URL or shared access signature for a
     sealed key is made by seal, for at most seven days as before; the key is
-    not given to the presigning capability. A sealed AWS connection signs
-    for Bedrock and the regional services its policy lists (SQS, SNS,
-    DynamoDB, Lambda, Kinesis, STS, EventBridge, Step Functions, Secrets
-    Manager, Systems Manager); one with an endpoint of its own must name
-    its `service`, or it stays as it was.
+    not given to the presigning capability. A sealed AWS key signs for
+    whatever service each request names, on AWS's hosts or on the
+    connection's own endpoint; its IAM permissions are what limit it.
   - **A client certificate's private key** (`http_mtls`): seal presents the
     certificate on the connection it opens. Changing the certificate or the
     server CA needs the key again.
@@ -52,7 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `http_oauth2_client_credentials`, `zendesk_client_credentials`,
     `ups_client_credentials`, `teams_bot`): seal sends it to the token
     endpoint, and the access token comes back already sealed for the API.
-    A sealed `teams_bot` reaches `smba.trafficmanager.net` only.
+    A sealed `teams_bot` reaches the Bot Connector hosts a service URL may
+    name: `smba.trafficmanager.net`, `botframework.com`, and the names under
+    them.
   - **The tokens of an authorization-code connection**
     (`hubspot_private_app`, `quickbooks_online`, `xero_oauth`,
     `http_oauth2_authorization_code`), and the client secret the connection
@@ -62,10 +62,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     platform OAuth app's, has its tokens sealed as they become the
     connection's. With sealed tokens, the HubSpot account is not named to
     whoever confirms a flow started without a browser.
-  - **A Postgres password** (`postgres`), for a URL with
-    `sslmode=verify-full` and nothing else in its query: seal verifies the
-    server, logs in, and relays the session. Any other URL stays as it was,
-    since seal always verifies the server's certificate.
+  - **A Postgres password** (`postgres`): seal logs in and relays the
+    session, through a Unix socket this process owns. seal is held to the
+    protection the URL's `sslmode` asks for: `verify-full` verifies the
+    server; `require` encrypts without verifying it; `disable` uses no TLS,
+    and is sealed only for a host in `RUNTARA_PROXY_ALLOW_HTTP_HOSTS`. To a
+    server that is not verified, seal logs in with SCRAM only, so the
+    password is never sent: such a server must offer SCRAM. A URL with
+    `prefer`, `allow`, `verify-ca` or no `sslmode`, or with anything else in
+    its query, is not sealed and stays as it was. Where
+    `RUNTARA_DATABASE_CONNECTION_GUARD` is off, seal may reach private
+    database addresses too.
 
   Connections stored before sealing was on are sealed when they are next
   saved, or all at once by `runtara-server seal-connections [--tenant-id

@@ -544,19 +544,30 @@ impl ConnectionResourceExtractor for AwsCredentialsExtractor {
         parameters: &Value,
         request: &ConnectionResourceRequest,
     ) -> Result<ConnectionResourcePage, ConnectionsError> {
-        // AWS keys sign each request, and are not sealed.
-        let client = fetcher.client;
+        // A readable key signs each request here; a sealed one is seal's
+        // to sign with, for the service each request names.
+        let via = AwsVia {
+            client: fetcher.client,
+            sealed: fetcher.sealed.as_ref().map(|route| (route, parameters)),
+        };
         let parameters: AwsCredentialsParams = parse_parameters(self.integration_id(), parameters)?;
         match request.resource_name.as_str() {
-            "bedrock.models" => resolve_bedrock_models(client, &parameters, request).await,
-            "sqs.queues" => resolve_sqs_queues(client, &parameters, request).await,
+            "bedrock.models" => resolve_bedrock_models(&via, &parameters, request).await,
+            "sqs.queues" => resolve_sqs_queues(&via, &parameters, request).await,
             _ => unreachable!("resource name was validated against AWS extractor metadata"),
         }
     }
 }
 
+/// How AWS discovery requests are signed: here, with a readable key, or by
+/// seal, with the connection's sealed parameters.
+struct AwsVia<'a> {
+    client: &'a reqwest::Client,
+    sealed: Option<(&'a SealedRoute<'a>, &'a Value)>,
+}
+
 async fn signed_aws_json(
-    client: &reqwest::Client,
+    via: &AwsVia<'_>,
     method: reqwest::Method,
     url: reqwest::Url,
     service: &str,
@@ -569,6 +580,39 @@ async fn signed_aws_json(
     for (name, value) in additional_headers {
         headers.insert((*name).to_string(), (*value).to_string());
     }
+    if let Some((route, parameters)) = via.sealed {
+        // seal signs for the service the request names.
+        let mut presenting = parameters.clone();
+        presenting[crate::sealed::policy::AWS_SERVICE_FIELD] = Value::String(service.to_owned());
+        let response = route
+            .sealed
+            .send_bounded(
+                route.tenant_id,
+                route.connection_id,
+                "aws_credentials",
+                &presenting,
+                method.as_str(),
+                url.as_str(),
+                headers,
+                (!body.is_empty()).then(|| body.to_vec()),
+                MAX_DISCOVERY_RESPONSE_BYTES,
+            )
+            .await
+            .map_err(|error| {
+                // seal's detail has identifiers and static text only.
+                let reason = match &error {
+                    crate::sealed::SendError::Seal(seal) => {
+                        format!("{}: {}", seal.code.as_str(), seal.detail)
+                    }
+                    other => format!("{other:?}"),
+                };
+                ConnectionsError::AuthResolution(
+                    format!("AWS resource discovery failed: {reason}").into(),
+                )
+            })?;
+        return json_body(response.status, &response.body, "AWS");
+    }
+    let client = via.client;
     sign_request_v4(
         method.as_str(),
         &url,
@@ -592,7 +636,7 @@ async fn signed_aws_json(
 }
 
 async fn resolve_bedrock_models(
-    client: &reqwest::Client,
+    client: &AwsVia<'_>,
     credentials: &AwsCredentialsParams,
     request: &ConnectionResourceRequest,
 ) -> Result<ConnectionResourcePage, ConnectionsError> {
@@ -671,7 +715,7 @@ async fn resolve_bedrock_models(
 }
 
 async fn resolve_sqs_queues(
-    client: &reqwest::Client,
+    client: &AwsVia<'_>,
     credentials: &AwsCredentialsParams,
     request: &ConnectionResourceRequest,
 ) -> Result<ConnectionResourcePage, ConnectionsError> {

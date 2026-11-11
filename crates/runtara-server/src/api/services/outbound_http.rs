@@ -657,7 +657,13 @@ async fn execute_request(
         mtls_client = resolved.mtls_client;
         // What the request presents to seal: the connection's parameters,
         // with the access token got for it if its OAuth secrets are sealed.
-        let presenting = resolved.sealed_parameters.unwrap_or_else(|| params.clone());
+        let mut presenting = resolved.sealed_parameters.unwrap_or_else(|| params.clone());
+        // A sealed AWS key signs for the service this request is for: the
+        // one the agent named, or the connection's own.
+        if let Some(aws) = &aws_signing {
+            presenting[runtara_connections::sealed::policy::AWS_SERVICE_FIELD] =
+                Value::String(aws.service.clone());
+        }
         // A sealed connection whose settings use no credential (an MCP server
         // with no auth) presents nothing, and is sent like any other.
         if conn.sealed

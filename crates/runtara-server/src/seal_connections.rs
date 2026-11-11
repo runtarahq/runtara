@@ -88,7 +88,13 @@ pub async fn run(
         ));
     }
     // seal as the server builds it, so that a connection is sealed here as
-    // it would be on its next save there.
+    // it would be on its next save there: with the server's configuration.
+    if crate::config::try_get().is_none() {
+        crate::config::init(
+            crate::config::Config::from_env()
+                .map_err(|error| format!("the server's configuration is not valid: {error}"))?,
+        );
+    }
     let sealed = runtara_connections::sealed::from_env(pool.clone(), crate::seal_allowances())?
         .ok_or_else(|| {
             format!(

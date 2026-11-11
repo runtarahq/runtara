@@ -65,6 +65,9 @@ pub(crate) fn seal_allowances() -> runtara_connections::sealed::Allowances {
     runtara_connections::sealed::Allowances {
         private_hosts: runtara_connections::net::allowed_private_hosts().to_vec(),
         plain_http_hosts: api::services::outbound_http::proxy_allow_http_hosts(),
+        // The address guard for database connections is seal's too.
+        private_databases: config::try_get()
+            .is_some_and(|config| !config.database_connection_guard),
         ..Default::default()
     }
 }

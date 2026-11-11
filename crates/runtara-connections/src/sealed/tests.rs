@@ -1055,6 +1055,19 @@ async fn a_database_url_is_stored_as_its_sealed_password_and_its_target() {
     assert_eq!(again, stored);
 
     // A URL seal could not log in for is not sealed, and is stored whole.
+    let odd = json!({
+        "database_url": format!(
+            "postgres://app:{SECRET}@db.example.com/orders?sslmode=verify-full&sslrootcert=/ca.pem"
+        ),
+    });
+    let stored = sealed
+        .seal_parameters(TENANT, CONNECTION, "postgres", &odd, None)
+        .await
+        .unwrap();
+    assert_eq!(stored, None);
+
+    // A URL that does not ask for a verified server is sealed for what it
+    // asks, by a seal that can log in so; an earlier seal leaves it whole.
     let unverified = json!({
         "database_url": format!("postgres://app:{SECRET}@db.example.com/orders?sslmode=require"),
     });
@@ -1062,5 +1075,16 @@ async fn a_database_url_is_stored_as_its_sealed_password_and_its_target() {
         .seal_parameters(TENANT, CONNECTION, "postgres", &unverified, None)
         .await
         .unwrap();
-    assert_eq!(stored, None);
+    match stored {
+        Some(stored) => {
+            assert!(policy::seal_logs_in_unverified());
+            assert!(is_sealed(&stored["database_url"]));
+            assert_eq!(
+                stored["database_target"],
+                "postgres://app@db.example.com:5432/orders?sslmode=require"
+            );
+            assert!(!stored.to_string().contains(SECRET));
+        }
+        None => assert!(!policy::seal_logs_in_unverified()),
+    }
 }

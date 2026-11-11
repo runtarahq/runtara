@@ -129,7 +129,12 @@ impl SealedCredentials {
         }
         // A rule names a private destination only when this deployment's
         // allowance listed its host as the secret was sealed.
-        config.network.honour_private_rules = !allowances.private_hosts.is_empty();
+        config.network.honour_private_rules =
+            !allowances.private_hosts.is_empty() || allowances.private_databases;
+        // A database with no TLS is reached only on a host this deployment
+        // lets be reached in the clear; a password is sealed for one only
+        // then.
+        config.network.honour_plaintext_postgres_rules = !allowances.plain_http_hosts.is_empty();
         let buffer_cap = config.limits.buffer_cap;
         let environment =
             Environment::production(Arc::new(LogAudit)).map_err(|error| error.to_string())?;
@@ -310,7 +315,7 @@ impl SealedCredentials {
                 item: ItemId::new(connection_id)
                     .map_err(|_| invalid_request("the connection's id is not an item id"))?,
                 sealed,
-                plain: BTreeMap::new(),
+                plain: plain_parts(integration_id, parameters)?,
                 request,
             })
             .await?;
@@ -503,6 +508,22 @@ fn invalid_request(detail: &str) -> SealError {
         code: SealErrorCode::BadRequest,
         detail: detail.to_owned(),
     }
+}
+
+/// The parts of a connection's credential that are not secret and that a
+/// request names, as seal takes them.
+fn plain_parts(
+    integration_id: &str,
+    parameters: &Value,
+) -> Result<BTreeMap<FieldName, String>, SealError> {
+    policy::plain_fields(integration_id, parameters)
+        .into_iter()
+        .map(|(name, value)| {
+            FieldName::new(name)
+                .map(|name| (name, value))
+                .map_err(|_| invalid_request("a plain part's name is not a field name"))
+        })
+        .collect()
 }
 
 /// A connection's sealed parameter, as seal takes it.
