@@ -530,7 +530,7 @@ async fn two_instances_seal_a_tenants_connections_to_the_same_key() {
 /// hold is counted and left as it is. A dry run writes nothing.
 #[tokio::test]
 async fn existing_connections_are_sealed_in_place() {
-    use runtara_connections::repository::connections::{SealingStats, refresh_token_guard};
+    use runtara_connections::repository::connections::SealingStats;
     let fixture = Fixture::new().await;
     // Rows as they were stored before the seal: readable.
     let sealable = "api-1".to_owned();
@@ -653,8 +653,10 @@ async fn existing_connections_are_sealed_in_place() {
     .fetch_one(&fixture.pool)
     .await
     .unwrap();
-    assert_eq!(guard, refresh_token_guard(&oauth["refresh_token"]));
+    // What that guard is, of which envelope, `oauth_rotation_persist_e2e`
+    // asserts; here, that sealing replaced the readable token's.
     assert!(guard.is_some());
+    assert_ne!(guard.as_deref(), Some("guard-of-the-readable-token"));
     // Sealed, a connection is given out; what seal cannot hold never is.
     let given = facade
         .get_with_parameters(&sealable, TENANT)
