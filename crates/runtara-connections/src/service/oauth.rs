@@ -852,28 +852,18 @@ impl OAuthService {
                 obj.remove("refresh_token");
                 obj.extend(fields.clone());
             }
-            // Tokens that were sealed as they came are named to the provider
-            // by seal.
-            let outcome = match &self.sealed {
-                sealed if crate::sealed::has_sealed_values(&revoked) => sealed
-                    .revoke_token(
-                        tenant_id,
-                        connection_id,
-                        &integration_id,
-                        &revoked,
-                        crate::auth::provider_auth::revoke_authorization(oauth_config, &revoked),
-                    )
-                    .await
-                    .map(|_| ()),
-                _ => {
-                    crate::auth::provider_auth::revoke_oauth_token(
-                        crate::net::shared_hardened_client(),
-                        oauth_config,
-                        &revoked,
-                    )
-                    .await
-                }
-            };
+            // The tokens came sealed, and seal names one to the provider.
+            let outcome = self
+                .sealed
+                .revoke_token(
+                    tenant_id,
+                    connection_id,
+                    &integration_id,
+                    &revoked,
+                    crate::auth::provider_auth::revoke_authorization(oauth_config, &revoked),
+                )
+                .await
+                .map(|_| ());
             if let Err(error) = outcome {
                 tracing::warn!(
                     connection_id,
@@ -1182,44 +1172,6 @@ mod tests {
             pkce_required: false,
             params_driven: false,
         }
-    }
-
-    fn params_driven_cfg() -> OAuthConfig {
-        OAuthConfig {
-            params_driven: true,
-            ..cfg_with(&[])
-        }
-    }
-
-    async fn provider(route: &str, expected_calls: u64) -> wiremock::MockServer {
-        use wiremock::matchers::{method, path};
-        let server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(method("POST"))
-            .and(path(route))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
-                serde_json::json!({"access_token": "at-1", "refresh_token": "rt-1"}),
-            ))
-            .expect(expected_calls)
-            .mount(&server)
-            .await;
-        server
-    }
-
-    #[tokio::test]
-    async fn revocation_refuses_plain_http_endpoint_before_sending() {
-        let server = provider("/revoke", 0).await;
-        let params = serde_json::json!({
-            "revocation_url": format!("{}/revoke", server.uri()),
-            "refresh_token": "rt-1",
-        });
-        let err = crate::auth::provider_auth::revoke_oauth_token(
-            crate::net::shared_hardened_client(),
-            &params_driven_cfg(),
-            &params,
-        )
-        .await
-        .expect_err("an http revocation endpoint must be refused");
-        assert!(err.contains("https"), "{err}");
     }
 
     static REALM: &[ExtraCallbackParam] = &[ExtraCallbackParam {

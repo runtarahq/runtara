@@ -1441,11 +1441,8 @@ mod tests {
         ResolvedConnectionAuth {
             base_url: base_url.map(str::to_string),
             aws_signing: Some(AwsSigningParams {
-                access_key_id: "AKIA".into(),
-                secret_access_key: "secret".into(),
                 region: region.into(),
                 service: service.into(),
-                session_token: None,
             }),
             azure_signing: None,
             sealed_parameters: None,

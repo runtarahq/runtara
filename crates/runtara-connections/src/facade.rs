@@ -118,9 +118,9 @@ impl ConnectionsFacade {
     /// connection's signing secret in `field`. `message` is what the provider
     /// signs; the caller builds it, and checks any timestamp itself.
     ///
-    /// A sealed secret is checked by seal, which says only yes or no; any
-    /// other is compared here, in constant time. An error means the check
-    /// could not be made, and the webhook must then be refused.
+    /// The secret is sealed, and seal checks the signature against it, saying
+    /// only yes or no. An error means the check could not be made, and the
+    /// webhook must then be refused.
     pub async fn check_webhook_signature(
         &self,
         connection: &ConnectionWithParameters,
@@ -129,48 +129,45 @@ impl ConnectionsFacade {
         message: &[u8],
         signature_hex: &str,
     ) -> Result<SignatureCheck, ConnectionsError> {
-        use hmac::{Hmac, Mac};
         let empty = Value::Null;
         let parameters = connection.connection_parameters.as_ref().unwrap_or(&empty);
         let secret = &parameters[field];
-        let sealed = crate::sealed::is_sealed(secret);
-        if !sealed && secret.as_str().is_none_or(str::is_empty) {
-            return Ok(SignatureCheck::NoSecret);
+        if !crate::sealed::is_sealed(secret) {
+            return if secret.as_str().is_none_or(str::is_empty) {
+                Ok(SignatureCheck::NoSecret)
+            } else {
+                // A secret this process could read is not one to check with.
+                Err(ConnectionsError::AuthResolution(
+                    "the connection's signing secret is not sealed".into(),
+                ))
+            };
         }
         let Ok(signature) = hex::decode(signature_hex) else {
             return Ok(SignatureCheck::Invalid);
         };
-        let valid = if sealed {
-            self.state
-                .sealed
-                .verify(
-                    tenant_id,
-                    &connection.id,
-                    parameters,
-                    field,
-                    message.to_vec(),
-                    signature,
-                )
-                .await
-                .map_err(|error| {
-                    // seal's detail has identifiers and static text only.
-                    ConnectionsError::AuthResolution(
-                        format!(
-                            "the signature could not be checked: {}: {}",
-                            error.code.as_str(),
-                            error.detail
-                        )
-                        .into(),
-                    )
-                })?
-        } else {
-            let mut mac = Hmac::<sha2::Sha256>::new_from_slice(
-                secret.as_str().unwrap_or_default().as_bytes(),
+        let valid = self
+            .state
+            .sealed
+            .verify(
+                tenant_id,
+                &connection.id,
+                parameters,
+                field,
+                message.to_vec(),
+                signature,
             )
-            .map_err(|_| ConnectionsError::AuthResolution("Invalid signing key".into()))?;
-            mac.update(message);
-            mac.verify_slice(&signature).is_ok()
-        };
+            .await
+            .map_err(|error| {
+                // seal's detail has identifiers and static text only.
+                ConnectionsError::AuthResolution(
+                    format!(
+                        "the signature could not be checked: {}: {}",
+                        error.code.as_str(),
+                        error.detail
+                    )
+                    .into(),
+                )
+            })?;
         Ok(if valid {
             SignatureCheck::Valid
         } else {
@@ -270,22 +267,14 @@ impl ConnectionsFacade {
             .connection_parameters
             .as_ref()
             .unwrap_or(&empty_parameters);
-        // A sealed connection's discovery request goes through seal, which
-        // attaches the secret the extractor can no longer read.
-        let presents_sealed = connection.sealed
-            && !crate::sealed::request_fields(integration_id, parameters).is_empty();
-        let fetcher = if presents_sealed {
-            crate::resource_resolver::Fetcher::sealed(
-                &self.state.http_client,
-                crate::resource_resolver::SealedRoute {
-                    sealed: &self.state.sealed,
-                    tenant_id,
-                    connection_id: id,
-                },
-            )
-        } else {
-            crate::resource_resolver::Fetcher::plain(&self.state.http_client)
-        };
+        // The discovery request goes through seal, which attaches the
+        // secret the extractor cannot read.
+        let fetcher =
+            crate::resource_resolver::Fetcher::sealed(crate::resource_resolver::SealedRoute {
+                sealed: &self.state.sealed,
+                tenant_id,
+                connection_id: id,
+            });
         crate::resource_resolver::resolve_resource(&fetcher, integration_id, parameters, request)
             .await
     }
@@ -956,7 +945,6 @@ mod signature_tests {
             .await
     }
 
-    /// The same answers whether the secret is readable or sealed.
     async fn assert_checks(facade: &ConnectionsFacade, connection: &ConnectionWithParameters) {
         let good = signature(SECRET, MESSAGE);
         assert_eq!(
@@ -986,9 +974,15 @@ mod signature_tests {
     }
 
     #[tokio::test]
-    async fn a_readable_signing_secret_checks_the_signature_here() {
+    async fn a_readable_signing_secret_checks_nothing() {
         let connection = connection(serde_json::json!({"signing_secret": SECRET}), false);
-        assert_checks(&facade(None), &connection).await;
+        let good = signature(SECRET, MESSAGE);
+        // Never a pass: the webhook is refused.
+        assert!(
+            check(&facade(None), &connection, MESSAGE, &good)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1017,8 +1011,8 @@ mod signature_tests {
 
         assert_checks(&facade(Some(sealed)), &connection).await;
 
-        // Without seal the check cannot be made, and that is an error, never
-        // a pass.
+        // A seal without this tenant's keys cannot make the check, and that
+        // is an error, never a pass.
         let good = signature(SECRET, MESSAGE);
         assert!(
             check(&facade(None), &connection, MESSAGE, &good)

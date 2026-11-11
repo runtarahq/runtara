@@ -1,5 +1,4 @@
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use reqwest::Client;
 use runtara_agents::extractors::connection_types::{
     GEMINI_API_BASE_URL, SHIPPO_API_BASE_URL, SHIPPO_API_VERSION, ZENDESK_DEFAULT_SCOPE,
     jira_base_url, ups_base_url, zendesk_base_url,
@@ -358,14 +357,8 @@ pub(crate) fn describe_connection_auth(
             }
         }
         "aws_credentials" | "s3_compatible" => {
-            let access_key_id = first_string_param(params, &["access_key_id", "aws_access_key_id"])
-                .unwrap_or_default();
-            let secret_access_key =
-                first_string_param(params, &["secret_access_key", "aws_secret_access_key"])
-                    .unwrap_or_default();
             let region = first_string_param(params, &["region", "aws_region"])
                 .unwrap_or_else(|| "us-east-1".to_string());
-            let session_token = first_string_param(params, &["session_token", "aws_session_token"]);
 
             let (base_url, service) = if integration_id == "s3_compatible" {
                 let endpoint = params["endpoint"]
@@ -387,29 +380,19 @@ pub(crate) fn describe_connection_auth(
 
             ConnectionAuthDescriptor {
                 base_url,
-                aws_signing: Some(AwsSigningParams {
-                    access_key_id,
-                    secret_access_key,
-                    region,
-                    service,
-                    session_token,
-                }),
+                aws_signing: Some(AwsSigningParams { region, service }),
                 azure_signing: None,
                 deferred_auth: None,
             }
         }
         "azure_blob_storage" => {
             let account_name = first_string_param(params, &["account_name"]).unwrap_or_default();
-            let account_key = first_string_param(params, &["account_key"]).unwrap_or_default();
             let base_url = resolve_azure_blob_base_url(params, &account_name);
 
             ConnectionAuthDescriptor {
                 base_url,
                 aws_signing: None,
-                azure_signing: Some(AzureSigningParams {
-                    account_name,
-                    account_key,
-                }),
+                azure_signing: Some(AzureSigningParams { account_name }),
                 deferred_auth: None,
             }
         }
@@ -943,36 +926,6 @@ fn describe_http_oauth2_client_credentials_auth(
     })
 }
 
-/// Build the `(optional Basic auth header, JSON body)` for a token-revocation
-/// request from the descriptor + connection params. Returns `None` when there is no
-/// revocation endpoint or no token to revoke. Sends `{"token": <refresh_or_access>}`;
-/// providers that authenticate the revoke with HTTP Basic (Intuit) get the header.
-pub(crate) fn build_revoke_request(
-    oauth_config: &OAuthConfig,
-    params: &Value,
-) -> Option<(Option<String>, String, String)> {
-    let effective = resolve_effective_oauth_config(oauth_config, params);
-    if effective.revocation_endpoint.is_empty() {
-        return None;
-    }
-    let token = params["refresh_token"]
-        .as_str()
-        .or_else(|| params["access_token"].as_str())?;
-    let body = serde_json::json!({ "token": token }).to_string();
-    let basic = match effective.token_endpoint_auth {
-        TokenEndpointAuth::HttpBasic => {
-            let client_id = params["client_id"].as_str().unwrap_or("");
-            let client_secret = params["client_secret"].as_str().unwrap_or("");
-            Some(format!(
-                "Basic {}",
-                BASE64.encode(format!("{client_id}:{client_secret}"))
-            ))
-        }
-        TokenEndpointAuth::FormBody => None,
-    };
-    Some((basic, body, effective.revocation_endpoint))
-}
-
 /// The `Authorization` header a provider wants on a revocation request: the
 /// client's own credentials, for a provider that authenticates the client
 /// with HTTP Basic.
@@ -990,40 +943,6 @@ pub(crate) fn revoke_authorization(oauth_config: &OAuthConfig, params: &Value) -
         }
         TokenEndpointAuth::FormBody => None,
     }
-}
-
-/// Best-effort provider-side token revocation, called on disconnect. A no-op when the
-/// effective config declares no revocation endpoint or the connection has no token.
-pub async fn revoke_oauth_token(
-    client: &Client,
-    oauth_config: &OAuthConfig,
-    params: &Value,
-) -> Result<(), String> {
-    let Some((basic_auth, body, endpoint)) = build_revoke_request(oauth_config, params) else {
-        return Ok(());
-    };
-    // Re-check the endpoint before the token (and any Basic credentials) leave.
-    crate::net::validate_credentialed_endpoint(&endpoint)
-        .map_err(|reason| format!("refusing to send the revocation request: {reason}"))?;
-    let mut request = client
-        .post(endpoint)
-        .header("Content-Type", "application/json")
-        .body(body)
-        .timeout(std::time::Duration::from_secs(10));
-    if let Some(header) = basic_auth {
-        request = request.header("Authorization", header);
-    }
-    let response = request
-        .send()
-        .await
-        .map_err(|e| format!("revocation request failed: {e}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "revocation endpoint returned {}",
-            response.status()
-        ));
-    }
-    Ok(())
 }
 
 fn collect_shopify_scopes(params: &Value) -> String {
@@ -1671,46 +1590,6 @@ mod tests {
         ));
     }
 
-    fn oauth_cfg_basic_revoke() -> OAuthConfig {
-        OAuthConfig {
-            auth_url: "",
-            token_url: "",
-            default_scopes: "",
-            token_endpoint_auth: TokenEndpointAuth::HttpBasic,
-            refresh_token_rotates: false,
-            base_url: "",
-            sandbox_base_url: "",
-            base_url_path_template: "",
-            extra_callback_params: &[],
-            reauth_on_error_codes: &[],
-            revocation_endpoint: "https://revoke.example.com",
-            pkce_required: false,
-            params_driven: false,
-        }
-    }
-
-    #[test]
-    fn revoke_request_basic_sends_json_token_and_basic_header() {
-        let cfg = oauth_cfg_basic_revoke();
-        let params = json!({"client_id":"cid","client_secret":"csec","refresh_token":"rt"});
-        let (basic, body, endpoint) = build_revoke_request(&cfg, &params).expect("revoke request");
-        assert_eq!(endpoint, "https://revoke.example.com");
-        assert_eq!(basic.as_deref(), Some("Basic Y2lkOmNzZWM=")); // base64("cid:csec")
-        assert!(body.contains("\"token\":\"rt\""), "body: {body}");
-    }
-
-    #[test]
-    fn revoke_request_none_without_endpoint_or_token() {
-        // No revocation endpoint declared → nothing to do.
-        assert!(
-            build_revoke_request(&oauth_cfg("", "", ""), &json!({"refresh_token":"rt"})).is_none()
-        );
-        // Endpoint declared but no token on the connection → nothing to revoke.
-        assert!(
-            build_revoke_request(&oauth_cfg_basic_revoke(), &json!({"client_id":"cid"})).is_none()
-        );
-    }
-
     fn teams_deferred(params: serde_json::Value) -> DeferredAuth {
         describe_teams_bot_auth("conn-1", &params).expect("teams_bot deferred auth")
     }
@@ -1868,10 +1747,6 @@ mod tests {
         // The empty descriptor endpoint must NOT be filled from params: no revoke
         // target may be conjured that would receive the refresh token.
         assert!(eff.revocation_endpoint.is_empty());
-        assert!(
-            build_revoke_request(&cfg, &hostile).is_none(),
-            "hostile revocation_url must not create a revoke request"
-        );
         // Base URL likewise stays the descriptor's.
         assert_eq!(
             resolve_oauth_base_url(&cfg, &hostile).as_deref(),
@@ -2113,29 +1988,8 @@ mod tests {
             Some("https://bedrock-runtime.eu-central-1.amazonaws.com")
         );
         let aws = descriptor.aws_signing.expect("aws signing params");
-        assert_eq!(aws.access_key_id, "AKIA_TEST");
-        assert_eq!(aws.secret_access_key, "secret");
         assert_eq!(aws.region, "eu-central-1");
         assert_eq!(aws.service, "bedrock");
-        assert_eq!(aws.session_token.as_deref(), Some("token"));
-    }
-
-    #[test]
-    fn aws_credentials_ignores_blank_optional_session_token() {
-        let params = json!({
-            "aws_access_key_id": "AKIA_TEST",
-            "aws_secret_access_key": "secret",
-            "aws_region": "ap-southeast-2",
-            "aws_session_token": ""
-        });
-        let mut headers = HashMap::new();
-
-        let descriptor = describe_connection_auth("conn", "aws_credentials", &params, &mut headers);
-        let aws = descriptor.aws_signing.expect("aws signing params");
-
-        assert_eq!(aws.access_key_id, "AKIA_TEST");
-        assert_eq!(aws.region, "ap-southeast-2");
-        assert!(aws.session_token.is_none());
     }
 
     #[test]

@@ -1289,9 +1289,9 @@ impl ConnectionService {
             return;
         };
         // No static-descriptor pre-check here: for params-driven types the
-        // revocation endpoint lives in the connection params, and
-        // build_revoke_request (inside revoke_oauth_token) resolves the
-        // EFFECTIVE endpoint — returning None (a no-op) when there is none.
+        // revocation endpoint lives in the connection params, and seal's
+        // revocation resolves the EFFECTIVE endpoint: a no-op when there is
+        // none.
         let params = conn
             .connection_parameters
             .unwrap_or(serde_json::Value::Null);
@@ -1305,22 +1305,13 @@ impl ConnectionService {
             Ok(Some(app)) => crate::oauth_apps::with_app_credentials(&params, &app),
             _ => params,
         };
-        // A sealed token is named to the provider by seal.
-        if crate::sealed::has_sealed_values(&params) {
-            let sealed = &self.sealed;
-            let authorization =
-                crate::auth::provider_auth::revoke_authorization(oauth_config, &params);
-            if let Err(e) = sealed
-                .revoke_token(tenant_id, id, integration_id, &params, authorization)
-                .await
-            {
-                tracing::warn!(connection_id = id, error = %e, "provider token revocation failed on disconnect (continuing)");
-            }
-            return;
-        }
-        let client = crate::net::shared_hardened_client();
-        if let Err(e) =
-            crate::auth::provider_auth::revoke_oauth_token(client, oauth_config, &params).await
+        // The tokens are sealed, and seal names one to the provider. A
+        // connection that holds none has nothing to revoke.
+        let authorization = crate::auth::provider_auth::revoke_authorization(oauth_config, &params);
+        if let Err(e) = self
+            .sealed
+            .revoke_token(tenant_id, id, integration_id, &params, authorization)
+            .await
         {
             tracing::warn!(connection_id = id, error = %e, "provider token revocation failed on disconnect (continuing)");
         }
