@@ -220,6 +220,24 @@ impl ChannelRouter {
         let stored_secret =
             crate::api::services::webhook_manager::stored_webhook_secret(&trigger.configuration);
 
+        // A sealed secret is checked by seal, which answers yes or no.
+        if let (Some(stored), Some(header)) = (stored_secret, secret_header)
+            && let Some(sealed_secret) =
+                crate::api::services::webhook_manager::sealed_webhook_secret(stored)
+        {
+            let sealed = self.connections.sealed().ok_or_else(|| {
+                anyhow::anyhow!("The webhook secret is sealed, and this deployment has no seal")
+            })?;
+            return match sealed
+                .verify_webhook_secret(&tenant_id, connection_id, &sealed_secret, header)
+                .await
+            {
+                Ok(true) => Ok(()),
+                Ok(false) => anyhow::bail!("Invalid webhook secret"),
+                // seal's detail has identifiers and static text only.
+                Err(error) => anyhow::bail!("The webhook secret could not be checked: {error}"),
+            };
+        }
         match (stored_secret, secret_header) {
             (Some(stored), Some(header)) if stored == header => Ok(()),
             (Some(_), Some(_)) => anyhow::bail!("Invalid webhook secret"),

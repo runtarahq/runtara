@@ -345,6 +345,11 @@ impl WebhookManager {
         webhook_url: &str,
         secret_token: &str,
     ) -> Result<(), WebhookError> {
+        if let Some(sealed_secret) = sealed_webhook_secret(secret_token) {
+            return self
+                .telegram_set_webhook_sealed(bot, webhook_url, sealed_secret)
+                .await;
+        }
         let body = self
             .telegram_call(
                 bot,
@@ -365,6 +370,126 @@ impl WebhookManager {
         }
 
         Ok(())
+    }
+
+    /// `setWebhook` with a sealed secret token: seal puts the bot token in
+    /// the path and the secret token in the form, and sends the request only
+    /// if it registers the URL the secret token was sealed for.
+    async fn telegram_set_webhook_sealed(
+        &self,
+        bot: &TelegramBot,
+        webhook_url: &str,
+        sealed_secret: Value,
+    ) -> Result<(), WebhookError> {
+        let TelegramBot::Sealed {
+            tenant_id,
+            connection_id,
+            parameters,
+        } = bot
+        else {
+            return Err(WebhookError::InvalidConnection(
+                "the webhook's secret is sealed, and the connection's bot token is not".into(),
+            ));
+        };
+        let sealed = self.facade.sealed().ok_or_else(|| {
+            WebhookError::NotApplied(
+                "the webhook's secret is sealed, and this deployment has no seal".into(),
+            )
+        })?;
+        let mut presenting = parameters.clone();
+        presenting[runtara_connections::sealed::policy::WEBHOOK_SECRET_FIELD] = sealed_secret;
+        // A form, which seal holds to the one URL: Telegram reads a list in
+        // a form as JSON.
+        let form = format!(
+            "url={}&allowed_updates={}",
+            urlencoding::encode(webhook_url),
+            urlencoding::encode(r#"["message"]"#),
+        );
+        let response = tokio::time::timeout(
+            self.request_timeout,
+            sealed.send_bounded(
+                tenant_id,
+                connection_id,
+                "telegram_bot",
+                &presenting,
+                "POST",
+                &format!(
+                    "{}/setWebhook",
+                    self.telegram_api_base.trim_end_matches('/')
+                ),
+                [(
+                    "content-type".to_string(),
+                    "application/x-www-form-urlencoded".to_string(),
+                )],
+                Some(form.into_bytes()),
+                MAX_PLATFORM_REPLY_BYTES,
+            ),
+        )
+        .await
+        // No reply in time: Telegram may have applied the request.
+        .map_err(|_| WebhookError::PlatformError("the request timed out".into()))?
+        .map_err(sealed_platform_error)?;
+        let body: Value = serde_json::from_slice(&response.body)
+            .map_err(|_| WebhookError::PlatformError("the platform's reply is not JSON".into()))?;
+        if body["ok"].as_bool() != Some(true) {
+            return Err(WebhookError::NotApplied(format!(
+                "Telegram setWebhook refused: {}",
+                body
+            )));
+        }
+        Ok(())
+    }
+
+    /// The webhook secret to register for a connection, from one a trigger
+    /// holds or was given (`candidate`): as it is, sealed, or none if it
+    /// cannot be this connection's.
+    ///
+    /// Where the connection's bot token is sealed, its webhook's secret is
+    /// too: a readable one is sealed as the same token, so the platform, if
+    /// it already holds it, still agrees. A sealed one is kept only if it was
+    /// sealed for this connection and its webhook URL: one a trigger brought
+    /// from another connection cannot be opened here.
+    pub async fn webhook_secret_for(
+        &self,
+        connection_id: &str,
+        tenant_id: &str,
+        candidate: Option<&str>,
+    ) -> Option<String> {
+        let candidate = candidate?;
+        // A connection that cannot be read now changes nothing: registration
+        // fails on it next, and the trigger keeps the secret it has.
+        let Ok(conn) = self.load_connection(connection_id, tenant_id).await else {
+            return Some(candidate.to_owned());
+        };
+        let seals = conn.integration_id.as_deref() == Some("telegram_bot")
+            && conn
+                .connection_parameters
+                .as_ref()
+                .is_some_and(|params| runtara_connections::sealed::is_sealed(&params["bot_token"]));
+        let webhook_url = self.telegram_webhook_url(tenant_id, connection_id);
+        held_webhook_secret(
+            self.facade
+                .sealed()
+                .filter(|_| seals)
+                .map(|sealed| &**sealed),
+            tenant_id,
+            connection_id,
+            webhook_url.as_deref(),
+            candidate,
+        )
+        .await
+    }
+
+    /// The URL Telegram calls for a connection, if this runtime knows its own.
+    fn telegram_webhook_url(&self, tenant_id: &str, connection_id: &str) -> Option<String> {
+        self.base_url.as_deref().map(|base_url| {
+            format!(
+                "{}/api/events/{}/webhook/telegram/{}",
+                base_url.trim_end_matches('/'),
+                tenant_id,
+                connection_id
+            )
+        })
     }
 
     async fn telegram_delete_webhook(&self, bot: &TelegramBot) -> Result<(), WebhookError> {
@@ -419,6 +544,54 @@ fn sealed_platform_error(error: runtara_connections::sealed::SendError) -> Webho
     }
 }
 
+/// What marks a trigger's webhook secret as sealed. A sealed secret is kept
+/// as text, like a readable one, so that everything that stores, compares
+/// and restores a trigger's secret treats both alike.
+const SEALED_SECRET_PREFIX: &str = "$sealed:";
+
+/// The sealed value of a webhook secret a trigger holds sealed.
+pub fn sealed_webhook_secret(stored: &str) -> Option<Value> {
+    serde_json::from_str(stored.strip_prefix(SEALED_SECRET_PREFIX)?)
+        .ok()
+        .filter(runtara_connections::sealed::is_sealed)
+}
+
+/// See [`WebhookManager::webhook_secret_for`]. `sealed` is seal where the
+/// connection's webhook secret is sealed, and `webhook_url` the URL it is
+/// registered at.
+async fn held_webhook_secret(
+    sealed: Option<&runtara_connections::sealed::SealedCredentials>,
+    tenant_id: &str,
+    connection_id: &str,
+    webhook_url: Option<&str>,
+    candidate: &str,
+) -> Option<String> {
+    let held_sealed = sealed_webhook_secret(candidate);
+    let Some((sealed, webhook_url)) = sealed.zip(webhook_url) else {
+        // Not sealed here: a sealed one is of no use, a readable one is as
+        // it always was.
+        return held_sealed.is_none().then(|| candidate.to_owned());
+    };
+    match held_sealed {
+        Some(marker) => sealed
+            .webhook_secret_is_current(connection_id, webhook_url, &marker)
+            .then(|| candidate.to_owned()),
+        None if usable_webhook_secret(candidate) => {
+            match sealed
+                .seal_webhook_secret(tenant_id, connection_id, webhook_url, candidate)
+                .await
+            {
+                Ok(marker) => Some(format!("{SEALED_SECRET_PREFIX}{marker}")),
+                Err(error) => {
+                    warn!(connection_id, %error, "Could not seal the webhook's secret");
+                    None
+                }
+            }
+        }
+        None => None,
+    }
+}
+
 /// Generate a cryptographically random webhook secret (64 hex chars).
 fn generate_webhook_secret() -> String {
     use rand::Rng;
@@ -469,8 +642,10 @@ struct SecretChoice {
 /// skipped. Reusing the stored secret keeps re-registration idempotent, so a
 /// failed call cannot strand the platform on a secret the trigger never kept.
 fn choose_webhook_secret(stored: Option<&str>, preferred: Option<&str>) -> SecretChoice {
-    let stored = stored.filter(|s| usable_webhook_secret(s));
-    match (preferred.filter(|s| usable_webhook_secret(s)), stored) {
+    // A sealed secret was a usable token when it was sealed.
+    let usable = |s: &&str| usable_webhook_secret(s) || sealed_webhook_secret(s).is_some();
+    let stored = stored.filter(usable);
+    match (preferred.filter(usable), stored) {
         (Some(preferred), stored) => SecretChoice {
             secret: preferred.to_string(),
             store_first: stored != Some(preferred),
@@ -527,10 +702,24 @@ pub async fn register_trigger_webhook(
             .as_ref()
             .and_then(|c| c.get("webhook_secret"))
             .and_then(Value::as_str);
-        let choice = choose_webhook_secret(
-            stored_webhook_secret(&trigger.configuration),
-            preferred_secret,
-        );
+        // Each as this connection's webhook can hold it: sealed, where the
+        // connection's bot token is.
+        let held = stored_webhook_secret(&trigger.configuration);
+        let stored = manager.webhook_secret_for(conn_id, tenant_id, held).await;
+        let preferred = manager
+            .webhook_secret_for(conn_id, tenant_id, preferred_secret)
+            .await;
+        let mut choice = choose_webhook_secret(stored.as_deref(), preferred.as_deref());
+        if choice.generated
+            && let Some(sealed) = manager
+                .webhook_secret_for(conn_id, tenant_id, Some(&choice.secret))
+                .await
+        {
+            choice.secret = sealed;
+        }
+        // Whatever the trigger does not hold as it is, it stores first: a
+        // secret just sealed is one.
+        choice.store_first = held != Some(choice.secret.as_str());
 
         // Every write below merges only the keys registration manages, so an
         // edit saved while the platform is being called is kept.
@@ -910,11 +1099,18 @@ mod tests {
                 "/{bot}/setWebhook",
                 axum::routing::post(
                     move |axum::extract::Path(bot): axum::extract::Path<String>,
-                          axum::Json(body): axum::Json<Value>| async move {
-                        let secret = body["secret_token"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .to_string();
+                          body: axum::body::Bytes| async move {
+                        // As Telegram does, it takes JSON or a form.
+                        let secret = match serde_json::from_slice::<Value>(&body) {
+                            Ok(body) => body["secret_token"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                            Err(_) => url::form_urlencoded::parse(&body)
+                                .find(|(name, _)| name == "secret_token")
+                                .map(|(_, value)| value.into_owned())
+                                .unwrap_or_default(),
+                        };
                         set_recorder
                             .lock()
                             .unwrap()
@@ -1052,6 +1248,186 @@ mod tests {
         manager
             .telegram_set_webhook(&bot, "http://runtime.test/hook", "secret")
             .await
+    }
+
+    /// seal in this process with `telegram_api_base` standing in for
+    /// Telegram, a connection whose bot token it sealed, and a manager.
+    async fn sealed_bot(
+        telegram_api_base: &str,
+    ) -> (
+        Arc<runtara_connections::sealed::SealedCredentials>,
+        WebhookManager,
+        TelegramBot,
+    ) {
+        use runtara_connections::sealed::{Allowances, MemoryKeySource, SealedCredentials};
+        let address = telegram_api_base.trim_start_matches("http://").to_string();
+        let host = address.split(':').next().unwrap().to_string();
+        let sealed = Arc::new(
+            SealedCredentials::in_process(
+                Arc::new(MemoryKeySource::default()),
+                &[7_u8; 32],
+                Allowances {
+                    private_hosts: vec![address],
+                    plain_http_hosts: vec![host],
+                    api_bases: [("telegram_bot".to_string(), telegram_api_base.to_string())].into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        let parameters = sealed
+            .seal_parameters(
+                "acme",
+                "c-1",
+                "telegram_bot",
+                &json!({"bot_token": "000000:sealed-token"}),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost:1/unused")
+            .unwrap();
+        let manager = WebhookManager::for_test(
+            connections_facade_with_seal(pool, Some(sealed.clone())),
+            Some("http://runtime.test".into()),
+            telegram_api_base.to_string(),
+            ANSWERING_PLATFORM_BUDGET,
+        );
+        let bot = manager.telegram_bot("acme", "c-1", &parameters).unwrap();
+        (sealed, manager, bot)
+    }
+
+    /// Where the connection's bot token is sealed, its webhook's secret is
+    /// too: seal sends both to register the webhook, and only for the URL
+    /// the secret was sealed for.
+    #[tokio::test]
+    async fn a_sealed_webhook_secret_is_registered_through_seal() {
+        let (base, received) = fake_telegram(ACCEPTED).await;
+        let (sealed, manager, bot) = sealed_bot(&base).await;
+        let webhook_url = "http://runtime.test/api/events/acme/webhook/telegram/c-1";
+        let secret = held_webhook_secret(
+            Some(&sealed),
+            "acme",
+            "c-1",
+            Some(webhook_url),
+            "plain-secret",
+        )
+        .await
+        .expect("a readable secret is sealed for the connection");
+        assert!(secret.starts_with(SEALED_SECRET_PREFIX));
+        assert!(!secret.contains("plain-secret"));
+
+        manager
+            .telegram_set_webhook(&bot, webhook_url, &secret)
+            .await
+            .unwrap();
+        // Telegram got the token in the path and the same secret as before.
+        assert_eq!(
+            *received.lock().unwrap(),
+            [(
+                "bot000000:sealed-token".to_string(),
+                TelegramCall::SetWebhook("plain-secret".into())
+            )]
+        );
+
+        // Telegram would send the secret to whatever URL is registered: seal
+        // registers the one it was sealed for, and no other.
+        let elsewhere = manager
+            .telegram_set_webhook(&bot, "http://attacker.test/hook", &secret)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(elsewhere, WebhookError::NotApplied(_)),
+            "{elsewhere}"
+        );
+        assert!(elsewhere.platform_unchanged());
+        assert_eq!(received.lock().unwrap().len(), 1);
+
+        // A sealed secret cannot go with a bot token this process holds.
+        let readable = TelegramBot::Token("000000:readable".into());
+        let refused = manager
+            .telegram_set_webhook(&readable, webhook_url, &secret)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refused, WebhookError::InvalidConnection(_)),
+            "{refused}"
+        );
+    }
+
+    /// Which secret a connection's webhook can hold: sealed where the
+    /// connection's bot token is, and only one sealed for this connection
+    /// and its URL.
+    #[tokio::test]
+    async fn a_webhook_secret_is_held_sealed_only_as_this_connections() {
+        let (base, _) = fake_telegram(ACCEPTED).await;
+        let (sealed, _, _) = sealed_bot(&base).await;
+        let url = "http://runtime.test/api/events/acme/webhook/telegram/c-1";
+        let held = |sealed, connection: &'static str, url, candidate: String| async move {
+            held_webhook_secret(sealed, "acme", connection, url, &candidate).await
+        };
+
+        // Not sealed here: a readable secret is as it always was, and a
+        // sealed one is of no use.
+        assert_eq!(
+            held(None, "c-1", Some(url), "plain".into())
+                .await
+                .as_deref(),
+            Some("plain")
+        );
+        let ours = held(Some(&*sealed), "c-1", Some(url), "plain".into())
+            .await
+            .unwrap();
+        assert_eq!(held(None, "c-1", Some(url), ours.clone()).await, None);
+        // Without its own URL, this runtime registers nothing to seal for.
+        assert_eq!(
+            held(Some(&*sealed), "c-1", None, "plain".into())
+                .await
+                .as_deref(),
+            Some("plain")
+        );
+
+        // Sealed for this connection and URL: kept as it is.
+        assert_eq!(
+            held(Some(&*sealed), "c-1", Some(url), ours.clone()).await,
+            Some(ours.clone())
+        );
+        // A trigger moved here from another connection, or a URL since
+        // changed: it cannot be this webhook's, and a new one is made.
+        assert_eq!(
+            held(Some(&*sealed), "c-2", Some(url), ours.clone()).await,
+            None
+        );
+        assert_eq!(
+            held(
+                Some(&*sealed),
+                "c-1",
+                Some("http://other.test/hook"),
+                ours.clone()
+            )
+            .await,
+            None
+        );
+        // What Telegram would refuse is not sealed either.
+        assert_eq!(
+            held(Some(&*sealed), "c-1", Some(url), "not usable!".into()).await,
+            None
+        );
+
+        // The bookkeeping takes a sealed secret as it takes a readable one.
+        assert_eq!(
+            choose_webhook_secret(Some(&ours), None),
+            SecretChoice {
+                secret: ours.clone(),
+                store_first: false,
+                generated: false
+            }
+        );
+        assert_eq!(sealed_webhook_secret("plain"), None);
+        assert_eq!(sealed_webhook_secret("$sealed:not json"), None);
+        assert_eq!(sealed_webhook_secret("$sealed:{\"other\":1}"), None);
     }
 
     #[tokio::test]

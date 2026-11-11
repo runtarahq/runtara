@@ -1224,3 +1224,77 @@ async fn a_sealed_channel_connections_webhook_is_checked_by_seal() {
         .unwrap();
     harness.cleanup().await;
 }
+
+/// A Telegram connection whose bot token is sealed has its webhook's secret
+/// sealed too: a call's token is checked by seal, a wrong or missing one is
+/// refused, and a deployment without seal refuses rather than accept
+/// unchecked.
+#[tokio::test]
+async fn a_sealed_telegram_webhooks_secret_is_checked_by_seal() {
+    use runtara_connections::sealed::keys::PgKeySource;
+    use runtara_connections::sealed::{Allowances, SealedCredentials};
+    let harness = Harness::new().await;
+    let sealed = Arc::new(
+        SealedCredentials::in_process(
+            Arc::new(PgKeySource::new(harness.pool.clone())),
+            &[7_u8; 32],
+            Allowances::default(),
+        )
+        .unwrap(),
+    );
+    let router = harness.router_with(Some(sealed.clone())).await;
+    let without_seal = harness.router().await;
+
+    let connection = harness
+        .sealed_connection(&sealed, "telegram_bot", Provider::Telegram.parameters())
+        .await;
+    // As registration stores it: sealed for this connection's webhook.
+    let marker = sealed
+        .seal_webhook_secret(
+            &harness.tenant,
+            &connection,
+            "https://runtime.example.test/hook",
+            TELEGRAM_SECRET,
+        )
+        .await
+        .unwrap();
+    let stored = format!("$sealed:{marker}");
+    assert!(!stored.contains(TELEGRAM_SECRET));
+    sqlx::query(
+        "UPDATE invocation_trigger
+         SET configuration = configuration || jsonb_build_object('webhook_secret', $2::text)
+         WHERE configuration->>'connection_id' = $1",
+    )
+    .bind(&connection)
+    .bind(&stored)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    for wrong in [Some("not-the-secret"), None] {
+        assert_eq!(
+            post(&router, telegram_request(&connection, 1, wrong)).await,
+            StatusCode::UNAUTHORIZED,
+            "{wrong:?}"
+        );
+    }
+    assert_eq!(
+        post(
+            &without_seal,
+            telegram_request(&connection, 1, Some(TELEGRAM_SECRET))
+        )
+        .await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(harness.intake(&connection).await.is_empty());
+
+    assert_eq!(
+        post(
+            &router,
+            telegram_request(&connection, 1, Some(TELEGRAM_SECRET))
+        )
+        .await,
+        StatusCode::OK
+    );
+    harness.processed(&connection).await;
+}
