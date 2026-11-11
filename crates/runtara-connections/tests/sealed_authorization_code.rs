@@ -60,8 +60,8 @@ async fn stored(sealed: &SealedCredentials, connection: &str, params: &Value) ->
         .await
         .unwrap()
         .expect("the connection's tokens are sealed");
-    for secret in ["access_token", "refresh_token", "client_secret"] {
-        assert!(is_sealed(&stored[secret]), "{secret}");
+    for field in ["access_token", "refresh_token", "client_secret"] {
+        assert!(is_sealed(&stored[field]));
     }
     assert!(!stored.to_string().contains("CANARY"));
     assert!(!stored.to_string().contains("csec"));

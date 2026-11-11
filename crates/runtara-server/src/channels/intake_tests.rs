@@ -1067,11 +1067,11 @@ async fn a_readable_webhook_secret_is_refused_until_it_is_sealed() {
     assert!(harness.intake(&connection).await.is_empty());
 
     let manager = WebhookManager::new(router.connections().clone());
-    let sealed = seal_stored_webhook_secrets(&harness.pool, &manager, &harness.tenant)
+    let count = seal_stored_webhook_secrets(&harness.pool, &manager, &harness.tenant)
         .await
         .unwrap();
     // This trigger's, and any other of the tenant's left readable.
-    assert!(sealed >= 1, "{sealed}");
+    assert!(count >= 1);
     let stored: String = sqlx::query_scalar(
         "SELECT configuration->>'webhook_secret' FROM invocation_trigger
          WHERE configuration->>'connection_id' = $1",
