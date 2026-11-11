@@ -417,14 +417,21 @@ impl OAuthService {
         // Build authorization URL. `response_type=code` is mandatory for the
         // authorization-code grant (RFC 6749 §4.1.1); strict providers (Intuit)
         // reject the request outright without it.
+        // The descriptor's own parameters go last, as written (Zoho issues a
+        // refresh token only for `access_type=offline`).
+        let authorize_params = match oauth_config.authorize_params {
+            "" => String::new(),
+            params => format!("&{params}"),
+        };
         let authorization_url = format!(
-            "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}{}",
+            "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}{}{}",
             effective.auth_url,
             urlencoding::encode(&client_id),
             urlencoding::encode(&redirect_uri),
             urlencoding::encode(&scopes),
             urlencoding::encode(&state),
             pkce_query,
+            authorize_params,
         );
 
         Ok(StartedFlow {
@@ -552,6 +559,8 @@ impl OAuthService {
         if !crate::sealed::policy::sealed_authorized_client(&flow.integration_id, exchanging) {
             return Err(OAuthError::MissingParameter("client_secret".to_string()));
         }
+        check_callback_region(&flow.integration_id, oauth_config, &params, callback_params)?;
+
         let sealed = &self.sealed;
         let grant = sealed
             .exchange_code(
@@ -918,10 +927,69 @@ async fn oauth_account(
                 .unwrap_or(tenant);
             Some(json!({ "id": tenant, "display": format!("Xero organisation {name}") }))
         }
+        // Zoho's organisation was looked up after the exchange.
+        "zoho_crm_oauth" => {
+            let environment = granted.get("environment")?.as_str()?;
+            let id = granted.get("org_id").and_then(Value::as_str);
+            let name = granted
+                .get("org_name")
+                .and_then(Value::as_str)
+                .or(id)
+                .unwrap_or("?");
+            Some(json!({
+                "id": id,
+                "display": format!("Zoho CRM organisation {name} ({environment})"),
+            }))
+        }
         // HubSpot names an account only to whoever shows it the token, in a
         // URL: a sealed token is shown to no one.
         _ => None,
     }
+}
+
+/// Refuses a callback from another region's login server than the one the
+/// code is exchanged at. Zoho names the account's login server on the
+/// callback (`accounts-server`); a code from another data centre cannot be
+/// exchanged at this connection's, so the flow says which data centre the
+/// account is in instead of failing at the exchange.
+fn check_callback_region(
+    integration_id: &str,
+    oauth_config: &OAuthConfig,
+    params: &Value,
+    callback_params: &std::collections::HashMap<String, String>,
+) -> Result<(), OAuthError> {
+    if integration_id != "zoho_crm_oauth" {
+        return Ok(());
+    }
+    let Some(server) = callback_params.get("accounts-server") else {
+        return Ok(());
+    };
+    let token_url =
+        crate::auth::provider_auth::resolve_effective_oauth_config(oauth_config, params).token_url;
+    let expected = token_url
+        .trim_start_matches("https://")
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    let actual = server
+        .trim()
+        .trim_start_matches("https://")
+        .trim_end_matches('/');
+    if actual.eq_ignore_ascii_case(expected) {
+        return Ok(());
+    }
+    Err(OAuthError::AccountUnresolved(
+        match runtara_agents::extractors::connection_types::zoho_data_center_of(server) {
+            Some(data_center) => format!(
+                "this Zoho account is in the `{data_center}` data centre; set the connection's \
+                 data centre to `{data_center}` and connect again"
+            ),
+            None => format!(
+                "this Zoho account signed in at {actual}, which is no Zoho data centre this \
+                 connection knows"
+            ),
+        },
+    ))
 }
 
 /// Xero's list of the organisations a user has authorized for the app.
@@ -944,39 +1012,82 @@ async fn add_provider_account_fields_through_seal(
     params: &Value,
     access_token_claims: Option<&Value>,
 ) -> Result<(), OAuthError> {
-    if integration_id != "xero_oauth" {
-        return Ok(());
+    let lookup = AccountLookup {
+        sealed,
+        tenant_id,
+        connection_id,
+        integration_id,
+    };
+    match integration_id {
+        "xero_oauth" => add_xero_organisation(&lookup, granted, params, access_token_claims).await,
+        "zoho_crm_oauth" => add_zoho_organisation(&lookup, granted, params).await,
+        _ => Ok(()),
     }
+}
+
+/// A lookup made with the access token just issued, which is sealed: seal
+/// attaches it, and sends the request only where the token may go.
+struct AccountLookup<'a> {
+    sealed: &'a crate::sealed::SealedCredentials,
+    tenant_id: &'a str,
+    connection_id: &'a str,
+    integration_id: &'a str,
+}
+
+impl AccountLookup<'_> {
+    /// GETs `url` as the connection `params` describe, with the access token
+    /// in `granted`. Returns the status and the body.
+    async fn get(
+        &self,
+        granted: &serde_json::Map<String, Value>,
+        params: &Value,
+        url: &str,
+    ) -> Result<(u16, Vec<u8>), String> {
+        let mut presenting = params.clone();
+        presenting[crate::sealed::policy::ACCESS_TOKEN_FIELD] = granted
+            .get(crate::sealed::policy::ACCESS_TOKEN_FIELD)
+            .cloned()
+            .ok_or_else(|| "no access_token".to_string())?;
+        let response = self
+            .sealed
+            .send_bounded(
+                self.tenant_id,
+                self.connection_id,
+                self.integration_id,
+                &presenting,
+                "GET",
+                url,
+                [("accept".to_string(), "application/json".to_string())],
+                None,
+                1024 * 1024,
+            )
+            .await
+            .map_err(|error| match error {
+                // seal's detail has identifiers and static text only.
+                crate::sealed::SendError::Seal(error) => error.to_string(),
+                other => format!("{other:?}"),
+            })?;
+        Ok((response.status, response.body))
+    }
+}
+
+async fn add_xero_organisation(
+    lookup: &AccountLookup<'_>,
+    granted: &mut serde_json::Map<String, Value>,
+    params: &Value,
+    access_token_claims: Option<&Value>,
+) -> Result<(), OAuthError> {
     let unresolved =
         |cause: String| OAuthError::AccountUnresolved(format!("Xero organisations: {cause}"));
-    let mut presenting = params.clone();
-    presenting[crate::sealed::policy::ACCESS_TOKEN_FIELD] = granted
-        .get(crate::sealed::policy::ACCESS_TOKEN_FIELD)
-        .cloned()
-        .ok_or_else(|| OAuthError::TokenExchangeFailed("no access_token".to_string()))?;
-    let response = sealed
-        .send_bounded(
-            tenant_id,
-            connection_id,
-            integration_id,
-            &presenting,
-            "GET",
-            XERO_CONNECTIONS_URL,
-            [("accept".to_string(), "application/json".to_string())],
-            None,
-            1024 * 1024,
-        )
+    let (status, body) = lookup
+        .get(granted, params, XERO_CONNECTIONS_URL)
         .await
-        .map_err(|error| match error {
-            // seal's detail has identifiers and static text only.
-            crate::sealed::SendError::Seal(error) => unresolved(error.to_string()),
-            other => unresolved(format!("{other:?}")),
-        })?;
-    if !(200..300).contains(&response.status) {
-        return Err(unresolved(format!("HTTP {}", response.status)));
+        .map_err(unresolved)?;
+    if !(200..300).contains(&status) {
+        return Err(unresolved(format!("HTTP {status}")));
     }
     let connections: Value =
-        serde_json::from_slice(&response.body).map_err(|e| unresolved(e.to_string()))?;
+        serde_json::from_slice(&body).map_err(|e| unresolved(e.to_string()))?;
     let event = access_token_claims
         .and_then(|claims| claims[crate::sealed::policy::XERO_EVENT_CLAIM].as_str())
         .map(str::to_owned);
@@ -984,6 +1095,94 @@ async fn add_provider_account_fields_through_seal(
         .map_err(OAuthError::AccountUnresolved)?;
     granted.extend(fields);
     Ok(())
+}
+
+/// Zoho binds a token to the organisation chosen on its consent screen, in one
+/// environment (production, a Developer Edition, a sandbox), and refuses it on
+/// another environment's API host (`DOMAIN_TOKEN_MISMATCH`). The Organization
+/// API on the data centre's `www.` host answers for any environment, with the
+/// organisation's `type`, so the connection takes its environment from there.
+async fn add_zoho_organisation(
+    lookup: &AccountLookup<'_>,
+    granted: &mut serde_json::Map<String, Value>,
+    params: &Value,
+) -> Result<(), OAuthError> {
+    use runtara_agents::extractors::connection_types::zoho_hosts;
+    let unresolved =
+        |cause: String| OAuthError::AccountUnresolved(format!("Zoho CRM organisation: {cause}"));
+    let mut production = params.clone();
+    production["environment"] = json!("production");
+    let base = zoho_hosts(&production)
+        .ok_or_else(|| unresolved("the connection names no Zoho data centre".to_string()))?
+        .base_url;
+    let (status, body) = lookup
+        .get(granted, params, &format!("{base}/crm/v8/org"))
+        .await
+        .map_err(unresolved)?;
+    if !(200..300).contains(&status) {
+        return Err(unresolved(zoho_lookup_refused(status)));
+    }
+    let org: Value = serde_json::from_slice(&body).map_err(|e| unresolved(e.to_string()))?;
+    let fields = zoho_account_fields(&org, params).map_err(OAuthError::AccountUnresolved)?;
+    granted.extend(fields);
+    Ok(())
+}
+
+/// Why Zoho refused the organisation lookup. A token without
+/// `ZohoCRM.org.READ` (scopes narrowed on the connection) gets a 401 or 403,
+/// which says nothing of the scope, so the message names it.
+fn zoho_lookup_refused(status: u16) -> String {
+    match status {
+        401 | 403 => format!(
+            "HTTP {status}; the connection's scopes must include ZohoCRM.org.READ, \
+             which the organisation lookup needs"
+        ),
+        _ => format!("HTTP {status}"),
+    }
+}
+
+/// The fields a Zoho connection stores for the organisation its token is
+/// bound to: the environment its API calls go to, and the organisation's ID
+/// and name. All are always written, so nothing of an earlier one stays.
+fn zoho_account_fields(
+    org: &Value,
+    params: &Value,
+) -> Result<serde_json::Map<String, Value>, String> {
+    let org = org["org"]
+        .as_array()
+        .and_then(|orgs| orgs.first())
+        .ok_or("Zoho named no organisation for this authorization")?;
+    let environment = org["type"]
+        .as_str()
+        .filter(|kind| matches!(*kind, "production" | "developer" | "sandbox"))
+        .ok_or(
+            "Zoho named no environment (production, developer or sandbox) for the organisation",
+        )?;
+    let mut bound = params.clone();
+    bound["environment"] = json!(environment);
+    if runtara_agents::extractors::connection_types::zoho_hosts(&bound)
+        .is_none_or(|hosts| hosts.base_url.is_empty())
+    {
+        return Err(format!(
+            "Zoho has no API host for a {environment} organisation in the `{}` data centre",
+            params["data_center"].as_str().unwrap_or("us")
+        ));
+    }
+    let id = match &org["id"] {
+        Value::String(id) => Value::String(id.clone()),
+        Value::Number(id) => Value::String(id.to_string()),
+        _ => Value::Null,
+    };
+    let mut fields = serde_json::Map::new();
+    fields.insert("environment".to_string(), json!(environment));
+    fields.insert("org_id".to_string(), id);
+    fields.insert(
+        "org_name".to_string(),
+        org["company_name"]
+            .as_str()
+            .map_or(Value::Null, |name| json!(name)),
+    );
+    Ok(fields)
 }
 
 /// The fields a Xero connection stores for the organisation it uses. The name
@@ -1177,6 +1376,9 @@ mod tests {
             revocation_endpoint: "",
             pkce_required: false,
             params_driven: false,
+            hosts: None,
+            authorize_params: "",
+            token_header_prefix: "",
         }
     }
 
@@ -1411,5 +1613,104 @@ mod tests {
         let fields = xero_account_fields(&unnamed, token, Some(ORG_B)).unwrap();
         params.as_object_mut().unwrap().extend(fields);
         assert_eq!(params, json!({ "tenant_id": ORG_A, "tenant_name": null }));
+    }
+
+    #[test]
+    fn zoho_connection_takes_the_environment_its_token_is_bound_to() {
+        let org = |kind: &str| json!({ "org": [{ "id": "4150868000000225013", "company_name": "Zylker", "type": kind }] });
+        let params = json!({ "data_center": "eu", "environment": "production", "org_name": "Old" });
+        for kind in ["production", "developer", "sandbox"] {
+            let fields = zoho_account_fields(&org(kind), &params).unwrap();
+            assert_eq!(
+                Value::Object(fields),
+                json!({ "environment": kind, "org_id": "4150868000000225013", "org_name": "Zylker" }),
+                "{kind}"
+            );
+        }
+        // A numeric ID, and no name: nothing of an earlier organisation stays.
+        let fields = zoho_account_fields(
+            &json!({ "org": [{ "id": 42, "type": "developer" }] }),
+            &params,
+        )
+        .unwrap();
+        assert_eq!(fields["org_id"], json!("42"));
+        assert_eq!(fields["org_name"], Value::Null);
+    }
+
+    #[test]
+    fn a_refused_zoho_lookup_names_the_scope_it_needs() {
+        for status in [401, 403] {
+            let message = zoho_lookup_refused(status);
+            assert!(message.contains("ZohoCRM.org.READ"), "{message}");
+        }
+        assert_eq!(zoho_lookup_refused(502), "HTTP 502");
+    }
+
+    #[test]
+    fn zoho_organisation_errors_say_what_is_missing() {
+        let eu = json!({ "data_center": "eu" });
+        for org in [json!({}), json!({ "org": [] })] {
+            let err = zoho_account_fields(&org, &eu).unwrap_err();
+            assert!(err.contains("no organisation"), "{err}");
+        }
+        for kind in [json!("staging"), Value::Null] {
+            let err = zoho_account_fields(&json!({ "org": [{ "type": kind }] }), &eu).unwrap_err();
+            assert!(err.contains("no environment"), "{err}");
+        }
+        // China has no Developer Edition host.
+        let err = zoho_account_fields(
+            &json!({ "org": [{ "type": "developer" }] }),
+            &json!({ "data_center": "cn" }),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("no API host for a developer organisation"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_zoho_callback_from_another_data_centre_is_refused_before_the_exchange() {
+        let cfg = find_connection_type("zoho_crm_oauth")
+            .and_then(|meta| meta.oauth_config)
+            .unwrap();
+        let params = json!({ "data_center": "eu" });
+        let callback = |server: &str| {
+            std::collections::HashMap::from([("accounts-server".to_string(), server.to_string())])
+        };
+        for server in ["https://accounts.zoho.eu", "https://accounts.zoho.eu/"] {
+            assert!(
+                check_callback_region("zoho_crm_oauth", cfg, &params, &callback(server)).is_ok(),
+                "{server}"
+            );
+        }
+        assert!(check_callback_region("zoho_crm_oauth", cfg, &params, &HashMap::new()).is_ok());
+        match check_callback_region(
+            "zoho_crm_oauth",
+            cfg,
+            &params,
+            &callback("https://accounts.zoho.com"),
+        ) {
+            Err(OAuthError::AccountUnresolved(message)) => {
+                assert!(message.contains("in the `us` data centre"))
+            }
+            other => panic!("{other:?}"),
+        }
+        match check_callback_region(
+            "zoho_crm_oauth",
+            cfg,
+            &params,
+            &callback("https://evil.example"),
+        ) {
+            Err(OAuthError::AccountUnresolved(message)) => {
+                assert!(message.contains("no Zoho data centre"))
+            }
+            other => panic!("{other:?}"),
+        }
+        // Other providers' callbacks are not read for it.
+        let xero = find_connection_type("xero_oauth")
+            .and_then(|meta| meta.oauth_config)
+            .unwrap();
+        assert!(check_callback_region("xero_oauth", xero, &params, &callback("x")).is_ok());
     }
 }

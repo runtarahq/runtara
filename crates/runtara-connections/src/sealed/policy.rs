@@ -338,6 +338,9 @@ pub struct AuthorizedTokens {
     api: Vec<(String, bool)>,
     /// Where either token may be revoked.
     pub revocation_url: Option<String>,
+    /// The word before the access token in the `Authorization` header:
+    /// `Bearer`, or the provider's own (Zoho's `Zoho-oauthtoken`).
+    scheme: &'static str,
     /// Claims of the access token this process is told, where the provider
     /// puts what a connection needs in the token itself.
     claims: Vec<String>,
@@ -788,11 +791,35 @@ pub fn authorized_tokens(integration_id: &str, params: &Value) -> Option<Authori
     if effective.token_url.is_empty() {
         return None;
     }
-    let base_url = crate::auth::provider_auth::resolve_oauth_base_url(config, params)?;
-    // A base that takes part of its path from the authorization itself (a
-    // QuickBooks company) is not known until a flow completes, and the
-    // proxy holds requests to it. The token is sealed for the API's host.
-    let mut api = vec![(base_url, !config.base_url_path_template.is_empty())];
+    let mut api = match (integration_id, config.hosts) {
+        // Zoho binds a token to an organisation in one environment, which
+        // the connection learns only after the code exchange, from the
+        // production host. The token is sealed for the data centre's API
+        // hosts, whichever environment the organisation turns out to be in.
+        ("zoho_crm_oauth", Some(hosts)) => {
+            let api: Vec<(String, bool)> = ["production", "developer", "sandbox"]
+                .into_iter()
+                .filter_map(|environment| {
+                    let mut of_environment = params.clone();
+                    of_environment["environment"] = json!(environment);
+                    Some(hosts(&of_environment)?.base_url).filter(|base| !base.is_empty())
+                })
+                .map(|base| (base, false))
+                .collect();
+            if api.is_empty() {
+                return None;
+            }
+            api
+        }
+        _ => {
+            let base_url = crate::auth::provider_auth::resolve_oauth_base_url(config, params)?;
+            // A base that takes part of its path from the authorization
+            // itself (a QuickBooks company) is not known until a flow
+            // completes, and the proxy holds requests to it. The token is
+            // sealed for the API's host.
+            vec![(base_url, !config.base_url_path_template.is_empty())]
+        }
+    };
     for endpoint in meta.named_endpoints {
         if let Ok(resolved) = resolve_named_endpoint(meta, endpoint.name, params) {
             api.push((resolved.base_url, false));
@@ -801,6 +828,7 @@ pub fn authorized_tokens(integration_id: &str, params: &Value) -> Option<Authori
     Some(AuthorizedTokens {
         token_url: effective.token_url,
         api,
+        scheme: crate::auth::provider_auth::token_header_scheme(config),
         revocation_url: Some(effective.revocation_endpoint).filter(|url| !url.is_empty()),
         claims: match integration_id {
             "xero_oauth" => vec![XERO_EVENT_CLAIM.to_owned()],
@@ -878,7 +906,8 @@ fn token_rules(tokens: &AuthorizedTokens, allowances: &Allowances) -> Option<Tok
 
     let mut to_api = Vec::new();
     for (base_url, any_path) in &tokens.api {
-        let rule = rule_for(base_url, &bearer(), *any_path, allowances)?;
+        let attached = header("Authorization", &format!("{} {{}}", tokens.scheme));
+        let rule = rule_for(base_url, &attached, *any_path, allowances)?;
         if !to_api.contains(&rule) {
             to_api.push(rule);
         }
@@ -1491,6 +1520,7 @@ pub const SEALABLE_TYPES: &[&str] = &[
     "hubspot_private_app",
     "quickbooks_online",
     "xero_oauth",
+    "zoho_crm_oauth",
     "http_oauth2_authorization_code",
     "postgres",
     "http_bearer",
@@ -2240,6 +2270,72 @@ mod tests {
         assert_eq!(
             entra["rules"][0]["inject"],
             json!({"form_field": {"name": "client_secret"}})
+        );
+    }
+
+    /// Zoho binds a token to an organisation in one environment, learnt only
+    /// after the exchange: the token is sealed for its data centre's API
+    /// hosts, after Zoho's own header word, whatever the environment.
+    #[test]
+    fn a_zoho_token_goes_to_its_data_centres_hosts_after_zohos_scheme() {
+        let of = |data_center: &str, environment: &str| {
+            let params = json!({
+                "client_id": "1000.cid", "client_secret": "s",
+                "data_center": data_center, "environment": environment,
+            });
+            canonical(
+                &policies("zoho_crm_oauth", &params, &Allowances::default())
+                    .expect("zoho is sealed")["access_token"],
+            )
+        };
+        let eu = of("eu", "production");
+        let rules = eu["rules"].as_array().unwrap();
+        let hosts: Vec<&str> = rules
+            .iter()
+            .filter_map(|rule| rule["destination"]["host"].as_str())
+            .collect();
+        for host in [
+            "www.zohoapis.eu",
+            "developer.zohoapis.eu",
+            "sandbox.zohoapis.eu",
+        ] {
+            assert!(hosts.contains(&host), "{host}: {hosts:?}");
+        }
+        assert!(!hosts.iter().any(|host| host.ends_with("zohoapis.com")));
+        for rule in rules.iter().filter(|rule| {
+            rule["destination"]["host"]
+                .as_str()
+                .is_some_and(|h| h.contains("zohoapis"))
+        }) {
+            assert_eq!(
+                rule["inject"],
+                json!({"header": {"name": "Authorization", "format": "Zoho-oauthtoken {}"}})
+            );
+        }
+        // The environment the organisation turns out to be in changes
+        // nothing; another data centre is another place.
+        assert_eq!(of("eu", "developer"), eu);
+        assert_eq!(of("eu", "sandbox"), eu);
+        assert_ne!(of("us", "production"), eu);
+        // China has no Developer Edition: the token is for the hosts it has.
+        let cn = of("cn", "developer");
+        let hosts: Vec<&str> = cn["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|rule| rule["destination"]["host"].as_str())
+            .collect();
+        assert!(
+            hosts.contains(&"www.zohoapis.com.cn") && !hosts.contains(&"developer.zohoapis.com.cn")
+        );
+        // A data centre the table does not know is no destination.
+        assert!(
+            policies(
+                "zoho_crm_oauth",
+                &json!({"client_id": "c", "client_secret": "s", "data_center": "mars"}),
+                &Allowances::default()
+            )
+            .is_none()
         );
     }
 

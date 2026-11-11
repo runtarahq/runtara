@@ -286,10 +286,17 @@ class NormalizeTest(unittest.TestCase):
         self.assertEqual(sorted(sliced["components"]["schemas"]), ["EmailCcObject", "UserObject"])
         response = operation(sliced, "op")["responses"]["200"]["content"]["application/json"]
         self.assertEqual(response["schema"], {"$ref": "#/components/schemas/EmailCcObject"})
-        # A `model_names` entry wins.
+        # A `model_names` entry wins, and every use of the schema follows it.
         sliced = cg.slice_spec(spec_with(ok_json({"$ref": "#/components/schemas/EmailCCObject"}), schemas),
                                ["op"], {"EmailCCObject": "EmailCopy"})
-        self.assertIn("EmailCCObject", sliced["components"]["schemas"])
+        self.assertEqual(sorted(sliced["components"]["schemas"]), ["EmailCopy", "UserObject"])
+        response = operation(sliced, "op")["responses"]["200"]["content"]["application/json"]
+        self.assertEqual(response["schema"], {"$ref": "#/components/schemas/EmailCopy"})
+        # A rename onto a schema the spec already has is refused.
+        with self.assertRaises(SystemExit) as raised:
+            cg.slice_spec(spec_with(ok_json({"$ref": "#/components/schemas/EmailCCObject"}), schemas),
+                          ["op"], {"EmailCCObject": "UserObject"})
+        self.assertIn("model_names", str(raised.exception))
 
     def test_body_envelope_becomes_the_body(self):
         ticket = {"type": "object", "properties": {"subject": {"type": "string"}}}
@@ -743,6 +750,43 @@ class InputTypesTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as raised:
             self.slice({"ts": "string", "thread_ts": "string"})
         self.assertIn("['thread_ts']", str(raised.exception))
+
+
+class FieldTypesTest(unittest.TestCase):
+    """`field_types` retypes a schema's property, such as one inside the items
+    of a request-body array, which `input_types` cannot reach."""
+
+    APPEND = {"type": "object", "additionalProperties": {"type": "boolean"}}
+
+    @staticmethod
+    def spec() -> dict:
+        body = json_body({"type": "object", "properties": {
+            "data": {"type": "array", "items": {"$ref": "#/components/schemas/Record"}}}})
+        return {"openapi": "3.0.1", "info": {"title": "t", "version": "1"}, "paths": {
+            "/records": {"put": {"operationId": "update", **body, "responses": {"200": {"description": "ok"}}}},
+        }, "components": {"schemas": {"Record": {"type": "object", "properties": {
+            "$append_values": {"type": "string", "maxLength": 10, "examples": ["true"],
+                               "description": "Append values."},
+            "id": {"type": "string"}}}}}}
+
+    def slice(self, field_types: dict) -> dict:
+        return cg.slice_specs([({"operations": ["update"]}, self.spec())], {"field_types": field_types})
+
+    def test_the_property_takes_the_schema_and_keeps_its_description(self):
+        record = self.slice({"Record": {"$append_values": self.APPEND}})["components"]["schemas"]["Record"]
+        self.assertEqual(record["properties"]["$append_values"], {**self.APPEND, "description": "Append values."})
+        self.assertEqual(record["properties"]["id"], {"type": "string"})
+
+    def test_a_type_name_replaces_the_type(self):
+        record = self.slice({"Record": {"id": "integer"}})["components"]["schemas"]["Record"]
+        self.assertEqual(record["properties"]["id"], {"type": "integer"})
+
+    def test_an_unknown_schema_or_property_fails(self):
+        for field_types, named in (({"Reply": {"id": "string"}}, "`Reply`"),
+                                   ({"Record": {"id": "string", "note": "string"}}, "['note']")):
+            with self.subTest(named), self.assertRaises(SystemExit) as raised:
+                self.slice(field_types)
+            self.assertIn(named, str(raised.exception))
 
 
 class Swagger2Test(unittest.TestCase):
@@ -1507,6 +1551,164 @@ class InputNameRenderTest(unittest.TestCase):
 
     def test_a_free_form_parameter_is_sent_key_by_key(self):
         self.assertIn('.query_object_opt("filter", &self.filter)', self.text)
+
+
+class MergeComponentsTest(unittest.TestCase):
+    """What the specs of one API may word differently (Zoho's, one per resource)."""
+
+    def test_servers_that_differ_only_in_their_descriptions_merge(self):
+        def spec(path, op_id, description):
+            spec = merge_spec(path, op_id, {"Reply": {"type": "object"}})
+            spec["servers"] = [{"url": "https://zohoapis.{dc}/crm/{version}", "description": description,
+                                "variables": {"dc": {"default": "com", "description": description},
+                                              "version": {"default": "v8"}}}]
+            return spec
+
+        merged = merge(("Records", "records", spec("/records", "records", "Records server")),
+                       ("Users", "users", spec("/users", "users", "API Server URL")))
+        self.assertEqual(merged["servers"][0]["url"], "https://zohoapis.{dc}/crm/{version}")
+        # A variable's value still has to agree.
+        other = spec("/users", "users", "x")
+        other["servers"][0]["variables"]["version"]["default"] = "v7"
+        with self.assertRaises(SystemExit) as raised:
+            merge(("Records", "records", spec("/records", "records", "y")), ("Users", "users", other))
+        self.assertIn("servers", str(raised.exception))
+
+    def test_a_parameter_the_specs_define_differently_gets_the_spec_name(self):
+        def spec(path, op_id, description):
+            spec = merge_spec(path, op_id, {"Reply": {"type": "object"}},
+                              parameters=[{"$ref": "#/components/parameters/Page"},
+                                          {"$ref": "#/components/parameters/Fields"}])
+            spec["components"]["parameters"] = {
+                "Page": {"in": "query", "name": "page", "description": description,
+                         "schema": {"type": "integer"}},
+                "Fields": {"in": "query", "name": "fields", "schema": {"type": "string"}},
+            }
+            return spec
+
+        merged = merge(("Records", "records", spec("/records", "records", "Records' page")),
+                       ("Users", "users", spec("/users", "users", "Users' page")))
+        # `Page` differs and is renamed per spec; `Fields` is the same and kept once.
+        self.assertEqual(sorted(merged["components"]["parameters"]), ["Fields", "RecordsPage", "UsersPage"])
+        refs = [p["$ref"] for p in operation(merged, "users")["parameters"]]
+        self.assertEqual(refs, ["#/components/parameters/UsersPage", "#/components/parameters/Fields"])
+        self.assertEqual(merged["components"]["parameters"]["RecordsPage"]["description"], "Records' page")
+
+
+class OmitParametersTest(unittest.TestCase):
+    """`omit_parameters`: query or header parameters no step input carries."""
+
+    @staticmethod
+    def spec() -> dict:
+        filters = {"in": "query", "name": "filters", "schema": {"oneOf": [
+            {"type": "object", "properties": {"field": {"type": "string"}}},
+            {"type": "object", "properties": {"group": {"type": "array", "items": {"type": "object"}}}},
+        ]}}
+        page = {"in": "query", "name": "page", "schema": {"type": "integer"}}
+        return spec_with({"parameters": [filters, page]}, method="get")
+
+    def test_an_omitted_parameter_is_no_input_and_is_not_checked(self):
+        with self.assertRaises(SystemExit) as raised:
+            cg.slice_spec(self.spec(), ["op"])
+        self.assertIn("non-scalar alternatives", str(raised.exception))
+        sliced = cg.slice_spec(self.spec(), ["op"], omit_parameters=["filters"])
+        self.assertEqual([p["name"] for p in operation(sliced, "op")["parameters"]], ["page"])
+
+    def test_an_unmatched_name_fails(self):
+        with self.assertRaises(SystemExit) as raised:
+            cg.slice_spec(self.spec(), ["op"], omit_parameters=["filters", "sort"])
+        self.assertIn("['sort']", str(raised.exception))
+
+
+class ReadOperationsTest(unittest.TestCase):
+    """`read_operations`: an operation that only reads though its method is not GET."""
+
+    @staticmethod
+    def spec() -> dict:
+        ok = {"responses": {"200": {"description": "ok"}}}
+        return {"openapi": "3.0.1", "info": {"title": "t", "version": "1"}, "paths": {
+            "/coql": {"post": {"operationId": "query", **ok}},
+            "/records": {"post": {"operationId": "create", **ok}},
+        }}
+
+    def test_a_listed_operation_has_no_side_effects(self):
+        sliced = cg.slice_spec(self.spec(), ["query", "create"], read_operations=["query"])
+        self.assertNotIn("x-runtara-side-effects", operation(sliced, "query"))
+        self.assertTrue(operation(sliced, "create")["x-runtara-side-effects"])
+
+    def test_an_unmatched_name_fails(self):
+        with self.assertRaises(SystemExit) as raised:
+            cg.slice_spec(self.spec(), ["query"], read_operations=["search"])
+        self.assertIn("['search']", str(raised.exception))
+
+
+class PropertyNameTest(unittest.TestCase):
+    def test_runs_of_underscores_collapse_and_other_names_are_left_to_the_generator(self):
+        sliced = {"components": {"schemas": {"Lead": {"type": "object", "properties": {
+            "status_reason__s": {"type": "string"},
+            "Owner__C": {"type": "string"},
+            "Last_Name": {"type": "string"},
+            "$approval": {"type": "object"},
+            "_id": {"type": "string"},
+        }}}}}
+        self.assertEqual(cg.property_name_mappings(sliced),
+                         {"Owner__C": "owner_c", "status_reason__s": "status_reason_s"})
+
+    def test_parameters_get_the_same_treatment(self):
+        def parameter(name):
+            return {"in": "query", "name": name, "schema": {"type": "string"}}
+
+        sliced = {"paths": {"/users": {"get": {"parameters": [
+            parameter("type__s"), parameter("page[size]"), parameter("per_page"), parameter("_id")]}}}}
+        self.assertEqual(cg.parameter_name_mappings(sliced),
+                         {"page[size]": "page_size", "type__s": "type_s"})
+
+
+@unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
+class ModelNamesRenderTest(unittest.TestCase):
+    """A schema renamed with `model_names` (one that would clash with the
+    generated code) is generated under its new name, and used by it."""
+
+    def test_the_struct_and_its_uses_take_the_new_name(self):
+        schemas = {
+            "Value": {"type": "object", "properties": {"amount": {"type": "number"}}},
+            "Holder": {"type": "object", "properties": {"value": {"$ref": "#/components/schemas/Value"}}},
+        }
+        spec = spec_with(ok_json({"$ref": "#/components/schemas/Holder"}), schemas, method="get")
+        with tempfile.TemporaryDirectory() as tmp:
+            write_crate(Path(tmp), spec, ["op"], model_names={"Value": "Amount"})
+            text = cg.render(Path(tmp))
+        self.assertIn("pub struct Amount {", text)
+        self.assertIn("pub value: Option<Amount>,", text)
+        self.assertNotIn("pub struct Value", text)
+        registry = re.sub(r"\s+", " ", text[text.index("let output_types"):])
+        self.assertIn('"Amount", &__OUTPUT_META_Amount as &OutputTypeMeta', registry)
+
+
+@unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
+class InlineNameRenderTest(unittest.TestCase):
+    """An inline schema takes its name from the operation, acronyms included
+    (Zoho's `executeCOQLQuery`): its struct and every use of it agree."""
+
+    def test_inline_models_of_an_acronym_operation_match_their_uses(self):
+        response = {"type": "object", "properties": {
+            "data": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "info": {"type": "object", "properties": {"count": {"type": "integer"}}},
+            "status_reason__s": {"type": "string"},
+        }}
+        op = {"operationId": "executeCOQLQuery", **ok_json(response)}
+        with tempfile.TemporaryDirectory() as tmp:
+            write_crate(Path(tmp), spec_with(op), ["executeCOQLQuery"])
+            text = cg.render(Path(tmp))
+        structs = set(re.findall(r"pub struct (\w+)", text))
+        returned = re.search(r"-> Result<(\w+), AgentError>", text).group(1)
+        info = re.search(r"pub info: Option<(\w+)>", text).group(1)
+        self.assertIn(returned, structs)
+        self.assertIn(info, structs)
+        registry = re.sub(r"\s+", " ", text[text.index("let output_types"):])
+        self.assertIn(f'"{returned}", &__OUTPUT_META_{returned} as &OutputTypeMeta', registry)
+        self.assertIn('rename = "status_reason__s"', text)
+        self.assertIn("pub status_reason_s: Option<String>,", text)
 
 
 if __name__ == "__main__":

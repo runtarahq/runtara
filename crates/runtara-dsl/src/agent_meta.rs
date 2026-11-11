@@ -976,6 +976,31 @@ pub struct OAuthConfig {
     /// empty — so a params PATCH can never redirect a curated provider's
     /// credentialed egress.
     pub params_driven: bool,
+    /// Resolves the authorize URL, token URL and API base URL from the
+    /// connection's parameters, in place of `auth_url`, `token_url`,
+    /// `base_url` and `sandbox_base_url`, for a provider that runs them per
+    /// region (Zoho's data centres). It picks from a table in code, so the
+    /// parameters still cannot name a host; `None` (a region it does not know)
+    /// leaves no URLs, and the flow and every request fail closed.
+    pub hosts: Option<OAuthHostsFn>,
+    /// Query parameters appended to the authorize URL as written, without a
+    /// leading `&` (Zoho's `access_type=offline&prompt=consent`). Empty = none.
+    pub authorize_params: &'static str,
+    /// The word before the access token in the `Authorization` header
+    /// (Zoho's `Zoho-oauthtoken`). Empty = `Bearer`.
+    pub token_header_prefix: &'static str,
+}
+
+/// See [`OAuthConfig::hosts`].
+pub type OAuthHostsFn = fn(&serde_json::Value) -> Option<OAuthHosts>;
+
+/// The OAuth endpoints and API host of one connection, resolved from its
+/// parameters by [`OAuthConfig::hosts`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthHosts {
+    pub auth_url: String,
+    pub token_url: String,
+    pub base_url: String,
 }
 
 /// An additional API endpoint a connection type may egress to, beyond the base

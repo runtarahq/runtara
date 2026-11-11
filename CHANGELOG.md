@@ -67,7 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     emulator); seal matches the port, so list it as `host:port`.
   - **The tokens of an authorization-code connection**
     (`hubspot_private_app`, `quickbooks_online`, `xero_oauth`,
-    `http_oauth2_authorization_code`), and the client secret the connection
+    `zoho_crm_oauth`, `http_oauth2_authorization_code`), and the client secret the connection
     holds: seal sends the secret with the authorization code, and the pair
     comes back already sealed. A refresh and a revocation go through seal
     too. A platform OAuth app's client secret is the deployment's own, not
@@ -119,6 +119,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   --tenant-id <id> --confirm <id>` destroys its seal keys: everything
   sealed for it, in the database and in every copy of its rows, can then no
   longer be opened.
+
+- **Zoho CRM agent, generated from Zoho's own OpenAPI files.** Fifteen
+  capabilities over records of any module (leads, contacts, deals, …): list,
+  read, create, update, upsert and delete them, list deleted ones, search them
+  and run COQL queries; and read users, modules and the organisation. The new
+  `zoho_crm_oauth` connection type authorizes a Zoho API Console app (the
+  tenant's own, or a platform OAuth app) with OAuth 2.0. Zoho runs its login
+  server and API per data centre, so the connection takes a `data_center` (us,
+  eu, in, au, jp, ca, sa, uk, cn), and a callback from another data centre's
+  login server fails with `account_unresolved`, naming the data centre to
+  choose. The API host also names the environment (production, a Developer
+  Edition, a sandbox), and a Zoho token works only on the environment of the
+  organisation chosen on Zoho's consent screen, so after the code exchange the
+  host asks Zoho which organisation that is and stores its environment, ID and
+  name; the lookup goes through seal, and the tokens are sealed for the data
+  centre's API hosts, whichever environment that turns out to be. Zoho issues
+  a refresh
+  token only for offline access, which the connection asks for, and keeps at
+  most 20 per user and app: the oldest stops working, so a user who authorizes
+  more than 20 connections with one app loses the first. It is limited by
+  default to 2 requests/s with a burst of 5, the fewest calls at once Zoho
+  allows. A batch Zoho writes only in part (207) fails with
+  `ZOHO_VALIDATION_FAILED`, naming the records it wrote (`saved_ids`) and each
+  one it refused; an empty search or list answer (204) is an empty output.
+
+- **An OAuth connection type can run per region.** A descriptor's `oauth_hosts`
+  function resolves the authorize URL, token URL and API host from the
+  connection's own fields, from a table in code, so the parameters still cannot
+  name a host and an unknown region fails closed. `oauth_authorize_params` adds
+  fixed parameters to the authorize URL, and `oauth_token_header_prefix`
+  replaces `Bearer` before the access token.
+
+- **`connector_gen` takes APIs published as one spec per resource.** Specs whose
+  `servers` differ only in their descriptions merge, and a parameter two of them
+  define differently under one name gets each spec's name, as schemas already
+  did. `omit_parameters` leaves out parameters no step input can carry,
+  `read_operations` marks an operation that only reads though its method is not
+  GET, and `field_types` retypes a property of a schema the spec types wrongly
+  (Zoho's `$append_values`, an object its spec calls a string). An inline schema of an operation whose name has an acronym
+  (`executeCOQLQuery`) is now generated under the name its uses refer to, and a
+  property such as `status_reason__s` becomes a snake-case field. A
+  `model_names` rename now renames the schema itself, so its struct and every
+  use of it take the new name; before, its uses kept the old one.
 
 - **`connector_gen` generates from a spec you write, and takes more of an API.**
   `spec: {path: openapi.yaml, sha256: …}` reads a spec kept in the crate, for a
@@ -1359,6 +1402,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is off or any row fails.
 
 ### Fixed
+
+- **A token endpoint that refuses a refresh with 200 no longer looks like an
+  outage.** Some providers (Zoho) answer a dead refresh token or a bad code with
+  HTTP 200 and an OAuth `error` body. A refresh read that as a missing token,
+  a passing problem retried for ever, so the connection never asked to be
+  reconnected; it is now a refusal like a 4xx, and a descriptor's reauth codes
+  match its `error`. A client-credentials mint is still judged by its status
+  alone. A code exchange reports the provider's `error` instead of "missing
+  access_token".
 
 - **A reconnected OAuth connection keeps its rotated refresh tokens.** A
   provider that rotates refresh tokens (QuickBooks Online, Xero) issues a new

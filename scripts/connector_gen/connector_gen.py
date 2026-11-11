@@ -731,10 +731,11 @@ def check_operation(spec: dict, path: str, method: str, op: dict, item: dict, en
 
 
 def drop_connection_parameters(spec: dict, op: dict, item: dict, names: list, locations: tuple) -> set:
-    """Parameters the connection supplies are not step inputs: headers it sends
-    (`connection_headers`, UPS's `transId`), and header or query parameters
-    carrying its credential (`connection_parameters`, Slack's `token`).
-    Returns the names dropped."""
+    """Parameters that are not step inputs: headers the connection sends
+    (`connection_headers`, UPS's `transId`), header or query parameters
+    carrying its credential (`connection_parameters`, Slack's `token`), and
+    ones the connector leaves out (`omit_parameters`, a filter whose shape no
+    step input can carry). Returns the names dropped."""
     dropped = set()
     for owner in (item, op):
         if "parameters" not in owner:
@@ -957,14 +958,18 @@ def rename_schemas(sliced: dict, model_names: dict) -> None:
     """Rename schemas whose Rust struct name differs from the name the templates
     spell their references with (`EmailCCObject` is generated as `EmailCcObject`)
     to the struct name, so both agree, including the inline types named after
-    them. A `model_names` entry takes precedence."""
+    them. A `model_names` entry takes precedence: the schema is renamed to it
+    here, so its struct and every use of it take the new name."""
     schemas = sliced["components"].get("schemas", {})
     renames = {
         name: rust_model_name(name) for name in schemas
         if name not in model_names and rust_model_name(name) != model_name(name)
     }
+    renames.update({name: new for name, new in model_names.items() if name in schemas})
     for old, new in renames.items():
-        if new in schemas:
+        if new in schemas and new not in renames:
+            if old in model_names:
+                sys.exit(f"`model_names` renames schema `{old}` to `{new}`, which the spec also defines")
             sys.exit(f"schema `{old}` is generated as `{new}`, which the spec also defines; "
                      f"rename it with `model_names: {{{old}: <OtherName>}}` in connector.yaml")
     rename_refs(sliced, renames)
@@ -1042,6 +1047,8 @@ NAME_LISTS = {
     "connection_headers": "are no header parameter",
     "connection_parameters": "are no header or query parameter",
     "pinned_path_parameters": "are no path parameter",
+    "omit_parameters": "are no header or query parameter",
+    "read_operations": "are none",
 }
 
 
@@ -1055,7 +1062,8 @@ def check_used(options: dict, used: dict) -> None:
 
 def slice_spec(spec: dict, operation_ids: list, model_names: dict = None, body_envelopes: list = (),
                connection_headers: list = (), connection_parameters: list = (),
-               pinned_path_parameters: list = ()) -> dict:
+               pinned_path_parameters: list = (), omit_parameters: list = (),
+               read_operations: list = ()) -> dict:
     """Keep the listed operations and every component they reference.
 
     openapi-generator's FILTER normalizer drops unlisted operations but still
@@ -1064,7 +1072,9 @@ def slice_spec(spec: dict, operation_ids: list, model_names: dict = None, body_e
     """
     options = {"body_envelopes": body_envelopes, "connection_headers": connection_headers,
                "connection_parameters": connection_parameters,
-               "pinned_path_parameters": pinned_path_parameters}
+               "pinned_path_parameters": pinned_path_parameters,
+               "omit_parameters": omit_parameters,
+               "read_operations": read_operations}
     sliced, used = slice_one(spec, operation_ids, operation_ids[0], model_names or {}, **options)
     check_used(options, used)
     return sliced
@@ -1090,12 +1100,37 @@ def slice_specs(specs: list, config: dict) -> dict:
         sliced = merge_slices(slices)
         check_names(sliced, [op for source, _ in specs for op in source["operations"]], model_names)
     make_optional(sliced, config.get("optional_fields") or {})
+    retype_fields(sliced, config.get("field_types") or {})
     retype_inputs(sliced, config.get("input_types") or {})
     return sliced
 
 
 # What a retyped input keeps of the schema the vendor gave it.
 RETYPE_KEPT = ("description", "title", "deprecated", "nullable", "readOnly", "writeOnly")
+
+
+def retyped_schema(schema: dict, new) -> dict:
+    """`schema` given the type (`string`) or schema `new`, keeping what
+    `RETYPE_KEPT` names unless `new` gives it."""
+    new = copy.deepcopy(new) if isinstance(new, dict) else {"type": new}
+    return {**{key: schema[key] for key in RETYPE_KEPT if key in schema}, **new}
+
+
+def retype_fields(sliced: dict, fields: dict) -> None:
+    """`field_types`: schema name -> {property: the type or schema the vendor's
+    spec should have given it}, for a field `input_types` cannot reach, such as
+    one inside the items of a request-body array. Zoho's spec types a record's
+    `$append_values` as a string; its API takes an object."""
+    schemas = sliced["components"].get("schemas", {})
+    for schema, types in fields.items():
+        properties = schemas.get(schema, {}).get("properties")
+        if properties is None:
+            sys.exit(f"field_types: `{schema}` is no schema with properties in spec.slice.json")
+        unknown = sorted(set(types) - set(properties))
+        if unknown:
+            sys.exit(f"field_types: `{schema}` in spec.slice.json has no properties {unknown}")
+        for name, new in types.items():
+            properties[name] = retyped_schema(deref(sliced, properties[name]), new)
 
 
 def retype_inputs(sliced: dict, types: dict) -> None:
@@ -1109,9 +1144,7 @@ def retype_inputs(sliced: dict, types: dict) -> None:
         return
 
     def retyped(schema: dict, name: str) -> dict:
-        new = types[name]
-        new = copy.deepcopy(new) if isinstance(new, dict) else {"type": new}
-        return {**{key: schema[key] for key in RETYPE_KEPT if key in schema}, **new}
+        return retyped_schema(schema, types[name])
 
     used = set()
     for item in sliced["paths"].values():
@@ -1150,7 +1183,8 @@ def make_optional(sliced: dict, fields: dict) -> None:
 
 
 def slice_one(spec: dict, operation_ids: list, first: str, model_names: dict, body_envelopes=(),
-              connection_headers=(), connection_parameters=(), pinned_path_parameters=()) -> tuple:
+              connection_headers=(), connection_parameters=(), pinned_path_parameters=(),
+              omit_parameters=(), read_operations=()) -> tuple:
     """The slice of one spec, and the listed names (`NAME_LISTS`) it used.
     `first` is the operation that carries the agent's module attributes."""
     if is_swagger2(spec):
@@ -1179,7 +1213,13 @@ def slice_one(spec: dict, operation_ids: list, first: str, model_names: dict, bo
                 spec, op, item, connection_headers, ("header",))
             used["connection_parameters"] |= drop_connection_parameters(
                 spec, op, item, connection_parameters, ("header", "query"))
+            used["omit_parameters"] |= drop_connection_parameters(
+                spec, op, item, omit_parameters, ("header", "query"))
             used["body_envelopes"] |= check_operation(spec, path, method, op, item, body_envelopes)
+            # A query sent as a POST (Zoho's COQL) changes nothing.
+            if op["operationId"] in read_operations:
+                op.pop("x-runtara-side-effects", None)
+                used["read_operations"].add(op["operationId"])
             target, pinned = pin_path_parameters(spec, path, op, item, pinned_path_parameters)
             used["pinned_path_parameters"] |= pinned
             if op["operationId"] == first:
@@ -1230,6 +1270,45 @@ def canonical(value) -> str:
     return json.dumps(value, sort_keys=True)
 
 
+def server_urls(servers) -> str:
+    """What `servers` say about the requests: each URL and its variables'
+    values. The descriptions are left out, as specs of one API word them
+    differently (Zoho's)."""
+    return canonical([
+        {
+            "url": server.get("url"),
+            "variables": {
+                name: {key: value for key, value in (variable or {}).items() if key != "description"}
+                for name, variable in (server.get("variables") or {}).items()
+            },
+        }
+        for server in servers or []
+    ])
+
+
+def rename_components(sliced: dict, kind: str, renames: dict) -> None:
+    """Rename `#/components/<kind>` entries other than schemas, and every
+    `$ref` to them."""
+    prefix = f"#/components/{kind}/"
+
+    def visit(node):
+        if isinstance(node, list):
+            for value in node:
+                visit(value)
+        elif isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith(prefix):
+                name, _, rest = ref[len(prefix):].partition("/")
+                if name in renames:
+                    node["$ref"] = prefix + renames[name] + ("/" + rest if rest else "")
+            for value in node.values():
+                visit(value)
+
+    visit(sliced)
+    entries = sliced["components"].get(kind, {})
+    sliced["components"][kind] = {renames.get(name, name): value for name, value in entries.items()}
+
+
 def merge_slices(slices: list) -> dict:
     """One slice from the slices of several specs of the same API, each paired
     with its `specs:` name. Paths are unioned. Two specs that define a schema
@@ -1242,7 +1321,7 @@ def merge_slices(slices: list) -> dict:
     if not all(prefixes) or len(set(prefixes)) != len(prefixes):
         sys.exit("each entry of `specs` needs a `name` of its own, "
                  "not one that differs from another only in case or punctuation")
-    if len({canonical(sliced.get("servers")) for _, sliced in slices}) > 1:
+    if len({server_urls(sliced.get("servers")) for _, sliced in slices}) > 1:
         sys.exit("the specs list different `servers`; the generated requests share one base path")
 
     # Until no generated name clashes: renaming a schema changes the schemas
@@ -1264,6 +1343,27 @@ def merge_slices(slices: list) -> dict:
                 if new in defined:
                     sys.exit(f"schema `{old}` of `{name}` would be renamed `{new}`, which a spec already defines")
             rename_refs(sliced, renames)
+
+    # The other components (parameters, request bodies, …) generate no types:
+    # one the specs define differently under one name (Zoho's `Module`
+    # parameter) is renamed for each spec, which the generated code never shows.
+    defined = {}
+    for name, sliced in slices:
+        for kind, entries in sliced["components"].items():
+            if kind not in ("schemas", "securitySchemes"):
+                for entry, value in entries.items():
+                    defined.setdefault((kind, entry), {})[name] = canonical(value)
+    for name, sliced in slices:
+        for kind in list(sliced["components"]):
+            renames = {
+                entry: rust_model_name(f"{name}_{entry}")
+                for (clash_kind, entry), by_spec in defined.items()
+                if clash_kind == kind and name in by_spec and len(set(by_spec.values())) > 1
+            }
+            for old, new in renames.items():
+                if new in sliced["components"][kind] or any(new in s["components"].get(kind, {}) for _, s in slices):
+                    sys.exit(f"`#/components/{kind}/{old}` of `{name}` would be renamed `{new}`, which a spec already defines")
+            rename_components(sliced, kind, renames)
 
     merged = {key: slices[0][1][key] for key in ("openapi", "info", "servers", "security") if key in slices[0][1]}
     merged["paths"], merged["components"] = {}, {}
@@ -1479,7 +1579,8 @@ def integration_ids(agent: dict) -> list:
 def parameter_name_mappings(sliced: dict) -> dict:
     """`page[size]` would become the Rust field
     `page_left_square_bracket_size_right_square_bracket`; name it `page_size`.
-    The step input keeps the wire name."""
+    Zoho's `type__s` would stay `type__s`, which is not snake case; name it
+    `type_s`. The step input keeps the wire name."""
     names = set()
 
     def visit(node):
@@ -1489,8 +1590,26 @@ def parameter_name_mappings(sliced: dict) -> dict:
     walk_schema(sliced, visit)
     return {
         name: re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").lower()
-        for name in sorted(names) if re.search(r"[\[\]]", name)
+        for name in sorted(names) if re.search(r"[\[\]]|[A-Za-z0-9]__+[A-Za-z0-9]", name)
     }
+
+
+def property_name_mappings(sliced: dict) -> dict:
+    """Zoho's `status_reason__s` would become the Rust field `status_reason__s`,
+    which is not snake case; name it `status_reason_s`. The wire name stays."""
+    names = set()
+
+    def visit(node):
+        if isinstance(node.get("properties"), dict):
+            names.update(name for name in node["properties"] if isinstance(name, str))
+
+    walk_schema(sliced, visit)
+    mappings = {}
+    for name in sorted(names):
+        snake = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()
+        if re.search(r"[a-z0-9]__+[a-z0-9]", snake):
+            mappings[name] = re.sub(r"_+", "_", snake).strip("_")
+    return mappings
 
 
 def render(crate: Path) -> str:
@@ -1522,8 +1641,8 @@ def render(crate: Path) -> str:
                 "errorPrefix": agent["error_prefix"],
             },
             "typeMappings": TYPE_MAPPINGS,
-            "modelNameMappings": config.get("model_names") or {},
             "parameterNameMappings": parameter_name_mappings(sliced),
+            "nameMappings": property_name_mappings(sliced),
         }))
         result = subprocess.run(
             [generator_cli(), "generate", "-c", str(config_path),

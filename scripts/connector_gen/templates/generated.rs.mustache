@@ -23,15 +23,15 @@ use crate::kit::{self, AgentError, RawConnection};
 {{#model}}
 {{#isEnum}}
 
-pub type {{classname}} = Value;
+pub type {{#lambda.pascalcase}}{{name}}{{/lambda.pascalcase}} = Value;
 {{/isEnum}}
 {{^isEnum}}
 {{#oneOf.isEmpty}}
 {{#anyOf.isEmpty}}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
-#[capability_output(display_name = "{{classname}}")]
-pub struct {{classname}} {
+#[capability_output(display_name = "{{#lambda.pascalcase}}{{name}}{{/lambda.pascalcase}}")]
+pub struct {{#lambda.pascalcase}}{{name}}{{/lambda.pascalcase}} {
 {{#vars}}
     #[field({{>field_output_attrs}})]
     #[serde(rename = "{{baseName}}", default, skip_serializing_if = "Option::is_none")]
@@ -46,13 +46,13 @@ pub struct {{classname}} {
 {{^anyOf.isEmpty}}
 
 /// anyOf schema, kept as raw JSON.
-pub type {{classname}} = Value;
+pub type {{#lambda.pascalcase}}{{name}}{{/lambda.pascalcase}} = Value;
 {{/anyOf.isEmpty}}
 {{/oneOf.isEmpty}}
 {{^oneOf.isEmpty}}
 
 /// oneOf schema, kept as raw JSON.
-pub type {{classname}} = Value;
+pub type {{#lambda.pascalcase}}{{name}}{{/lambda.pascalcase}} = Value;
 {{/oneOf.isEmpty}}
 {{/isEnum}}
 {{/model}}
@@ -209,7 +209,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 {{^isEnum}}
 {{#oneOf.isEmpty}}
 {{#anyOf.isEmpty}}
-        ("{{classname}}", &__OUTPUT_META_{{classname}} as &OutputTypeMeta),
+        ("{{#lambda.pascalcase}}{{name}}{{/lambda.pascalcase}}", &__OUTPUT_META_{{#lambda.pascalcase}}{{name}}{{/lambda.pascalcase}} as &OutputTypeMeta),
 {{/anyOf.isEmpty}}
 {{/oneOf.isEmpty}}
 {{/isEnum}}

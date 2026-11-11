@@ -1,0 +1,52 @@
+# Zoho CRM v8, generated from Zoho's own OpenAPI files (one per resource),
+# pinned to a commit of github.com/zoho/crm-oas.
+agent:
+  id: zoho-crm
+  name: Zoho CRM
+  description: Zoho CRM — records of any module (leads, contacts, deals, …), search, COQL queries, users and modules.
+  integration_id: zoho_crm_oauth
+  error_prefix: ZOHO
+# `filters` and `cross_filters` of getRecords take nested filter objects no
+# step input can carry; searchRecords' criteria and COQL cover filtering.
+omit_parameters: [filters, cross_filters]
+# A COQL query is a POST that only reads.
+read_operations: [executeCOQLQuery]
+# The spec types a record's `$append_values` as a string; the API takes an
+# object of multi-select picklist fields (update-records, update-record,
+# upsert-records).
+field_types:
+  RecordPutWriteDataItem:
+    $append_values: &append_values
+      type: object
+      additionalProperties: {type: boolean}
+      description: >-
+        Multi-select picklist fields of this record, each mapped to `true` to add
+        the values given to the record's own, or `false` to replace them (the
+        default).
+  RecordSinglePutWriteDataItem:
+    $append_values: *append_values
+specs:
+  - name: records
+    url: https://raw.githubusercontent.com/zoho/crm-oas/3371eb0c3c4f6f1579208dece09fceff2a77a181/v8.0/record/record.yaml
+    sha256: 5397f63e5beba143086bd2aec8789291b2a59474200b096bc7c5faecff12423a
+    operations: [getRecords, getRecord, createRecords, updateRecords, updateRecord, upsertRecords, deleteRecords, deleteRecord, getDeletedRecords]
+  - name: search
+    url: https://raw.githubusercontent.com/zoho/crm-oas/3371eb0c3c4f6f1579208dece09fceff2a77a181/v8.0/module_search/module_search.yaml
+    sha256: 250ce6b5fe7c69fd6b188eb77c8540c17b3c6d98d40328c4480b00f911425cd8
+    operations: [searchRecords]
+  - name: coql
+    url: https://raw.githubusercontent.com/zoho/crm-oas/3371eb0c3c4f6f1579208dece09fceff2a77a181/v8.0/coql/coql.yaml
+    sha256: b8c3d0567fcfcf23af2a8a05db31bf099c65c1332b1501bfb24603f120b31eb1
+    operations: [executeCOQLQuery]
+  - name: org
+    url: https://raw.githubusercontent.com/zoho/crm-oas/3371eb0c3c4f6f1579208dece09fceff2a77a181/v8.0/org/org.yaml
+    sha256: 18f957789c995b04cd944b78999d2fcceb75372eb2cc90c9380329c3f52117d5
+    operations: [getOrganization]
+  - name: users
+    url: https://raw.githubusercontent.com/zoho/crm-oas/3371eb0c3c4f6f1579208dece09fceff2a77a181/v8.0/users/users.yaml
+    sha256: e3534e5e118c8016145a81d3f8719c0dde8f8b67668c74e0d334040c2ee09e05
+    operations: [getUsers, getSingleUser]
+  - name: modules
+    url: https://raw.githubusercontent.com/zoho/crm-oas/3371eb0c3c4f6f1579208dece09fceff2a77a181/v8.0/modules/modules.yaml
+    sha256: 2f4a73b7c5ee7e3fbd3657a6f735f7839d3e14f7b785430e66b8672c05bb8541
+    operations: [getModules]

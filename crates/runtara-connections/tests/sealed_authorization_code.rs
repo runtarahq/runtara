@@ -285,6 +285,49 @@ async fn a_refused_refresh_is_permanent_and_an_outage_is_not() {
     assert!(!refused.contains("CANARY"));
 }
 
+/// Some providers (Zoho) refuse a grant with 200 and an OAuth `error`. It is
+/// the refusal a 4xx is: permanent, with the code, and not a token that went
+/// missing and is asked for again for ever.
+#[tokio::test]
+async fn a_grant_refused_with_200_is_permanent() {
+    allow_loopback();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"error": "invalid_code"})))
+        .mount(&server)
+        .await;
+    let sealed = sealed_for(&server);
+    let connection = "conn-sealed-refused-200";
+    let first = stored(&sealed, connection, &authorized(&server, "form_body")).await;
+    let refused = resolve(&sealed, connection, &first)
+        .await
+        .err()
+        .expect("the provider refused the refresh");
+    assert!(refused.contains("invalid_code"), "{refused}");
+    assert!(refused.contains("permanent: true"), "{refused}");
+
+    let exchanged = sealed
+        .exchange_code(
+            TENANT,
+            connection,
+            TYPE,
+            &first,
+            "code-1",
+            "https://platform.example.com/callback",
+            None,
+        )
+        .await
+        .err()
+        .expect("the provider refused the code");
+    assert!(exchanged.permanent, "{}", exchanged.message);
+    assert!(
+        exchanged.message.contains("invalid_code"),
+        "{}",
+        exchanged.message
+    );
+}
+
 #[tokio::test]
 async fn sealed_tokens_are_revoked_through_seal_and_go_stale_with_their_destination() {
     allow_loopback();

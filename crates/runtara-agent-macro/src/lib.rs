@@ -986,6 +986,18 @@ struct ConnectionContainerArgs {
     /// the generic bring-your-own types; default false)
     #[darling(default)]
     oauth_params_driven: Option<bool>,
+    /// A `fn(&serde_json::Value) -> Option<OAuthHosts>` that resolves the
+    /// OAuth endpoints and API host from the connection's parameters, for a
+    /// provider that runs them per region
+    #[darling(default)]
+    oauth_hosts: Option<syn::Path>,
+    /// Query parameters appended to the authorize URL as written
+    /// (e.g. "access_type=offline&prompt=consent")
+    #[darling(default)]
+    oauth_authorize_params: Option<String>,
+    /// The word before the access token in the Authorization header (default "Bearer")
+    #[darling(default)]
+    oauth_token_header_prefix: Option<String>,
     /// Additional descriptor-declared endpoints this connection may egress to,
     /// selectable per request. Repeat the attribute once per endpoint.
     #[darling(multiple)]
@@ -1358,6 +1370,12 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
             let revocation_endpoint = args.oauth_revocation_endpoint.as_deref().unwrap_or("");
             let pkce_required = args.oauth_pkce_required.unwrap_or(false);
             let params_driven = args.oauth_params_driven.unwrap_or(false);
+            let hosts = match &args.oauth_hosts {
+                Some(path) => quote! { Some(#path as runtara_dsl::agent_meta::OAuthHostsFn) },
+                None => quote! { None },
+            };
+            let authorize_params = args.oauth_authorize_params.as_deref().unwrap_or("");
+            let token_header_prefix = args.oauth_token_header_prefix.as_deref().unwrap_or("");
             quote! {
                 Some({
                     static OAUTH_CFG: runtara_dsl::agent_meta::OAuthConfig = runtara_dsl::agent_meta::OAuthConfig {
@@ -1374,6 +1392,9 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
                         revocation_endpoint: #revocation_endpoint,
                         pkce_required: #pkce_required,
                         params_driven: #params_driven,
+                        hosts: #hosts,
+                        authorize_params: #authorize_params,
+                        token_header_prefix: #token_header_prefix,
                     };
                     &OAUTH_CFG
                 })

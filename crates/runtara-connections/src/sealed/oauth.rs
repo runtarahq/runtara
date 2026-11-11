@@ -288,6 +288,9 @@ impl SealedCredentials {
                         body.into_bytes(),
                     )
                     .await?;
+                if let Some(refusal) = refused_with_success(&reply) {
+                    return Err(refusal);
+                }
                 let refresh_field = FieldName::new(policy::REFRESH_TOKEN_FIELD).map_err(|_| {
                     AuthResolutionError::permanent("The refresh token's field is not valid")
                 })?;
@@ -433,6 +436,9 @@ impl SealedCredentials {
                 client_form(effective.token_endpoint_auth, grant, client_id).into_bytes(),
             )
             .await?;
+        if let Some(refusal) = refused_with_success(&reply) {
+            return Err(refusal);
+        }
         let access_field = FieldName::new(policy::ACCESS_TOKEN_FIELD)
             .map_err(|_| AuthResolutionError::permanent("The access token's field is not valid"))?;
         let refresh_field = FieldName::new(policy::REFRESH_TOKEN_FIELD).map_err(|_| {
@@ -491,6 +497,25 @@ pub(crate) fn sealed_access_token(reply: &TokenReply) -> Result<String, AuthReso
     })?;
     serde_json::to_string(envelope)
         .map_err(|_| AuthResolutionError::transient("The sealed access token cannot be kept"))
+}
+
+/// A refusal some providers (Zoho) answer an authorization's grant with a
+/// 2xx: no access token, and an OAuth `error`. It is the same refusal as a
+/// 4xx, so permanent like one, with the code in the message for the
+/// descriptor's reauth codes to match. A client-credentials mint is judged
+/// by its status alone, and is not read for this.
+fn refused_with_success(reply: &TokenReply) -> Option<AuthResolutionError> {
+    let field = FieldName::new(policy::ACCESS_TOKEN_FIELD).ok()?;
+    if reply.sealed.contains_key(&field) {
+        return None;
+    }
+    let code = reply.body["error"].as_str()?;
+    let description = reply.body["error_description"].as_str().unwrap_or("");
+    Some(AuthResolutionError::permanent(
+        format!("Token endpoint returned 200: {code} {description}")
+            .trim()
+            .to_string(),
+    ))
 }
 
 /// A kept sealed token as the marker a request presents.
