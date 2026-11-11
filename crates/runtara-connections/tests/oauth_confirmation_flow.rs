@@ -165,13 +165,13 @@ async fn a_link_flow_waits_unusable_until_a_member_confirms() {
     // Nothing that makes requests with the connection finds a token.
     let mut headers = HashMap::new();
     let resolved = runtara_connections::auth::provider_auth::resolve_connection_auth(
-        &reqwest::Client::new(),
         "acme",
         "c1",
         "http_oauth2_authorization_code",
         &stored,
         &mut headers,
         &runtara_connections::events::ConnectionEvents::default(),
+        &fixture.sealed,
     )
     .await;
     assert!(resolved.is_err(), "a pending connection resolves no auth");

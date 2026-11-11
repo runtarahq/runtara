@@ -13,11 +13,11 @@ use opentelemetry::global;
 use opentelemetry::metrics::Counter;
 use serde_json::Value;
 
-use crate::auth::provider_auth::{self, ResolvedConnectionAuth, RotatedCredentials};
+use crate::auth::provider_auth::{self, ResolvedConnectionAuth};
 use crate::config::ConnectionsState;
 use crate::error::ConnectionsError;
 use crate::repository::connections::{
-    ConnectionRepository, ConnectionWithParameters, refresh_token_guard, refresh_token_hash,
+    ConnectionRepository, ConnectionWithParameters, refresh_token_guard,
 };
 use crate::resolution::{ConnectionDescriptor, ConnectionResourcePage, ConnectionResourceRequest};
 use crate::resource_resolver::resources_for_integration;
@@ -96,32 +96,6 @@ fn record_rate_limit_fail_open(reason: &'static str) {
              through unthrottled; a misbehaving workflow can now trigger provider 429s or bans."
         );
     }
-}
-
-/// The stored `params` with a refresh's tokens: what a refresh writes back.
-/// Built from the parameters as stored, never from the view of them a request
-/// was made with, so a platform app's credentials are not written.
-fn rotated_parameters(params: &Value, rotated: &RotatedCredentials) -> Value {
-    let old_refresh = params.get("refresh_token").and_then(|v| v.as_str());
-    // A provider may omit refresh_token on refresh (non-rotating) — keep the old one.
-    let new_refresh = rotated.refresh_token.as_deref().or(old_refresh);
-    let mut merged = params.clone();
-    if let Some(obj) = merged.as_object_mut() {
-        obj.insert(
-            "access_token".to_string(),
-            Value::String(rotated.access_token.clone()),
-        );
-        if let Some(rt) = new_refresh {
-            obj.insert("refresh_token".to_string(), Value::String(rt.to_string()));
-        }
-        if let Some(exp) = rotated.token_expires_at {
-            obj.insert(
-                "token_expires_at".to_string(),
-                Value::String(exp.to_rfc3339()),
-            );
-        }
-    }
-    merged
 }
 
 /// How a webhook's signature checks against a connection's signing secret.
@@ -501,15 +475,14 @@ impl ConnectionsFacade {
         let effective = app
             .as_ref()
             .map(|app| crate::oauth_apps::with_app_credentials(params, app));
-        let resolved = match provider_auth::resolve_connection_auth_with_seal(
-            &self.state.http_client,
+        let resolved = match provider_auth::resolve_connection_auth(
             tenant_id,
             connection_id,
             integration_id,
             effective.as_ref().unwrap_or(params),
             headers,
             &self.state.connection_events,
-            Some(&self.state.sealed),
+            &self.state.sealed,
         )
         .await
         {
@@ -527,19 +500,9 @@ impl ConnectionsFacade {
             }
         };
 
-        // Only set when an actual refresh occurred (once per ~55-min cycle, not per
-        // request), so this DB write is off the common hot path.
-        if let Some(rotated) = &resolved.rotated_credentials {
-            self.persist_rotated_credentials(
-                connection_id,
-                tenant_id,
-                integration_id,
-                params,
-                rotated,
-            )
-            .await?;
-        }
-        // The pair a refresh through seal brought back, already sealed.
+        // The pair a refresh through seal brought back, already sealed. Only
+        // set when a refresh was made (once per token lifetime, not per
+        // request), so this write is off the common path.
         if let Some(rotated) = &resolved.rotated_sealed {
             let mut merged = params.clone();
             if let Some(obj) = merged.as_object_mut() {
@@ -625,36 +588,6 @@ impl ConnectionsFacade {
                 "failed to flip connection to REQUIRES_RECONNECTION after a reauth error"
             ),
         }
-    }
-
-    /// Seal the refreshed tokens back into `connection_parameters` with an
-    /// optimistic-concurrency guard on the refresh-token hash (see
-    /// [`ConnectionRepository::persist_refreshed_oauth`]).
-    async fn persist_rotated_credentials(
-        &self,
-        connection_id: &str,
-        tenant_id: &str,
-        integration_id: &str,
-        params: &Value,
-        rotated: &RotatedCredentials,
-    ) -> Result<(), ConnectionsError> {
-        let old_refresh = params.get("refresh_token").and_then(|v| v.as_str());
-        // A provider may omit refresh_token on refresh (non-rotating) — keep the old one.
-        let new_refresh = rotated.refresh_token.as_deref().or(old_refresh);
-        let merged = rotated_parameters(params, rotated);
-
-        let expected_hash = old_refresh.map(refresh_token_hash);
-        let new_hash = new_refresh.map(refresh_token_hash);
-        self.persist_rotation(
-            connection_id,
-            tenant_id,
-            integration_id,
-            params,
-            &merged,
-            expected_hash.as_deref(),
-            new_hash.as_deref(),
-        )
-        .await
     }
 
     /// Store a connection's refreshed tokens (`merged`), unless another
@@ -885,35 +818,6 @@ fn sealed_only(
 mod tests {
     use super::{FAIL_OPEN_WARN_INTERVAL_MS, claim_warn_slot, is_reauth_error};
     use std::sync::atomic::AtomicI64;
-
-    #[test]
-    fn a_refresh_writes_back_the_stored_parameters_not_a_platform_apps_view() {
-        use super::{RotatedCredentials, rotated_parameters};
-        let app = crate::oauth_apps::tests::app("hubspot", "hubspot_private_app");
-        let stored = serde_json::json!({
-            "oauth_app": "hubspot",
-            "access_token": "at-old",
-            "refresh_token": "rt-old",
-        });
-        // The refresh was made with the app's credentials added...
-        let effective = crate::oauth_apps::with_app_credentials(&stored, &app);
-        assert_eq!(effective["client_secret"], "platform-secret");
-        // ...and what is written back is the stored parameters with new tokens.
-        let rotated = RotatedCredentials {
-            access_token: "at-new".into(),
-            refresh_token: Some("rt-new".into()),
-            token_expires_at: None,
-        };
-        let written = rotated_parameters(&stored, &rotated);
-        assert_eq!(written["access_token"], "at-new");
-        assert_eq!(written["refresh_token"], "rt-new");
-        assert_eq!(written["oauth_app"], "hubspot");
-        assert!(written.get("client_id").is_none(), "{written}");
-        assert!(
-            !written.to_string().contains("platform-secret"),
-            "{written}"
-        );
-    }
 
     #[test]
     fn reauth_error_matches_only_declared_codes() {

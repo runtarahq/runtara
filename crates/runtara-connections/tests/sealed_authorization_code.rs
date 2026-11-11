@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use runtara_connections::auth::provider_auth::{
-    ResolvedConnectionAuth, evict_connection_token_caches, resolve_connection_auth_with_seal,
+    ResolvedConnectionAuth, evict_connection_token_caches, resolve_connection_auth,
 };
 use runtara_connections::sealed::{
     Allowances, MemoryKeySource, SealedCredentials, SendError, is_sealed,
@@ -69,13 +69,12 @@ async fn stored(sealed: &SealedCredentials, connection: &str, params: &Value) ->
 }
 
 async fn resolve(
-    sealed: Option<&SealedCredentials>,
+    sealed: &SealedCredentials,
     connection: &str,
     stored: &Value,
 ) -> Result<ResolvedConnectionAuth, String> {
     let mut headers = HashMap::new();
-    let resolved = resolve_connection_auth_with_seal(
-        &reqwest::Client::new(),
+    let resolved = resolve_connection_auth(
         TENANT,
         connection,
         TYPE,
@@ -163,7 +162,7 @@ async fn sealed_tokens_refresh_through_seal_and_stay_sealed() {
     };
 
     // The stored token ran out: seal refreshes, and the pair comes back sealed.
-    let resolved = resolve(Some(&sealed), connection, &first).await.unwrap();
+    let resolved = resolve(&sealed, connection, &first).await.unwrap();
     let presenting = resolved.sealed_parameters.clone().unwrap();
     assert!(!presenting.to_string().contains("CANARY"));
     assert_eq!(send(presenting).await.unwrap().status, 200);
@@ -192,7 +191,7 @@ async fn sealed_tokens_refresh_through_seal_and_stay_sealed() {
 
     // While the stored token is fresh there is no refresh, kept or not.
     evict_connection_token_caches(connection);
-    let resolved = resolve(Some(&sealed), connection, &second).await.unwrap();
+    let resolved = resolve(&sealed, connection, &second).await.unwrap();
     assert!(resolved.rotated_sealed.is_none());
     assert_eq!(
         resolved.sealed_parameters.unwrap()["access_token"],
@@ -203,7 +202,7 @@ async fn sealed_tokens_refresh_through_seal_and_stay_sealed() {
     let mut expired = second.clone();
     expired["token_expires_at"] =
         json!((chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339());
-    let resolved = resolve(Some(&sealed), connection, &expired).await.unwrap();
+    let resolved = resolve(&sealed, connection, &expired).await.unwrap();
     assert_eq!(
         send(resolved.sealed_parameters.clone().unwrap())
             .await
@@ -228,13 +227,6 @@ async fn sealed_tokens_refresh_through_seal_and_stay_sealed() {
         )
         .await;
     assert!(matches!(outside, Err(SendError::Seal(_))), "{outside:?}");
-
-    // Without seal, a connection with sealed tokens resolves nothing.
-    let unavailable = resolve(None, connection, &third)
-        .await
-        .err()
-        .expect("no seal, no token");
-    assert!(unavailable.contains("permanent: true"), "{unavailable}");
 }
 
 #[tokio::test]
@@ -256,7 +248,7 @@ async fn a_client_that_authenticates_with_basic_refreshes_with_its_header() {
     let sealed = sealed_for(&server);
     let connection = "conn-sealed-basic-refresh";
     let first = stored(&sealed, connection, &authorized(&server, "basic")).await;
-    let resolved = resolve(Some(&sealed), connection, &first).await.unwrap();
+    let resolved = resolve(&sealed, connection, &first).await.unwrap();
     let rotated = resolved.rotated_sealed.expect("a refresh was made");
     assert!(is_sealed(&rotated.access_token));
     // The refresh token held stays the connection's.
@@ -284,7 +276,7 @@ async fn a_refused_refresh_is_permanent_and_an_outage_is_not() {
         &authorized(&server, "form_body"),
     )
     .await;
-    let refused = resolve(Some(&sealed), "conn-sealed-dead", &first)
+    let refused = resolve(&sealed, "conn-sealed-dead", &first)
         .await
         .err()
         .expect("the provider refused");
@@ -366,9 +358,7 @@ async fn a_client_secret_the_connection_does_not_hold_is_sent_from_here() {
     // As the platform's credentials are given for one request.
     let mut effective = first.clone();
     effective["client_secret"] = json!("platform-secret");
-    let resolved = resolve(Some(&sealed), connection, &effective)
-        .await
-        .unwrap();
+    let resolved = resolve(&sealed, connection, &effective).await.unwrap();
     assert!(is_sealed(
         &resolved
             .rotated_sealed

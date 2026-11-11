@@ -162,10 +162,7 @@ impl SealedCredentials {
             request_body,
             default_ttl_seconds,
             ..
-        } = request
-        else {
-            return Err(unsupported());
-        };
+        } = request;
         let envelope = token_cache::resolve_cached_token(&cache_key.sealed(), || async {
             // The request as the type builds it, without the secret: seal
             // puts that where the secret's policy says.

@@ -732,10 +732,7 @@ fn token_grant(integration_id: &str, params: &Value) -> Option<TokenGrant> {
         request_body,
         basic_auth,
         ..
-    } = request
-    else {
-        return None;
-    };
+    } = request;
     let client = match (basic_auth, request_body) {
         (Some((client_id, _)), _) => basic(&client_id),
         (None, TokenRequestBody::Json(_)) => Inject::JsonField {

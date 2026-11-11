@@ -1,7 +1,5 @@
-use super::provider_auth::RotatedCredentials;
 use chrono::{DateTime, Duration, Utc};
 use dashmap::DashMap;
-use reqwest::Client;
 use runtara_dsl::agent_meta::TokenEndpointAuth;
 use serde_json::Value;
 use std::sync::Arc;
@@ -89,26 +87,6 @@ pub(crate) struct TokenResponse {
     pub refresh_token: Option<String>,
 }
 
-/// Result of resolving a [`DeferredAuth`]: the header to inject, plus — only when an
-/// actual refresh occurred on the refresh-token grant — the credentials that must be
-/// persisted back to the connection. `rotated` is `None` on every cache hit / fast-path
-/// and structurally always `None` for the client-credentials grant.
-pub(crate) struct ResolvedDeferredAuth {
-    pub header_name: String,
-    pub header_value: String,
-    pub rotated: Option<RotatedCredentials>,
-}
-
-impl ResolvedDeferredAuth {
-    fn header_only(header_name: String, header_value: String) -> Self {
-        Self {
-            header_name,
-            header_value,
-            rotated: None,
-        }
-    }
-}
-
 pub(crate) enum TokenRequestBody {
     Json(Value),
     FormUrlEncoded(Vec<(String, String)>),
@@ -140,166 +118,9 @@ pub(crate) enum DeferredAuth {
         basic_auth: Option<(String, String)>,
         default_ttl_seconds: i64,
     },
-    OAuth2RefreshToken {
-        cache_key: TokenCacheKey,
-        token_url: String,
-        header_name: String,
-        client_id: String,
-        client_secret: String,
-        refresh_token: String,
-        /// How to present client credentials to the token endpoint on refresh.
-        token_endpoint_auth: TokenEndpointAuth,
-        fallback_access_token: Option<String>,
-        fallback_expires_at: Option<DateTime<Utc>>,
-    },
 }
 
 static TOKEN_CACHE: OnceLock<DashMap<TokenCacheKey, CachedAccessToken>> = OnceLock::new();
-
-pub(crate) async fn resolve_deferred_auth(
-    client: &Client,
-    auth: DeferredAuth,
-    events: &crate::events::ConnectionEvents,
-    tenant_id: &str,
-    connection_id: &str,
-    integration: &str,
-) -> Result<ResolvedDeferredAuth, AuthResolutionError> {
-    match auth {
-        DeferredAuth::OAuth2ClientCredentials {
-            cache_key,
-            token_url,
-            header_name,
-            header_value_prefix,
-            request_body,
-            basic_auth,
-            default_ttl_seconds,
-        } => {
-            let token = resolve_cached_token(&cache_key, || async {
-                exchange_client_credentials_token(
-                    client,
-                    &token_url,
-                    request_body,
-                    basic_auth,
-                    default_ttl_seconds,
-                )
-                .await
-            })
-            .await?;
-            let header_value = match header_value_prefix {
-                Some(prefix) => format!("{}{}", prefix, token),
-                None => token,
-            };
-            // The client-credentials grant has no refresh token to rotate.
-            Ok(ResolvedDeferredAuth::header_only(header_name, header_value))
-        }
-        DeferredAuth::OAuth2RefreshToken {
-            cache_key,
-            token_url,
-            header_name,
-            client_id,
-            client_secret,
-            refresh_token,
-            token_endpoint_auth,
-            fallback_access_token,
-            fallback_expires_at,
-        } => {
-            // Fast path 1: a still-fresh DB-stored access token — pure read, no refresh,
-            // no lock. Must never trigger a network refresh (that would bypass single-flight).
-            if let Some(access_token) = fallback_access_token
-                && token_is_fresh(fallback_expires_at)
-            {
-                cache_token(
-                    &cache_key,
-                    CachedAccessToken {
-                        access_token: access_token.clone(),
-                        expires_at: fallback_expires_at,
-                    },
-                );
-                return Ok(ResolvedDeferredAuth::header_only(
-                    header_name,
-                    format!("Bearer {access_token}"),
-                ));
-            }
-
-            // Fast path 2: a fresh in-memory cached access token — pure read, no lock.
-            if let Some(token) = get_fresh_cached_token(&cache_key) {
-                return Ok(ResolvedDeferredAuth::header_only(
-                    header_name,
-                    format!("Bearer {token}"),
-                ));
-            }
-
-            // Slow path: single-flight per connection. A rotating provider (e.g. Intuit)
-            // invalidates the old refresh token on every refresh, so concurrent refreshes
-            // with the same one-time-use token would self-invalidate. Serialize them.
-            let lock = refresh_lock(&cache_key);
-            let _guard = lock.lock().await;
-
-            // Double-check the cache under the lock — a peer may have just refreshed.
-            if let Some(token) = get_fresh_cached_token(&cache_key) {
-                return Ok(ResolvedDeferredAuth::header_only(
-                    header_name,
-                    format!("Bearer {token}"),
-                ));
-            }
-
-            // Negative cache: inherit a very recent failure rather than re-hammering the
-            // provider under a persistent outage.
-            if let Some(err) = recent_refresh_error(&cache_key) {
-                return Err(err);
-            }
-
-            let outcome = refresh_oauth_access_token(
-                client,
-                &token_url,
-                &client_id,
-                &client_secret,
-                &refresh_token,
-                token_endpoint_auth,
-            )
-            .await;
-            // Emitted on every actual refresh (connection-health signal), regardless of outcome.
-            crate::events::emit(
-                events,
-                Some(tenant_id),
-                crate::events::ConnectionLifecycleEvent::TokenRefreshed {
-                    connection_id: connection_id.to_string(),
-                    integration: integration.to_string(),
-                    success: outcome.is_ok(),
-                },
-            );
-
-            match outcome {
-                Ok(tr) => {
-                    clear_refresh_error(&cache_key);
-                    cache_token(
-                        &cache_key,
-                        CachedAccessToken {
-                            access_token: tr.access_token.clone(),
-                            expires_at: tr.expires_at,
-                        },
-                    );
-                    let header_value = format!("Bearer {}", tr.access_token);
-                    Ok(ResolvedDeferredAuth {
-                        header_name,
-                        header_value,
-                        // Surface the (possibly rotated) refresh token + fresh expiry so the
-                        // facade can persist them back into connection_parameters.
-                        rotated: Some(RotatedCredentials {
-                            access_token: tr.access_token,
-                            refresh_token: tr.refresh_token,
-                            token_expires_at: tr.expires_at,
-                        }),
-                    })
-                }
-                Err(e) => {
-                    record_refresh_error(&cache_key, &e);
-                    Err(e)
-                }
-            }
-        }
-    }
-}
 
 impl TokenCacheKey {
     /// The key of the same credential held sealed: a sealed token and a
@@ -392,81 +213,6 @@ pub(crate) fn check_token_endpoint(token_url: &str) -> Result<(), AuthResolution
     })
 }
 
-async fn exchange_client_credentials_token(
-    client: &Client,
-    token_url: &str,
-    request_body: TokenRequestBody,
-    basic_auth: Option<(String, String)>,
-    default_ttl_seconds: i64,
-) -> Result<CachedAccessToken, AuthResolutionError> {
-    check_token_endpoint(token_url)?;
-    let mut request = match request_body {
-        TokenRequestBody::Json(body) => client
-            .post(token_url)
-            .header("Content-Type", "application/json")
-            .json(&body),
-        TokenRequestBody::FormUrlEncoded(fields) => client
-            .post(token_url)
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(form_urlencoded(&fields)),
-    };
-    if let Some((client_id, client_secret)) = basic_auth {
-        use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-        let basic = BASE64.encode(format!("{client_id}:{client_secret}"));
-        request = request.header("Authorization", format!("Basic {basic}"));
-    }
-
-    let response = request
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| {
-            AuthResolutionError::transient(format!("Token exchange request failed: {}", e))
-        })?;
-
-    // Client credentials has no refresh token to carry forward — drop it.
-    let tr = parse_token_response(response, default_ttl_seconds).await?;
-    Ok(CachedAccessToken {
-        access_token: tr.access_token,
-        expires_at: tr.expires_at,
-    })
-}
-
-async fn refresh_oauth_access_token(
-    client: &Client,
-    token_url: &str,
-    client_id: &str,
-    client_secret: &str,
-    refresh_token: &str,
-    token_endpoint_auth: TokenEndpointAuth,
-) -> Result<TokenResponse, AuthResolutionError> {
-    check_token_endpoint(token_url)?;
-    let (basic_auth, body) = token_request_parts(
-        token_endpoint_auth,
-        vec![
-            ("grant_type".to_string(), "refresh_token".to_string()),
-            ("refresh_token".to_string(), refresh_token.to_string()),
-        ],
-        client_id,
-        client_secret,
-    );
-
-    let mut request = client
-        .post(token_url)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(body)
-        .timeout(std::time::Duration::from_secs(10));
-    if let Some(header) = basic_auth {
-        request = request.header("Authorization", header);
-    }
-
-    let response = request.send().await.map_err(|e| {
-        AuthResolutionError::transient(format!("OAuth token refresh request failed: {}", e))
-    })?;
-
-    parse_token_response(response, DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS).await
-}
-
 /// Build the `(Authorization header, x-www-form-urlencoded body)` for an OAuth token
 /// request per the provider's credential style. For `HttpBasic` the credentials go in
 /// the Basic header and are kept OUT of the body (Intuit/Xero reject body creds); for
@@ -494,55 +240,6 @@ pub(crate) fn token_request_parts(
             (None, form_urlencoded(&fields))
         }
     }
-}
-
-async fn parse_token_response(
-    response: reqwest::Response,
-    default_ttl_seconds: i64,
-) -> Result<TokenResponse, AuthResolutionError> {
-    let status = response.status();
-    let body: Value = response.json().await.map_err(|e| {
-        AuthResolutionError::transient(format!("Failed to parse token response: {}", e))
-    })?;
-
-    if !status.is_success() {
-        // NEVER echo the full response body upward — it flows through the proxy to the
-        // (untrusted) guest agent and could carry sensitive material. Log the full body
-        // host-side; surface only the status + the standard OAuth error fields.
-        tracing::debug!(status = %status, body = %body, "token endpoint returned non-success");
-        let code = body["error"].as_str().unwrap_or("unknown_error");
-        let desc = body["error_description"].as_str().unwrap_or("");
-        let message = format!("Token endpoint returned {status}: {code} {desc}")
-            .trim()
-            .to_string();
-        // A token-endpoint 4xx (other than 429) means the provider rejected the
-        // credentials/grant itself — permanent until the connection is fixed.
-        // 429 and 5xx are the provider having a moment — transient.
-        return Err(
-            if status.is_client_error() && status != reqwest::StatusCode::TOO_MANY_REQUESTS {
-                AuthResolutionError::permanent(message)
-            } else {
-                AuthResolutionError::transient(message)
-            },
-        );
-    }
-
-    let access_token = body["access_token"]
-        .as_str()
-        .ok_or_else(|| {
-            tracing::debug!(body = %body, "token response missing access_token");
-            AuthResolutionError::transient("Token response missing access_token field")
-        })?
-        .to_string();
-
-    // The (possibly rotated) refresh token, when the provider returns one.
-    let refresh_token = body["refresh_token"].as_str().map(|s| s.to_string());
-
-    Ok(TokenResponse {
-        access_token,
-        expires_at: token_expiry(&body, default_ttl_seconds),
-        refresh_token,
-    })
 }
 
 /// When the token expires: after its `expires_in`, or after the default
@@ -593,14 +290,15 @@ fn cache_token(cache_key: &TokenCacheKey, token: CachedAccessToken) {
 
 /// Drop the cached access token for an OAuth refresh-token connection so the next
 /// resolution re-refreshes from the persisted connection state. Used on the
-/// fail-closed path when a rotated token could not be persisted. The key must
-/// match how `describe_oauth_refresh_auth` builds it.
+/// fail-closed path when a rotated token could not be persisted. The key is
+/// the one a refresh through seal keeps its token under.
 pub(crate) fn invalidate_oauth_refresh_cache(
     connection_id: &str,
     integration_id: &str,
     token_url: &str,
 ) {
-    let key = build_token_cache_key(connection_id, &["oauth_refresh", integration_id, token_url]);
+    let key = build_token_cache_key(connection_id, &["oauth_refresh", integration_id, token_url])
+        .sealed();
     token_cache().remove(&key);
 }
 
@@ -830,30 +528,6 @@ mod tests {
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
-    async fn refresh_auth_uses_fallback_access_token_when_still_fresh() {
-        let client = Client::new();
-        let auth = DeferredAuth::OAuth2RefreshToken {
-            cache_key: key("conn-1", "hubspot-cache"),
-            token_url: "https://example.com/token".to_string(),
-            header_name: "Authorization".to_string(),
-            client_id: "id".to_string(),
-            client_secret: "secret".to_string(),
-            refresh_token: "refresh".to_string(),
-            token_endpoint_auth: TokenEndpointAuth::FormBody,
-            fallback_access_token: Some("existing-token".to_string()),
-            fallback_expires_at: Some(Utc::now() + Duration::minutes(30)),
-        };
-
-        let resolved = resolve_deferred_auth(&client, auth, &None, "tenant-1", "conn-1", "hubspot")
-            .await
-            .unwrap();
-        assert_eq!(resolved.header_name, "Authorization");
-        assert_eq!(resolved.header_value, "Bearer existing-token");
-        // Fresh fallback → no refresh happened → nothing to persist.
-        assert!(resolved.rotated.is_none());
-    }
-
     #[test]
     fn expires_in_is_read_as_a_number_or_a_numeric_string() {
         use serde_json::json;
@@ -884,229 +558,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_string_expires_in_sets_the_cached_tokens_expiry() {
-        let _loopback = crate::net::test_allowlist::allow("127.0.0.1");
-        // UPS's token response.
-        let url = mock_token_endpoint(
-            "200 OK",
-            r#"{"token_type":"Bearer","access_token":"ups-token","expires_in":"14399","status":"approved"}"#,
-        )
-        .await;
-        let cache_key = key("conn-ups", "string-expires-in");
-        let resolved = resolve_deferred_auth(
-            &Client::new(),
-            client_credentials_auth(cache_key.clone(), url),
-            &None,
-            "tenant-1",
-            "conn-ups",
-            "ups_client_credentials",
-        )
-        .await
-        .unwrap();
-        assert_eq!(resolved.header_value, "Bearer ups-token");
-        let expires_at = token_cache().get(&cache_key).unwrap().expires_at.unwrap();
-        let lifetime = expires_at - Utc::now();
-        assert!(
-            lifetime > Duration::hours(3) && lifetime <= Duration::seconds(14399),
-            "cached for {lifetime}"
-        );
-    }
-
-    /// One-shot mock token endpoint returning a canned HTTP response.
-    async fn mock_token_endpoint(status_line: &'static str, body: &'static str) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            if let Ok((mut sock, _)) = listener.accept().await {
-                let mut buf = [0u8; 8192];
-                let _ = sock.read(&mut buf).await;
-                let resp = format!(
-                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = sock.write_all(resp.as_bytes()).await;
-            }
-        });
-        format!("http://{addr}/token")
-    }
-
-    fn client_credentials_auth(cache_key: TokenCacheKey, token_url: String) -> DeferredAuth {
-        DeferredAuth::OAuth2ClientCredentials {
-            cache_key,
-            token_url,
-            header_name: "Authorization".to_string(),
-            header_value_prefix: Some("Bearer ".to_string()),
-            request_body: TokenRequestBody::FormUrlEncoded(vec![(
-                "grant_type".to_string(),
-                "client_credentials".to_string(),
-            )]),
-            basic_auth: None,
-            default_ttl_seconds: DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
-        }
-    }
-
-    #[tokio::test]
-    async fn token_endpoint_401_is_a_permanent_auth_failure() {
-        let _loopback = crate::net::test_allowlist::allow("127.0.0.1");
-        // The live-observed case: wrong client secret → invalid_client. Retrying
-        // cannot succeed; the error must carry permanent=true so the proxy maps
-        // it to 401 and agents stop durable-retrying.
-        let url = mock_token_endpoint(
-            "401 Unauthorized",
-            r#"{"error":"invalid_client","error_description":"AADSTS7000215"}"#,
-        )
-        .await;
-        let err = resolve_deferred_auth(
-            &Client::new(),
-            client_credentials_auth(key("conn-p1", "perm-401-cache"), url),
-            &None,
-            "tenant-1",
-            "conn-p1",
-            "teams_bot",
-        )
-        .await;
-        let Err(err) = err else {
-            panic!("401 mint must fail")
-        };
-        assert!(err.permanent, "token-endpoint 401 is permanent: {err}");
-        assert!(err.message.contains("invalid_client"), "message: {err}");
-    }
-
-    #[tokio::test]
-    async fn token_endpoint_5xx_and_429_are_transient() {
-        let _loopback = crate::net::test_allowlist::allow("127.0.0.1");
-        let url =
-            mock_token_endpoint("503 Service Unavailable", r#"{"error":"server_error"}"#).await;
-        let err = resolve_deferred_auth(
-            &Client::new(),
-            client_credentials_auth(key("conn-t1", "trans-503-cache"), url),
-            &None,
-            "tenant-1",
-            "conn-t1",
-            "teams_bot",
-        )
-        .await;
-        let Err(err) = err else {
-            panic!("503 mint must fail")
-        };
-        assert!(!err.permanent, "provider 5xx is transient: {err}");
-
-        let url = mock_token_endpoint(
-            "429 Too Many Requests",
-            r#"{"error":"temporarily_throttled"}"#,
-        )
-        .await;
-        let err = resolve_deferred_auth(
-            &Client::new(),
-            client_credentials_auth(key("conn-t2", "trans-429-cache"), url),
-            &None,
-            "tenant-1",
-            "conn-t2",
-            "teams_bot",
-        )
-        .await;
-        let Err(err) = err else {
-            panic!("429 mint must fail")
-        };
-        assert!(!err.permanent, "429 is transient: {err}");
-    }
-
-    fn refresh_auth(cache_key: TokenCacheKey, token_url: String) -> DeferredAuth {
-        DeferredAuth::OAuth2RefreshToken {
-            cache_key,
-            token_url,
-            header_name: "Authorization".to_string(),
-            client_id: "id".to_string(),
-            client_secret: "secret".to_string(),
-            refresh_token: "refresh".to_string(),
-            token_endpoint_auth: TokenEndpointAuth::FormBody,
-            fallback_access_token: None,
-            fallback_expires_at: None,
-        }
-    }
-
-    async fn token_server(expected_calls: u64) -> wiremock::MockServer {
-        use wiremock::matchers::{method, path};
-        let server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(method("POST"))
-            .and(path("/token"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
-                serde_json::json!({"access_token": "fresh-token", "expires_in": 3600}),
-            ))
-            .expect(expected_calls)
-            .mount(&server)
-            .await;
-        server
-    }
-
-    #[tokio::test]
-    async fn refresh_refuses_plain_http_token_endpoint_before_sending() {
-        let server = token_server(0).await;
-        for (tag, token_url) in [
-            ("public", "http://auth.example.com/token".to_string()),
-            ("loopback", format!("{}/token", server.uri())),
-        ] {
-            let Err(err) = resolve_deferred_auth(
-                &Client::new(),
-                refresh_auth(key("conn-http-refresh", tag), token_url),
-                &None,
-                "tenant-1",
-                "conn-http-refresh",
-                "http_oauth2_authorization_code",
-            )
-            .await
-            else {
-                panic!("{tag}: an http token endpoint must be refused")
-            };
-            assert!(err.permanent, "{tag}: refusal is permanent: {err}");
-            assert!(err.message.contains("https"), "{tag}: {err}");
-        }
-        // Dropping the server verifies it saw zero requests.
-    }
-
-    #[tokio::test]
-    async fn refresh_sends_to_an_allowlisted_http_token_endpoint() {
-        let _loopback = crate::net::test_allowlist::allow("127.0.0.1");
-        let server = token_server(1).await;
-        let resolved = resolve_deferred_auth(
-            &Client::new(),
-            refresh_auth(
-                key("conn-http-refresh-ok", "allowed"),
-                format!("{}/token", server.uri()),
-            ),
-            &None,
-            "tenant-1",
-            "conn-http-refresh-ok",
-            "http_oauth2_authorization_code",
-        )
-        .await
-        .unwrap_or_else(|err| panic!("allowlisted endpoint must be used: {err}"));
-        assert_eq!(resolved.header_value, "Bearer fresh-token");
-    }
-
-    #[tokio::test]
-    async fn client_credentials_refuses_plain_http_token_endpoint_before_sending() {
-        let server = token_server(0).await;
-        let Err(err) = resolve_deferred_auth(
-            &Client::new(),
-            client_credentials_auth(
-                key("conn-http-mint", "loopback"),
-                format!("{}/token", server.uri()),
-            ),
-            &None,
-            "tenant-1",
-            "conn-http-mint",
-            "http_oauth2_client_credentials",
-        )
-        .await
-        else {
-            panic!("an http token endpoint must be refused")
-        };
-        assert!(err.permanent, "refusal is permanent: {err}");
-    }
-
     #[test]
     fn form_urlencoded_encodes_keys_and_values() {
         let encoded = form_urlencoded(&[
@@ -1124,142 +575,22 @@ mod tests {
         );
     }
 
-    /// Records every connection lifecycle event it receives, for assertions.
-    #[derive(Default)]
-    struct RecordingSink {
-        events: std::sync::Mutex<Vec<crate::events::ConnectionLifecycleEvent>>,
-    }
-
-    impl crate::events::ConnectionEventSink for RecordingSink {
-        fn emit(&self, tenant_id: Option<&str>, event: crate::events::ConnectionLifecycleEvent) {
-            assert_eq!(tenant_id, Some("tenant-1"));
-            self.events.lock().unwrap().push(event);
+    #[tokio::test]
+    async fn a_failed_refresh_is_not_tried_again_at_once() {
+        // Two refreshes one after the other, the first failing: the second,
+        // within the cooldown, gets the first's error without asking the
+        // provider again.
+        let cache_key = key("conn-neg", "neg-cache-test");
+        let asked = AtomicUsize::new(0);
+        for _ in 0..2 {
+            let outcome = refreshed_token(&cache_key, || async {
+                asked.fetch_add(1, Ordering::SeqCst);
+                Err(AuthResolutionError::transient("the token endpoint is down"))
+            })
+            .await;
+            assert!(outcome.is_err());
         }
-    }
-
-    #[tokio::test]
-    async fn refresh_token_grant_emits_token_refreshed_on_actual_refresh() {
-        let recorder = Arc::new(RecordingSink::default());
-        let events: crate::events::ConnectionEvents = Some(recorder.clone());
-        let client = Client::new();
-
-        // No fresh fallback → the fallback fast-path is skipped and the cache misses, so an
-        // actual refresh is attempted. `token_url` is unreachable, so the refresh *fails* — but
-        // the event must still fire (it's emitted regardless of outcome), with success=false.
-        let auth = DeferredAuth::OAuth2RefreshToken {
-            cache_key: key("conn-42", "rec-refresh-cache"),
-            token_url: "http://127.0.0.1:1/token".to_string(),
-            header_name: "Authorization".to_string(),
-            client_id: "id".to_string(),
-            client_secret: "secret".to_string(),
-            refresh_token: "refresh".to_string(),
-            token_endpoint_auth: TokenEndpointAuth::FormBody,
-            fallback_access_token: None,
-            fallback_expires_at: None,
-        };
-
-        let result =
-            resolve_deferred_auth(&client, auth, &events, "tenant-1", "conn-42", "hubspot").await;
-        assert!(
-            result.is_err(),
-            "refresh against an unreachable endpoint should fail"
-        );
-
-        let recorded = recorder.events.lock().unwrap();
-        assert_eq!(recorded.len(), 1, "exactly one token_refreshed event");
-        match &recorded[0] {
-            crate::events::ConnectionLifecycleEvent::TokenRefreshed {
-                connection_id,
-                integration,
-                success,
-            } => {
-                assert_eq!(connection_id, "conn-42");
-                assert_eq!(integration, "hubspot");
-                assert!(!success, "a failed refresh must report success=false");
-            }
-            other => panic!("expected TokenRefreshed, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn fresh_fallback_does_not_emit_token_refreshed() {
-        // No refresh happens when the fallback token is still fresh, so we must NOT emit —
-        // `token_refreshed` fires only on an actual refresh, not on every connection use.
-        let recorder = Arc::new(RecordingSink::default());
-        let events: crate::events::ConnectionEvents = Some(recorder.clone());
-        let client = Client::new();
-
-        let auth = DeferredAuth::OAuth2RefreshToken {
-            cache_key: key("conn-1", "rec-fallback-cache"),
-            token_url: "https://example.com/token".to_string(),
-            header_name: "Authorization".to_string(),
-            client_id: "id".to_string(),
-            client_secret: "secret".to_string(),
-            refresh_token: "refresh".to_string(),
-            token_endpoint_auth: TokenEndpointAuth::FormBody,
-            fallback_access_token: Some("existing".to_string()),
-            fallback_expires_at: Some(Utc::now() + Duration::minutes(30)),
-        };
-
-        let resolved =
-            resolve_deferred_auth(&client, auth, &events, "tenant-1", "conn-1", "hubspot")
-                .await
-                .unwrap();
-        assert_eq!(resolved.header_value, "Bearer existing");
-        assert!(
-            recorder.events.lock().unwrap().is_empty(),
-            "a fresh fallback must not emit a token_refreshed event"
-        );
-    }
-
-    #[tokio::test]
-    async fn negative_cache_suppresses_immediate_second_refresh() {
-        // Two back-to-back refreshes against an unreachable endpoint: the first performs
-        // an actual (failing) refresh and emits one event; the second, within the cooldown,
-        // inherits the cached error via the negative cache and does NOT re-hit the provider
-        // (so no second event fires).
-        let recorder = Arc::new(RecordingSink::default());
-        let events: crate::events::ConnectionEvents = Some(recorder.clone());
-        let client = Client::new();
-
-        let make_auth = || DeferredAuth::OAuth2RefreshToken {
-            cache_key: key("conn-neg", "neg-cache-test"),
-            token_url: "http://127.0.0.1:1/token".to_string(),
-            header_name: "Authorization".to_string(),
-            client_id: "id".to_string(),
-            client_secret: "secret".to_string(),
-            refresh_token: "refresh".to_string(),
-            token_endpoint_auth: TokenEndpointAuth::FormBody,
-            fallback_access_token: None,
-            fallback_expires_at: None,
-        };
-
-        let first = resolve_deferred_auth(
-            &client,
-            make_auth(),
-            &events,
-            "tenant-1",
-            "conn-neg",
-            "hubspot",
-        )
-        .await;
-        assert!(first.is_err());
-        let second = resolve_deferred_auth(
-            &client,
-            make_auth(),
-            &events,
-            "tenant-1",
-            "conn-neg",
-            "hubspot",
-        )
-        .await;
-        assert!(second.is_err());
-
-        assert_eq!(
-            recorder.events.lock().unwrap().len(),
-            1,
-            "the second refresh must be short-circuited by the negative cache"
-        );
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
     }
 
     // ── Cache eviction, sweeping and bounds ──────────────────────────────────

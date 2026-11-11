@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use runtara_connections::auth::provider_auth::resolve_connection_auth_with_seal;
+use runtara_connections::auth::provider_auth::resolve_connection_auth;
 use runtara_connections::sealed::{
     Allowances, MemoryKeySource, SealedCredentials, SendError, is_sealed,
 };
@@ -44,14 +44,13 @@ fn sealed_for(server: &MockServer, stand_in_for: &[&str]) -> SealedCredentials {
 /// The connection's parameters as a request presents them: with the access
 /// token got through seal.
 async fn presenting(
-    sealed: Option<&SealedCredentials>,
+    sealed: &SealedCredentials,
     connection: &str,
     integration_id: &str,
     stored: &Value,
 ) -> Result<Value, String> {
     let mut headers = HashMap::new();
-    let resolved = resolve_connection_auth_with_seal(
-        &reqwest::Client::new(),
+    let resolved = resolve_connection_auth(
         TENANT,
         connection,
         integration_id,
@@ -118,7 +117,7 @@ async fn a_sealed_client_secret_gets_a_token_only_the_api_ever_sees() {
 
     // Twice: the token is got once, and kept.
     for _ in 0..2 {
-        let parameters = presenting(Some(&sealed), connection, integration_id, &stored)
+        let parameters = presenting(&sealed, connection, integration_id, &stored)
             .await
             .unwrap();
         assert!(is_sealed(&parameters["access_token"]));
@@ -158,7 +157,7 @@ async fn a_sealed_client_secret_gets_a_token_only_the_api_ever_sees() {
     );
 
     // The token goes to the API, and nowhere else.
-    let parameters = presenting(Some(&sealed), connection, integration_id, &stored)
+    let parameters = presenting(&sealed, connection, integration_id, &stored)
         .await
         .unwrap();
     let outside = sealed
@@ -175,12 +174,6 @@ async fn a_sealed_client_secret_gets_a_token_only_the_api_ever_sees() {
         )
         .await;
     assert!(matches!(outside, Err(SendError::Seal(_))), "{outside:?}");
-
-    // A deployment without seal cannot use the connection.
-    let unavailable = presenting(None, connection, integration_id, &stored)
-        .await
-        .unwrap_err();
-    assert!(unavailable.contains("permanent: true"), "{unavailable}");
 }
 
 #[tokio::test]
@@ -221,7 +214,7 @@ async fn a_sealed_client_secret_is_sent_as_the_type_sends_it() {
         .await
         .unwrap()
         .unwrap();
-    let parameters = presenting(Some(&sealed), connection, integration_id, &stored)
+    let parameters = presenting(&sealed, connection, integration_id, &stored)
         .await
         .unwrap();
     assert!(is_sealed(&parameters["access_token"]));
@@ -267,7 +260,7 @@ async fn a_token_endpoints_refusal_is_reported_as_before() {
             .await
             .unwrap()
             .unwrap();
-        let refused = presenting(Some(&sealed), connection, integration_id, &stored)
+        let refused = presenting(&sealed, connection, integration_id, &stored)
             .await
             .unwrap_err();
         assert!(
@@ -322,7 +315,7 @@ async fn a_teams_bots_app_password_gets_a_token_for_the_bot_connector() {
         .expect("teams_bot is sealed");
     assert!(is_sealed(&stored["app_password"]));
 
-    let parameters = presenting(Some(&sealed), connection, "teams_bot", &stored)
+    let parameters = presenting(&sealed, connection, "teams_bot", &stored)
         .await
         .unwrap();
     let response = sealed
