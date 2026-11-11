@@ -273,6 +273,11 @@ impl SealedCredentials {
         }
         let sealed = Value::Object(sealed);
         // A secret the type's policies do not cover would be stored readable.
+        if let Some(header) = policy::credential_extra_headers(integration_id, &sealed).first() {
+            return Err(SealingError::CannotSeal {
+                reason: policy::credential_header_refusal(header),
+            });
+        }
         if let Some(field) = policy::readable_secrets(integration_id, &sealed).first() {
             return Err(SealingError::CannotSeal {
                 reason: format!("`{field}` is a secret this connection has no use for"),
@@ -281,10 +286,10 @@ impl SealedCredentials {
         Ok(Some(sealed))
     }
 
-    /// A connection on a platform OAuth app, as seal exchanges a code for it:
-    /// with the app's client secret sealed as the connection's own would be,
-    /// so that seal sends it and the tokens come back sealed. For one
-    /// exchange: the result is never stored.
+    /// A connection on a platform OAuth app, as seal makes a request to the
+    /// provider for it (a code exchange, a refresh, a revocation): with the
+    /// app's client secret sealed as the connection's own would be, so that
+    /// seal sends it. For one request: the result is never stored.
     pub async fn with_app_client(
         &self,
         tenant_id: &str,
@@ -461,16 +466,16 @@ impl SealedCredentials {
     }
 
     /// Revokes a connection's sealed token at the provider: the refresh
-    /// token, or the access token if that is all it holds. `authorization`
-    /// is the client's own, where the provider wants it. `Ok(false)` if the
-    /// connection has no sealed token or nowhere to revoke it.
+    /// token, or the access token if that is all it holds. The client's own
+    /// secret goes with it where the provider wants it, sealed too.
+    /// `Ok(false)` if the connection has no sealed token or nowhere to
+    /// revoke it.
     pub async fn revoke_token(
         &self,
         tenant_id: &str,
         connection_id: &str,
         integration_id: &str,
         parameters: &Value,
-        authorization: Option<String>,
     ) -> Result<bool, String> {
         let Some(url) = policy::authorized_tokens(integration_id, parameters)
             .and_then(|tokens| tokens.revocation_url)
@@ -487,18 +492,16 @@ impl SealedCredentials {
             .map_err(|reason| format!("refusing to send the revocation request: {reason}"))?;
         let (name, value) = presented(parameters, field).map_err(|error| error.detail)?;
         let mut values = BTreeMap::from([(name, value)]);
-        let mut request = http::Request::builder()
+        let request = http::Request::builder()
             .method("POST")
             .uri(url)
             .header("content-type", "application/json");
-        // A sealed client secret is seal's to send, where the provider has
-        // the client say who it is; a readable one came as `authorization`.
+        // The client secret is seal's to send, where the provider has the
+        // client say who it is.
         if policy::client_secret_revokes(integration_id, parameters) {
             let (name, value) =
                 presented(parameters, policy::CLIENT_SECRET_FIELD).map_err(|error| error.detail)?;
             values.insert(name, value);
-        } else if let Some(authorization) = authorization {
-            request = request.header("authorization", authorization);
         }
         // seal names the token in the body, as its policy says.
         let request = request
@@ -546,15 +549,16 @@ impl SealedCredentials {
         }
     }
 
-    /// Seals the secret token of a Telegram webhook registered for a
-    /// connection at `webhook_url`. Telegram sends it back with each call.
-    /// The marker names the connection too: a trigger moved to another
-    /// connection holds a token that is not that connection's.
+    /// Seals the secret token of a webhook of a connection: Telegram's, which
+    /// it sends back with each call, registered at `webhook_url`; or, with no
+    /// URL, one that is only ever checked. The marker names the connection
+    /// too: a trigger moved to another connection holds a token that is not
+    /// that connection's.
     pub async fn seal_webhook_secret(
         &self,
         tenant_id: &str,
         connection_id: &str,
-        webhook_url: &str,
+        webhook_url: Option<&str>,
         token: &str,
     ) -> Result<Value, SealingError> {
         let policy = policy::telegram_webhook_secret_policy(webhook_url, &self.allowances)
@@ -574,11 +578,11 @@ impl SealedCredentials {
 
     /// Whether a sealed webhook secret token is the one a webhook registered
     /// for this connection at `webhook_url` would have: sealed for this
-    /// connection, and for that URL.
+    /// connection, and for that URL (or, with none, only to be checked).
     pub fn webhook_secret_is_current(
         &self,
         connection_id: &str,
-        webhook_url: &str,
+        webhook_url: Option<&str>,
         marker: &Value,
     ) -> bool {
         let current = policy::telegram_webhook_secret_policy(webhook_url, &self.allowances)

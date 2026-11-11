@@ -247,6 +247,33 @@ async fn a_secret_seal_cannot_hold_is_refused_and_nothing_is_stored() {
             .unwrap(),
             "sslmode=verify-full",
         ),
+        // A credential among the headers an MCP connection sends as they
+        // are: it has a sealed place of its own.
+        (
+            serde_json::from_value(json!({
+                "title": "smuggled",
+                "integrationId": "mcp",
+                "connectionParameters": {
+                    "url": "https://mcp.example.com/mcp", "auth_mode": "none",
+                    "extra_headers": {"X-Team": "a", "X-Api-Key": SECRET},
+                },
+            }))
+            .unwrap(),
+            "`extra_headers` carries a credential in `X-Api-Key`",
+        ),
+        (
+            serde_json::from_value(json!({
+                "title": "beside",
+                "integrationId": "mcp",
+                "connectionParameters": {
+                    "url": "https://mcp.example.com/mcp", "auth_mode": "bearer",
+                    "bearer_token": "another-secret",
+                    "extra_headers": {"Cookie": SECRET},
+                },
+            }))
+            .unwrap(),
+            "`extra_headers` carries a credential in `Cookie`",
+        ),
     ] {
         let error = service
             .create_connection(request, TENANT)
@@ -291,7 +318,11 @@ async fn a_secret_seal_cannot_hold_is_refused_and_nothing_is_stored() {
     let none: CreateConnectionRequest = serde_json::from_value(json!({
         "title": "open",
         "integrationId": "mcp",
-        "connectionParameters": {"url": "https://mcp.example.com/mcp", "auth_mode": "none"},
+        "connectionParameters": {
+            "url": "https://mcp.example.com/mcp", "auth_mode": "none",
+            // Headers that are no credential are sent as they are.
+            "extra_headers": {"X-Team": "a", "Mcp-Session-Id": "s", "X-Author": "me"},
+        },
     }))
     .unwrap();
     let id = service.create_connection(none, TENANT).await.unwrap();

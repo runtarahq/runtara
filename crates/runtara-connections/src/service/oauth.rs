@@ -839,10 +839,22 @@ impl OAuthService {
             .as_deref()
             .and_then(find_connection_type)
             .and_then(|meta| meta.oauth_config);
-        if let (Some(oauth_config), Some(integration_id)) = (oauth_config, integration_id) {
+        if let (Some(_), Some(integration_id)) = (oauth_config, integration_id) {
             // The dropped tokens, with the connection's client credentials.
+            // A platform app's client secret is sealed for this request.
             let mut revoked = match self.app_for(tenant_id, &integration_id, &params) {
-                Ok(Some(app)) => oauth_apps::with_app_credentials(&params, &app),
+                Ok(Some(app)) => self
+                    .sealed
+                    .with_app_client(
+                        tenant_id,
+                        connection_id,
+                        &integration_id,
+                        &params,
+                        &app.client_id,
+                        app.client_secret.as_str(),
+                    )
+                    .await
+                    .unwrap_or_else(|_| params.clone()),
                 _ => params.clone(),
             };
             if let (Some(obj), Some(fields)) =
@@ -855,13 +867,7 @@ impl OAuthService {
             // The tokens came sealed, and seal names one to the provider.
             let outcome = self
                 .sealed
-                .revoke_token(
-                    tenant_id,
-                    connection_id,
-                    &integration_id,
-                    &revoked,
-                    crate::auth::provider_auth::revoke_authorization(oauth_config, &revoked),
-                )
+                .revoke_token(tenant_id, connection_id, &integration_id, &revoked)
                 .await
                 .map(|_| ());
             if let Err(error) = outcome {

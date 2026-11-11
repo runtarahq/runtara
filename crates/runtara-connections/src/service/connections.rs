@@ -1283,11 +1283,12 @@ impl ConnectionService {
         let Some(integration_id) = conn.integration_id.as_deref() else {
             return;
         };
-        let Some(oauth_config) = runtara_agents::registry::find_connection_type(integration_id)
+        if runtara_agents::registry::find_connection_type(integration_id)
             .and_then(|meta| meta.oauth_config)
-        else {
+            .is_none()
+        {
             return;
-        };
+        }
         // No static-descriptor pre-check here: for params-driven types the
         // revocation endpoint lives in the connection params, and seal's
         // revocation resolves the EFFECTIVE endpoint: a no-op when there is
@@ -1295,22 +1296,32 @@ impl ConnectionService {
         let params = conn
             .connection_parameters
             .unwrap_or(serde_json::Value::Null);
-        // A platform app's credentials, for this request only.
+        // A platform app's client secret, sealed for this request only.
         let params = match crate::oauth_apps::app_for(
             self.oauth_apps.as_deref(),
             tenant_id,
             integration_id,
             &params,
         ) {
-            Ok(Some(app)) => crate::oauth_apps::with_app_credentials(&params, &app),
+            Ok(Some(app)) => self
+                .sealed
+                .with_app_client(
+                    tenant_id,
+                    id,
+                    integration_id,
+                    &params,
+                    &app.client_id,
+                    app.client_secret.as_str(),
+                )
+                .await
+                .unwrap_or(params),
             _ => params,
         };
         // The tokens are sealed, and seal names one to the provider. A
         // connection that holds none has nothing to revoke.
-        let authorization = crate::auth::provider_auth::revoke_authorization(oauth_config, &params);
         if let Err(e) = self
             .sealed
-            .revoke_token(tenant_id, id, integration_id, &params, authorization)
+            .revoke_token(tenant_id, id, integration_id, &params)
             .await
         {
             tracing::warn!(connection_id = id, error = %e, "provider token revocation failed on disconnect (continuing)");

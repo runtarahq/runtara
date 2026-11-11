@@ -302,21 +302,13 @@ async fn sealed_tokens_are_revoked_through_seal_and_go_stale_with_their_destinat
     let connection = "conn-sealed-revoke";
     let first = stored(&sealed, connection, &authorized(&server, "form_body")).await;
     assert_eq!(
-        sealed
-            .revoke_token(TENANT, connection, TYPE, &first, None)
-            .await,
+        sealed.revoke_token(TENANT, connection, TYPE, &first).await,
         Ok(true)
     );
     // Nothing sealed, nothing to revoke here.
     assert_eq!(
         sealed
-            .revoke_token(
-                TENANT,
-                connection,
-                TYPE,
-                &authorized(&server, "form_body"),
-                None
-            )
+            .revoke_token(TENANT, connection, TYPE, &authorized(&server, "form_body"))
             .await,
         Ok(false)
     );
@@ -328,17 +320,18 @@ async fn sealed_tokens_are_revoked_through_seal_and_go_stale_with_their_destinat
     assert!(sealed.holds_stale_tokens(TYPE, &moved));
 }
 
-/// A connection on a platform OAuth app holds no client secret: the
-/// platform's is this process's to send, and the tokens are sealed all the
-/// same.
+/// A connection on a platform OAuth app holds no client secret. The app's is
+/// sealed for the refresh as the connection's own would be: seal sends it,
+/// and the tokens come back sealed all the same.
 #[tokio::test]
-async fn a_client_secret_the_connection_does_not_hold_is_sent_from_here() {
+async fn a_platform_apps_client_secret_is_sealed_for_a_refresh() {
     allow_loopback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/oauth/token"))
         .and(body_string_contains("refresh_token=rt-0-CANARY"))
-        .and(body_string_contains("client_secret=platform-secret"))
+        .and(body_string_contains("client_id=platform-client"))
+        .and(body_string_contains("client_secret=platform-CANARY"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "access_token": "at-1-CANARY", "expires_in": 3600,
         })))
@@ -348,16 +341,31 @@ async fn a_client_secret_the_connection_does_not_hold_is_sent_from_here() {
     let sealed = sealed_for(&server);
     let connection = "conn-sealed-platform-client";
     let mut held = authorized(&server, "form_body");
-    held.as_object_mut().unwrap().remove("client_secret");
+    for field in ["client_id", "client_secret"] {
+        held.as_object_mut().unwrap().remove(field);
+    }
+    held["oauth_app"] = json!("platform");
     let first = sealed
         .seal_parameters(TENANT, connection, TYPE, &held, None)
         .await
         .unwrap()
         .unwrap();
     assert!(is_sealed(&first["refresh_token"]));
-    // As the platform's credentials are given for one request.
-    let mut effective = first.clone();
-    effective["client_secret"] = json!("platform-secret");
+    // Without a client, there is no refresh.
+    assert!(resolve(&sealed, connection, &first).await.is_err());
+
+    let effective = sealed
+        .with_app_client(
+            TENANT,
+            connection,
+            TYPE,
+            &first,
+            "platform-client",
+            "platform-CANARY",
+        )
+        .await
+        .unwrap();
+    assert!(!effective.to_string().contains("CANARY"));
     let resolved = resolve(&sealed, connection, &effective).await.unwrap();
     assert!(is_sealed(
         &resolved

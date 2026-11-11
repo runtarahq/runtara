@@ -1,6 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
 use dashmap::DashMap;
-use runtara_dsl::agent_meta::TokenEndpointAuth;
 use serde_json::Value;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -211,35 +210,6 @@ pub(crate) fn check_token_endpoint(token_url: &str) -> Result<(), AuthResolution
             "Refusing to send credentials to the token endpoint: {reason}"
         ))
     })
-}
-
-/// Build the `(Authorization header, x-www-form-urlencoded body)` for an OAuth token
-/// request per the provider's credential style. For `HttpBasic` the credentials go in
-/// the Basic header and are kept OUT of the body (Intuit/Xero reject body creds); for
-/// `FormBody` they are appended to the body (the OAuth2 default). `grant_fields` are the
-/// non-credential fields (grant_type, code/redirect_uri or refresh_token).
-pub(crate) fn token_request_parts(
-    token_endpoint_auth: TokenEndpointAuth,
-    grant_fields: Vec<(String, String)>,
-    client_id: &str,
-    client_secret: &str,
-) -> (Option<String>, String) {
-    match token_endpoint_auth {
-        TokenEndpointAuth::HttpBasic => {
-            use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-            let basic = BASE64.encode(format!("{client_id}:{client_secret}"));
-            (
-                Some(format!("Basic {basic}")),
-                form_urlencoded(&grant_fields),
-            )
-        }
-        TokenEndpointAuth::FormBody => {
-            let mut fields = grant_fields;
-            fields.push(("client_id".to_string(), client_id.to_string()));
-            fields.push(("client_secret".to_string(), client_secret.to_string()));
-            (None, form_urlencoded(&fields))
-        }
-    }
 }
 
 /// When the token expires: after its `expires_in`, or after the default
@@ -774,45 +744,5 @@ mod tests {
             cache.get(&live).is_some(),
             "a live token must not be evicted while expired ones are still present"
         );
-    }
-
-    #[test]
-    fn token_request_parts_form_body_puts_creds_in_body() {
-        let (auth, body) = token_request_parts(
-            TokenEndpointAuth::FormBody,
-            vec![
-                ("grant_type".to_string(), "refresh_token".to_string()),
-                ("refresh_token".to_string(), "rt".to_string()),
-            ],
-            "cid",
-            "csec",
-        );
-        assert!(
-            auth.is_none(),
-            "form-body style sends no Authorization header"
-        );
-        assert!(body.contains("grant_type=refresh_token"));
-        assert!(body.contains("client_id=cid"));
-        assert!(body.contains("client_secret=csec"));
-    }
-
-    #[test]
-    fn token_request_parts_http_basic_uses_header_and_omits_body_creds() {
-        let (auth, body) = token_request_parts(
-            TokenEndpointAuth::HttpBasic,
-            vec![
-                ("grant_type".to_string(), "refresh_token".to_string()),
-                ("refresh_token".to_string(), "rt".to_string()),
-            ],
-            "cid",
-            "csec",
-        );
-        // base64("cid:csec")
-        assert_eq!(auth.as_deref(), Some("Basic Y2lkOmNzZWM="));
-        assert!(body.contains("grant_type=refresh_token"));
-        assert!(body.contains("refresh_token=rt"));
-        // Credentials must NOT appear in the body under HTTP Basic (Intuit rejects that).
-        assert!(!body.contains("client_id"));
-        assert!(!body.contains("client_secret"));
     }
 }

@@ -3,9 +3,11 @@
 //!
 //! A connection names one in its `oauth_app` parameter in place of a client
 //! ID and secret. Its credentials are resolved where a request to the
-//! provider needs them, and added only to that request's view of the
-//! connection ([`with_app_credentials`]); they are never written into the
-//! connection, so nothing that stores the connection back can persist them.
+//! provider needs them, and its secret is sealed for that request as the
+//! connection's own would be, for seal to send
+//! ([`crate::sealed::SealedCredentials::with_app_client`]); they are never
+//! written into the connection, so nothing that stores the connection back
+//! can persist them.
 //!
 //! The host supplies the apps ([`OAuthApps`]); runtara reads them from the
 //! file `RUNTARA_OAUTH_APPS_FILE` names ([`FileOAuthApps`]) when it supplies
@@ -326,21 +328,6 @@ pub fn app_for(
     Ok(Some(app))
 }
 
-/// `params` as a request to the provider sees them: with the app's client
-/// credentials, and its scopes. Only ever passed to an outgoing call, never
-/// written back.
-pub fn with_app_credentials(params: &Value, app: &OAuthAppCredentials) -> Value {
-    let mut effective = params.clone();
-    if let Some(obj) = effective.as_object_mut() {
-        obj.insert("client_id".into(), Value::String(app.client_id.clone()));
-        obj.insert(
-            "client_secret".into(),
-            Value::String(app.client_secret.as_str().to_owned()),
-        );
-    }
-    effective
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -466,13 +453,6 @@ pub(crate) mod tests {
             )
             .unwrap()
             .is_none()
-        );
-
-        let effective = with_app_credentials(&params, &apps.0);
-        assert_eq!(effective["client_secret"], "platform-secret");
-        assert!(
-            params.get("client_secret").is_none(),
-            "the original is unchanged"
         );
     }
 }

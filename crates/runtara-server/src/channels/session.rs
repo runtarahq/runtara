@@ -214,25 +214,32 @@ impl ChannelRouter {
         let stored_secret =
             crate::api::services::webhook_manager::stored_webhook_secret(&trigger.configuration);
 
-        // A sealed secret is checked by seal, which answers yes or no.
-        if let (Some(stored), Some(header)) = (stored_secret, secret_header)
-            && let Some(sealed_secret) =
-                crate::api::services::webhook_manager::sealed_webhook_secret(stored)
-        {
-            let sealed = self.connections.sealed();
-            return match sealed
-                .verify_webhook_secret(&tenant_id, connection_id, &sealed_secret, header)
-                .await
-            {
-                Ok(true) => Ok(()),
-                Ok(false) => anyhow::bail!("Invalid webhook secret"),
-                // seal's detail has identifiers and static text only.
-                Err(error) => anyhow::bail!("The webhook secret could not be checked: {error}"),
-            };
-        }
+        // The secret is sealed, and seal checks the call's against it,
+        // answering yes or no.
         match (stored_secret, secret_header) {
-            (Some(stored), Some(header)) if stored == header => Ok(()),
-            (Some(_), Some(_)) => anyhow::bail!("Invalid webhook secret"),
+            (Some(stored), Some(header)) => {
+                let Some(sealed_secret) =
+                    crate::api::services::webhook_manager::sealed_webhook_secret(stored)
+                else {
+                    // One an earlier release stored readable is sealed when
+                    // the server starts; nothing is checked against it as it
+                    // is.
+                    anyhow::bail!("The Channel trigger's webhook secret is not sealed");
+                };
+                match self
+                    .connections
+                    .sealed()
+                    .verify_webhook_secret(&tenant_id, connection_id, &sealed_secret, header)
+                    .await
+                {
+                    Ok(true) => Ok(()),
+                    Ok(false) => anyhow::bail!("Invalid webhook secret"),
+                    // seal's detail has identifiers and static text only.
+                    Err(error) => {
+                        anyhow::bail!("The webhook secret could not be checked: {error}")
+                    }
+                }
+            }
             (Some(_), None) => anyhow::bail!("Missing webhook secret header"),
             // Every webhook this runtime registers carries a secret, stored
             // before the platform is contacted. A trigger without one was

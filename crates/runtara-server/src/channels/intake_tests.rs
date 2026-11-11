@@ -339,7 +339,12 @@ impl Harness {
         .unwrap();
         let mut configuration = json!({"connection_id": id});
         if matches!(provider, Provider::Telegram) {
-            configuration["webhook_secret"] = json!(TELEGRAM_SECRET);
+            // As registration stores it: sealed.
+            let marker = runtara_connections::sealed::SealedCredentials::for_tests()
+                .seal_webhook_secret(&self.tenant, &id, None, TELEGRAM_SECRET)
+                .await
+                .unwrap();
+            configuration["webhook_secret"] = json!(format!("$sealed:{marker}"));
         }
         self.channel_trigger(&self.workflow_id, configuration).await;
         self.connections.lock().unwrap().push(id.clone());
@@ -1035,6 +1040,69 @@ async fn a_telegram_call_is_rejected_when_the_trigger_holds_no_secret() {
     harness.cleanup().await;
 }
 
+/// A secret an earlier release stored readable authenticates nothing as it
+/// is. The server seals it when it starts, as the same token: the platform
+/// that holds it still agrees, and its calls are accepted again.
+#[tokio::test]
+async fn a_readable_webhook_secret_is_refused_until_it_is_sealed() {
+    use crate::api::services::webhook_manager::{
+        WebhookManager, seal_stored_webhook_secrets, sealed_webhook_secret,
+    };
+    let harness = Harness::new().await;
+    let router = harness.router().await;
+    let connection = harness.connection(Provider::Telegram).await;
+    sqlx::query(
+        "UPDATE invocation_trigger
+         SET configuration = configuration || jsonb_build_object('webhook_secret', $2::text)
+         WHERE configuration->>'connection_id' = $1",
+    )
+    .bind(&connection)
+    .bind(TELEGRAM_SECRET)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let call = || telegram_request(&connection, 1, Some(TELEGRAM_SECRET));
+    assert_eq!(post(&router, call()).await, StatusCode::UNAUTHORIZED);
+    assert!(harness.intake(&connection).await.is_empty());
+
+    let manager = WebhookManager::new(router.connections().clone());
+    let sealed = seal_stored_webhook_secrets(&harness.pool, &manager, &harness.tenant)
+        .await
+        .unwrap();
+    // This trigger's, and any other of the tenant's left readable.
+    assert!(sealed >= 1, "{sealed}");
+    let stored: String = sqlx::query_scalar(
+        "SELECT configuration->>'webhook_secret' FROM invocation_trigger
+         WHERE configuration->>'connection_id' = $1",
+    )
+    .bind(&connection)
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+    assert!(sealed_webhook_secret(&stored).is_some());
+    assert!(!stored.contains(TELEGRAM_SECRET));
+    // Nothing is left to seal.
+    assert_eq!(
+        seal_stored_webhook_secrets(&harness.pool, &manager, &harness.tenant)
+            .await
+            .unwrap(),
+        0
+    );
+
+    assert_eq!(post(&router, call()).await, StatusCode::OK);
+    // Another token is still refused.
+    assert_eq!(
+        post(
+            &router,
+            telegram_request(&connection, 2, Some("another-token"))
+        )
+        .await,
+        StatusCode::UNAUTHORIZED
+    );
+    harness.cleanup().await;
+}
+
 #[tokio::test]
 async fn a_newer_trigger_of_a_deleted_workflow_does_not_take_the_bot() {
     let harness = Harness::new().await;
@@ -1267,7 +1335,7 @@ async fn a_sealed_telegram_webhooks_secret_is_checked_by_seal() {
         .seal_webhook_secret(
             &harness.tenant,
             &connection,
-            "https://runtime.example.test/hook",
+            Some("https://runtime.example.test/hook"),
             TELEGRAM_SECRET,
         )
         .await

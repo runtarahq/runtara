@@ -1109,19 +1109,41 @@ async fn a_webhooks_secret_token_registers_one_url_and_is_checked_without_being_
         .unwrap()
         .unwrap();
     let marker = sealed
-        .seal_webhook_secret(TENANT, CONNECTION, webhook_url, secret)
+        .seal_webhook_secret(TENANT, CONNECTION, Some(webhook_url), secret)
         .await
         .unwrap();
     assert!(is_sealed(&marker));
     assert!(!marker.to_string().contains(secret));
-    assert!(sealed.webhook_secret_is_current(CONNECTION, webhook_url, &marker));
+    assert!(sealed.webhook_secret_is_current(CONNECTION, Some(webhook_url), &marker));
     // Another connection's, or one for a URL since changed, is not.
-    assert!(!sealed.webhook_secret_is_current("another-connection", webhook_url, &marker));
+    assert!(!sealed.webhook_secret_is_current("another-connection", Some(webhook_url), &marker));
     assert!(!sealed.webhook_secret_is_current(
         CONNECTION,
-        "https://elsewhere.example.com/hook",
+        Some("https://elsewhere.example.com/hook"),
         &marker
     ));
+    assert!(!sealed.webhook_secret_is_current(CONNECTION, None, &marker));
+
+    // Sealed with no URL to register, a token is only ever checked: it can
+    // be sent nowhere, registration included.
+    let checked_only = sealed
+        .seal_webhook_secret(TENANT, CONNECTION, None, secret)
+        .await
+        .unwrap();
+    assert!(sealed.webhook_secret_is_current(CONNECTION, None, &checked_only));
+    assert!(!sealed.webhook_secret_is_current(CONNECTION, Some(webhook_url), &checked_only));
+    assert_eq!(
+        sealed
+            .verify_webhook_secret(TENANT, CONNECTION, &checked_only, secret)
+            .await,
+        Ok(true)
+    );
+    assert_eq!(
+        sealed
+            .verify_webhook_secret(TENANT, CONNECTION, &checked_only, "another-token")
+            .await,
+        Ok(false)
+    );
 
     // Registration presents both, for that URL only.
     connection[policy::WEBHOOK_SECRET_FIELD] = marker.clone();

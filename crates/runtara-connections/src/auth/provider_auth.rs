@@ -1,4 +1,3 @@
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use runtara_agents::extractors::connection_types::{
     GEMINI_API_BASE_URL, SHIPPO_API_BASE_URL, SHIPPO_API_VERSION, ZENDESK_DEFAULT_SCOPE,
     jira_base_url, ups_base_url, zendesk_base_url,
@@ -924,25 +923,6 @@ fn describe_http_oauth2_client_credentials_auth(
         basic_auth: use_basic.then_some((client_id, client_secret)),
         default_ttl_seconds: DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
     })
-}
-
-/// The `Authorization` header a provider wants on a revocation request: the
-/// client's own credentials, for a provider that authenticates the client
-/// with HTTP Basic.
-pub(crate) fn revoke_authorization(oauth_config: &OAuthConfig, params: &Value) -> Option<String> {
-    let effective = resolve_effective_oauth_config(oauth_config, params);
-    match effective.token_endpoint_auth {
-        TokenEndpointAuth::HttpBasic => {
-            let client_id = params["client_id"].as_str().unwrap_or("");
-            // A sealed secret is not this process's to send.
-            let client_secret = params["client_secret"].as_str()?;
-            Some(format!(
-                "Basic {}",
-                BASE64.encode(format!("{client_id}:{client_secret}"))
-            ))
-        }
-        TokenEndpointAuth::FormBody => None,
-    }
 }
 
 fn collect_shopify_scopes(params: &Value) -> String {

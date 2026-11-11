@@ -461,9 +461,36 @@ impl ConnectionsFacade {
                 crate::auth::token_cache::AuthResolutionError::permanent(error),
             )
         })?;
-        let effective = app
-            .as_ref()
-            .map(|app| crate::oauth_apps::with_app_credentials(params, app));
+        // The stored token, while it is fresh, needs no client. Otherwise
+        // the app's secret is sealed for the refresh, as the connection's
+        // own would be: seal sends it.
+        let fresh = crate::sealed::is_sealed(&params[crate::sealed::policy::ACCESS_TOKEN_FIELD])
+            && crate::auth::token_cache::token_is_fresh(crate::auth::token_cache::parse_expiry(
+                params["token_expires_at"].as_str(),
+            ));
+        let effective = match &app {
+            Some(app) if !fresh => Some(
+                self.state
+                    .sealed
+                    .with_app_client(
+                        tenant_id,
+                        connection_id,
+                        integration_id,
+                        params,
+                        &app.client_id,
+                        app.client_secret.as_str(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        ConnectionsError::AuthResolution(
+                            crate::auth::token_cache::AuthResolutionError::permanent(
+                                error.to_string(),
+                            ),
+                        )
+                    })?,
+            ),
+            _ => None,
+        };
         let resolved = match provider_auth::resolve_connection_auth(
             tenant_id,
             connection_id,

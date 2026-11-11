@@ -294,8 +294,9 @@ async fn a_teams_bots_app_password_gets_a_token_for_the_bot_connector() {
         .expect(1)
         .mount(&server)
         .await;
-    // The mock server stands in for the Bot Connector.
-    let sealed = sealed_for(&server, &["teams_bot"]);
+    // The mock server stands in for the Bot Connector, as a host the
+    // operator allowlisted for egress may.
+    let sealed = sealed_for(&server, &[]);
     let connection = "conn-sealed-teams";
     let stored = sealed
         .seal_parameters(

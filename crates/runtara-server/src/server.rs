@@ -1599,6 +1599,32 @@ pub async fn start_with(
         }
     });
 
+    // Webhook secrets earlier releases stored readable in Channel triggers
+    // are sealed: nothing checks a call against a readable one any more.
+    {
+        let webhooks =
+            crate::api::services::webhook_manager::WebhookManager::new(connections_facade.clone());
+        for tenant_id in config::served_tenants() {
+            match crate::api::services::webhook_manager::seal_stored_webhook_secrets(
+                &pool, &webhooks, tenant_id,
+            )
+            .await
+            {
+                Ok(0) => {}
+                Ok(sealed) => tracing::info!(
+                    tenant_id = %tenant_id,
+                    sealed,
+                    "Sealed Channel triggers' webhook secrets stored readable"
+                ),
+                Err(error) => tracing::error!(
+                    tenant_id = %tenant_id,
+                    %error,
+                    "Could not seal Channel triggers' webhook secrets"
+                ),
+            }
+        }
+    }
+
     // Each served tenant gets the platform database as its default
     // connection. The connection stands for that database and holds no URL:
     // the URL is the operator's, and stays in the configuration.
