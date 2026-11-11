@@ -1132,7 +1132,7 @@ mod tests {
         connections_facade_with_seal(pool, None)
     }
 
-    fn connections_facade_with_seal(
+    pub(super) fn connections_facade_with_seal(
         pool: PgPool,
         sealed: Option<Arc<runtara_connections::sealed::SealedCredentials>>,
     ) -> Arc<ConnectionsFacade> {
@@ -1649,33 +1649,64 @@ mod tests {
 #[cfg(all(test, feature = "db-integration-tests"))]
 mod registration_tests {
     use super::tests::{
-        ACCEPTED, APPLIED_REPLY_LOST, REFUSED, Received, TelegramCall, connections_facade,
-        fake_telegram_holding,
+        ACCEPTED, APPLIED_REPLY_LOST, REFUSED, Received, TelegramCall,
+        connections_facade_with_seal, fake_telegram_holding,
     };
     use super::*;
     use crate::api::dto::triggers::CreateInvocationTriggerRequest;
     use crate::api::dto::triggers::UpdateInvocationTriggerRequest;
     use crate::api::repositories::workflows::WorkflowRepository;
     use axum::http::StatusCode;
+    use runtara_connections::sealed::SealedCredentials;
     use uuid::Uuid;
 
     const BOT_TOKEN: &str = "000000:test-token";
 
-    /// A `telegram_bot` connection with `bot_token`, returning its id.
-    async fn insert_bot(pool: &PgPool, tenant: &str, bot_token: &str) -> String {
+    /// A `telegram_bot` connection with `bot_token`, stored as a save
+    /// stores it (the token sealed), returning its id.
+    async fn insert_bot(
+        pool: &PgPool,
+        sealed: &SealedCredentials,
+        tenant: &str,
+        bot_token: &str,
+    ) -> String {
         let connection_id = Uuid::new_v4().to_string();
+        let parameters = sealed
+            .seal_parameters(
+                tenant,
+                &connection_id,
+                "telegram_bot",
+                &json!({"bot_token": bot_token}),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
         sqlx::query(
-            "INSERT INTO connection_data_entity (id, tenant_id, title, integration_id, connection_parameters, status)
-             VALUES ($1, $2, $3, 'telegram_bot', $4, 'ACTIVE')",
+            "INSERT INTO connection_data_entity
+                 (id, tenant_id, title, integration_id, connection_parameters, status, credential_format)
+             VALUES ($1, $2, $3, 'telegram_bot', $4, 'ACTIVE', 'seal')",
         )
         .bind(&connection_id)
         .bind(tenant)
         .bind(format!("telegram {connection_id}"))
-        .bind(json!({"bot_token": bot_token}))
+        .bind(parameters)
         .execute(pool)
         .await
         .unwrap();
         connection_id
+    }
+
+    /// seal with `telegram_api_base` standing in for Telegram.
+    fn seal_reaching(telegram_api_base: &str) -> Arc<SealedCredentials> {
+        let address = telegram_api_base.trim_start_matches("http://").to_string();
+        let host = address.split(':').next().unwrap().to_string();
+        SealedCredentials::for_tests_with(runtara_connections::sealed::Allowances {
+            private_hosts: vec![address],
+            plain_http_hosts: vec![host],
+            api_bases: [("telegram_bot".to_string(), telegram_api_base.to_string())].into(),
+            ..Default::default()
+        })
     }
 
     struct Harness {
@@ -1684,6 +1715,10 @@ mod registration_tests {
         received: Received,
         tenant: String,
         connection_id: String,
+        sealed: Arc<SealedCredentials>,
+        /// The secrets a test gave a trigger: a stored secret is sealed, and
+        /// is known only by which of these it is.
+        given: std::sync::Mutex<Vec<String>>,
     }
 
     impl Harness {
@@ -1708,11 +1743,12 @@ mod registration_tests {
             sqlx::migrate!("./migrations").run(&pool).await.unwrap();
 
             let tenant = format!("t-{}", Uuid::new_v4());
-            let connection_id = insert_bot(&pool, &tenant, BOT_TOKEN).await;
-
             let (telegram_api_base, received) = fake_telegram_holding(reply, hold).await;
+            let sealed = seal_reaching(&telegram_api_base);
+            let connection_id = insert_bot(&pool, &sealed, &tenant, BOT_TOKEN).await;
+
             let manager = WebhookManager::for_test(
-                connections_facade(pool.clone()),
+                connections_facade_with_seal(pool.clone(), Some(sealed.clone())),
                 Some("http://runtime.test".into()),
                 telegram_api_base,
                 Duration::from_secs(5),
@@ -1723,6 +1759,8 @@ mod registration_tests {
                 received,
                 tenant,
                 connection_id,
+                sealed,
+                given: Default::default(),
             }
         }
 
@@ -1753,6 +1791,7 @@ mod registration_tests {
             let mut configuration = json!({"connection_id": self.connection_id});
             if let Some(secret) = webhook_secret {
                 configuration["webhook_secret"] = json!(secret);
+                self.given(secret);
             }
             let request = CreateInvocationTriggerRequest {
                 workflow_id,
@@ -1813,7 +1852,11 @@ mod registration_tests {
 
         /// A second bot in the harness's tenant, returning its connection id.
         async fn another_bot(&self, bot_token: &str) -> String {
-            insert_bot(&self.pool, &self.tenant, bot_token).await
+            insert_bot(&self.pool, &self.sealed, &self.tenant, bot_token).await
+        }
+
+        fn given(&self, secret: &str) {
+            self.given.lock().unwrap().push(secret.to_owned());
         }
 
         /// Point `trigger` at another connection, returning the updated row.
@@ -1833,6 +1876,9 @@ mod registration_tests {
             key: &str,
             value: Value,
         ) -> InvocationTrigger {
+            if let (true, Some(secret)) = (key == "webhook_secret", value.as_str()) {
+                self.given(secret);
+            }
             sqlx::query_as::<_, InvocationTrigger>(
                 r#"
                 UPDATE invocation_trigger SET configuration = configuration || jsonb_build_object($2::text, $3::jsonb)
@@ -1852,6 +1898,9 @@ mod registration_tests {
         /// Save `configuration` for `trigger` through the trigger update, as a
         /// client edit does.
         async fn edit(&self, trigger: &InvocationTrigger, configuration: Value) {
+            if let Some(secret) = configuration["webhook_secret"].as_str() {
+                self.given(secret);
+            }
             let request = UpdateInvocationTriggerRequest {
                 workflow_id: trigger.workflow_id.clone(),
                 trigger_type: trigger.trigger_type.clone(),
@@ -1878,14 +1927,20 @@ mod registration_tests {
             .expect("Telegram was called");
         }
 
+        /// The configuration `trigger` stores, with its secret as
+        /// [`Self::stored_secret`] knows it.
         async fn stored_configuration(&self, trigger: &InvocationTrigger) -> Value {
-            TriggerRepository::new(self.pool.clone())
+            let mut configuration = TriggerRepository::new(self.pool.clone())
                 .get_by_id(&trigger.id, Some(&self.tenant))
                 .await
                 .unwrap()
                 .expect("trigger exists")
                 .configuration
-                .unwrap_or(Value::Null)
+                .unwrap_or(Value::Null);
+            if let Some(secret) = self.stored_secret(trigger).await {
+                configuration["webhook_secret"] = json!(secret);
+            }
+            configuration
         }
 
         async fn update(&self, before: &InvocationTrigger, after: &InvocationTrigger) {
@@ -1904,6 +1959,9 @@ mod registration_tests {
         }
 
         async fn register(&self, trigger: &InvocationTrigger, preferred_secret: Option<&str>) {
+            if let Some(secret) = preferred_secret {
+                self.given(secret);
+            }
             register_trigger_webhook(
                 &self.pool,
                 &self.manager,
@@ -1914,13 +1972,38 @@ mod registration_tests {
             .await;
         }
 
+        /// The secret `trigger` stores. One stored sealed cannot be read: it
+        /// is whichever of the secrets a test gave, or Telegram was sent,
+        /// seal says it is.
         async fn stored_secret(&self, trigger: &InvocationTrigger) -> Option<String> {
             let trigger = TriggerRepository::new(self.pool.clone())
                 .get_by_id(&trigger.id, Some(&self.tenant))
                 .await
                 .unwrap()
                 .expect("trigger exists");
-            stored_webhook_secret(&trigger.configuration).map(str::to_string)
+            let stored = stored_webhook_secret(&trigger.configuration)?;
+            let Some(marker) = sealed_webhook_secret(stored) else {
+                return Some(stored.to_string());
+            };
+            // The connection it was sealed for, which a trigger moved since
+            // has left.
+            let connection_id = marker[runtara_connections::sealed::SEALED_MARKER]["connection"]
+                .as_str()?
+                .to_owned();
+            let connection_id = connection_id.as_str();
+            let mut known = self.given.lock().unwrap().clone();
+            known.extend(self.sent_secrets());
+            for secret in known {
+                if self
+                    .sealed
+                    .verify_webhook_secret(&self.tenant, connection_id, &marker, &secret)
+                    .await
+                    .unwrap_or(false)
+                {
+                    return Some(secret);
+                }
+            }
+            Some("(a sealed secret no test gave and Telegram was not sent)".to_string())
         }
 
         /// The secrets sent with `setWebhook`, in order.

@@ -151,9 +151,23 @@ async fn generic_authcode_full_flow_from_params() {
         "base_url": "https://api.example.com",
         "token_auth": "basic"
     });
+    // As a save stores it: the client secret sealed.
+    let sealed = runtara_connections::sealed::SealedCredentials::for_tests();
+    let params = sealed
+        .seal_parameters(
+            "tenant_gen",
+            "conn_gen",
+            "http_oauth2_authorization_code",
+            &params,
+            None,
+        )
+        .await
+        .expect("the client secret is sealed")
+        .expect("the connection holds a secret");
     sqlx::query(
-        "INSERT INTO connection_data_entity (id, tenant_id, integration_id, connection_parameters) \
-         VALUES ($1, $2, $3, $4)",
+        "INSERT INTO connection_data_entity \
+         (id, tenant_id, integration_id, connection_parameters, credential_format) \
+         VALUES ($1, $2, $3, $4, 'seal')",
     )
     .bind("conn_gen")
     .bind("tenant_gen")
@@ -168,7 +182,7 @@ async fn generic_authcode_full_flow_from_params() {
         fixture.pool.clone(),
         Arc::new(NoOpCipher),
         "https://platform.example.com".to_string(),
-        runtara_connections::sealed::SealedCredentials::for_tests(),
+        sealed,
     )
     .with_flows(valkey.manager.clone());
 

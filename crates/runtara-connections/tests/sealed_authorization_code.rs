@@ -466,8 +466,8 @@ async fn a_code_is_exchanged_through_seal_for_a_sealed_pair() {
         .unwrap();
     assert_eq!(response.status, 200);
 
-    // A connection whose client secret is readable has nothing for seal to
-    // send: its exchange is this process's.
+    // A client secret seal does not hold is not sent: there is no exchange
+    // but seal's.
     let refused = sealed
         .exchange_code(
             TENANT,
@@ -480,4 +480,105 @@ async fn a_code_is_exchanged_through_seal_for_a_sealed_pair() {
         )
         .await;
     assert!(refused.is_err());
+}
+
+/// A connection on a platform OAuth app holds no client secret. The app's is
+/// sealed for the one exchange as the connection's own would be, so that
+/// seal sends it too: the pair comes back sealed, and nothing readable is
+/// ever the connection's to store, authorized or waiting to be confirmed.
+#[tokio::test]
+async fn a_platform_apps_code_is_exchanged_through_seal_too() {
+    allow_loopback();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .and(body_string_contains("code=code-1"))
+        .and(body_string_contains("client_id=platform-client"))
+        .and(body_string_contains("client_secret=platform-CANARY"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "at-1-CANARY", "refresh_token": "rt-1-CANARY", "expires_in": 1800,
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/me"))
+        .and(header("Authorization", "Bearer at-1-CANARY"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let sealed = sealed_for(&server);
+    let connection = "conn-platform-exchange";
+    // As stored: the app's name, and no client of its own.
+    let mut stored = authorized(&server, "form_body");
+    for field in [
+        "client_id",
+        "client_secret",
+        "access_token",
+        "refresh_token",
+        "token_expires_at",
+    ] {
+        stored.as_object_mut().unwrap().remove(field);
+    }
+    stored["oauth_app"] = json!("platform");
+
+    let exchanging = sealed
+        .with_app_client(
+            TENANT,
+            connection,
+            TYPE,
+            &stored,
+            "platform-client",
+            "platform-CANARY",
+        )
+        .await
+        .unwrap();
+    assert!(is_sealed(&exchanging["client_secret"]));
+    assert_eq!(exchanging["client_id"], "platform-client");
+    assert!(!exchanging.to_string().contains("CANARY"));
+
+    let grant = sealed
+        .exchange_code(
+            TENANT,
+            connection,
+            TYPE,
+            &exchanging,
+            "code-1",
+            "https://platform.example.com/callback",
+            None,
+        )
+        .await
+        .map_err(|error| error.message)
+        .unwrap();
+    assert!(is_sealed(&grant.access_token));
+
+    // The pair is the stored connection's, which still names the app and
+    // holds no client: kept as it is, and its access token reaches the API.
+    let mut authorized = stored.clone();
+    authorized["access_token"] = grant.access_token;
+    authorized["refresh_token"] = grant.refresh_token.expect("a refresh token");
+    assert!(!authorized.to_string().contains("CANARY"));
+    assert!(authorized.get("client_secret").is_none());
+    let kept = sealed
+        .seal_parameters(TENANT, connection, TYPE, &authorized, Some(&authorized))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept, authorized);
+    let response = sealed
+        .send_bounded(
+            TENANT,
+            connection,
+            TYPE,
+            &authorized,
+            "GET",
+            &format!("{}/api/me", server.uri()),
+            [],
+            None,
+            65536,
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status, 200);
 }

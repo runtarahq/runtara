@@ -626,6 +626,46 @@ async fn encrypt_plaintext_credentials(
     }
 }
 
+/// Seal connection secrets an earlier release stored readable: nothing uses
+/// a readable secret any more. One seal cannot hold is logged and left as it
+/// is, unusable until it is entered again, so that one such row does not
+/// keep every tenant from starting.
+async fn seal_readable_credentials(
+    pool: &PgPool,
+    cipher: Arc<dyn runtara_connections::CredentialCipher>,
+    sealed: &runtara_connections::sealed::SealedCredentials,
+) {
+    let repository = runtara_connections::repository::connections::ConnectionRepository::new(
+        pool.clone(),
+        cipher,
+    );
+    match repository.seal_existing(sealed, None, false).await {
+        Ok(stats) if stats.sealed + stats.unsealable + stats.failed == 0 => {}
+        Ok(stats) => {
+            tracing::info!(
+                sealed = stats.sealed,
+                unsealable = stats.unsealable,
+                failed = stats.failed,
+                "Sealed connection credentials stored readable"
+            );
+            if stats.unsealable + stats.failed > 0 {
+                tracing::error!(
+                    unsealable = stats.unsealable,
+                    failed = stats.failed,
+                    "Some connection credentials could not be sealed; those connections \
+                     cannot be used until they are entered again \
+                     (`runtara-server seal-connections --dry-run` names them)"
+                );
+            }
+        }
+        Err(e) => tracing::error!(
+            error = %e,
+            "Could not seal readable connection credentials; \
+             run `runtara-server seal-connections`"
+        ),
+    }
+}
+
 /// Readiness, as distinct from liveness: can this process actually validate the tokens it is
 /// about to be presented?
 ///
@@ -1358,6 +1398,9 @@ pub async fn start_with(
         mode = sealed_credentials.mode(),
         "Connection secrets are held by seal"
     );
+    // Releases before seal stored secrets readable, which nothing uses any
+    // more: seal them first.
+    seal_readable_credentials(&pool, cipher.clone(), &sealed_credentials).await;
 
     // Construct connections crate config and facade.
     let connections_config = runtara_connections::ConnectionsConfig {

@@ -252,16 +252,11 @@ impl SealedCredentials {
                     if key.is_none() {
                         key = Some(self.sealing_key(tenant_id).await.map_err(seal_failed)?);
                     }
-                    let (keyset, kid, public) = key.as_ref().expect("the key was just set");
-                    let binding = Binding {
-                        keyset,
-                        item: &item(connection_id)?,
-                        field: &field_name(field)?,
-                    };
-                    let envelope =
-                        seal_format::seal(public, kid, binding, secret.as_bytes(), policy)
-                            .map_err(|error| SealingError::Seal(error.to_string()))?;
-                    sealed.insert(field.clone(), marker(&envelope, &fingerprint)?);
+                    let key = key.as_ref().expect("the key was just set");
+                    sealed.insert(
+                        field.clone(),
+                        seal_one(key, connection_id, field, secret, policy)?,
+                    );
                 }
                 Some(value) if is_sealed(value) => {
                     let unchanged = stored.and_then(|stored| stored.get(field)) == Some(value)
@@ -284,6 +279,52 @@ impl SealedCredentials {
             });
         }
         Ok(Some(sealed))
+    }
+
+    /// A connection on a platform OAuth app, as seal exchanges a code for it:
+    /// with the app's client secret sealed as the connection's own would be,
+    /// so that seal sends it and the tokens come back sealed. For one
+    /// exchange: the result is never stored.
+    pub async fn with_app_client(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        integration_id: &str,
+        parameters: &Value,
+        client_id: &str,
+        client_secret: &str,
+    ) -> Result<Value, SealingError> {
+        let mut own = parameters.clone();
+        let cannot = |reason: String| SealingError::CannotSeal { reason };
+        let fields = own
+            .as_object_mut()
+            .ok_or_else(|| cannot("the connection has no parameters".to_owned()))?;
+        fields.remove(crate::oauth_apps::OAUTH_APP_PARAM);
+        fields.insert("client_id".to_owned(), Value::String(client_id.to_owned()));
+        fields.insert(
+            policy::CLIENT_SECRET_FIELD.to_owned(),
+            Value::String(client_secret.to_owned()),
+        );
+        let policies =
+            policy::policies(integration_id, &own, &self.allowances).ok_or_else(|| {
+                cannot(policy::why_unsealable(
+                    integration_id,
+                    &own,
+                    &self.allowances,
+                ))
+            })?;
+        let policy = policies
+            .get(policy::CLIENT_SECRET_FIELD)
+            .ok_or_else(|| cannot("the connection's type takes no client secret".to_owned()))?;
+        let key = self.sealing_key(tenant_id).await.map_err(seal_failed)?;
+        own[policy::CLIENT_SECRET_FIELD] = seal_one(
+            &key,
+            connection_id,
+            policy::CLIENT_SECRET_FIELD,
+            client_secret,
+            policy,
+        )?;
+        Ok(own)
     }
 
     /// Sends a request with a sealed connection's credentials. seal attaches
@@ -821,6 +862,26 @@ impl SealedCredentials {
             .expect("seal starts in a test"),
         )
     }
+}
+
+/// The marker of `secret`, sealed to a tenant's `key` for one field of one
+/// connection, to be used as `policy` says.
+fn seal_one(
+    key: &(KeysetId, KeyId, PublicKey),
+    connection_id: &str,
+    field: &str,
+    secret: &str,
+    policy: &Policy,
+) -> Result<Value, SealingError> {
+    let (keyset, kid, public) = key;
+    let binding = Binding {
+        keyset,
+        item: &item(connection_id)?,
+        field: &field_name(field)?,
+    };
+    let envelope = seal_format::seal(public, kid, binding, secret.as_bytes(), policy)
+        .map_err(|error| SealingError::Seal(error.to_string()))?;
+    marker(&envelope, &policy_fingerprint(policy)?)
 }
 
 /// Whether a parameter's value is a sealed value's marker.

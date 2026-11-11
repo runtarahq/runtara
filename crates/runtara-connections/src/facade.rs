@@ -331,7 +331,9 @@ impl ConnectionsFacade {
 
     // ── With secrets (internal use only) ────────────────────────────────
 
-    /// Get a connection including secret parameters.
+    /// Get a connection with its parameters, its secrets sealed. One that
+    /// still holds a readable secret is not given out: nothing here uses a
+    /// secret but through seal.
     ///
     /// SECURITY: Only use for internal runtime credential resolution.
     pub async fn get_with_parameters(
@@ -343,6 +345,7 @@ impl ConnectionsFacade {
             .get_with_parameters(id, tenant_id)
             .await
             .map_err(ConnectionsError::Database)
+            .and_then(sealed_only)
     }
 
     /// Trusted execution: verify the integration on the stored row before
@@ -357,6 +360,7 @@ impl ConnectionsFacade {
             .get_with_parameters_for_types(id, tenant_id, allowed)
             .await
             .map_err(ConnectionsError::Database)
+            .and_then(sealed_only)
     }
 
     /// Get the default connection for an agent/operator, including secret parameters.
@@ -371,12 +375,15 @@ impl ConnectionsFacade {
             .get_default_connection_with_parameters(tenant_id, default_for)
             .await
             .map_err(ConnectionsError::Database)
+            .and_then(sealed_only)
     }
 
     /// Ensure a tenant has a default connection for an agent/operator.
     ///
     /// If the default already exists, returns that connection id. Otherwise a
-    /// new active connection is created and mapped as the default.
+    /// new active connection is created and mapped as the default, with its
+    /// secrets sealed. Parameters with a secret seal cannot hold are refused,
+    /// and no connection is made.
     pub async fn ensure_default_connection(
         &self,
         tenant_id: &str,
@@ -395,6 +402,21 @@ impl ConnectionsFacade {
         }
 
         let connection_id = uuid::Uuid::new_v4().to_string();
+        // As any save: a secret is stored sealed, or the connection is not
+        // made.
+        let connection_parameters = self
+            .state
+            .sealed
+            .seal_parameters(
+                tenant_id,
+                &connection_id,
+                &integration_id,
+                &connection_parameters,
+                None,
+            )
+            .await
+            .map_err(|error| ConnectionsError::Validation(error.to_string()))?
+            .unwrap_or(connection_parameters);
         let request = CreateConnectionRequest {
             title,
             connection_subtype: None,
@@ -430,6 +452,7 @@ impl ConnectionsFacade {
             .get_channel_connection(id)
             .await
             .map_err(ConnectionsError::Database)
+            .and_then(sealed_only)
     }
 
     // ── Validation ──────────────────────────────────────────────────────
@@ -822,6 +845,41 @@ else
     return -wait_ms
 end
 "#;
+
+/// A connection to use, only if seal holds every secret it has. One stored
+/// readable by an earlier release is sealed when the server starts, or by
+/// `runtara-server seal-connections`; what seal cannot hold must be entered
+/// again.
+fn sealed_only(
+    connection: Option<ConnectionWithParameters>,
+) -> Result<Option<ConnectionWithParameters>, ConnectionsError> {
+    let Some(connection) = connection else {
+        return Ok(None);
+    };
+    let readable = connection
+        .connection_parameters
+        .as_ref()
+        .map(|parameters| {
+            crate::sealed::policy::readable_secrets(
+                connection.integration_id.as_deref().unwrap_or_default(),
+                parameters,
+            )
+        })
+        .unwrap_or_default();
+    if readable.is_empty() {
+        return Ok(Some(connection));
+    }
+    tracing::warn!(
+        connection_id = %connection.id,
+        tenant_id = connection.tenant_id.as_deref().unwrap_or_default(),
+        "refusing a connection whose credentials are not sealed"
+    );
+    Err(ConnectionsError::Validation(format!(
+        "Connection '{}' holds credentials that are not sealed, and cannot be used: \
+         enter them again",
+        connection.id
+    )))
+}
 
 #[cfg(test)]
 mod tests {

@@ -108,6 +108,25 @@ impl Fixture {
         )
     }
 
+    /// What uses connections, over this database.
+    fn facade(&self, sealed: Arc<SealedCredentials>) -> runtara_connections::ConnectionsFacade {
+        let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![]));
+        runtara_connections::ConnectionsFacade::new(runtara_connections::ConnectionsState {
+            db_pool: self.pool.clone(),
+            redis_manager: None,
+            public_base_url: String::new(),
+            oauth_complete_url: None,
+            http_client: reqwest::Client::new(),
+            cipher: Arc::new(NoOpCipher),
+            compatibility: Arc::new(IntegrationCompatibility::new(HashMap::new())),
+            agent_catalog: catalog,
+            connection_events: None,
+            oauth: Default::default(),
+            agent_access: Arc::new(runtara_connections::EveryAgent),
+            sealed,
+        })
+    }
+
     fn repository(&self) -> ConnectionRepository {
         ConnectionRepository::new(self.pool.clone(), Arc::new(NoOpCipher))
     }
@@ -561,6 +580,19 @@ async fn existing_connections_are_sealed_in_place() {
     let sealed = fixture.sealed();
     let repository = fixture.repository();
 
+    // Nothing uses a readable secret: until it is sealed, a connection
+    // holding one is given to no one.
+    let facade = fixture.facade(sealed.clone());
+    for id in [sealable.as_str(), "oauth-1", "sftp-1"] {
+        let refused = facade
+            .get_with_parameters(id, TENANT)
+            .await
+            .expect_err("a readable secret is not given out");
+        let message = refused.to_string();
+        assert!(message.contains("not sealed"), "{message}");
+        assert!(!message.contains(SECRET) && !message.contains("CANARY"));
+    }
+
     // A dry run counts, and writes nothing.
     let would = repository
         .seal_existing(&sealed, Some(TENANT), true)
@@ -606,6 +638,19 @@ async fn existing_connections_are_sealed_in_place() {
     .unwrap();
     assert_eq!(guard, refresh_token_guard(&oauth["refresh_token"]));
     assert!(guard.is_some());
+    // Sealed, a connection is given out; what seal cannot hold never is.
+    let given = facade
+        .get_with_parameters(&sealable, TENANT)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(given.sealed);
+    for id in [unexpressible.as_str(), "sftp-1"] {
+        assert!(
+            facade.get_with_parameters(id, TENANT).await.is_err(),
+            "{id}"
+        );
+    }
     // What seal cannot hold is left as it was, to be entered again.
     for (id, field) in [(unexpressible.as_str(), "token"), ("sftp-1", "password")] {
         let (format, stored) = fixture.row(id).await;

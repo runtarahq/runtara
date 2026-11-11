@@ -312,15 +312,28 @@ impl Harness {
     /// A connection with an active Channel trigger for the harness workflow.
     async fn connection(&self, provider: Provider) -> String {
         let id = Uuid::new_v4().to_string();
+        // As a save stores it: its secrets sealed.
+        let parameters = runtara_connections::sealed::SealedCredentials::for_tests()
+            .seal_parameters(
+                &self.tenant,
+                &id,
+                provider.integration_id(),
+                &provider.parameters(),
+                None,
+            )
+            .await
+            .unwrap()
+            .expect("a channel's connection holds a secret");
         sqlx::query(
-            "INSERT INTO connection_data_entity (id, tenant_id, title, integration_id, connection_parameters, status)
-             VALUES ($1, $2, $3, $4, $5, 'ACTIVE')",
+            "INSERT INTO connection_data_entity
+                 (id, tenant_id, title, integration_id, connection_parameters, status, credential_format)
+             VALUES ($1, $2, $3, $4, $5, 'ACTIVE', 'seal')",
         )
         .bind(&id)
         .bind(&self.tenant)
         .bind(format!("{provider:?} intake {id}"))
         .bind(provider.integration_id())
-        .bind(provider.parameters())
+        .bind(parameters)
         .execute(&self.pool)
         .await
         .unwrap();
