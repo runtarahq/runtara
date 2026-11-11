@@ -823,3 +823,88 @@ async fn a_leaving_tenants_keys_are_destroyed_and_its_secrets_with_them() {
     // Destroying what is already gone is not an error.
     sealed.destroy_tenant_keys(TENANT).await.unwrap();
 }
+
+/// The key that wraps tenants' seal keys is derived from the credential
+/// encryption key, so it changes when that key is rotated. The seal keys are
+/// wrapped again under the new one: what was sealed before still opens, and
+/// the retired key is then no longer needed.
+#[tokio::test]
+async fn sealed_secrets_survive_a_rotation_of_the_key_their_keys_are_wrapped_with() {
+    use runtara_connections::sealed::keys::{
+        key_wrap, rewrap_retired, wrapping_key_from_encryption_key,
+    };
+    let fixture = Fixture::new().await;
+    let seal_wrapped_by = |encryption_key: &[u8]| {
+        SealedCredentials::in_process(
+            Arc::new(PgKeySource::new(fixture.pool.clone())),
+            wrapping_key_from_encryption_key(encryption_key).as_ref(),
+            Allowances::default(),
+        )
+        .unwrap()
+    };
+    let (old_key, new_key) = ([1_u8; 32], [2_u8; 32]);
+
+    // A webhook token sealed while the old key was current, checked by seal.
+    let before = seal_wrapped_by(&old_key);
+    let marker = before
+        .seal_webhook_secret(TENANT, "c-1", None, SECRET)
+        .await
+        .unwrap();
+    assert_eq!(
+        before
+            .verify_webhook_secret(TENANT, "c-1", &marker, SECRET)
+            .await,
+        Ok(true)
+    );
+
+    // With the new key current and nothing done, it opens no more.
+    assert!(
+        seal_wrapped_by(&new_key)
+            .verify_webhook_secret(TENANT, "c-1", &marker, SECRET)
+            .await
+            .is_err()
+    );
+
+    let wrap = |key: &[u8]| key_wrap(wrapping_key_from_encryption_key(key).as_ref()).unwrap();
+    // A key that is not the one the seal keys are wrapped under moves nothing.
+    assert_eq!(
+        rewrap_retired(&fixture.pool, wrap(&new_key).as_ref(), &[wrap(&[9_u8; 32])])
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        rewrap_retired(&fixture.pool, wrap(&new_key).as_ref(), &[wrap(&old_key)])
+            .await
+            .unwrap(),
+        1
+    );
+    // Done once: nothing is left under the retired key.
+    assert_eq!(
+        rewrap_retired(&fixture.pool, wrap(&new_key).as_ref(), &[wrap(&old_key)])
+            .await
+            .unwrap(),
+        0
+    );
+
+    let after = seal_wrapped_by(&new_key);
+    assert_eq!(
+        after
+            .verify_webhook_secret(TENANT, "c-1", &marker, SECRET)
+            .await,
+        Ok(true)
+    );
+    assert_eq!(
+        after
+            .verify_webhook_secret(TENANT, "c-1", &marker, "another-token")
+            .await,
+        Ok(false)
+    );
+    // And the retired key opens it no more.
+    assert!(
+        seal_wrapped_by(&old_key)
+            .verify_webhook_secret(TENANT, "c-1", &marker, SECRET)
+            .await
+            .is_err()
+    );
+}

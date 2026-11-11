@@ -1402,6 +1402,20 @@ pub async fn start_with(
 
     // seal holds every connection's secrets, and sends their requests. The
     // proxy's development allowances are seal's too.
+    // Tenants' seal keys follow a rotation of the encryption key their
+    // wrapping key is derived from: without that, every sealed secret would
+    // be lost with the retired key.
+    match runtara_connections::sealed::follow_encryption_key_rotation(&pool).await {
+        Ok(0) => {}
+        Ok(rewrapped) => tracing::info!(
+            rewrapped,
+            "Seal keys wrapped under a retired encryption key are wrapped under the current one"
+        ),
+        Err(msg) => {
+            eprintln!("❌ Seal keys could not follow the encryption key's rotation: {msg}");
+            std::process::exit(1);
+        }
+    }
     let sealed_credentials =
         match runtara_connections::sealed::from_env(pool.clone(), crate::seal_allowances()) {
             Ok(sealed) => sealed,

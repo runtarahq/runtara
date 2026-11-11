@@ -835,6 +835,64 @@ pub fn from_env(
     Ok(Arc::new(sealed))
 }
 
+/// Has tenants' seal keys follow a rotation of the credential encryption key.
+///
+/// Without [`WRAPPING_KEY_ENV`], the key that wraps them is derived from the
+/// encryption key, so it changes when that key is rotated. The keys still
+/// wrapped under one derived from a retired encryption key
+/// ([`crate::crypto::factory::RETIRED_KEYS_ENV`]) are wrapped again under the current
+/// one, so that the retired key can then be dropped as the rotation says.
+/// Returns how many were. A deployment with its own wrapping key has nothing
+/// to do here.
+pub async fn follow_encryption_key_rotation(pool: &sqlx::PgPool) -> Result<usize, String> {
+    use base64::Engine;
+    let set = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .map(|value| zeroize::Zeroizing::new(value.trim().to_owned()))
+            .filter(|value| !value.is_empty())
+    };
+    if set(WRAPPING_KEY_ENV).is_some() {
+        return Ok(0);
+    }
+    let Some(retired) = set(crate::crypto::factory::RETIRED_KEYS_ENV) else {
+        return Ok(0);
+    };
+    let current = wrapping_key(
+        None,
+        set(crate::crypto::ENCRYPTION_KEY_ENV)
+            .as_ref()
+            .map(|key| key.as_str()),
+    )?;
+    let current = keys::key_wrap(current.as_ref()).map_err(|error| error.to_string())?;
+    let mut wraps = Vec::new();
+    for entry in retired
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let (_, key) = entry.split_once(':').ok_or_else(|| {
+            format!(
+                "{} entries are kid:base64",
+                crate::crypto::factory::RETIRED_KEYS_ENV
+            )
+        })?;
+        let bytes = zeroize::Zeroizing::new(
+            base64::engine::general_purpose::STANDARD
+                .decode(key.trim())
+                .map_err(|_| {
+                    format!(
+                        "{} holds a key that is not base64",
+                        crate::crypto::factory::RETIRED_KEYS_ENV
+                    )
+                })?,
+        );
+        let derived = keys::wrapping_key_from_encryption_key(&bytes);
+        wraps.push(keys::key_wrap(derived.as_ref()).map_err(|error| error.to_string())?);
+    }
+    keys::rewrap_retired(pool, current.as_ref(), &wraps).await
+}
+
 #[cfg(any(test, feature = "test-util"))]
 impl SealedCredentials {
     /// seal for a test, as a development deployment has it: in this process,

@@ -162,6 +162,73 @@ impl KeySource for PgKeySource {
     }
 }
 
+/// Wraps again, under `current`, every seal key in the table that is still
+/// wrapped under one of `retired`. Returns how many were.
+///
+/// This is how the key that wraps tenants' seal keys follows a rotation of
+/// the key it is derived from: without it, every sealed secret would be lost
+/// with the retired key. Each key is unwrapped and compared with its public
+/// key before it is written, and only the row that was read is replaced.
+pub async fn rewrap_retired(
+    pool: &PgPool,
+    current: &dyn KeyWrap,
+    retired: &[Arc<dyn KeyWrap>],
+) -> Result<usize, String> {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT keyset, kid, public_key, wrap_id, wrapped FROM seal_wrapped_key \
+         WHERE wrap_id <> $1 ORDER BY keyset, kid",
+    )
+    .bind(current.id())
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("could not read seal keys: {error}"))?;
+    let mut rewrapped = 0;
+    for (keyset, kid, public, wrap_id, wrapped) in rows {
+        let Some(old) = retired.iter().find(|wrap| wrap.id() == wrap_id) else {
+            continue;
+        };
+        let invalid = |what: &str| format!("seal key {keyset}/{kid}: {what}");
+        let keyset_id = KeysetId::new(keyset.clone()).map_err(|_| invalid("its keyset"))?;
+        let key_id = KeyId::new(kid.clone()).map_err(|_| invalid("its id"))?;
+        let bytes = URL_SAFE_NO_PAD
+            .decode(&wrapped)
+            .map_err(|_| invalid("it is not base64url"))?;
+        let private = old
+            .unwrap(&keyset_id, &key_id, &bytes)
+            .await
+            .map_err(|_| invalid("it does not open with the retired key"))?;
+        let matches = private
+            .public_key()
+            .ok()
+            .zip(seal_format::PublicKey::from_base64url(&public).ok())
+            .is_some_and(|(of_private, stored)| of_private == stored);
+        if !matches {
+            return Err(invalid("it does not match its public key"));
+        }
+        let again = current
+            .wrap(&keyset_id, &key_id, &private)
+            .await
+            .map_err(|_| invalid("it could not be wrapped again"))?;
+        drop(private);
+        let updated = sqlx::query(
+            "UPDATE seal_wrapped_key SET wrap_id = $3, wrapped = $4 \
+             WHERE keyset = $1 AND kid = $2 AND wrap_id = $5",
+        )
+        .bind(&keyset)
+        .bind(&kid)
+        .bind(current.id())
+        .bind(URL_SAFE_NO_PAD.encode(again))
+        .bind(&wrap_id)
+        .execute(pool)
+        .await
+        .map_err(|error| format!("could not store a seal key: {error}"))?;
+        rewrapped += usize::try_from(updated.rows_affected()).unwrap_or(0);
+    }
+    Ok(rewrapped)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
