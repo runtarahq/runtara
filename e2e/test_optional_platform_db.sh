@@ -238,20 +238,31 @@ echo "  no default database: refused with 'add a Postgres connection'; no defaul
 
 #-------------------------------------------------------------------------
 print_step "2. Connections to metadata and loopback addresses are refused..."
-METADATA=$(create_connection "metadata" "postgresql://u:p@169.254.169.254:5432/db")
+# A connection's URL says how its session is protected. Its password is
+# sealed, and seal opens the session: it refuses a private address.
+METADATA=$(create_connection "metadata" "postgresql://u:p@169.254.169.254:5432/db?sslmode=require")
 OUT=$(api_post_status "/object-model/schemas?connectionId=${METADATA}" "${SCHEMA}")
-case "${OUT}" in 4??\ *"is refused"*"169.254.169.254"*) ;; *) print_error "metadata address not refused: ${OUT}"; exit 1 ;; esac
-LOCAL=$(create_connection "local" "${TENANT_DB_URL}")
-OUT=$(api_post_status "/object-model/schemas?connectionId=${LOCAL}" "${SCHEMA}")
-case "${OUT}" in 4??\ *"is refused"*) ;; *) print_error "loopback address not refused: ${OUT}"; exit 1 ;; esac
-echo "  metadata and loopback connections refused before connecting ✓"
+case "${OUT}" in 2??\ *) print_error "metadata address not refused: ${OUT}"; exit 1 ;; esac
+echo "${OUT}" | grep -q "p@169" && { print_error "the refusal names the password: ${OUT}"; exit 1; }
+LOOPBACK=$(create_connection "loopback" "${TENANT_DB_URL}?sslmode=require")
+OUT=$(api_post_status "/object-model/schemas?connectionId=${LOOPBACK}" "${SCHEMA}")
+case "${OUT}" in 2??\ *) print_error "loopback address not refused: ${OUT}"; exit 1 ;; esac
+# A session with no TLS is only for a host the deployment allows it for:
+# such a connection is not stored at all.
+OUT=$(api_post_status /connections "{\"title\": \"plain\", \"integrationId\": \"postgres\", \"connectionParameters\": {\"database_url\": \"${TENANT_DB_URL}?sslmode=disable\"}}")
+case "${OUT}" in 4??\ *"without TLS"*) ;; *) print_error "a plaintext session to a host not allowed it was not refused: ${OUT}"; exit 1 ;; esac
+# Nor is one whose URL does not say how its session is protected.
+OUT=$(api_post_status /connections "{\"title\": \"unsaid\", \"integrationId\": \"postgres\", \"connectionParameters\": {\"database_url\": \"${TENANT_DB_URL}\"}}")
+case "${OUT}" in 4??\ *"sslmode"*) ;; *) print_error "a URL with no sslmode was not refused: ${OUT}"; exit 1 ;; esac
+echo "  metadata and loopback connections refused; plaintext and unprotected URLs not stored ✓"
 
 #-------------------------------------------------------------------------
 print_step "3. With the test host allowlisted, workflows run on the tenant's database..."
 kill "${SERVER_PID}"; wait "${SERVER_PID}" 2>/dev/null || true
 SERVER_PID=""
-EXTRA_ENV=("RUNTARA_PROXY_ALLOWED_HOSTS=localhost")
+EXTRA_ENV=("RUNTARA_PROXY_ALLOWED_HOSTS=localhost" "RUNTARA_PROXY_ALLOW_HTTP_HOSTS=localhost")
 start_server
+LOCAL=$(create_connection "local" "${TENANT_DB_URL}?sslmode=disable")
 OUT=$(api_post_status "/object-model/schemas?connectionId=${LOCAL}" "${SCHEMA}")
 case "${OUT}" in 2??\ *) ;; *) print_error "schema create on the tenant connection failed: ${OUT}"; exit 1 ;; esac
 DEFINITION=$(jq -n --arg conn "${LOCAL}" '{
@@ -300,7 +311,7 @@ echo "  schema created and an object-model + SQL workflow ran on the tenant's da
 
 #-------------------------------------------------------------------------
 print_step "4. The per-tenant pool limit holds..."
-SECOND=$(create_connection "second" "${TENANT2_DB_URL}")
+SECOND=$(create_connection "second" "${TENANT2_DB_URL}?sslmode=disable")
 OUT=$(api_post_status "/object-model/schemas?connectionId=${SECOND}" "${SCHEMA}")
 case "${OUT}" in *"OBJECT_MODEL_TENANT_POOL_MAX"*) ;; *) print_error "a second pool was not refused: ${OUT}"; exit 1 ;; esac
 echo "  a second database refused at OBJECT_MODEL_TENANT_POOL_MAX=1 ✓"

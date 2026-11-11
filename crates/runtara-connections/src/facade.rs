@@ -13,11 +13,11 @@ use opentelemetry::global;
 use opentelemetry::metrics::Counter;
 use serde_json::Value;
 
-use crate::auth::provider_auth::{self, ResolvedConnectionAuth, RotatedCredentials};
+use crate::auth::provider_auth::{self, ResolvedConnectionAuth};
 use crate::config::ConnectionsState;
 use crate::error::ConnectionsError;
 use crate::repository::connections::{
-    ConnectionRepository, ConnectionWithParameters, refresh_token_guard, refresh_token_hash,
+    ConnectionRepository, ConnectionWithParameters, refresh_token_guard,
 };
 use crate::resolution::{ConnectionDescriptor, ConnectionResourcePage, ConnectionResourceRequest};
 use crate::resource_resolver::resources_for_integration;
@@ -98,32 +98,6 @@ fn record_rate_limit_fail_open(reason: &'static str) {
     }
 }
 
-/// The stored `params` with a refresh's tokens: what a refresh writes back.
-/// Built from the parameters as stored, never from the view of them a request
-/// was made with, so a platform app's credentials are not written.
-fn rotated_parameters(params: &Value, rotated: &RotatedCredentials) -> Value {
-    let old_refresh = params.get("refresh_token").and_then(|v| v.as_str());
-    // A provider may omit refresh_token on refresh (non-rotating) — keep the old one.
-    let new_refresh = rotated.refresh_token.as_deref().or(old_refresh);
-    let mut merged = params.clone();
-    if let Some(obj) = merged.as_object_mut() {
-        obj.insert(
-            "access_token".to_string(),
-            Value::String(rotated.access_token.clone()),
-        );
-        if let Some(rt) = new_refresh {
-            obj.insert("refresh_token".to_string(), Value::String(rt.to_string()));
-        }
-        if let Some(exp) = rotated.token_expires_at {
-            obj.insert(
-                "token_expires_at".to_string(),
-                Value::String(exp.to_rfc3339()),
-            );
-        }
-    }
-    merged
-}
-
 /// How a webhook's signature checks against a connection's signing secret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignatureCheck {
@@ -144,9 +118,9 @@ impl ConnectionsFacade {
     /// connection's signing secret in `field`. `message` is what the provider
     /// signs; the caller builds it, and checks any timestamp itself.
     ///
-    /// A sealed secret is checked by seal, which says only yes or no; any
-    /// other is compared here, in constant time. An error means the check
-    /// could not be made, and the webhook must then be refused.
+    /// The secret is sealed, and seal checks the signature against it, saying
+    /// only yes or no. An error means the check could not be made, and the
+    /// webhook must then be refused.
     pub async fn check_webhook_signature(
         &self,
         connection: &ConnectionWithParameters,
@@ -155,25 +129,26 @@ impl ConnectionsFacade {
         message: &[u8],
         signature_hex: &str,
     ) -> Result<SignatureCheck, ConnectionsError> {
-        use hmac::{Hmac, Mac};
         let empty = Value::Null;
         let parameters = connection.connection_parameters.as_ref().unwrap_or(&empty);
         let secret = &parameters[field];
-        let sealed = crate::sealed::is_sealed(secret);
-        if !sealed && secret.as_str().is_none_or(str::is_empty) {
-            return Ok(SignatureCheck::NoSecret);
+        if !crate::sealed::is_sealed(secret) {
+            return if secret.as_str().is_none_or(str::is_empty) {
+                Ok(SignatureCheck::NoSecret)
+            } else {
+                // A secret this process could read is not one to check with.
+                Err(ConnectionsError::AuthResolution(
+                    "the connection's signing secret is not sealed".into(),
+                ))
+            };
         }
         let Ok(signature) = hex::decode(signature_hex) else {
             return Ok(SignatureCheck::Invalid);
         };
-        let valid = if sealed {
-            let seal = self.state.sealed.as_ref().ok_or_else(|| {
-                ConnectionsError::AuthResolution(
-                    "the connection's signing secret is sealed, and this deployment has no seal"
-                        .into(),
-                )
-            })?;
-            seal.verify(
+        let valid = self
+            .state
+            .sealed
+            .verify(
                 tenant_id,
                 &connection.id,
                 parameters,
@@ -192,15 +167,7 @@ impl ConnectionsFacade {
                     )
                     .into(),
                 )
-            })?
-        } else {
-            let mut mac = Hmac::<sha2::Sha256>::new_from_slice(
-                secret.as_str().unwrap_or_default().as_bytes(),
-            )
-            .map_err(|_| ConnectionsError::AuthResolution("Invalid signing key".into()))?;
-            mac.update(message);
-            mac.verify_slice(&signature).is_ok()
-        };
+            })?;
         Ok(if valid {
             SignatureCheck::Valid
         } else {
@@ -214,10 +181,9 @@ impl ConnectionsFacade {
         ConnectionRepository::new(self.state.db_pool.clone(), self.state.cipher.clone())
     }
 
-    /// seal, if this deployment seals credentials. A connection that
-    /// resolves as sealed is used through it.
-    pub fn sealed(&self) -> Option<&Arc<crate::sealed::SealedCredentials>> {
-        self.state.sealed.as_ref()
+    /// seal, which holds every connection's secrets and uses them.
+    pub fn sealed(&self) -> &Arc<crate::sealed::SealedCredentials> {
+        &self.state.sealed
     }
 
     /// Build a rate-limit analytics service using the facade's configured
@@ -301,27 +267,14 @@ impl ConnectionsFacade {
             .connection_parameters
             .as_ref()
             .unwrap_or(&empty_parameters);
-        // A sealed connection's discovery request goes through seal, which
-        // attaches the secret the extractor can no longer read.
-        let presents_sealed = connection.sealed
-            && !crate::sealed::request_fields(integration_id, parameters).is_empty();
-        let fetcher = match (presents_sealed, self.state.sealed.as_deref()) {
-            (false, _) => crate::resource_resolver::Fetcher::plain(&self.state.http_client),
-            (true, Some(sealed)) => crate::resource_resolver::Fetcher::sealed(
-                &self.state.http_client,
-                crate::resource_resolver::SealedRoute {
-                    sealed,
-                    tenant_id,
-                    connection_id: id,
-                },
-            ),
-            (true, None) => {
-                return Err(ConnectionsError::AuthResolution(
-                    "the connection's credentials are sealed, and this deployment has no seal"
-                        .into(),
-                ));
-            }
-        };
+        // The discovery request goes through seal, which attaches the
+        // secret the extractor cannot read.
+        let fetcher =
+            crate::resource_resolver::Fetcher::sealed(crate::resource_resolver::SealedRoute {
+                sealed: &self.state.sealed,
+                tenant_id,
+                connection_id: id,
+            });
         crate::resource_resolver::resolve_resource(&fetcher, integration_id, parameters, request)
             .await
     }
@@ -341,7 +294,9 @@ impl ConnectionsFacade {
 
     // ── With secrets (internal use only) ────────────────────────────────
 
-    /// Get a connection including secret parameters.
+    /// Get a connection with its parameters, its secrets sealed. One that
+    /// still holds a readable secret is not given out: nothing here uses a
+    /// secret but through seal.
     ///
     /// SECURITY: Only use for internal runtime credential resolution.
     pub async fn get_with_parameters(
@@ -353,6 +308,7 @@ impl ConnectionsFacade {
             .get_with_parameters(id, tenant_id)
             .await
             .map_err(ConnectionsError::Database)
+            .and_then(sealed_only)
     }
 
     /// Trusted execution: verify the integration on the stored row before
@@ -367,6 +323,7 @@ impl ConnectionsFacade {
             .get_with_parameters_for_types(id, tenant_id, allowed)
             .await
             .map_err(ConnectionsError::Database)
+            .and_then(sealed_only)
     }
 
     /// Get the default connection for an agent/operator, including secret parameters.
@@ -381,12 +338,15 @@ impl ConnectionsFacade {
             .get_default_connection_with_parameters(tenant_id, default_for)
             .await
             .map_err(ConnectionsError::Database)
+            .and_then(sealed_only)
     }
 
     /// Ensure a tenant has a default connection for an agent/operator.
     ///
     /// If the default already exists, returns that connection id. Otherwise a
-    /// new active connection is created and mapped as the default.
+    /// new active connection is created and mapped as the default, with its
+    /// secrets sealed. Parameters with a secret seal cannot hold are refused,
+    /// and no connection is made.
     pub async fn ensure_default_connection(
         &self,
         tenant_id: &str,
@@ -405,6 +365,21 @@ impl ConnectionsFacade {
         }
 
         let connection_id = uuid::Uuid::new_v4().to_string();
+        // As any save: a secret is stored sealed, or the connection is not
+        // made.
+        let connection_parameters = self
+            .state
+            .sealed
+            .seal_parameters(
+                tenant_id,
+                &connection_id,
+                &integration_id,
+                &connection_parameters,
+                None,
+            )
+            .await
+            .map_err(|error| ConnectionsError::Validation(error.to_string()))?
+            .unwrap_or(connection_parameters);
         let request = CreateConnectionRequest {
             title,
             connection_subtype: None,
@@ -440,6 +415,7 @@ impl ConnectionsFacade {
             .get_channel_connection(id)
             .await
             .map_err(ConnectionsError::Database)
+            .and_then(sealed_only)
     }
 
     // ── Validation ──────────────────────────────────────────────────────
@@ -485,18 +461,44 @@ impl ConnectionsFacade {
                 crate::auth::token_cache::AuthResolutionError::permanent(error),
             )
         })?;
-        let effective = app
-            .as_ref()
-            .map(|app| crate::oauth_apps::with_app_credentials(params, app));
-        let resolved = match provider_auth::resolve_connection_auth_with_seal(
-            &self.state.http_client,
+        // The stored token, while it is fresh, needs no client. Otherwise
+        // the app's secret is sealed for the refresh, as the connection's
+        // own would be: seal sends it.
+        let fresh = crate::sealed::is_sealed(&params[crate::sealed::policy::ACCESS_TOKEN_FIELD])
+            && crate::auth::token_cache::token_is_fresh(crate::auth::token_cache::parse_expiry(
+                params["token_expires_at"].as_str(),
+            ));
+        let effective = match &app {
+            Some(app) if !fresh => Some(
+                self.state
+                    .sealed
+                    .with_app_client(
+                        tenant_id,
+                        connection_id,
+                        integration_id,
+                        params,
+                        &app.client_id,
+                        app.client_secret.as_str(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        ConnectionsError::AuthResolution(
+                            crate::auth::token_cache::AuthResolutionError::permanent(
+                                error.to_string(),
+                            ),
+                        )
+                    })?,
+            ),
+            _ => None,
+        };
+        let resolved = match provider_auth::resolve_connection_auth(
             tenant_id,
             connection_id,
             integration_id,
             effective.as_ref().unwrap_or(params),
             headers,
             &self.state.connection_events,
-            self.state.sealed.as_deref(),
+            &self.state.sealed,
         )
         .await
         {
@@ -514,19 +516,9 @@ impl ConnectionsFacade {
             }
         };
 
-        // Only set when an actual refresh occurred (once per ~55-min cycle, not per
-        // request), so this DB write is off the common hot path.
-        if let Some(rotated) = &resolved.rotated_credentials {
-            self.persist_rotated_credentials(
-                connection_id,
-                tenant_id,
-                integration_id,
-                params,
-                rotated,
-            )
-            .await?;
-        }
-        // The pair a refresh through seal brought back, already sealed.
+        // The pair a refresh through seal brought back, already sealed. Only
+        // set when a refresh was made (once per token lifetime, not per
+        // request), so this write is off the common path.
         if let Some(rotated) = &resolved.rotated_sealed {
             let mut merged = params.clone();
             if let Some(obj) = merged.as_object_mut() {
@@ -612,36 +604,6 @@ impl ConnectionsFacade {
                 "failed to flip connection to REQUIRES_RECONNECTION after a reauth error"
             ),
         }
-    }
-
-    /// Seal the refreshed tokens back into `connection_parameters` with an
-    /// optimistic-concurrency guard on the refresh-token hash (see
-    /// [`ConnectionRepository::persist_refreshed_oauth`]).
-    async fn persist_rotated_credentials(
-        &self,
-        connection_id: &str,
-        tenant_id: &str,
-        integration_id: &str,
-        params: &Value,
-        rotated: &RotatedCredentials,
-    ) -> Result<(), ConnectionsError> {
-        let old_refresh = params.get("refresh_token").and_then(|v| v.as_str());
-        // A provider may omit refresh_token on refresh (non-rotating) — keep the old one.
-        let new_refresh = rotated.refresh_token.as_deref().or(old_refresh);
-        let merged = rotated_parameters(params, rotated);
-
-        let expected_hash = old_refresh.map(refresh_token_hash);
-        let new_hash = new_refresh.map(refresh_token_hash);
-        self.persist_rotation(
-            connection_id,
-            tenant_id,
-            integration_id,
-            params,
-            &merged,
-            expected_hash.as_deref(),
-            new_hash.as_deref(),
-        )
-        .await
     }
 
     /// Store a connection's refreshed tokens (`merged`), unless another
@@ -833,39 +795,45 @@ else
 end
 "#;
 
+/// A connection to use, only if seal holds every secret it has. One stored
+/// readable by an earlier release is sealed when the server starts, or by
+/// `runtara-server seal-connections`; what seal cannot hold must be entered
+/// again.
+fn sealed_only(
+    connection: Option<ConnectionWithParameters>,
+) -> Result<Option<ConnectionWithParameters>, ConnectionsError> {
+    let Some(connection) = connection else {
+        return Ok(None);
+    };
+    let readable = connection
+        .connection_parameters
+        .as_ref()
+        .map(|parameters| {
+            crate::sealed::policy::readable_secrets(
+                connection.integration_id.as_deref().unwrap_or_default(),
+                parameters,
+            )
+        })
+        .unwrap_or_default();
+    if readable.is_empty() {
+        return Ok(Some(connection));
+    }
+    tracing::warn!(
+        connection_id = %connection.id,
+        tenant_id = connection.tenant_id.as_deref().unwrap_or_default(),
+        "refusing a connection whose credentials are not sealed"
+    );
+    Err(ConnectionsError::Validation(format!(
+        "Connection '{}' holds credentials that are not sealed, and cannot be used: \
+         enter them again",
+        connection.id
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{FAIL_OPEN_WARN_INTERVAL_MS, claim_warn_slot, is_reauth_error};
     use std::sync::atomic::AtomicI64;
-
-    #[test]
-    fn a_refresh_writes_back_the_stored_parameters_not_a_platform_apps_view() {
-        use super::{RotatedCredentials, rotated_parameters};
-        let app = crate::oauth_apps::tests::app("hubspot", "hubspot_private_app");
-        let stored = serde_json::json!({
-            "oauth_app": "hubspot",
-            "access_token": "at-old",
-            "refresh_token": "rt-old",
-        });
-        // The refresh was made with the app's credentials added...
-        let effective = crate::oauth_apps::with_app_credentials(&stored, &app);
-        assert_eq!(effective["client_secret"], "platform-secret");
-        // ...and what is written back is the stored parameters with new tokens.
-        let rotated = RotatedCredentials {
-            access_token: "at-new".into(),
-            refresh_token: Some("rt-new".into()),
-            token_expires_at: None,
-        };
-        let written = rotated_parameters(&stored, &rotated);
-        assert_eq!(written["access_token"], "at-new");
-        assert_eq!(written["refresh_token"], "rt-new");
-        assert_eq!(written["oauth_app"], "hubspot");
-        assert!(written.get("client_id").is_none(), "{written}");
-        assert!(
-            !written.to_string().contains("platform-secret"),
-            "{written}"
-        );
-    }
 
     #[test]
     fn reauth_error_matches_only_declared_codes() {
@@ -971,7 +939,7 @@ mod signature_tests {
             connection_events: None,
             oauth: Default::default(),
             agent_access: Arc::new(crate::config::EveryAgent),
-            sealed,
+            sealed: sealed.unwrap_or_else(SealedCredentials::for_tests),
         })
     }
 
@@ -1004,7 +972,6 @@ mod signature_tests {
             .await
     }
 
-    /// The same answers whether the secret is readable or sealed.
     async fn assert_checks(facade: &ConnectionsFacade, connection: &ConnectionWithParameters) {
         let good = signature(SECRET, MESSAGE);
         assert_eq!(
@@ -1034,9 +1001,15 @@ mod signature_tests {
     }
 
     #[tokio::test]
-    async fn a_readable_signing_secret_checks_the_signature_here() {
+    async fn a_readable_signing_secret_checks_nothing() {
         let connection = connection(serde_json::json!({"signing_secret": SECRET}), false);
-        assert_checks(&facade(None), &connection).await;
+        let good = signature(SECRET, MESSAGE);
+        // Never a pass: the webhook is refused.
+        assert!(
+            check(&facade(None), &connection, MESSAGE, &good)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1065,8 +1038,8 @@ mod signature_tests {
 
         assert_checks(&facade(Some(sealed)), &connection).await;
 
-        // Without seal the check cannot be made, and that is an error, never
-        // a pass.
+        // A seal without this tenant's keys cannot make the check, and that
+        // is an error, never a pass.
         let good = signature(SECRET, MESSAGE);
         assert!(
             check(&facade(None), &connection, MESSAGE, &good)

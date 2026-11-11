@@ -1,15 +1,11 @@
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use reqwest::Client;
 use runtara_agents::extractors::connection_types::{
     GEMINI_API_BASE_URL, SHIPPO_API_BASE_URL, SHIPPO_API_VERSION, ZENDESK_DEFAULT_SCOPE,
-    jira_base_url, jira_basic_auth, ups_base_url, zendesk_base_url,
+    jira_base_url, ups_base_url, zendesk_base_url,
 };
 use runtara_agents::registry::find_connection_type;
 use runtara_dsl::agent_meta::{OAuthConfig, TokenEndpointAuth};
 use serde_json::Value;
 use std::collections::HashMap;
-
-use crate::net;
 
 use super::aws_signing::AwsSigningParams;
 use super::azure_signing::AzureSigningParams;
@@ -21,14 +17,6 @@ pub struct ResolvedConnectionAuth {
     pub base_url: Option<String>,
     pub aws_signing: Option<AwsSigningParams>,
     pub azure_signing: Option<AzureSigningParams>,
-    /// A hardened Rustls client carrying the mTLS identity for this request.
-    /// `reqwest::Client` does not expose the parsed private key, so the proxy
-    /// can select it without receiving raw PEM material.
-    pub mtls_client: Option<Client>,
-    /// Credentials produced by an actual OAuth refresh during this resolution that
-    /// must be persisted back to the connection. `None` on every cache hit / fast
-    /// path and for non-refresh grants. Consumed by the facade write-back.
-    pub rotated_credentials: Option<RotatedCredentials>,
     /// For a connection whose OAuth secrets are sealed: its parameters with
     /// the sealed access token a request presents. The token was got through
     /// seal and is never readable here.
@@ -36,28 +24,6 @@ pub struct ResolvedConnectionAuth {
     /// The sealed tokens a refresh through seal brought back, to be stored
     /// with the connection. `None` unless a refresh was made now.
     pub rotated_sealed: Option<crate::sealed::RotatedSealed>,
-}
-
-/// Access + (possibly rotated) refresh token captured when an OAuth refresh fires,
-/// to be sealed back into `connection_parameters`. Has a hand-written `Debug` that
-/// redacts the token values so a stray `{:?}` can't leak them to logs.
-pub struct RotatedCredentials {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
-    pub token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-impl std::fmt::Debug for RotatedCredentials {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RotatedCredentials")
-            .field("access_token", &"<redacted>")
-            .field(
-                "refresh_token",
-                &self.refresh_token.as_ref().map(|_| "<redacted>"),
-            )
-            .field("token_expires_at", &self.token_expires_at)
-            .finish()
-    }
 }
 
 pub(crate) struct ConnectionAuthDescriptor {
@@ -81,40 +47,18 @@ const SHOPIFY_SCOPE_FIELDS: &[(&str, &str)] = &[
     ("scope_write_fulfillments", "write_fulfillments"),
 ];
 
+/// What a request with a connection needs besides its secrets: where it
+/// goes, and the headers that are no secret. The secrets are seal's to
+/// attach. A connection whose access token comes from a grant gets it
+/// through seal, already sealed for the connection's API.
 pub async fn resolve_connection_auth(
-    client: &Client,
     tenant_id: &str,
     connection_id: &str,
     integration_id: &str,
     params: &Value,
     headers: &mut HashMap<String, String>,
     events: &crate::events::ConnectionEvents,
-) -> Result<ResolvedConnectionAuth, token_cache::AuthResolutionError> {
-    resolve_connection_auth_with_seal(
-        client,
-        tenant_id,
-        connection_id,
-        integration_id,
-        params,
-        headers,
-        events,
-        None,
-    )
-    .await
-}
-
-/// [`resolve_connection_auth`], for a deployment with seal: a connection
-/// whose OAuth secrets are sealed gets its access token through it.
-#[allow(clippy::too_many_arguments)]
-pub async fn resolve_connection_auth_with_seal(
-    client: &Client,
-    tenant_id: &str,
-    connection_id: &str,
-    integration_id: &str,
-    params: &Value,
-    headers: &mut HashMap<String, String>,
-    events: &crate::events::ConnectionEvents,
-    sealed: Option<&crate::sealed::SealedCredentials>,
+    sealed: &crate::sealed::SealedCredentials,
 ) -> Result<ResolvedConnectionAuth, token_cache::AuthResolutionError> {
     // Authorized by a flow started without a browser and not yet confirmed:
     // its tokens are held apart, and the connection has none of its own.
@@ -128,44 +72,11 @@ pub async fn resolve_connection_auth_with_seal(
         ));
     }
     let descriptor = describe_connection_auth(connection_id, integration_id, params, headers);
-    // A sealed private key makes no client here: seal presents the
-    // certificate on the connection it opens.
-    let mtls_client = if integration_id == "http_mtls"
-        && !crate::sealed::is_sealed(&params["client_private_key_pem"])
-    {
-        Some(net::build_hardened_mtls_client(params).map_err(|error| {
-            token_cache::AuthResolutionError::permanent(format!(
-                "Invalid HTTP mTLS configuration: {error}"
-            ))
-        })?)
-    } else {
-        None
-    };
 
-    let mut rotated_credentials = None;
-    if let Some(deferred_auth) = descriptor.deferred_auth {
-        let resolved = token_cache::resolve_deferred_auth(
-            client,
-            deferred_auth,
-            events,
-            tenant_id,
-            connection_id,
-            integration_id,
-        )
-        .await?;
-        headers.insert(resolved.header_name, resolved.header_value);
-        rotated_credentials = resolved.rotated;
-    }
-
-    // A sealed client secret is no use to the request above: the access
-    // token comes through seal, already sealed for the connection's API.
+    // A client secret gets the access token through seal, already sealed
+    // for the connection's API.
     let mut sealed_parameters = None;
     if crate::sealed::policy::sealed_token_grant(integration_id, params).is_some() {
-        let sealed = sealed.ok_or_else(|| {
-            token_cache::AuthResolutionError::permanent(
-                "the connection's credentials are sealed, and this deployment has no seal",
-            )
-        })?;
         let token = sealed
             .minted_access_token(tenant_id, connection_id, integration_id, params)
             .await?;
@@ -173,14 +84,9 @@ pub async fn resolve_connection_auth_with_seal(
         presenting[crate::sealed::policy::ACCESS_TOKEN_FIELD] = token;
         sealed_parameters = Some(presenting);
     }
-    // A sealed refresh token gets the next pair through seal, sealed too.
+    // A refresh token gets the next pair through seal, sealed too.
     let mut rotated_sealed = None;
     if crate::sealed::policy::sealed_authorized_tokens(integration_id, params).is_some() {
-        let sealed = sealed.ok_or_else(|| {
-            token_cache::AuthResolutionError::permanent(
-                "the connection's credentials are sealed, and this deployment has no seal",
-            )
-        })?;
         let (token, rotated) = sealed
             .refreshed_access_token(events, tenant_id, connection_id, integration_id, params)
             .await?;
@@ -194,8 +100,6 @@ pub async fn resolve_connection_auth_with_seal(
         base_url: descriptor.base_url,
         aws_signing: descriptor.aws_signing,
         azure_signing: descriptor.azure_signing,
-        mtls_client,
-        rotated_credentials,
         sealed_parameters,
         rotated_sealed,
     })
@@ -234,30 +138,20 @@ pub(crate) fn describe_connection_auth(
         };
     }
     match integration_id {
-        "openai_api_key" => {
-            if let Some(key) = params["api_key"].as_str() {
-                headers.insert("Authorization".into(), format!("Bearer {}", key));
-            }
-            ConnectionAuthDescriptor {
-                base_url: Some(openai_proxy_base_url(params)),
-                aws_signing: None,
-                azure_signing: None,
-                deferred_auth: None,
-            }
-        }
-        "shopify_access_token" => {
-            if let Some(token) = params["access_token"].as_str() {
-                headers.insert("X-Shopify-Access-Token".into(), token.to_string());
-            }
-            ConnectionAuthDescriptor {
-                base_url: params["shop_domain"]
-                    .as_str()
-                    .map(|domain| format!("https://{}", domain)),
-                aws_signing: None,
-                azure_signing: None,
-                deferred_auth: None,
-            }
-        }
+        "openai_api_key" => ConnectionAuthDescriptor {
+            base_url: Some(openai_proxy_base_url(params)),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: None,
+        },
+        "shopify_access_token" => ConnectionAuthDescriptor {
+            base_url: params["shop_domain"]
+                .as_str()
+                .map(|domain| format!("https://{}", domain)),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: None,
+        },
         "shopify_client_credentials" => ConnectionAuthDescriptor {
             base_url: params["shop_domain"]
                 .as_str()
@@ -281,22 +175,17 @@ pub(crate) fn describe_connection_auth(
             azure_signing: None,
             deferred_auth: describe_http_oauth2_client_credentials_auth(connection_id, params),
         },
-        "hubspot_access_token" => {
-            if let Some(token) = params["access_token"].as_str() {
-                headers.insert("Authorization".into(), format!("Bearer {}", token));
-            }
-            ConnectionAuthDescriptor {
-                base_url: Some("https://api.hubapi.com".into()),
-                aws_signing: None,
-                azure_signing: None,
-                deferred_auth: None,
-            }
-        }
+        "hubspot_access_token" => ConnectionAuthDescriptor {
+            base_url: Some("https://api.hubapi.com".into()),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: None,
+        },
         // OAuth2 authorization-code integrations are fully descriptor-driven: base URL,
         // token-endpoint auth style, refresh rotation and extra callback params all come
         // from the connection type's OAuthConfig (see runtara-dsl agent_meta).
         "hubspot_private_app" | "quickbooks_online" | "http_oauth2_authorization_code" => {
-            describe_oauth_authcode_auth(connection_id, integration_id, params, headers)
+            describe_oauth_authcode_auth(integration_id, params)
         }
         // One Xero token reaches every organisation its user authorized; each
         // request names the one this connection was authorized for. Without it
@@ -305,7 +194,7 @@ pub(crate) fn describe_connection_auth(
         "xero_oauth" => match xero_tenant_id(params) {
             Some(tenant) => {
                 headers.insert("xero-tenant-id".into(), tenant.to_string());
-                describe_oauth_authcode_auth(connection_id, integration_id, params, headers)
+                describe_oauth_authcode_auth(integration_id, params)
             }
             // No organisation to name: no destination and no credentials, so
             // the proxy refuses the request and no token goes anywhere.
@@ -316,45 +205,27 @@ pub(crate) fn describe_connection_auth(
                 deferred_auth: None,
             },
         },
-        "stripe_api_key" => {
-            if let Some(key) = params["secret_key"].as_str() {
-                headers.insert("Authorization".into(), format!("Bearer {}", key));
-            }
-            ConnectionAuthDescriptor {
-                base_url: Some("https://api.stripe.com".into()),
-                aws_signing: None,
-                azure_signing: None,
-                deferred_auth: None,
-            }
-        }
-        "gemini_api_key" => {
-            if let Some(key) = params["api_key"].as_str() {
-                headers.insert("x-goog-api-key".into(), key.to_string());
-            }
-            ConnectionAuthDescriptor {
-                base_url: Some(GEMINI_API_BASE_URL.into()),
-                aws_signing: None,
-                azure_signing: None,
-                deferred_auth: None,
-            }
-        }
-        "pipedrive_api_token" => {
-            if let Some(token) = params["api_token"].as_str() {
-                headers.insert("x-api-token".into(), token.to_string());
-            }
-            ConnectionAuthDescriptor {
-                base_url: Some("https://api.pipedrive.com".into()),
-                aws_signing: None,
-                azure_signing: None,
-                deferred_auth: None,
-            }
-        }
+        "stripe_api_key" => ConnectionAuthDescriptor {
+            base_url: Some("https://api.stripe.com".into()),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: None,
+        },
+        "gemini_api_key" => ConnectionAuthDescriptor {
+            base_url: Some(GEMINI_API_BASE_URL.into()),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: None,
+        },
+        "pipedrive_api_token" => ConnectionAuthDescriptor {
+            base_url: Some("https://api.pipedrive.com".into()),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: None,
+        },
         // Shippo: the token picks test or live on the one host. Every request pins
         // the API version the agent's generated types describe.
         "shippo_api_token" => {
-            if let Some(token) = params["api_token"].as_str() {
-                headers.insert("Authorization".into(), format!("ShippoToken {token}"));
-            }
             headers.insert("SHIPPO-API-VERSION".into(), SHIPPO_API_VERSION.into());
             ConnectionAuthDescriptor {
                 base_url: Some(SHIPPO_API_BASE_URL.into()),
@@ -377,18 +248,12 @@ pub(crate) fn describe_connection_auth(
         // closed at the proxy's pin step instead of going out anonymously.
         "jira_api_token" => {
             let filled = |name: &str| params[name].as_str().filter(|v| !v.trim().is_empty());
-            let credentials = filled("email").zip(filled("api_token"));
-            if let Some((email, token)) = credentials {
-                headers.insert("Authorization".into(), jira_basic_auth(email, token));
-            }
-            // A sealed token is attached by seal, with the email, where the
-            // request is sent; the destination is still the account's.
-            let sealed =
+            // The token is attached by seal, with the email, where the
+            // request is sent.
+            let credentials =
                 filled("email").is_some() && crate::sealed::is_sealed(&params["api_token"]);
             ConnectionAuthDescriptor {
-                base_url: (credentials.is_some() || sealed)
-                    .then(|| jira_account_url(params))
-                    .flatten(),
+                base_url: credentials.then(|| jira_account_url(params)).flatten(),
                 aws_signing: None,
                 azure_signing: None,
                 deferred_auth: None,
@@ -408,17 +273,12 @@ pub(crate) fn describe_connection_auth(
                 deferred_auth: describe_ups_client_credentials_auth(connection_id, params),
             }
         }
-        "slack_bot" => {
-            if let Some(token) = params["bot_token"].as_str() {
-                headers.insert("Authorization".into(), format!("Bearer {}", token));
-            }
-            ConnectionAuthDescriptor {
-                base_url: Some("https://slack.com".into()),
-                aws_signing: None,
-                azure_signing: None,
-                deferred_auth: None,
-            }
-        }
+        "slack_bot" => ConnectionAuthDescriptor {
+            base_url: Some("https://slack.com".into()),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: None,
+        },
         // ── Microsoft Teams bot (Bot Framework Connector) ────────
         // Deferred OAuth2 client-credentials against Microsoft Entra. There is
         // deliberately no static base_url: the Bot Connector base is the
@@ -432,10 +292,6 @@ pub(crate) fn describe_connection_auth(
             deferred_auth: describe_teams_bot_auth(connection_id, params),
         },
         "mailgun" => {
-            if let Some(key) = params["api_key"].as_str() {
-                let encoded = BASE64.encode(format!("api:{}", key));
-                headers.insert("Authorization".into(), format!("Basic {}", encoded));
-            }
             let region = params["region"].as_str().unwrap_or("us");
             let base = match region {
                 "eu" => "https://api.eu.mailgun.net".to_string(),
@@ -449,54 +305,26 @@ pub(crate) fn describe_connection_auth(
             }
         }
         // ── HTTP Bearer token ────────────────────────────────────
-        "http_bearer" => {
-            if let Some(token) = params["token"].as_str() {
-                headers.insert("Authorization".into(), format!("Bearer {}", token));
-            }
-            ConnectionAuthDescriptor {
-                base_url: params["base_url"].as_str().map(|u| u.to_string()),
-                aws_signing: None,
-                azure_signing: None,
-                deferred_auth: None,
-            }
-        }
+        "http_bearer" => ConnectionAuthDescriptor {
+            base_url: params["base_url"].as_str().map(|u| u.to_string()),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: None,
+        },
         // ── HTTP Basic ──────────────────────────────────────────
-        "http_basic" => {
-            if let (Some(username), Some(password)) =
-                (params["username"].as_str(), params["password"].as_str())
-            {
-                match runtara_agents::extractors::http_basic_auth(username, password) {
-                    Ok(value) => {
-                        headers.insert("Authorization".into(), value);
-                    }
-                    Err(error) => {
-                        tracing::warn!(connection_id, %error, "http_basic: not authenticating")
-                    }
-                }
-            }
-            ConnectionAuthDescriptor {
-                base_url: params["base_url"].as_str().map(|u| u.to_string()),
-                aws_signing: None,
-                azure_signing: None,
-                deferred_auth: None,
-            }
-        }
+        "http_basic" => ConnectionAuthDescriptor {
+            base_url: params["base_url"].as_str().map(|u| u.to_string()),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: None,
+        },
         // ── HTTP API Key ────────────────────────────────────────
-        "http_api_key" => {
-            if let Some(key) = params["api_key"].as_str() {
-                let header_name = params["header_name"]
-                    .as_str()
-                    .unwrap_or("X-API-Key")
-                    .to_string();
-                headers.insert(header_name, key.to_string());
-            }
-            ConnectionAuthDescriptor {
-                base_url: params["base_url"].as_str().map(|u| u.to_string()),
-                aws_signing: None,
-                azure_signing: None,
-                deferred_auth: None,
-            }
-        }
+        "http_api_key" => ConnectionAuthDescriptor {
+            base_url: params["base_url"].as_str().map(|u| u.to_string()),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: None,
+        },
         // ── HTTP mutual TLS ─────────────────────────────────────
         // The certificate/key are parsed into a hardened Rustls client by
         // `resolve_connection_auth`; no raw TLS material is exposed to the
@@ -509,53 +337,18 @@ pub(crate) fn describe_connection_auth(
         },
         // ── MCP (Model Context Protocol) ─────────────────────────
         // The agent (runtara-agent-mcp) sends its JSON-RPC bodies through
-        // the proxy; this arm injects the right Authorization / api-key
-        // header for the three v1 auth modes. OAuth2 is reserved for a
-        // follow-up — extend `auth_mode` then.
-        "mcp" => {
-            let auth_mode = params["auth_mode"].as_str().unwrap_or("none");
-            match auth_mode {
-                "bearer" => {
-                    if let Some(token) = params["bearer_token"].as_str() {
-                        headers.insert("Authorization".into(), format!("Bearer {}", token));
-                    }
-                }
-                "api_key" => {
-                    if let Some(value) = params["api_key_value"].as_str() {
-                        let header_name = params["api_key_header"]
-                            .as_str()
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or("X-API-Key")
-                            .to_string();
-                        headers.insert(header_name, value.to_string());
-                    }
-                }
-                _ => { /* "none" — no auth header injected */ }
-            }
-            // Extra static headers configured on the connection.
-            if let Some(extras) = params["extra_headers"].as_object() {
-                for (k, v) in extras {
-                    if let Some(s) = v.as_str() {
-                        headers.insert(k.clone(), s.to_string());
-                    }
-                }
-            }
-            ConnectionAuthDescriptor {
-                base_url: params["url"].as_str().map(|u| u.to_string()),
-                aws_signing: None,
-                azure_signing: None,
-                deferred_auth: None,
-            }
-        }
+        // the proxy; seal attaches the bearer token or API key of the
+        // connection's `auth_mode`.
+        // The connection's extra headers are sealed too, and seal's to set.
+        "mcp" => ConnectionAuthDescriptor {
+            base_url: params["url"].as_str().map(|u| u.to_string()),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: None,
+        },
         "aws_credentials" | "s3_compatible" => {
-            let access_key_id = first_string_param(params, &["access_key_id", "aws_access_key_id"])
-                .unwrap_or_default();
-            let secret_access_key =
-                first_string_param(params, &["secret_access_key", "aws_secret_access_key"])
-                    .unwrap_or_default();
             let region = first_string_param(params, &["region", "aws_region"])
                 .unwrap_or_else(|| "us-east-1".to_string());
-            let session_token = first_string_param(params, &["session_token", "aws_session_token"]);
 
             let (base_url, service) = if integration_id == "s3_compatible" {
                 let endpoint = params["endpoint"]
@@ -577,49 +370,28 @@ pub(crate) fn describe_connection_auth(
 
             ConnectionAuthDescriptor {
                 base_url,
-                aws_signing: Some(AwsSigningParams {
-                    access_key_id,
-                    secret_access_key,
-                    region,
-                    service,
-                    session_token,
-                }),
+                aws_signing: Some(AwsSigningParams { region, service }),
                 azure_signing: None,
                 deferred_auth: None,
             }
         }
         "azure_blob_storage" => {
             let account_name = first_string_param(params, &["account_name"]).unwrap_or_default();
-            let account_key = first_string_param(params, &["account_key"]).unwrap_or_default();
             let base_url = resolve_azure_blob_base_url(params, &account_name);
 
             ConnectionAuthDescriptor {
                 base_url,
                 aws_signing: None,
-                azure_signing: Some(AzureSigningParams {
-                    account_name,
-                    account_key,
-                }),
+                azure_signing: Some(AzureSigningParams { account_name }),
                 deferred_auth: None,
             }
         }
-        _ => {
-            if let Some(key) = params["api_key"].as_str() {
-                headers
-                    .entry("Authorization".into())
-                    .or_insert_with(|| format!("Bearer {}", key));
-            } else if let Some(token) = params["access_token"].as_str() {
-                headers
-                    .entry("Authorization".into())
-                    .or_insert_with(|| format!("Bearer {}", token));
-            }
-            ConnectionAuthDescriptor {
-                base_url: params["base_url"].as_str().map(|u| u.to_string()),
-                aws_signing: None,
-                azure_signing: None,
-                deferred_auth: None,
-            }
-        }
+        _ => ConnectionAuthDescriptor {
+            base_url: params["base_url"].as_str().map(|u| u.to_string()),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: None,
+        },
     }
 }
 
@@ -923,38 +695,20 @@ pub fn evict_connection_token_caches(connection_id: &str) {
     token_cache::evict_connection(connection_id);
 }
 
-/// Descriptor-driven auth for OAuth2 authorization-code integrations: resolves the
-/// base URL from the connection type's `OAuthConfig` and builds the refresh-token
-/// deferred auth. Falls back to injecting the stored `access_token` directly when no
-/// refresh token is present yet (immediately post-consent, before the first refresh).
-fn describe_oauth_authcode_auth(
-    connection_id: &str,
-    integration_id: &str,
-    params: &Value,
-    headers: &mut HashMap<String, String>,
-) -> ConnectionAuthDescriptor {
+/// Descriptor-driven destination of OAuth2 authorization-code integrations:
+/// the base URL from the connection type's `OAuthConfig`.
+fn describe_oauth_authcode_auth(integration_id: &str, params: &Value) -> ConnectionAuthDescriptor {
     let base_url = find_connection_type(integration_id)
         .and_then(|meta| meta.oauth_config)
         .and_then(|cfg| resolve_oauth_base_url(cfg, params));
 
-    match describe_oauth_refresh_auth(connection_id, integration_id, params, "Authorization") {
-        Some(auth) => ConnectionAuthDescriptor {
-            base_url,
-            aws_signing: None,
-            azure_signing: None,
-            deferred_auth: Some(auth),
-        },
-        None => {
-            if let Some(token) = params["access_token"].as_str() {
-                headers.insert("Authorization".into(), format!("Bearer {}", token));
-            }
-            ConnectionAuthDescriptor {
-                base_url,
-                aws_signing: None,
-                azure_signing: None,
-                deferred_auth: None,
-            }
-        }
+    // The tokens are seal's: it refreshes them, and attaches the access
+    // token where the request is sent.
+    ConnectionAuthDescriptor {
+        base_url,
+        aws_signing: None,
+        azure_signing: None,
+        deferred_auth: None,
     }
 }
 
@@ -1162,123 +916,6 @@ fn describe_http_oauth2_client_credentials_auth(
     })
 }
 
-fn describe_oauth_refresh_auth(
-    connection_id: &str,
-    integration_id: &str,
-    params: &Value,
-    header_name: &str,
-) -> Option<DeferredAuth> {
-    let refresh_token = params["refresh_token"].as_str()?.to_string();
-    let client_id = params["client_id"].as_str()?.to_string();
-    let client_secret = params["client_secret"].as_str()?.to_string();
-    let oauth_config = find_connection_type(integration_id)?.oauth_config?;
-    let effective = resolve_effective_oauth_config(oauth_config, params);
-    if effective.token_url.is_empty() {
-        // Fail fast instead of refreshing against an empty-host URL.
-        return None;
-    }
-
-    Some(DeferredAuth::OAuth2RefreshToken {
-        // token_url in the key so an endpoint edit on a params-driven connection
-        // naturally misses stale cache entries.
-        cache_key: token_cache::build_token_cache_key(
-            connection_id,
-            &["oauth_refresh", integration_id, &effective.token_url],
-        ),
-        token_url: effective.token_url,
-        header_name: header_name.to_string(),
-        client_id,
-        client_secret,
-        refresh_token,
-        token_endpoint_auth: effective.token_endpoint_auth,
-        fallback_access_token: params["access_token"].as_str().map(|s| s.to_string()),
-        fallback_expires_at: token_cache::parse_expiry(params["token_expires_at"].as_str()),
-    })
-}
-
-/// Build the `(optional Basic auth header, JSON body)` for a token-revocation
-/// request from the descriptor + connection params. Returns `None` when there is no
-/// revocation endpoint or no token to revoke. Sends `{"token": <refresh_or_access>}`;
-/// providers that authenticate the revoke with HTTP Basic (Intuit) get the header.
-pub(crate) fn build_revoke_request(
-    oauth_config: &OAuthConfig,
-    params: &Value,
-) -> Option<(Option<String>, String, String)> {
-    let effective = resolve_effective_oauth_config(oauth_config, params);
-    if effective.revocation_endpoint.is_empty() {
-        return None;
-    }
-    let token = params["refresh_token"]
-        .as_str()
-        .or_else(|| params["access_token"].as_str())?;
-    let body = serde_json::json!({ "token": token }).to_string();
-    let basic = match effective.token_endpoint_auth {
-        TokenEndpointAuth::HttpBasic => {
-            let client_id = params["client_id"].as_str().unwrap_or("");
-            let client_secret = params["client_secret"].as_str().unwrap_or("");
-            Some(format!(
-                "Basic {}",
-                BASE64.encode(format!("{client_id}:{client_secret}"))
-            ))
-        }
-        TokenEndpointAuth::FormBody => None,
-    };
-    Some((basic, body, effective.revocation_endpoint))
-}
-
-/// The `Authorization` header a provider wants on a revocation request: the
-/// client's own credentials, for a provider that authenticates the client
-/// with HTTP Basic.
-pub(crate) fn revoke_authorization(oauth_config: &OAuthConfig, params: &Value) -> Option<String> {
-    let effective = resolve_effective_oauth_config(oauth_config, params);
-    match effective.token_endpoint_auth {
-        TokenEndpointAuth::HttpBasic => {
-            let client_id = params["client_id"].as_str().unwrap_or("");
-            // A sealed secret is not this process's to send.
-            let client_secret = params["client_secret"].as_str()?;
-            Some(format!(
-                "Basic {}",
-                BASE64.encode(format!("{client_id}:{client_secret}"))
-            ))
-        }
-        TokenEndpointAuth::FormBody => None,
-    }
-}
-
-/// Best-effort provider-side token revocation, called on disconnect. A no-op when the
-/// effective config declares no revocation endpoint or the connection has no token.
-pub async fn revoke_oauth_token(
-    client: &Client,
-    oauth_config: &OAuthConfig,
-    params: &Value,
-) -> Result<(), String> {
-    let Some((basic_auth, body, endpoint)) = build_revoke_request(oauth_config, params) else {
-        return Ok(());
-    };
-    // Re-check the endpoint before the token (and any Basic credentials) leave.
-    crate::net::validate_credentialed_endpoint(&endpoint)
-        .map_err(|reason| format!("refusing to send the revocation request: {reason}"))?;
-    let mut request = client
-        .post(endpoint)
-        .header("Content-Type", "application/json")
-        .body(body)
-        .timeout(std::time::Duration::from_secs(10));
-    if let Some(header) = basic_auth {
-        request = request.header("Authorization", header);
-    }
-    let response = request
-        .send()
-        .await
-        .map_err(|e| format!("revocation request failed: {e}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "revocation endpoint returned {}",
-            response.status()
-        ));
-    }
-    Ok(())
-}
-
 fn collect_shopify_scopes(params: &Value) -> String {
     SHOPIFY_SCOPE_FIELDS
         .iter()
@@ -1422,15 +1059,13 @@ mod tests {
             let descriptor =
                 describe_connection_auth("conn", "openai_api_key", &params, &mut headers);
             assert_eq!(descriptor.base_url.as_deref(), Some(expected), "{params}");
-            assert_eq!(
-                headers.get("Authorization").map(String::as_str),
-                Some("Bearer sk-x")
-            );
+            // The credential is seal's to attach.
+            assert!(!headers.contains_key("Authorization"));
         }
     }
 
     #[test]
-    fn gemini_key_goes_in_its_header_and_pins_the_api_host() {
+    fn gemini_pins_the_api_host() {
         let mut headers = HashMap::new();
         let descriptor = describe_connection_auth(
             "conn-1",
@@ -1438,10 +1073,8 @@ mod tests {
             &json!({ "api_key": "key-value" }),
             &mut headers,
         );
-        assert_eq!(
-            headers.get("x-goog-api-key").map(String::as_str),
-            Some("key-value")
-        );
+        // The credential is seal's to attach.
+        assert!(!headers.contains_key("x-goog-api-key"));
         assert!(!headers.contains_key("Authorization"));
         assert_eq!(
             descriptor.base_url.as_deref(),
@@ -1450,7 +1083,7 @@ mod tests {
     }
 
     #[test]
-    fn pipedrive_token_goes_in_its_header_and_pins_the_api_host() {
+    fn pipedrive_pins_the_api_host() {
         let mut headers = HashMap::new();
         let descriptor = describe_connection_auth(
             "conn-1",
@@ -1458,10 +1091,8 @@ mod tests {
             &json!({ "api_token": "token-value" }),
             &mut headers,
         );
-        assert_eq!(
-            headers.get("x-api-token").map(String::as_str),
-            Some("token-value")
-        );
+        // The credential is seal's to attach.
+        assert!(!headers.contains_key("x-api-token"));
         assert!(!headers.contains_key("Authorization"));
         assert_eq!(
             descriptor.base_url.as_deref(),
@@ -1470,7 +1101,7 @@ mod tests {
     }
 
     #[test]
-    fn shippo_token_uses_its_own_scheme_and_pins_host_and_version() {
+    fn shippo_pins_host_and_version() {
         let mut headers = HashMap::new();
         let descriptor = describe_connection_auth(
             "conn-1",
@@ -1478,10 +1109,8 @@ mod tests {
             &json!({ "api_token": "token-value" }),
             &mut headers,
         );
-        assert_eq!(
-            headers.get("Authorization").map(String::as_str),
-            Some("ShippoToken token-value")
-        );
+        // The credential is seal's to attach.
+        assert!(!headers.contains_key("Authorization"));
         assert_eq!(
             headers.get("SHIPPO-API-VERSION").map(String::as_str),
             Some(SHIPPO_API_VERSION)
@@ -1493,7 +1122,7 @@ mod tests {
     }
 
     #[test]
-    fn http_basic_is_basic_auth_on_its_base_url() {
+    fn http_basic_goes_to_its_base_url() {
         let mut headers = HashMap::new();
         let descriptor = describe_connection_auth(
             "conn-1",
@@ -1501,10 +1130,8 @@ mod tests {
             &json!({ "username": "user", "password": "pa:ss", "base_url": "https://api.example.com" }),
             &mut headers,
         );
-        assert_eq!(
-            headers.get("Authorization"),
-            Some(&format!("Basic {}", BASE64.encode("user:pa:ss")))
-        );
+        // The credential is seal's to attach.
+        assert!(!headers.contains_key("Authorization"));
         assert_eq!(
             descriptor.base_url.as_deref(),
             Some("https://api.example.com")
@@ -1540,10 +1167,8 @@ mod tests {
             headers.get("xero-tenant-id").map(String::as_str),
             Some("a3b9b4c0-1d2e-4f50-8a6b-7c8d9e0f1a2b")
         );
-        assert_eq!(
-            headers.get("Authorization").map(String::as_str),
-            Some("Bearer access")
-        );
+        // The credential is seal's to attach.
+        assert!(!headers.contains_key("Authorization"));
     }
 
     #[test]
@@ -1569,48 +1194,16 @@ mod tests {
     }
 
     #[test]
-    fn xero_refreshes_through_its_token_endpoint_with_basic_auth() {
-        let mut headers = HashMap::new();
-        let descriptor = describe_connection_auth(
-            "conn-1",
-            "xero_oauth",
-            &json!({
-                "client_id": "client",
-                "client_secret": "secret",
-                "refresh_token": "refresh",
-                "tenant_id": "a3b9b4c0-1d2e-4f50-8a6b-7c8d9e0f1a2b",
-            }),
-            &mut headers,
-        );
-        match descriptor.deferred_auth {
-            Some(DeferredAuth::OAuth2RefreshToken {
-                token_url,
-                token_endpoint_auth,
-                ..
-            }) => {
-                assert_eq!(token_url, "https://identity.xero.com/connect/token");
-                assert!(matches!(token_endpoint_auth, TokenEndpointAuth::HttpBasic));
-            }
-            _ => panic!("a refresh token means a deferred refresh"),
-        }
-    }
-
-    #[test]
-    fn jira_token_is_basic_auth_on_the_site() {
+    fn jira_token_goes_to_the_site() {
         let mut headers = HashMap::new();
         let descriptor = describe_connection_auth(
             "conn-1",
             "jira_api_token",
-            &json!({ "site": "acme", "email": "me@example.com", "api_token": "token-value" }),
+            &json!({ "site": "acme", "email": "me@example.com", "api_token": {"$sealed": {}} }),
             &mut headers,
         );
-        assert_eq!(
-            headers.get("Authorization"),
-            Some(&format!(
-                "Basic {}",
-                BASE64.encode("me@example.com:token-value")
-            ))
-        );
+        // The credential is seal's to attach.
+        assert!(!headers.contains_key("Authorization"));
         assert_eq!(
             descriptor.base_url.as_deref(),
             Some("https://acme.atlassian.net")
@@ -1626,7 +1219,7 @@ mod tests {
             &json!({
                 "site": "acme",
                 "email": "me@example.com",
-                "api_token": "token-value",
+                "api_token": {"$sealed": {}},
                 "cloud_id": "fff89a1a-52c8-11e5-91b2-3c15c2bd8caa-ecosystem",
             }),
             &mut headers,
@@ -1642,11 +1235,11 @@ mod tests {
     #[test]
     fn jira_invalid_site_or_cloud_id_leaves_no_base_url() {
         for params in [
-            json!({ "site": "acme.evil.com", "email": "e", "api_token": "t" }),
-            json!({ "site": "acme", "cloud_id": "../../evil", "email": "e", "api_token": "t" }),
+            json!({ "site": "acme.evil.com", "email": "e", "api_token": {"$sealed": {}} }),
+            json!({ "site": "acme", "cloud_id": "../../evil", "email": "e", "api_token": {"$sealed": {}} }),
             json!({ "site": "acme", "email": "e" }),
-            json!({ "site": "acme", "api_token": "t" }),
-            json!({ "site": "acme", "email": " ", "api_token": "t" }),
+            json!({ "site": "acme", "api_token": {"$sealed": {}} }),
+            json!({ "site": "acme", "email": " ", "api_token": {"$sealed": {}} }),
             json!({ "site": "acme", "email": "e", "api_token": "" }),
         ] {
             let descriptor =
@@ -1968,55 +1561,13 @@ mod tests {
         ));
     }
 
-    fn oauth_cfg_basic_revoke() -> OAuthConfig {
-        OAuthConfig {
-            auth_url: "",
-            token_url: "",
-            default_scopes: "",
-            token_endpoint_auth: TokenEndpointAuth::HttpBasic,
-            refresh_token_rotates: false,
-            base_url: "",
-            sandbox_base_url: "",
-            base_url_path_template: "",
-            extra_callback_params: &[],
-            reauth_on_error_codes: &[],
-            revocation_endpoint: "https://revoke.example.com",
-            pkce_required: false,
-            params_driven: false,
-        }
-    }
-
-    #[test]
-    fn revoke_request_basic_sends_json_token_and_basic_header() {
-        let cfg = oauth_cfg_basic_revoke();
-        let params = json!({"client_id":"cid","client_secret":"csec","refresh_token":"rt"});
-        let (basic, body, endpoint) = build_revoke_request(&cfg, &params).expect("revoke request");
-        assert_eq!(endpoint, "https://revoke.example.com");
-        assert_eq!(basic.as_deref(), Some("Basic Y2lkOmNzZWM=")); // base64("cid:csec")
-        assert!(body.contains("\"token\":\"rt\""), "body: {body}");
-    }
-
-    #[test]
-    fn revoke_request_none_without_endpoint_or_token() {
-        // No revocation endpoint declared → nothing to do.
-        assert!(
-            build_revoke_request(&oauth_cfg("", "", ""), &json!({"refresh_token":"rt"})).is_none()
-        );
-        // Endpoint declared but no token on the connection → nothing to revoke.
-        assert!(
-            build_revoke_request(&oauth_cfg_basic_revoke(), &json!({"client_id":"cid"})).is_none()
-        );
-    }
-
     fn teams_deferred(params: serde_json::Value) -> DeferredAuth {
         describe_teams_bot_auth("conn-1", &params).expect("teams_bot deferred auth")
     }
 
     fn teams_token_url(params: serde_json::Value) -> String {
-        match teams_deferred(params) {
-            DeferredAuth::OAuth2ClientCredentials { token_url, .. } => token_url,
-            _ => panic!("expected client-credentials deferred auth"),
-        }
+        let DeferredAuth::OAuth2ClientCredentials { token_url, .. } = teams_deferred(params);
+        token_url
     }
 
     #[test]
@@ -2167,10 +1718,6 @@ mod tests {
         // The empty descriptor endpoint must NOT be filled from params: no revoke
         // target may be conjured that would receive the refresh token.
         assert!(eff.revocation_endpoint.is_empty());
-        assert!(
-            build_revoke_request(&cfg, &hostile).is_none(),
-            "hostile revocation_url must not create a revoke request"
-        );
         // Base URL likewise stays the descriptor's.
         assert_eq!(
             resolve_oauth_base_url(&cfg, &hostile).as_deref(),
@@ -2263,7 +1810,6 @@ mod tests {
                     _ => panic!("expected form body"),
                 }
             }
-            _ => panic!("expected client credentials"),
         }
     }
 
@@ -2301,7 +1847,6 @@ mod tests {
                     _ => panic!("expected form body"),
                 }
             }
-            _ => panic!("expected client credentials"),
         }
     }
 
@@ -2394,9 +1939,6 @@ mod tests {
                     TokenRequestBody::Json(_) => panic!("expected form-encoded token body"),
                 }
             }
-            DeferredAuth::OAuth2RefreshToken { .. } => {
-                panic!("expected client credentials auth")
-            }
         }
     }
 
@@ -2417,33 +1959,12 @@ mod tests {
             Some("https://bedrock-runtime.eu-central-1.amazonaws.com")
         );
         let aws = descriptor.aws_signing.expect("aws signing params");
-        assert_eq!(aws.access_key_id, "AKIA_TEST");
-        assert_eq!(aws.secret_access_key, "secret");
         assert_eq!(aws.region, "eu-central-1");
         assert_eq!(aws.service, "bedrock");
-        assert_eq!(aws.session_token.as_deref(), Some("token"));
     }
 
     #[test]
-    fn aws_credentials_ignores_blank_optional_session_token() {
-        let params = json!({
-            "aws_access_key_id": "AKIA_TEST",
-            "aws_secret_access_key": "secret",
-            "aws_region": "ap-southeast-2",
-            "aws_session_token": ""
-        });
-        let mut headers = HashMap::new();
-
-        let descriptor = describe_connection_auth("conn", "aws_credentials", &params, &mut headers);
-        let aws = descriptor.aws_signing.expect("aws signing params");
-
-        assert_eq!(aws.access_key_id, "AKIA_TEST");
-        assert_eq!(aws.region, "ap-southeast-2");
-        assert!(aws.session_token.is_none());
-    }
-
-    #[test]
-    fn mcp_bearer_injects_authorization_header() {
+    fn mcp_bearer_token_is_left_to_seal() {
         let params = json!({
             "url": "https://mcp.example.com/jsonrpc",
             "auth_mode": "bearer",
@@ -2451,10 +1972,8 @@ mod tests {
         });
         let mut headers = HashMap::new();
         let descriptor = describe_connection_auth("c", "mcp", &params, &mut headers);
-        assert_eq!(
-            headers.get("Authorization"),
-            Some(&"Bearer tkn_abc".to_string())
-        );
+        // The credential is seal's to attach.
+        assert!(!headers.contains_key("Authorization"));
         assert_eq!(
             descriptor.base_url.as_deref(),
             Some("https://mcp.example.com/jsonrpc")
@@ -2462,7 +1981,7 @@ mod tests {
     }
 
     #[test]
-    fn mcp_api_key_injects_custom_header() {
+    fn mcp_api_key_is_left_to_seal() {
         let params = json!({
             "url": "https://mcp.example.com/jsonrpc",
             "auth_mode": "api_key",
@@ -2471,12 +1990,13 @@ mod tests {
         });
         let mut headers = HashMap::new();
         let _ = describe_connection_auth("c", "mcp", &params, &mut headers);
-        assert_eq!(headers.get("X-Linear-Token"), Some(&"lin_xyz".to_string()));
+        // The credential is seal's to attach.
+        assert!(!headers.contains_key("X-Linear-Token"));
         assert!(!headers.contains_key("Authorization"));
     }
 
     #[test]
-    fn mcp_api_key_defaults_to_x_api_key_header() {
+    fn mcp_api_key_in_its_default_header_is_left_to_seal() {
         let params = json!({
             "url": "https://mcp.example.com/jsonrpc",
             "auth_mode": "api_key",
@@ -2484,11 +2004,12 @@ mod tests {
         });
         let mut headers = HashMap::new();
         let _ = describe_connection_auth("c", "mcp", &params, &mut headers);
-        assert_eq!(headers.get("X-API-Key"), Some(&"secret".to_string()));
+        // The credential is seal's to attach.
+        assert!(!headers.contains_key("X-API-Key"));
     }
 
     #[test]
-    fn mcp_none_injects_no_auth_header() {
+    fn mcp_without_auth_sets_no_auth_header() {
         let params = json!({
             "url": "https://mcp.example.com/jsonrpc",
             "auth_mode": "none"
@@ -2500,7 +2021,7 @@ mod tests {
     }
 
     #[test]
-    fn mcp_extra_headers_are_forwarded() {
+    fn mcp_extra_headers_are_left_to_seal() {
         let params = json!({
             "url": "https://mcp.example.com/jsonrpc",
             "auth_mode": "none",
@@ -2508,7 +2029,6 @@ mod tests {
         });
         let mut headers = HashMap::new();
         let _ = describe_connection_auth("c", "mcp", &params, &mut headers);
-        assert_eq!(headers.get("X-Custom"), Some(&"yes".to_string()));
-        assert_eq!(headers.get("Mcp-Session-Id"), Some(&"sess1".to_string()));
+        assert!(headers.is_empty(), "{headers:?}");
     }
 }

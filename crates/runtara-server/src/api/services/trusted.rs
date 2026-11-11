@@ -1,5 +1,6 @@
-//! Credential preparation for approved built-in trusted execution. The host
-//! selects the implementation; the guest cannot supply authoritative metadata.
+//! What approved built-in trusted capabilities get of a connection. Its
+//! credentials are sealed and are given to no guest: the host answers for the
+//! capability, having seal do with the key what the guest would have.
 
 use runtara_agent_trusted::{TrustedContext, error};
 use runtara_component_host::trusted::TrustedCredentials;
@@ -39,49 +40,14 @@ impl TrustedCredentials for BuiltinTrustedCredentials {
                     "Connection is unavailable or incompatible",
                 )
             })?;
-        let integration = conn.integration_id.as_deref().unwrap_or_default();
-        let params = conn.connection_parameters.as_ref().ok_or_else(|| {
-            error(
-                "TRUSTED_CREDENTIALS_UNAVAILABLE",
-                "Missing connection credentials",
-            )
-        })?;
-        // Reuse native provider configuration extraction. Network-bound OAuth
-        // resolution remains host-side; the isolated component cannot do I/O.
-        let mut headers = std::collections::HashMap::new();
-        let resolved = self
-            .0
-            .resolve_connection_auth(connection, tenant, integration, params, &mut headers)
-            .await
-            .map_err(|_| {
-                error(
-                    "TRUSTED_CREDENTIALS_UNAVAILABLE",
-                    "Cannot resolve signing credentials",
-                )
-            })?;
-        let base = resolved.base_url.ok_or_else(|| {
-            error(
-                "TRUSTED_CREDENTIALS_UNAVAILABLE",
-                "Missing connection endpoint",
-            )
-        })?;
-        let credentials = if let Some(aws) = resolved.aws_signing {
-            json!({"base_url": base, "access_key_id": aws.access_key_id,
-                "secret_access_key": aws.secret_access_key, "region": aws.region,
-                "session_token": aws.session_token})
-        } else if let Some(azure) = resolved.azure_signing {
-            json!({"base_url": base, "account_name": azure.account_name, "account_key": azure.account_key})
-        } else {
-            return Err(error(
-                "TRUSTED_CONNECTION_TYPE",
-                "Connection does not support signing",
-            ));
-        };
-        Ok(TrustedContext {
-            integration_id: integration.to_owned(),
-            credentials,
-            now_ms: chrono::Utc::now().timestamp_millis(),
-        })
+        // A connection's key is sealed, and is given to no capability: what
+        // a capability does with one, seal does for it (see `answer`). One
+        // that reaches here asked for something seal does not do.
+        let _ = conn;
+        Err(error(
+            "TRUSTED_CREDENTIALS_UNAVAILABLE",
+            "The connection's credentials are sealed and are given to no capability",
+        ))
     }
     /// A storage connection whose key is sealed cannot give it to the
     /// presigning guest. seal presigns the URL instead, within what the key's
@@ -188,9 +154,7 @@ impl BuiltinTrustedCredentials {
                 "The connection's credentials are sealed and cannot be given to this capability",
             ));
         }
-        let sealed = self.0.sealed().ok_or_else(|| {
-            unavailable("The connection's credentials are sealed, and this deployment has no seal")
-        })?;
+        let sealed = self.0.sealed();
         let invalid = || error("INVALID_INPUT", "Bucket and object key are required");
         let input: serde_json::Value = serde_json::from_slice(input).map_err(|_| invalid())?;
         let filled = |name: &str| input[name].as_str().filter(|value| !value.is_empty());

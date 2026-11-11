@@ -267,18 +267,6 @@ pub(crate) fn validate_mtls_certificates(
     Ok(())
 }
 
-/// Build a request-scoped hardened mTLS client for an `http_mtls` connection.
-///
-/// This preserves every regular credentialed-egress control (no redirects and
-/// the guarded DNS resolver), forces Rustls for PEM identity support, and
-/// accepts HTTPS only. Optional server CAs are *added* to the normal trust
-/// roots; hostname and certificate verification remain enabled.
-pub(crate) fn build_hardened_mtls_client(
-    params: &serde_json::Value,
-) -> Result<reqwest::Client, MtlsClientConfigError> {
-    build_hardened_mtls_client_from_material(parse_mtls_material(params)?)
-}
-
 /// Process-shared hardened client for OAuth token / refresh / revoke egress.
 /// One pooled client per process (same lifecycle as any reqwest client).
 pub fn shared_hardened_client() -> &'static reqwest::Client {
@@ -356,48 +344,8 @@ pub fn connection_http_allowed(host: &str) -> bool {
 /// egress list, which loopback emulators such as the Teams mock rely on).
 pub fn validate_credentialed_endpoint(raw: &str) -> Result<(), String> {
     validate_public_url(raw, |host| {
-        connection_http_allowed(host)
-            || host_is_allowlisted_for_egress(host)
-            || test_allowlist::contains(host)
+        connection_http_allowed(host) || host_is_allowlisted_for_egress(host)
     })
-}
-
-/// Unit tests cannot use the read-once env allowlists (other tests in the same
-/// binary assert they are empty), so they allow a host on their own thread.
-#[cfg(test)]
-pub(crate) mod test_allowlist {
-    use std::cell::RefCell;
-
-    thread_local! {
-        static HOSTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
-    }
-
-    /// Allow `host` for credentialed endpoints on this thread until the guard drops.
-    pub(crate) fn allow(host: &str) -> Guard {
-        HOSTS.with(|hosts| hosts.borrow_mut().push(host.to_ascii_lowercase()));
-        Guard
-    }
-
-    pub(crate) fn contains(host: &str) -> bool {
-        let host = host.to_ascii_lowercase();
-        HOSTS.with(|hosts| hosts.borrow().contains(&host))
-    }
-
-    pub(crate) struct Guard;
-
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            HOSTS.with(|hosts| hosts.borrow_mut().clear());
-        }
-    }
-}
-
-#[cfg(not(test))]
-mod test_allowlist {
-    #[inline]
-    pub(super) fn contains(_host: &str) -> bool {
-        false
-    }
 }
 
 #[cfg(test)]

@@ -1,8 +1,7 @@
 //! Native outbound HTTP service shared by host invocations.
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use runtara_connections::{
-    AwsSigningParams, AzureSigningParams, ConnectionsFacade, RateLimitEventType,
-    ResolvedConnectionAuth,
+    AzureSigningParams, ConnectionsFacade, RateLimitEventType, ResolvedConnectionAuth,
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -519,14 +518,10 @@ async fn execute_request(
     let response_limit = proxy_response_limit(request.max_response_bytes)?;
     let mut final_headers = request.headers.clone();
     let mut final_url = request.url.clone();
-    let mut aws_signing: Option<AwsSigningParams> = None;
     let mut azure_signing: Option<AzureSigningParams> = None;
-    // A client-specific mTLS identity must live on the reqwest client, not on
-    // an individual request. It remains opaque here; auth resolution parsed
-    // the write-only PEM fields and built a hardened Rustls client.
-    let mut mtls_client: Option<reqwest::Client> = None;
-    // A sealed connection's type and parameters. Its secrets are markers, not
-    // values: seal attaches them and sends the request.
+    // A connection's type and parameters, where a request presents a
+    // credential. Its secrets are markers, not values: seal attaches them
+    // (a token, a signature, a client certificate) and sends the request.
     let mut sealed_connection: Option<(String, Value)> = None;
 
     // ── Connection credential injection ──────────────────────────────────
@@ -599,10 +594,9 @@ async fn execute_request(
 
         // Unlike generic HTTP connections, mTLS has no development HTTP
         // escape hatch. A manually-created or legacy record must not gain a
-        // warn/off-mode path around that invariant; the Rustls client also
-        // refuses HTTP as a second line of defense.
-        // A sealed key has no client here, and is held to the same rule.
-        let uses_mtls = resolved.mtls_client.is_some() || integration_id == "http_mtls";
+        // warn/off-mode path around that invariant. seal presents the
+        // certificate on the connection it opens, over TLS only.
+        let uses_mtls = integration_id == "http_mtls";
 
         // Record analytics off the request path. This can hit Redis and
         // PostgreSQL, and should not delay the upstream call.
@@ -652,9 +646,8 @@ async fn execute_request(
             },
         }
 
-        aws_signing = resolved.aws_signing;
+        let aws_signing = resolved.aws_signing;
         azure_signing = resolved.azure_signing;
-        mtls_client = resolved.mtls_client;
         // What the request presents to seal: the connection's parameters,
         // with the access token got for it if its OAuth secrets are sealed.
         let mut presenting = resolved.sealed_parameters.unwrap_or_else(|| params.clone());
@@ -737,46 +730,12 @@ async fn execute_request(
         )
     })?;
 
-    // Resolve body bytes for SigV4 signing (we need them before building the request)
     let body_bytes = request.body;
 
-    // ── AWS SigV4 signing (if needed) ───────────────────────────────────
-    // A sealed key signs nothing here: seal signs the request it sends.
-    if let Some(ref aws) = aws_signing
-        && sealed_connection.is_none()
-    {
-        let parsed_url = url::Url::parse(&final_url).map_err(|e| {
-            (
-                400,
-                json!({"error": format!("Invalid URL for SigV4 signing: {}", e)}),
-            )
-        })?;
-        let payload = body_bytes.as_deref().unwrap_or(b"");
-        remove_headers(
-            &mut final_headers,
-            &[
-                "authorization",
-                "host",
-                "x-amz-date",
-                "x-amz-content-sha256",
-                "x-amz-security-token",
-            ],
-        );
-        runtara_connections::auth::aws_signing::sign_request_v4(
-            &method,
-            &parsed_url,
-            &mut final_headers,
-            payload,
-            &aws.access_key_id,
-            &aws.secret_access_key,
-            &aws.region,
-            &aws.service,
-            aws.session_token.as_deref(),
-        );
-    }
-
-    // ── Azure Storage Shared Key signing (if needed) ────────────────────
-    if let Some(ref azure) = azure_signing {
+    // A key that signs requests signs nothing here: seal signs the request
+    // it sends, with the body's hash.
+    // ── Azure Storage: what a Shared Key signature covers ────────────────
+    if azure_signing.is_some() {
         let parsed_url = url::Url::parse(&final_url).map_err(|e| {
             (
                 400,
@@ -803,26 +762,6 @@ async fn execute_request(
             };
             final_headers.insert(key, absolute);
         }
-
-        // A sealed key signs nothing here: seal signs the request it sends.
-        if sealed_connection.is_none() {
-            let payload = body_bytes.as_deref().unwrap_or(b"");
-            remove_headers(&mut final_headers, &["authorization", "x-ms-date"]);
-            runtara_connections::auth::azure_signing::sign_request_shared_key(
-                &method,
-                &parsed_url,
-                &mut final_headers,
-                payload,
-                &azure.account_name,
-                &azure.account_key,
-            )
-            .map_err(|e| {
-                (
-                    400,
-                    json!({"error": format!("Azure Shared Key signing failed: {}", e)}),
-                )
-            })?;
-        }
     }
 
     // ── Sealed credentials: seal sends the request ───────────────────────
@@ -833,20 +772,7 @@ async fn execute_request(
     if let (Some((integration_id, params)), Some(connection_id)) =
         (&sealed_connection, request.connection_id.as_deref())
     {
-        let Some(sealed) = facade.sealed() else {
-            tracing::error!(
-                target: "proxy",
-                connection_id,
-                "connection is sealed, but this deployment has no seal"
-            );
-            return Err((
-                502,
-                json!({
-                    "error": "Connection credentials are sealed and cannot be used here",
-                    "code": "SEALED_CREDENTIALS_UNAVAILABLE",
-                }),
-            ));
-        };
+        let sealed = facade.sealed();
         let upstream = sealed
             .send_bounded(
                 tenant_id,
@@ -879,8 +805,8 @@ async fn execute_request(
         });
     }
 
-    let outbound_client = mtls_client.as_ref().unwrap_or(client);
-    let mut req_builder = outbound_client.request(reqwest_method, &final_url);
+    // A request that presents no credential is this process's to send.
+    let mut req_builder = client.request(reqwest_method, &final_url);
 
     // Set headers
     let mut header_map = HeaderMap::new();
@@ -1260,6 +1186,7 @@ fn is_explicitly_allowed_host(url: &url::Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use runtara_connections::AwsSigningParams;
 
     #[test]
     fn a_guest_sets_neither_the_host_nor_the_framing() {
@@ -1514,15 +1441,10 @@ mod tests {
         ResolvedConnectionAuth {
             base_url: base_url.map(str::to_string),
             aws_signing: Some(AwsSigningParams {
-                access_key_id: "AKIA".into(),
-                secret_access_key: "secret".into(),
                 region: region.into(),
                 service: service.into(),
-                session_token: None,
             }),
             azure_signing: None,
-            mtls_client: None,
-            rotated_credentials: None,
             sealed_parameters: None,
             rotated_sealed: None,
         }
@@ -1585,8 +1507,6 @@ mod tests {
             base_url: Some("https://api.example.com".into()),
             aws_signing: None,
             azure_signing: None,
-            mtls_client: None,
-            rotated_credentials: None,
             sealed_parameters: None,
             rotated_sealed: None,
         };
@@ -1612,8 +1532,6 @@ mod tests {
             base_url: Some(QBO_BASE.into()),
             aws_signing: None,
             azure_signing: None,
-            mtls_client: None,
-            rotated_credentials: None,
             sealed_parameters: None,
             rotated_sealed: None,
         }
@@ -1819,8 +1737,6 @@ mod tests {
             base_url: None,
             aws_signing: None,
             azure_signing: None,
-            mtls_client: None,
-            rotated_credentials: None,
             sealed_parameters: None,
             rotated_sealed: None,
         }

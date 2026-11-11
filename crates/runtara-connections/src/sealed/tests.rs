@@ -200,16 +200,23 @@ async fn a_sealed_value_opens_only_for_its_own_connection_and_tenant() {
 }
 
 #[tokio::test]
-async fn a_type_that_is_not_sealed_is_left_alone() {
+async fn a_type_seal_does_not_know_is_refused_with_whatever_it_holds() {
     let server = MockServer::start().await;
     let sealed = sealed_for(&server);
     let params = json!({"host": "db.example.com", "password": SECRET});
 
-    let stored = sealed
+    let error = sealed
         .seal_parameters(TENANT, CONNECTION, "not_a_sealed_type", &params, None)
         .await
-        .unwrap();
+        .unwrap_err();
 
+    assert!(matches!(error, SealingError::CannotSeal { .. }), "{error}");
+    assert!(!error.to_string().contains(SECRET));
+    // With nothing in it, there is nothing to refuse.
+    let stored = sealed
+        .seal_parameters(TENANT, CONNECTION, "not_a_sealed_type", &json!({}), None)
+        .await
+        .unwrap();
     assert_eq!(stored, None);
 }
 
@@ -624,21 +631,117 @@ async fn a_request_presents_only_the_secret_the_connections_settings_use() {
     assert!(request_fields("mcp", &params).is_empty());
 }
 
-#[test]
-fn sealing_is_off_unless_switched_on() {
-    for on in ["1", "true", "TRUE", " yes ", "on"] {
-        assert!(sealing_enabled(Some(on)), "{on}");
-    }
-    for off in [
-        None,
-        Some(""),
-        Some("0"),
-        Some("false"),
-        Some("off"),
-        Some("seal"),
-    ] {
-        assert!(!sealing_enabled(off), "{off:?}");
-    }
+/// The extra headers of an MCP connection are secrets of their own: seal
+/// sets each on the connection's requests, and nothing else holds a value.
+#[tokio::test]
+async fn an_mcp_connections_extra_headers_are_sent_by_seal() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .and(header("Authorization", "Bearer bearer-CANARY"))
+        .and(header("X-Team", "team-CANARY"))
+        .and(header("X-Api-Key", "key-CANARY"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/open"))
+        .and(header("X-Team", "team-CANARY"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let sealed = sealed_for(&server);
+    let send = |connection: &'static str, stored: Value, route: &'static str| {
+        let (sealed, url) = (&sealed, format!("{}{route}", server.uri()));
+        async move {
+            sealed
+                .send_bounded(
+                    TENANT,
+                    connection,
+                    "mcp",
+                    &stored,
+                    "POST",
+                    &url,
+                    headers(&[]),
+                    Some(b"{}".to_vec()),
+                    64 * 1024,
+                )
+                .await
+        }
+    };
+
+    let stored = sealed
+        .seal_parameters(
+            TENANT,
+            CONNECTION,
+            "mcp",
+            &json!({
+                "url": format!("{}/mcp", server.uri()),
+                "auth_mode": "bearer",
+                "bearer_token": "bearer-CANARY",
+                "extra_headers": {"X-Team": "team-CANARY", "X-Api-Key": "key-CANARY"},
+            }),
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("mcp is sealed");
+    assert!(!stored.to_string().contains("CANARY"));
+    assert_eq!(
+        request_fields("mcp", &stored),
+        [
+            "bearer_token",
+            "extra_headers.X-Api-Key",
+            "extra_headers.X-Team"
+        ]
+    );
+    assert_eq!(
+        send(CONNECTION, stored.clone(), "/mcp")
+            .await
+            .unwrap()
+            .status,
+        200
+    );
+    // They go to the connection's server, and nowhere else.
+    let elsewhere = sealed
+        .send_bounded(
+            TENANT,
+            CONNECTION,
+            "mcp",
+            &stored,
+            "POST",
+            "https://elsewhere.example.com/mcp",
+            headers(&[]),
+            None,
+            64 * 1024,
+        )
+        .await;
+    assert!(
+        matches!(elsewhere, Err(SendError::Seal(_))),
+        "{elsewhere:?}"
+    );
+
+    // With no auth mode, the headers are still seal's to send.
+    let open = sealed
+        .seal_parameters(
+            TENANT,
+            "c-open",
+            "mcp",
+            &json!({
+                "url": format!("{}/open", server.uri()),
+                "auth_mode": "none",
+                "extra_headers": {"X-Team": "team-CANARY"},
+            }),
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("its headers are sealed");
+    assert!(has_sealed_values(&open));
+    assert_eq!(request_fields("mcp", &open), ["extra_headers.X-Team"]);
+    assert_eq!(send("c-open", open, "/open").await.unwrap().status, 200);
 }
 
 #[test]
@@ -1054,17 +1157,18 @@ async fn a_database_url_is_stored_as_its_sealed_password_and_its_target() {
         .unwrap();
     assert_eq!(again, stored);
 
-    // A URL seal could not log in for is not sealed, and is stored whole.
+    // A URL seal could not log in for is refused: it is not stored whole.
     let odd = json!({
         "database_url": format!(
             "postgres://app:{SECRET}@db.example.com/orders?sslmode=verify-full&sslrootcert=/ca.pem"
         ),
     });
-    let stored = sealed
+    let error = sealed
         .seal_parameters(TENANT, CONNECTION, "postgres", &odd, None)
         .await
-        .unwrap();
-    assert_eq!(stored, None);
+        .unwrap_err();
+    assert!(matches!(error, SealingError::CannotSeal { .. }), "{error}");
+    assert!(!error.to_string().contains(SECRET));
 
     // A URL that does not ask for a verified server is sealed for what it
     // asks, by a seal that can log in so; an earlier seal leaves it whole.
@@ -1118,19 +1222,41 @@ async fn a_webhooks_secret_token_registers_one_url_and_is_checked_without_being_
         .unwrap()
         .unwrap();
     let marker = sealed
-        .seal_webhook_secret(TENANT, CONNECTION, webhook_url, secret)
+        .seal_webhook_secret(TENANT, CONNECTION, Some(webhook_url), secret)
         .await
         .unwrap();
     assert!(is_sealed(&marker));
     assert!(!marker.to_string().contains(secret));
-    assert!(sealed.webhook_secret_is_current(CONNECTION, webhook_url, &marker));
+    assert!(sealed.webhook_secret_is_current(CONNECTION, Some(webhook_url), &marker));
     // Another connection's, or one for a URL since changed, is not.
-    assert!(!sealed.webhook_secret_is_current("another-connection", webhook_url, &marker));
+    assert!(!sealed.webhook_secret_is_current("another-connection", Some(webhook_url), &marker));
     assert!(!sealed.webhook_secret_is_current(
         CONNECTION,
-        "https://elsewhere.example.com/hook",
+        Some("https://elsewhere.example.com/hook"),
         &marker
     ));
+    assert!(!sealed.webhook_secret_is_current(CONNECTION, None, &marker));
+
+    // Sealed with no URL to register, a token is only ever checked: it can
+    // be sent nowhere, registration included.
+    let checked_only = sealed
+        .seal_webhook_secret(TENANT, CONNECTION, None, secret)
+        .await
+        .unwrap();
+    assert!(sealed.webhook_secret_is_current(CONNECTION, None, &checked_only));
+    assert!(!sealed.webhook_secret_is_current(CONNECTION, Some(webhook_url), &checked_only));
+    assert_eq!(
+        sealed
+            .verify_webhook_secret(TENANT, CONNECTION, &checked_only, secret)
+            .await,
+        Ok(true)
+    );
+    assert_eq!(
+        sealed
+            .verify_webhook_secret(TENANT, CONNECTION, &checked_only, "another-token")
+            .await,
+        Ok(false)
+    );
 
     // Registration presents both, for that URL only.
     connection[policy::WEBHOOK_SECRET_FIELD] = marker.clone();

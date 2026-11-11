@@ -162,10 +162,7 @@ impl SealedCredentials {
             request_body,
             default_ttl_seconds,
             ..
-        } = request
-        else {
-            return Err(unsupported());
-        };
+        } = request;
         let envelope = token_cache::resolve_cached_token(&cache_key.sealed(), || async {
             // The request as the type builds it, without the secret: seal
             // puts that where the secret's policy says.
@@ -262,14 +259,10 @@ impl SealedCredentials {
         let client_id = parameters["client_id"]
             .as_str()
             .ok_or_else(|| missing("client_id"))?;
-        // A sealed client secret is seal's to send, beside the refresh
-        // token; a readable one is this process's.
-        let sealed_client = policy::sealed_authorized_client(integration_id, parameters);
-        let client_secret = match parameters[policy::CLIENT_SECRET_FIELD].as_str() {
-            Some(client_secret) => client_secret,
-            None if sealed_client => "",
-            None => return Err(missing("client_secret")),
-        };
+        // The client secret is seal's to send, beside the refresh token.
+        if !policy::sealed_authorized_client(integration_id, parameters) {
+            return Err(missing("client_secret"));
+        }
 
         let cache_key = token_cache::build_token_cache_key(
             connection_id,
@@ -280,21 +273,8 @@ impl SealedCredentials {
             // The grant, with the client's credentials as the provider takes
             // them. seal adds the refresh token.
             let grant = vec![("grant_type".to_string(), "refresh_token".to_string())];
-            let (authorization, body, presented) = if sealed_client {
-                (
-                    None,
-                    client_form(effective.token_endpoint_auth, grant, client_id),
-                    &[policy::REFRESH_TOKEN_FIELD, policy::CLIENT_SECRET_FIELD][..],
-                )
-            } else {
-                let (authorization, body) = token_cache::token_request_parts(
-                    effective.token_endpoint_auth,
-                    grant,
-                    client_id,
-                    client_secret,
-                );
-                (authorization, body, &[policy::REFRESH_TOKEN_FIELD][..])
-            };
+            let body = client_form(effective.token_endpoint_auth, grant, client_id);
+            let presented = &[policy::REFRESH_TOKEN_FIELD, policy::CLIENT_SECRET_FIELD][..];
             let outcome = async {
                 let reply = self
                     .token_request(
@@ -304,7 +284,7 @@ impl SealedCredentials {
                         presented,
                         &tokens.token_url,
                         "application/x-www-form-urlencoded",
-                        authorization,
+                        None,
                         body.into_bytes(),
                     )
                     .await?;

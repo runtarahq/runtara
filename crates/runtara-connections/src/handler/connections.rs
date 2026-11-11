@@ -45,7 +45,7 @@ pub async fn create_connection_handler(
     State(events): State<crate::events::ConnectionEvents>,
     State(oauth): State<crate::config::OAuthOptions>,
     State(agent_access): State<Arc<dyn crate::config::AgentAccess>>,
-    State(sealed): State<Option<Arc<crate::sealed::SealedCredentials>>>,
+    State(sealed): State<Arc<crate::sealed::SealedCredentials>>,
     Json(payload): Json<CreateConnectionRequest>,
 ) -> Result<(StatusCode, Json<CreateConnectionResponse>), (StatusCode, Json<Value>)> {
     // A connection type an agent declared exists only for the tenants that
@@ -69,9 +69,7 @@ pub async fn create_connection_handler(
     }
     // Create service with repository
     let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
-    let service = ConnectionService::new(repository, compatibility)
-        .with_oauth(&oauth)
-        .with_sealed(sealed);
+    let service = ConnectionService::new(repository, compatibility, sealed).with_oauth(&oauth);
 
     // Capture the integration id before `payload` is consumed by the service.
     let integration = payload.integration_id.clone();
@@ -143,13 +141,14 @@ pub async fn create_connection_handler(
 pub async fn list_connections_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
+    State(sealed): State<Arc<crate::sealed::SealedCredentials>>,
     State(cipher): State<Arc<dyn CredentialCipher>>,
     State(compatibility): State<Arc<IntegrationCompatibility>>,
     Query(params): Query<ListConnectionsQuery>,
 ) -> Result<Json<ListConnectionsResponse>, (StatusCode, Json<Value>)> {
     // Create service with repository
     let repository = Arc::new(ConnectionRepository::new(pool.clone(), cipher.clone()));
-    let service = ConnectionService::new(repository.clone(), compatibility);
+    let service = ConnectionService::new(repository.clone(), compatibility, sealed);
 
     match service
         .list_connections(&tenant_id, params.integration_id, params.status)
@@ -235,13 +234,14 @@ pub async fn list_connections_handler(
 pub async fn get_connection_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
+    State(sealed): State<Arc<crate::sealed::SealedCredentials>>,
     State(cipher): State<Arc<dyn CredentialCipher>>,
     State(compatibility): State<Arc<IntegrationCompatibility>>,
     Path(id): Path<String>,
 ) -> Result<Json<ConnectionResponse>, (StatusCode, Json<Value>)> {
     // Create service with repository
     let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
-    let service = ConnectionService::new(repository, compatibility);
+    let service = ConnectionService::new(repository, compatibility, sealed);
 
     match service.get_connection(&id, &tenant_id).await {
         Ok(connection) => Ok(Json(ConnectionResponse {
@@ -334,15 +334,13 @@ pub async fn update_connection_handler(
     State(cipher): State<Arc<dyn CredentialCipher>>,
     State(compatibility): State<Arc<IntegrationCompatibility>>,
     State(oauth): State<crate::config::OAuthOptions>,
-    State(sealed): State<Option<Arc<crate::sealed::SealedCredentials>>>,
+    State(sealed): State<Arc<crate::sealed::SealedCredentials>>,
     Path(id): Path<String>,
     Json(payload): Json<UpdateConnectionRequest>,
 ) -> Result<Json<ConnectionResponse>, (StatusCode, Json<Value>)> {
     // Create service with repository
     let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
-    let service = ConnectionService::new(repository, compatibility)
-        .with_oauth(&oauth)
-        .with_sealed(sealed);
+    let service = ConnectionService::new(repository, compatibility, sealed).with_oauth(&oauth);
 
     match service.update_connection(&id, &tenant_id, payload).await {
         Ok(connection) => Ok(Json(ConnectionResponse {
@@ -398,9 +396,11 @@ pub async fn update_connection_handler(
     ),
     tag = "connections-controller"
 ))]
+#[allow(clippy::too_many_arguments)] // axum extractors
 pub async fn delete_connection_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
+    State(sealed): State<Arc<crate::sealed::SealedCredentials>>,
     State(cipher): State<Arc<dyn CredentialCipher>>,
     State(compatibility): State<Arc<IntegrationCompatibility>>,
     State(events): State<crate::events::ConnectionEvents>,
@@ -409,7 +409,7 @@ pub async fn delete_connection_handler(
 ) -> Result<Json<DeleteConnectionResponse>, (StatusCode, Json<Value>)> {
     // Create service with repository
     let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
-    let service = ConnectionService::new(repository, compatibility).with_oauth(&oauth);
+    let service = ConnectionService::new(repository, compatibility, sealed).with_oauth(&oauth);
 
     match service.delete_connection(&id, &tenant_id).await {
         Ok(()) => {
@@ -472,9 +472,11 @@ pub async fn delete_connection_handler(
     ),
     tag = "connections-controller"
 ))]
+#[allow(clippy::too_many_arguments)] // axum extractors
 pub async fn get_connections_by_operator_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
+    State(sealed): State<Arc<crate::sealed::SealedCredentials>>,
     State(cipher): State<Arc<dyn CredentialCipher>>,
     State(compatibility): State<Arc<IntegrationCompatibility>>,
     State(catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
@@ -501,7 +503,7 @@ pub async fn get_connections_by_operator_handler(
     let integration_ids = catalog.integration_ids_for(&operator_name);
 
     let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
-    let service = ConnectionService::new(repository, compatibility);
+    let service = ConnectionService::new(repository, compatibility, sealed);
 
     match service
         .list_connections_by_integration_ids(&tenant_id, &integration_ids, params.status)

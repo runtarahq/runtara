@@ -148,7 +148,7 @@ async fn expire(fixture: &Fixture, id: &str) {
 async fn a_link_flow_waits_unusable_until_a_member_confirms() {
     allow_loopback_endpoints();
     let fixture = Fixture::start().await;
-    let _provider = revocable(&fixture, "c1", 0).await;
+    let provider = revocable(&fixture, "c1", 0).await;
     link_and_return(&fixture, "c1").await;
 
     let (stored, status) = fixture.stored("c1").await;
@@ -156,21 +156,22 @@ async fn a_link_flow_waits_unusable_until_a_member_confirms() {
     for live in ["access_token", "refresh_token", "authorized_at"] {
         assert!(stored.get(live).is_none(), "{live} is held apart: {stored}");
     }
-    assert_eq!(
-        stored["pending_oauth"]["fields"]["access_token"],
-        "at-pending"
-    );
+    // Sealed as the provider issued it, even while it waits.
+    assert!(runtara_connections::sealed::is_sealed(
+        &stored["pending_oauth"]["fields"]["access_token"]
+    ));
+    assert!(!stored.to_string().contains("at-pending"), "{stored}");
 
     // Nothing that makes requests with the connection finds a token.
     let mut headers = HashMap::new();
     let resolved = runtara_connections::auth::provider_auth::resolve_connection_auth(
-        &reqwest::Client::new(),
         "acme",
         "c1",
         "http_oauth2_authorization_code",
         &stored,
         &mut headers,
         &runtara_connections::events::ConnectionEvents::default(),
+        &fixture.sealed,
     )
     .await;
     assert!(resolved.is_err(), "a pending connection resolves no auth");
@@ -219,8 +220,13 @@ async fn a_link_flow_waits_unusable_until_a_member_confirms() {
     );
     let (stored, status) = fixture.stored("c1").await;
     assert_eq!(status, "ACTIVE");
-    assert_eq!(stored["access_token"], "at-pending");
-    assert_eq!(stored["refresh_token"], "rt-at-pending");
+    assert_eq!(
+        fixture.access_token("acme", "c1", &provider).await,
+        "at-pending"
+    );
+    assert!(runtara_connections::sealed::is_sealed(
+        &stored["refresh_token"]
+    ));
     assert!(stored.get("pending_oauth").is_none());
 
     // Nothing is left to confirm.
@@ -317,8 +323,10 @@ async fn a_reconnection_keeps_the_old_tokens_until_confirmed() {
         .unwrap();
     link_and_return(&fixture, "c1").await;
 
-    let (stored, _) = fixture.stored("c1").await;
-    assert_eq!(stored["access_token"], "at-old");
+    assert_eq!(
+        fixture.access_token("acme", "c1", &provider).await,
+        "at-old"
+    );
     let service = fixture.service();
     let pending = service
         .pending_confirmation("acme", "c1")
@@ -326,7 +334,10 @@ async fn a_reconnection_keeps_the_old_tokens_until_confirmed() {
         .unwrap()
         .unwrap();
     service.confirm("acme", "c1", &pending.id).await.unwrap();
-    assert_eq!(fixture.stored("c1").await.0["access_token"], "at-new");
+    assert_eq!(
+        fixture.access_token("acme", "c1", &provider).await,
+        "at-new"
+    );
 
     // Rejecting a later reconnection restores the status it had.
     provider_issuing(&provider, "code-2", "at-newer").await;
@@ -350,9 +361,12 @@ async fn a_reconnection_keeps_the_old_tokens_until_confirmed() {
         .unwrap()
         .unwrap();
     service.reject("acme", "c1", &pending.id).await.unwrap();
-    let (stored, status) = fixture.stored("c1").await;
+    let (_, status) = fixture.stored("c1").await;
     assert_eq!(status, "ACTIVE");
-    assert_eq!(stored["access_token"], "at-new");
+    assert_eq!(
+        fixture.access_token("acme", "c1", &provider).await,
+        "at-new"
+    );
 }
 
 #[tokio::test]
@@ -498,7 +512,10 @@ async fn a_later_flow_is_never_confirmed_unseen() {
         .unwrap()
         .unwrap();
     service.confirm("acme", "c1", &current.id).await.unwrap();
-    assert_eq!(fixture.stored("c1").await.0["access_token"], "at-second");
+    assert_eq!(
+        fixture.access_token("acme", "c1", &provider).await,
+        "at-second"
+    );
 }
 
 #[tokio::test]

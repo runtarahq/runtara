@@ -51,13 +51,13 @@ impl AgentAccess for PayingOnly {
 async fn resolve(params: serde_json::Value) -> (Option<String>, HashMap<String, String>) {
     let mut headers = HashMap::new();
     let resolved = runtara_connections::resolve_connection_auth(
-        &reqwest::Client::new(),
         "tenant",
         "conn-1",
         "example_crm",
         &params,
         &mut headers,
         &None,
+        &runtara_connections::sealed::SealedCredentials::for_tests(),
     )
     .await
     .expect("resolves");
@@ -65,14 +65,15 @@ async fn resolve(params: serde_json::Value) -> (Option<String>, HashMap<String, 
 }
 
 #[tokio::test]
-async fn a_declared_connection_authenticates_as_its_base_on_the_vendor_host() {
+async fn a_declared_connection_goes_to_the_vendor_host() {
     let _serial = SERIAL.lock().await;
     runtara_agents::derived::register(vec![("example-crm".into(), example_crm())]).unwrap();
 
     let (base_url, headers) =
         resolve(json!({"account": "acme", "username": "api", "password": "pw"})).await;
     assert_eq!(base_url.as_deref(), Some("https://acme.vendor.example/api"));
-    assert_eq!(headers["Authorization"], "Basic YXBpOnB3");
+    // The password is seal's to attach, as the base type's is.
+    assert!(!headers.contains_key("Authorization"));
 
     // A stored base_url never wins over the rendered one.
     let (base_url, _) = resolve(json!({

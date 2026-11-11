@@ -109,26 +109,19 @@ pub(crate) async fn resolve_database_url_uncached(
                 ServiceError::ValidationError(format!("Connection '{}' has no parameters", conn_id))
             })?;
 
-            // A sealed password is seal's to log in with.
-            if let Some(admitted) = admit_sealed(facade, &conn.id, params, tenant_id).await {
-                return admitted.map(Some).map_err(|reason| {
-                    ServiceError::ValidationError(format!(
-                        "Connection '{conn_id}' is refused: {reason}"
-                    ))
-                });
+            // The platform's own database is the operator's, not a tenant's.
+            if is_platform_database(params) {
+                return Ok(None);
             }
-            let db_url = params
-                .get("database_url")
-                .and_then(|v| v.as_str())
+            // The password is sealed, and seal's to log in with.
+            admit_sealed(facade, &conn.id, params, tenant_id)
+                .await
                 .ok_or_else(|| {
                     ServiceError::ValidationError(format!(
                         "Connection '{}' missing 'database_url' parameter",
                         conn_id
                     ))
-                })?;
-
-            super::database_guard::admit(db_url, tenant_id)
-                .await
+                })?
                 .map(Some)
                 .map_err(|reason| {
                     ServiceError::ValidationError(format!(
@@ -171,25 +164,17 @@ pub(crate) async fn resolve_database_url_uncached(
                 )
             })?;
 
-            if let Some(admitted) = admit_sealed(facade, &conn.id, params, tenant_id).await {
-                return admitted.map(Some).map_err(|reason| {
-                    ServiceError::ValidationError(format!(
-                        "The default object_model connection is refused: {reason}"
-                    ))
-                });
+            if is_platform_database(params) {
+                return Ok(None);
             }
-            let db_url = params
-                .get("database_url")
-                .and_then(|v| v.as_str())
+            admit_sealed(facade, &conn.id, params, tenant_id)
+                .await
                 .ok_or_else(|| {
                     ServiceError::ValidationError(
                         "Default object_model connection missing 'database_url' parameter"
                             .to_string(),
                     )
-                })?;
-
-            super::database_guard::admit(db_url, tenant_id)
-                .await
+                })?
                 .map(Some)
                 .map_err(|reason| {
                     ServiceError::ValidationError(format!(
@@ -200,8 +185,15 @@ pub(crate) async fn resolve_database_url_uncached(
     }
 }
 
-/// The URL to connect with for a Postgres connection whose password is
-/// sealed, or why it is refused; `None` for a connection that is not sealed.
+/// Whether a connection stands for the platform's own database: it holds no
+/// URL, and the platform object-model store is used.
+fn is_platform_database(params: &serde_json::Value) -> bool {
+    params[runtara_connections::repository::connections::PLATFORM_DATABASE_PARAM].as_bool()
+        == Some(true)
+}
+
+/// The URL to connect with for a Postgres connection, whose password is
+/// sealed, or why it is refused; `None` for a connection that holds none.
 async fn admit_sealed(
     facade: &ConnectionsFacade,
     connection_id: &str,
@@ -212,11 +204,7 @@ async fn admit_sealed(
     if !is_sealed(&params[PG_URL_FIELD]) {
         return None;
     }
-    let Some(sealed) = facade.sealed().cloned() else {
-        return Some(Err(
-            "its password is sealed, and this deployment has no seal".to_string(),
-        ));
-    };
+    let sealed = facade.sealed().clone();
     Some(super::database_guard::admit_sealed(sealed, tenant_id, connection_id, params).await)
 }
 

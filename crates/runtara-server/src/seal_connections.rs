@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! `runtara-server seal-connections [--tenant-id <id>] [--dry-run]`
 //!
-//! Seals the secrets of connections stored before sealed credentials were
-//! turned on (`RUNTARA_SEALED_CREDENTIALS`): each is sealed as it would be on
-//! its next save. A connection of a type seal does not handle, or whose
-//! secret goes somewhere seal cannot express, is left as it is.
+//! Seals the secrets of connections an earlier release stored readable: each
+//! is sealed as it would be on its next save. A connection whose secret seal
+//! cannot hold (its type is not one this build knows, or its secret goes
+//! somewhere seal cannot express) is counted, named in a warning and left as
+//! it is: it must be entered again.
 //!
 //! Sealing is one-way: a sealed secret is not stored readable again. Run with
 //! `--dry-run` first to see how many connections it would seal. Idempotent,
@@ -15,7 +16,6 @@
 use std::ffi::OsString;
 
 use runtara_connections::repository::connections::{ConnectionRepository, SealingStats};
-use runtara_connections::sealed::SEALED_CREDENTIALS_ENV;
 use runtara_connections::{ENCRYPTION_KEY_ENV, cipher_from_env};
 use sqlx::PgPool;
 
@@ -71,8 +71,9 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<SealArgs, S
 }
 
 /// Run the job and print its statistics, with the host's cipher if it
-/// supplies one (else the keyring from the environment). Errors when sealing
-/// is off, the job fails, or any connection could not be sealed.
+/// supplies one (else the keyring from the environment). Errors when seal
+/// cannot start, the job fails, or any connection could not be read or
+/// written.
 pub async fn run(
     pool: PgPool,
     args: SealArgs,
@@ -95,13 +96,7 @@ pub async fn run(
                 .map_err(|error| format!("the server's configuration is not valid: {error}"))?,
         );
     }
-    let sealed = runtara_connections::sealed::from_env(pool.clone(), crate::seal_allowances())?
-        .ok_or_else(|| {
-            format!(
-                "Sealed credentials are not enabled. Set {SEALED_CREDENTIALS_ENV}=1 before \
-                 running {COMMAND}."
-            )
-        })?;
+    let sealed = runtara_connections::sealed::from_env(pool.clone(), crate::seal_allowances())?;
 
     let scope = args.tenant_id.as_deref().unwrap_or("all tenants");
     let action = if args.dry_run {
@@ -121,9 +116,17 @@ pub async fn run(
         })?;
     let sealed_label = if args.dry_run { "would_seal" } else { "sealed" };
     println!(
-        "scanned={} {sealed_label}={} unchanged={} failed={}",
-        stats.scanned, stats.sealed, stats.unchanged, stats.failed
+        "scanned={} {sealed_label}={} unchanged={} unsealable={} failed={}",
+        stats.scanned, stats.sealed, stats.unchanged, stats.unsealable, stats.failed
     );
+    if stats.unsealable > 0 {
+        println!(
+            "{} connection(s) hold credentials seal cannot hold (see the warnings above). \
+             They are left as they are and cannot be used: enter each again in a form seal \
+             can hold, or delete it.",
+            stats.unsealable
+        );
+    }
     if stats.failed > 0 {
         return Err(format!(
             "{} connection(s) could not be sealed; see the errors above",

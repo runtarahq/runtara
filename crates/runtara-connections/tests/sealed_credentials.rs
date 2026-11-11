@@ -104,8 +104,27 @@ impl Fixture {
         ConnectionService::new(
             repository,
             Arc::new(IntegrationCompatibility::new(HashMap::new())),
+            sealed.unwrap_or_else(runtara_connections::sealed::SealedCredentials::for_tests),
         )
-        .with_sealed(sealed)
+    }
+
+    /// What uses connections, over this database.
+    fn facade(&self, sealed: Arc<SealedCredentials>) -> runtara_connections::ConnectionsFacade {
+        let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![]));
+        runtara_connections::ConnectionsFacade::new(runtara_connections::ConnectionsState {
+            db_pool: self.pool.clone(),
+            redis_manager: None,
+            public_base_url: String::new(),
+            oauth_complete_url: None,
+            http_client: reqwest::Client::new(),
+            cipher: Arc::new(NoOpCipher),
+            compatibility: Arc::new(IntegrationCompatibility::new(HashMap::new())),
+            agent_catalog: catalog,
+            connection_events: None,
+            oauth: Default::default(),
+            agent_access: Arc::new(runtara_connections::EveryAgent),
+            sealed,
+        })
     }
 
     fn repository(&self) -> ConnectionRepository {
@@ -206,39 +225,94 @@ async fn a_sealable_connection_is_stored_sealed_and_says_so() {
 }
 
 #[tokio::test]
-async fn connections_that_are_not_sealed_stay_as_they_were() {
+async fn a_secret_seal_cannot_hold_is_refused_and_nothing_is_stored() {
     let fixture = Fixture::new().await;
-
-    // A destination seal cannot express (a base URL with a query), with
-    // sealing on.
     let service = fixture.service(Some(fixture.sealed()));
-    let id = service
-        .create_connection(bearer("odd", "https://api.example.com/v1?tenant=1"), TENANT)
-        .await
-        .unwrap();
-    let (format, stored) = fixture.row(&id).await;
-    assert_eq!(format, "cipher");
-    assert_eq!(stored["token"], SECRET);
-    let resolved = fixture
-        .repository()
-        .get_with_parameters(&id, TENANT)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(!resolved.sealed);
 
-    // A sealable type, with sealing off.
-    let service = fixture.service(None);
+    // Each with why, and never with the secret.
+    for (request, reason) in [
+        // A destination seal cannot express.
+        (
+            bearer("odd", "https://api.example.com/v1?tenant=1"),
+            "`base_url` must not carry a query or fragment",
+        ),
+        (
+            serde_json::from_value(json!({
+                "title": "db",
+                "integrationId": "postgres",
+                "connectionParameters": {
+                    "database_url": format!("postgres://app:{SECRET}@db.example.com/orders"),
+                },
+            }))
+            .unwrap(),
+            "sslmode=verify-full",
+        ),
+        // An MCP header of the connection's own in the credential's place.
+        (
+            serde_json::from_value(json!({
+                "title": "replaced",
+                "integrationId": "mcp",
+                "connectionParameters": {
+                    "url": "https://mcp.example.com/mcp", "auth_mode": "bearer",
+                    "bearer_token": "another-secret",
+                    "extra_headers": {"Authorization": SECRET},
+                },
+            }))
+            .unwrap(),
+            "replaces the credential's own",
+        ),
+    ] {
+        let error = service
+            .create_connection(request, TENANT)
+            .await
+            .expect_err("a secret seal cannot hold is not stored");
+        let ServiceError::ValidationError(message) = error else {
+            panic!("refused as invalid input, not {error:?}");
+        };
+        assert!(message.contains(reason), "{message}");
+        assert!(!message.contains(SECRET), "{message}");
+    }
+    let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM connection_data_entity")
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 0);
+
+    // An edit that would leave a sealed secret with nowhere to go is refused
+    // too, and the connection stays as it was.
     let id = service
         .create_connection(bearer("api", "https://api.example.com/v1"), TENANT)
         .await
         .unwrap();
-    let (format, stored) = fixture.row(&id).await;
-    assert_eq!(format, "cipher");
-    assert_eq!(stored["token"], SECRET);
+    let before = fixture.row(&id).await;
+    for write in [json!({}), json!({"token": "another-secret"})] {
+        let error = patch(
+            &service,
+            &id,
+            json!({"set": {"base_url": "https://api.example.com/v1?tenant=1"}, "write": write}),
+        )
+        .await
+        .expect_err("the edit is refused");
+        assert!(
+            matches!(error, ServiceError::ValidationError(_)),
+            "{error:?}"
+        );
+    }
+    assert_eq!(fixture.row(&id).await, before);
+    assert_eq!(before.0, "seal");
 
-    // No connection was sealed, so no key was made.
-    assert!(fixture.keys().await.is_empty());
+    // A connection with no secret is stored as it is.
+    let none: CreateConnectionRequest = serde_json::from_value(json!({
+        "title": "open",
+        "integrationId": "mcp",
+        "connectionParameters": {
+            "url": "https://mcp.example.com/mcp", "auth_mode": "none",
+            "extra_headers": {},
+        },
+    }))
+    .unwrap();
+    let id = service.create_connection(none, TENANT).await.unwrap();
+    assert_eq!(fixture.row(&id).await.0, "cipher");
 }
 
 /// Types with more than one secret, or whose secret has a second reader:
@@ -451,30 +525,39 @@ async fn two_instances_seal_a_tenants_connections_to_the_same_key() {
     );
 }
 
-/// Connections stored before sealing was on are sealed in place: each as it
-/// would be on its next save, one tenant at a time or all, and only what
-/// seal can hold. A dry run writes nothing.
+/// Connections an earlier release stored readable are sealed in place: each as it
+/// would be on its next save, one tenant at a time or all. What seal cannot
+/// hold is counted and left as it is. A dry run writes nothing.
 #[tokio::test]
 async fn existing_connections_are_sealed_in_place() {
     use runtara_connections::repository::connections::{SealingStats, refresh_token_guard};
     let fixture = Fixture::new().await;
-    let unsealed = fixture.service(None);
-    let sealable = unsealed
-        .create_connection(bearer("api", "https://api.example.com/v1"), TENANT)
-        .await
-        .unwrap();
-    // A destination seal cannot express: left as it is.
-    let unexpressible = unsealed
-        .create_connection(bearer("odd", "https://api.example.com/v1?tenant=1"), TENANT)
-        .await
-        .unwrap();
-    let elsewhere = unsealed
-        .create_connection(
-            bearer("theirs", "https://api.example.com/v1"),
-            "other-tenant",
+    // Rows as they were stored before the seal: readable.
+    let sealable = "api-1".to_owned();
+    let unexpressible = "odd-1".to_owned();
+    let elsewhere = "theirs-1".to_owned();
+    for (id, tenant, base_url) in [
+        (&sealable, TENANT, "https://api.example.com/v1"),
+        // A destination seal cannot express: left as it is.
+        (
+            &unexpressible,
+            TENANT,
+            "https://api.example.com/v1?tenant=1",
+        ),
+        (&elsewhere, "other-tenant", "https://api.example.com/v1"),
+    ] {
+        sqlx::query(
+            "INSERT INTO connection_data_entity \
+             (id, tenant_id, title, integration_id, connection_parameters) \
+             VALUES ($1, $2, $1, 'http_bearer', $3)",
         )
+        .bind(id)
+        .bind(tenant)
+        .bind(json!({"token": SECRET, "base_url": base_url}))
+        .execute(&fixture.pool)
         .await
         .unwrap();
+    }
     // An authorized OAuth connection, with the rotation guard of its
     // readable refresh token, and a type seal does not handle.
     for (id, integration_id, parameters, guard) in [
@@ -514,6 +597,19 @@ async fn existing_connections_are_sealed_in_place() {
     let sealed = fixture.sealed();
     let repository = fixture.repository();
 
+    // Nothing uses a readable secret: until it is sealed, a connection
+    // holding one is given to no one.
+    let facade = fixture.facade(sealed.clone());
+    for id in [sealable.as_str(), "oauth-1", "sftp-1"] {
+        let refused = facade
+            .get_with_parameters(id, TENANT)
+            .await
+            .expect_err("a readable secret is not given out");
+        let message = refused.to_string();
+        assert!(message.contains("not sealed"), "{message}");
+        assert!(!message.contains(SECRET) && !message.contains("CANARY"));
+    }
+
     // A dry run counts, and writes nothing.
     let would = repository
         .seal_existing(&sealed, Some(TENANT), true)
@@ -524,7 +620,8 @@ async fn existing_connections_are_sealed_in_place() {
         SealingStats {
             scanned: 4,
             sealed: 2,
-            unchanged: 2,
+            unchanged: 0,
+            unsealable: 2,
             failed: 0
         }
     );
@@ -558,7 +655,20 @@ async fn existing_connections_are_sealed_in_place() {
     .unwrap();
     assert_eq!(guard, refresh_token_guard(&oauth["refresh_token"]));
     assert!(guard.is_some());
-    // What seal cannot hold stays readable, and stays as it was.
+    // Sealed, a connection is given out; what seal cannot hold never is.
+    let given = facade
+        .get_with_parameters(&sealable, TENANT)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(given.sealed);
+    for id in [unexpressible.as_str(), "sftp-1"] {
+        assert!(
+            facade.get_with_parameters(id, TENANT).await.is_err(),
+            "{id}"
+        );
+    }
+    // What seal cannot hold is left as it was, to be entered again.
     for (id, field) in [(unexpressible.as_str(), "token"), ("sftp-1", "password")] {
         let (format, stored) = fixture.row(id).await;
         assert_eq!(format, "cipher", "{id}");
@@ -586,7 +696,8 @@ async fn existing_connections_are_sealed_in_place() {
         SealingStats {
             scanned: 3,
             sealed: 1,
-            unchanged: 2,
+            unchanged: 0,
+            unsealable: 2,
             failed: 0
         }
     );
@@ -697,4 +808,166 @@ async fn a_leaving_tenants_keys_are_destroyed_and_its_secrets_with_them() {
     );
     // Destroying what is already gone is not an error.
     sealed.destroy_tenant_keys(TENANT).await.unwrap();
+}
+
+/// The key that wraps tenants' seal keys is derived from the credential
+/// encryption key, so it changes when that key is rotated. The seal keys are
+/// wrapped again under the new one: what was sealed before still opens, and
+/// the retired key is then no longer needed.
+#[tokio::test]
+async fn sealed_secrets_survive_a_rotation_of_the_key_their_keys_are_wrapped_with() {
+    use runtara_connections::sealed::keys::{
+        key_wrap, rewrap_retired, wrapping_key_from_encryption_key,
+    };
+    let fixture = Fixture::new().await;
+    let seal_wrapped_by = |encryption_key: &[u8]| {
+        SealedCredentials::in_process(
+            Arc::new(PgKeySource::new(fixture.pool.clone())),
+            wrapping_key_from_encryption_key(encryption_key).as_ref(),
+            Allowances::default(),
+        )
+        .unwrap()
+    };
+    let (old_key, new_key) = ([1_u8; 32], [2_u8; 32]);
+
+    // A webhook token sealed while the old key was current, checked by seal.
+    let before = seal_wrapped_by(&old_key);
+    let marker = before
+        .seal_webhook_secret(TENANT, "c-1", None, SECRET)
+        .await
+        .unwrap();
+    assert_eq!(
+        before
+            .verify_webhook_secret(TENANT, "c-1", &marker, SECRET)
+            .await,
+        Ok(true)
+    );
+
+    // With the new key current and nothing done, it opens no more.
+    assert!(
+        seal_wrapped_by(&new_key)
+            .verify_webhook_secret(TENANT, "c-1", &marker, SECRET)
+            .await
+            .is_err()
+    );
+
+    let wrap = |key: &[u8]| key_wrap(wrapping_key_from_encryption_key(key).as_ref()).unwrap();
+    // A key that is not the one the seal keys are wrapped under moves nothing.
+    assert_eq!(
+        rewrap_retired(&fixture.pool, wrap(&new_key).as_ref(), &[wrap(&[9_u8; 32])])
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        rewrap_retired(&fixture.pool, wrap(&new_key).as_ref(), &[wrap(&old_key)])
+            .await
+            .unwrap(),
+        1
+    );
+    // Done once: nothing is left under the retired key.
+    assert_eq!(
+        rewrap_retired(&fixture.pool, wrap(&new_key).as_ref(), &[wrap(&old_key)])
+            .await
+            .unwrap(),
+        0
+    );
+
+    let after = seal_wrapped_by(&new_key);
+    assert_eq!(
+        after
+            .verify_webhook_secret(TENANT, "c-1", &marker, SECRET)
+            .await,
+        Ok(true)
+    );
+    assert_eq!(
+        after
+            .verify_webhook_secret(TENANT, "c-1", &marker, "another-token")
+            .await,
+        Ok(false)
+    );
+    // And the retired key opens it no more.
+    assert!(
+        seal_wrapped_by(&old_key)
+            .verify_webhook_secret(TENANT, "c-1", &marker, SECRET)
+            .await
+            .is_err()
+    );
+}
+
+/// Any extra header of an MCP connection may carry a credential, so each
+/// value is sealed where it is, under its header's name. An edit shows them
+/// blank: one left blank is kept, one entered is sealed, one left out goes.
+#[tokio::test]
+async fn an_mcp_connections_extra_headers_are_stored_sealed() {
+    let fixture = Fixture::new().await;
+    let service = fixture.service(Some(fixture.sealed()));
+    let request: CreateConnectionRequest = serde_json::from_value(json!({
+        "title": "headers",
+        "integrationId": "mcp",
+        "connectionParameters": {
+            "url": "https://mcp.example.com/mcp", "auth_mode": "none",
+            "extra_headers": {"X-Team": "team-CANARY", "X-Api-Key": SECRET},
+        },
+    }))
+    .unwrap();
+    let id = service.create_connection(request, TENANT).await.unwrap();
+
+    let (format, stored) = fixture.row(&id).await;
+    assert_eq!(format, "seal");
+    for header in ["X-Team", "X-Api-Key"] {
+        assert!(is_sealed(&stored["extra_headers"][header]), "{header}");
+    }
+    assert!(!stored.to_string().contains(SECRET));
+    assert!(!stored.to_string().contains("CANARY"));
+
+    // Nothing shows a value.
+    let projection = service
+        .get_connection(&id, TENANT)
+        .await
+        .unwrap()
+        .edit_projection
+        .unwrap();
+    assert_eq!(
+        projection.values["extra_headers"],
+        json!({"X-Team": "", "X-Api-Key": ""})
+    );
+
+    // Left blank: kept. Entered: sealed. Left out: gone.
+    patch(
+        &service,
+        &id,
+        json!({"set": {"extra_headers": {"X-Team": "", "X-New": "new-CANARY"}}}),
+    )
+    .await
+    .unwrap();
+    let (_, edited) = fixture.row(&id).await;
+    assert_eq!(
+        edited["extra_headers"]["X-Team"],
+        stored["extra_headers"]["X-Team"]
+    );
+    assert!(is_sealed(&edited["extra_headers"]["X-New"]));
+    assert!(edited["extra_headers"].get("X-Api-Key").is_none());
+    assert!(!edited.to_string().contains("CANARY"));
+
+    // A sealed value is this connection's header's: it cannot be supplied.
+    let forged = patch(
+        &service,
+        &id,
+        json!({"set": {"extra_headers": {
+            "X-Other": stored["extra_headers"]["X-Api-Key"],
+        }}}),
+    )
+    .await;
+    assert!(matches!(forged, Err(ServiceError::ValidationError(_))));
+
+    // Moving the server moves where the headers go: they are entered again.
+    let moved = patch(
+        &service,
+        &id,
+        json!({"set": {"url": "https://other.example.com/mcp"}}),
+    )
+    .await;
+    assert!(matches!(moved, Err(ServiceError::ValidationError(_))));
+    assert_eq!(fixture.row(&id).await.1, edited);
 }

@@ -14,7 +14,6 @@
 
 use std::ffi::OsString;
 
-use runtara_connections::sealed::SEALED_CREDENTIALS_ENV;
 use sqlx::PgPool;
 
 /// The argv[1] that selects this command.
@@ -77,16 +76,10 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<DestroyArgs
     }
 }
 
-/// Destroy the tenant's keys. Errors when sealing is off or the keys could
-/// not be deleted.
+/// Destroy the tenant's keys. Errors when seal cannot start or the keys
+/// could not be deleted.
 pub async fn run(pool: PgPool, args: DestroyArgs) -> Result<(), String> {
-    let sealed = runtara_connections::sealed::from_env(pool, crate::seal_allowances())?
-        .ok_or_else(|| {
-            format!(
-                "Sealed credentials are not enabled. Set {SEALED_CREDENTIALS_ENV}=1 before \
-                 running {COMMAND}."
-            )
-        })?;
+    let sealed = runtara_connections::sealed::from_env(pool, crate::seal_allowances())?;
     println!("Destroying the seal keys of tenant '{}'...", args.tenant_id);
     sealed
         .destroy_tenant_keys(&args.tenant_id)

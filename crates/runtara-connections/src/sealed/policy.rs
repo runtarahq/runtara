@@ -71,27 +71,37 @@ pub const WEBHOOK_SECRET_FIELD: &str = "webhook_secret";
 /// whatever URL is registered, and the path is filled by whichever bot token
 /// is presented. It is never sent anywhere else; a call's token is checked
 /// against it, and seal answers yes or no.
+///
+/// With no `webhook_url` (a runtime that does not know its own address, or a
+/// connection that registers nothing) the token can be sent nowhere at all:
+/// it is only checked.
 pub fn telegram_webhook_secret_policy(
-    webhook_url: &str,
+    webhook_url: Option<&str>,
     allowances: &Allowances,
 ) -> Option<Policy> {
-    let api_base = allowances
-        .api_bases
-        .get("telegram_bot")
-        .map_or(TELEGRAM_API_BASE, String::as_str);
-    let mut rule = rule_for(
-        &format!("{}/setWebhook", api_base.trim_end_matches('/')),
-        &Inject::FormField {
-            name: "secret_token".to_owned(),
-        },
-        false,
-        allowances,
-    )?;
-    rule.methods = Some(vec![Method::Post]);
-    rule.allow_injected_path = Some("/bot{}".to_owned());
-    rule.require_form = BTreeMap::from([("url".to_owned(), vec![webhook_url.to_owned()])]);
+    let rules = match webhook_url {
+        Some(webhook_url) => {
+            let api_base = allowances
+                .api_bases
+                .get("telegram_bot")
+                .map_or(TELEGRAM_API_BASE, String::as_str);
+            let mut rule = rule_for(
+                &format!("{}/setWebhook", api_base.trim_end_matches('/')),
+                &Inject::FormField {
+                    name: "secret_token".to_owned(),
+                },
+                false,
+                allowances,
+            )?;
+            rule.methods = Some(vec![Method::Post]);
+            rule.allow_injected_path = Some("/bot{}".to_owned());
+            rule.require_form = BTreeMap::from([("url".to_owned(), vec![webhook_url.to_owned()])]);
+            vec![rule]
+        }
+        None => Vec::new(),
+    };
     let policy = Policy {
-        rules: vec![rule],
+        rules,
         definitions: BTreeMap::new(),
         shared: false,
         verify: Some(Verify::Equals),
@@ -732,10 +742,7 @@ fn token_grant(integration_id: &str, params: &Value) -> Option<TokenGrant> {
         request_body,
         basic_auth,
         ..
-    } = request
-    else {
-        return None;
-    };
+    } = request;
     let client = match (basic_auth, request_body) {
         (Some((client_id, _)), _) => basic(&client_id),
         (None, TokenRequestBody::Json(_)) => Inject::JsonField {
@@ -1227,6 +1234,10 @@ pub fn request_fields(integration_id: &str, params: &Value) -> Vec<String> {
             )
         })
         .map(|secret| secret.field.to_owned())
+        // Each extra header of an MCP connection goes with every request.
+        .chain(
+            extra_headers(integration_id, params).map(|(header, _)| extra_header_parameter(header)),
+        )
         .collect()
 }
 
@@ -1260,6 +1271,188 @@ pub fn injected_headers(integration_id: &str, params: &Value) -> Vec<String> {
         }
     }
     headers
+}
+
+/// Parameters a type marks secret to keep them out of the console, though
+/// they are public: a certificate, a client's id. seal is given them as they
+/// are, and they are stored as they are.
+const PUBLIC_SECRET_FIELDS: &[&str] = &["client_certificate_pem", "server_ca_pem", "client_id"];
+
+/// The parameter of an MCP connection that holds the extra headers each of
+/// its requests carries. Any of them may be a credential, so each value is a
+/// secret: sealed for the connection's server, and attached by seal.
+pub const EXTRA_HEADERS_FIELD: &str = "extra_headers";
+
+/// The name a request knows an extra header's sealed value by.
+pub fn extra_header_parameter(header: &str) -> String {
+    format!("{EXTRA_HEADERS_FIELD}.{header}")
+}
+
+/// The extra header a request's parameter name is for, if it is one.
+pub fn extra_header_of(parameter: &str) -> Option<&str> {
+    parameter
+        .strip_prefix(EXTRA_HEADERS_FIELD)?
+        .strip_prefix('.')
+}
+
+/// The field an extra header's value is sealed as: header names are not
+/// field names, and differ only by case.
+pub fn extra_header_field(header: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = hex::encode(Sha256::digest(header.to_ascii_lowercase().as_bytes()));
+    format!("xh_{}", &digest[..32])
+}
+
+/// The extra headers of an MCP connection, by name.
+pub fn extra_headers<'a>(
+    integration_id: &str,
+    params: &'a Value,
+) -> impl Iterator<Item = (&'a String, &'a Value)> {
+    (integration_id == "mcp")
+        .then(|| params[EXTRA_HEADERS_FIELD].as_object())
+        .flatten()
+        .into_iter()
+        .flatten()
+}
+
+/// The policy of an extra header's value: sent as that header, to the
+/// connection's server and nowhere else.
+pub fn extra_header_policy(
+    params: &Value,
+    header: &str,
+    allowances: &Allowances,
+) -> Option<Policy> {
+    let rule = rule_for(
+        filled(params, "url")?,
+        &self::header(header, "{}"),
+        true,
+        allowances,
+    )?;
+    let policy = Policy {
+        rules: vec![rule],
+        definitions: BTreeMap::new(),
+        shared: false,
+        verify: None,
+    };
+    policy.validate().ok()?;
+    Some(policy)
+}
+
+/// The secrets a connection's parameters hold readable, by parameter name:
+/// what its type marks secret, and what a provider gave it. A parameter that
+/// is empty or sealed is not one.
+///
+/// A type this build does not know is taken at its word nowhere: every
+/// parameter it holds may be a secret.
+pub fn readable_secrets(integration_id: &str, params: &Value) -> Vec<String> {
+    let Some(fields) = params.as_object() else {
+        return Vec::new();
+    };
+    let readable = |name: &str| filled(params, name).is_some();
+    let Some(meta) = find_connection_type(integration_id) else {
+        return fields
+            .keys()
+            .filter(|name| readable(name))
+            .cloned()
+            .collect();
+    };
+    let mut names: Vec<&str> = meta
+        .fields
+        .iter()
+        .filter(|field| field.is_secret && !PUBLIC_SECRET_FIELDS.contains(&field.name))
+        .map(|field| field.name)
+        .collect();
+    names.extend([
+        ACCESS_TOKEN_FIELD,
+        REFRESH_TOKEN_FIELD,
+        CLIENT_SECRET_FIELD,
+        WEBHOOK_SECRET_FIELD,
+    ]);
+    names.sort_unstable();
+    names.dedup();
+    names
+        .into_iter()
+        .filter(|name| readable(name))
+        .map(str::to_owned)
+        .chain(
+            extra_headers(integration_id, params)
+                .filter(|(_, value)| value.as_str().is_some_and(|value| !value.is_empty()))
+                .map(|(header, _)| extra_header_parameter(header)),
+        )
+        .collect()
+}
+
+/// Why seal cannot hold the secrets of a connection [`policies`] makes no
+/// policy for, in words for whoever entered its parameters. Never includes a
+/// value.
+pub fn why_unsealable(integration_id: &str, params: &Value, allowances: &Allowances) -> String {
+    let translated;
+    let (integration_id, params) = match runtara_agents::derived::to_base(integration_id, params) {
+        Some(Ok((base, base_params))) => {
+            translated = base_params;
+            (base, &translated)
+        }
+        Some(Err(_)) => {
+            return "its parameters do not say where its credentials are sent".to_owned();
+        }
+        None => (integration_id, params),
+    };
+    if !is_sealable_type(integration_id) {
+        return format!("`{integration_id}` is not a connection type this deployment knows");
+    }
+    if integration_id == "postgres" {
+        return format!(
+            "`{PG_URL_FIELD}` must be a postgres:// URL with a user, a password and a \
+             database, and nothing in its query but `sslmode=verify-full`, \
+             `sslmode=require`, or `sslmode=disable` for a host this deployment lets be \
+             reached without TLS"
+        );
+    }
+    if let Some(fields) = params.as_object() {
+        for (name, value) in fields {
+            let Some(text) = value.as_str() else { continue };
+            // Where a browser is sent to authorize is no destination of a
+            // secret.
+            if name == "auth_url" || !(text.starts_with("http://") || text.starts_with("https://"))
+            {
+                continue;
+            }
+            if let Some(problem) = url_problem(text, allowances) {
+                return format!("`{name}` {problem}");
+            }
+        }
+        // With its URL in order, an MCP connection is unsealable for one
+        // reason: a header of its own in the credential's place.
+        let replaced = integration_id == "mcp"
+            && fields
+                .get("extra_headers")
+                .and_then(Value::as_object)
+                .is_some_and(|extras| !extras.is_empty());
+        if replaced {
+            return "a header in `extra_headers` replaces the credential's own".to_owned();
+        }
+    }
+    "its parameters do not name a destination its credentials can be held for".to_owned()
+}
+
+/// What about a URL keeps a secret from being sealed for it, if anything.
+fn url_problem(text: &str, allowances: &Allowances) -> Option<&'static str> {
+    let Ok(url) = url::Url::parse(text) else {
+        return Some("is not a URL");
+    };
+    if !url.username().is_empty() || url.password().is_some() {
+        return Some("must not carry a username or password");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Some("must not carry a query or fragment");
+    }
+    let Some(host) = url.host_str() else {
+        return Some("names no host");
+    };
+    if url.scheme() == "http" && !allowances.allows_plain_http(&host.to_ascii_lowercase()) {
+        return Some("must be https: this deployment does not let its host be reached without TLS");
+    }
+    None
 }
 
 /// Whether a connection type's secrets can be sealed at all, whatever its
@@ -1425,6 +1618,23 @@ pub fn policies(
                 let mut grant = grant.clone();
                 if let Some(api_base) = allowances.api_bases.get(integration_id) {
                     grant.api = vec![(api_base.clone(), true)];
+                } else if integration_id == "teams_bot" {
+                    // A host the operator allowlisted for egress may stand
+                    // for a Bot Connector (an emulator), as the server's
+                    // check of a conversation's service URL has it.
+                    grant
+                        .api
+                        .extend(allowances.private_hosts.iter().map(|entry| {
+                            let host = entry
+                                .rsplit_once(':')
+                                .map_or(entry.as_str(), |(host, _)| host);
+                            let scheme = if allowances.allows_plain_http(host) {
+                                "http"
+                            } else {
+                                "https"
+                            };
+                            (format!("{scheme}://{entry}"), true)
+                        }));
                 }
                 client_secret_policy(&grant, allowances)?
             }
@@ -2573,7 +2783,7 @@ mod tests {
         assert_eq!(
             canonical(
                 &telegram_webhook_secret_policy(
-                    "https://runtime.example.com/hook",
+                    Some("https://runtime.example.com/hook"),
                     &Allowances::default()
                 )
                 .unwrap()

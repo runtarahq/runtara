@@ -398,17 +398,33 @@ async fn moving_between_a_platform_app_and_the_tenants_own_needs_reauthorization
     assert_eq!(status, "REQUIRES_RECONNECTION");
     assert!(stored.get("oauth_app").is_none());
     assert_eq!(stored["client_id"], "own-client-2");
-    assert_eq!(stored["client_secret"], "own-secret-2");
+    assert!(runtara_connections::sealed::is_sealed(
+        &stored["client_secret"]
+    ));
+    assert!(!stored.to_string().contains("own-secret-2"));
 }
 
 #[tokio::test]
 async fn requests_use_the_app_while_the_tenant_may_and_fail_when_it_may_not() {
     let fixture = Fixture::start().await;
-    let stored = json!({
-        "oauth_app": "hubspot",
-        "access_token": "at-live",
-        "token_expires_at": (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
-    });
+    // As an authorization leaves it: the token sealed.
+    let stored = fixture
+        .sealed
+        .seal_parameters(
+            "acme",
+            "c1",
+            "hubspot_private_app",
+            &json!({
+                "oauth_app": "hubspot",
+                "access_token": "at-live",
+                "token_expires_at":
+                    (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+            }),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
     let facade = |oauth: OAuthOptions| {
         let mut config = fixture.config(Arc::new(EveryTenant));
         config.oauth = oauth;
@@ -422,10 +438,8 @@ async fn requests_use_the_app_while_the_tenant_may_and_fail_when_it_may_not() {
         .resolve_connection_auth("c1", "acme", "hubspot_private_app", &stored, &mut headers)
         .await
         .expect("the tenant may use the app");
-    assert_eq!(
-        headers.get("Authorization").map(String::as_str),
-        Some("Bearer at-live")
-    );
+    // The token is seal's to attach.
+    assert!(headers.is_empty());
 
     // A tenant that lost the app gets a clear failure, and the connection
     // is kept.

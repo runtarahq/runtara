@@ -37,6 +37,12 @@ pub fn refresh_token_hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
+/// The parameter of a `postgres` connection that stands for the platform's
+/// own database (the deployment's `OBJECT_MODEL_DATABASE_URL`): the
+/// connection holds no URL and no secret, and whoever uses it uses the
+/// platform's database, which is the operator's to configure.
+pub const PLATFORM_DATABASE_PARAM: &str = "platform_database";
+
 /// How a connection's secrets are held, as `credential_format` records it.
 pub const FORMAT_CIPHER: &str = "cipher";
 /// See [`FORMAT_CIPHER`]: each secret inside the parameters is sealed by seal.
@@ -1167,14 +1173,17 @@ impl ConnectionRepository {
         Ok(result.rows_affected())
     }
 
-    /// Seal the secrets of connections stored before sealing was on, for one
-    /// tenant or for all: each is sealed as it would be on its next save.
+    /// Seal the secrets of connections an earlier release stored readable,
+    /// for one tenant or for all: each is sealed as it would be on its next
+    /// save.
     ///
-    /// A connection is left as it is where seal does not handle its type or
-    /// cannot express where its secret goes. One written meanwhile is left
-    /// to that write. With `dry_run`, nothing is written, and the count is
-    /// of what would be sealed. Sealing is one-way: a sealed secret is not
-    /// stored readable again.
+    /// A connection whose secret seal cannot hold (its type is not one this
+    /// build knows, or its secret goes somewhere seal cannot express) is
+    /// counted as unsealable and left as it is: it cannot be used until it is
+    /// entered again. One written meanwhile is left to that write. With
+    /// `dry_run`, nothing is written, and the count is of what would be
+    /// sealed. Sealing is one-way: a sealed secret is not stored readable
+    /// again.
     pub async fn seal_existing(
         &self,
         sealed: &crate::sealed::SealedCredentials,
@@ -1232,10 +1241,20 @@ impl ConnectionRepository {
                 {
                     sealed_parameters
                 }
-                // Not a type seal handles, a destination it cannot express,
-                // or nothing entered to seal.
+                // Nothing entered to seal.
                 Ok(_) => {
                     stats.unchanged += 1;
+                    continue;
+                }
+                // A secret seal cannot hold: the connection is left as it
+                // is, and cannot be used until it is entered again in a form
+                // seal can hold.
+                Err(crate::sealed::SealingError::CannotSeal { reason }) => {
+                    stats.unsealable += 1;
+                    tracing::warn!(
+                        connection_id = %id, tenant_id = %tenant, %integration_id, %reason,
+                        "seal: the connection's credentials cannot be sealed"
+                    );
                     continue;
                 }
                 Err(error) => {
@@ -1291,6 +1310,60 @@ impl ConnectionRepository {
             }
         }
         Ok(stats)
+    }
+
+    /// Turn the copies of the platform's own database URL that earlier
+    /// releases stored in tenants' `postgres` connections into what stands
+    /// for it now: [`PLATFORM_DATABASE_PARAM`], which holds no secret. Only a
+    /// connection whose stored URL is exactly `platform_url` is changed, and
+    /// one written meanwhile is left to that write. Returns how many were.
+    pub async fn adopt_platform_database(&self, platform_url: &str) -> Result<usize, sqlx::Error> {
+        let rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
+            "SELECT id, tenant_id, connection_parameters FROM connection_data_entity \
+             WHERE credential_format = 'cipher' AND connection_parameters IS NOT NULL \
+               AND integration_id = 'postgres' ORDER BY tenant_id, id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut adopted = 0;
+        for (id, tenant, stored) in rows {
+            let context = CipherContext {
+                tenant_id: &tenant,
+                connection_id: &id,
+            };
+            let parameters = if is_envelope(&stored) {
+                match self.cipher.decrypt(&stored, &context) {
+                    Ok(parameters) => parameters,
+                    // Left to the sealing that follows, which reports it.
+                    Err(_) => continue,
+                }
+            } else {
+                stored.clone()
+            };
+            if parameters["database_url"].as_str() != Some(platform_url) {
+                continue;
+            }
+            let mut standing = parameters;
+            if let Some(fields) = standing.as_object_mut() {
+                fields.remove("database_url");
+                fields.insert(PLATFORM_DATABASE_PARAM.to_owned(), true.into());
+            }
+            let Ok(encrypted) = self.cipher.encrypt(&standing, &context) else {
+                continue;
+            };
+            let updated = sqlx::query(
+                "UPDATE connection_data_entity SET connection_parameters = $3 \
+                 WHERE id = $1 AND tenant_id = $2 AND connection_parameters = $4",
+            )
+            .bind(&id)
+            .bind(&tenant)
+            .bind(&encrypted)
+            .bind(&stored)
+            .execute(&self.pool)
+            .await?;
+            adopted += usize::try_from(updated.rows_affected()).unwrap_or(0);
+        }
+        Ok(adopted)
     }
 
     /// Re-encrypt all rows for a given tenant (or all tenants if `tenant_id`
@@ -1433,9 +1506,12 @@ pub struct SealingStats {
     pub scanned: usize,
     /// Connections whose secrets were sealed (or would be, in a dry run).
     pub sealed: usize,
-    /// Connections left as they are: of a type seal does not handle, with a
-    /// destination seal cannot express, or with no secret to seal.
+    /// Connections left as they are: they hold no secret.
     pub unchanged: usize,
+    /// Connections left as they are though they hold a secret: seal cannot
+    /// hold it (the type is not one it handles, or the destination is one it
+    /// cannot express). They cannot be used until entered again.
+    pub unsealable: usize,
     /// Connections that could not be read or sealed, and were left alone.
     pub failed: usize,
 }

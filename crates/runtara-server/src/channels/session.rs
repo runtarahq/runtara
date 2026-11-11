@@ -135,10 +135,6 @@ pub struct ChannelRouter {
     /// Rows accepted before this instant belong to an earlier process and are
     /// dispatched again by `recover_pending`.
     started_at: chrono::DateTime<chrono::Utc>,
-    http_client: reqwest::Client,
-    /// Hardened egress client (no redirects + DNS guard) for credentialed
-    /// channel replies (Teams).
-    hardened_client: reqwest::Client,
     /// Shared, live service-URL map for Teams, keyed by
     /// `(connection_id, conversation_id)`. Handed to every `TeamsChannel` by
     /// Arc clone (not snapshot) so replies can always resolve a serviceUrl that
@@ -163,8 +159,6 @@ impl ChannelRouter {
             connections,
             engine,
             valkey,
-            http_client: reqwest::Client::new(),
-            hardened_client: runtara_connections::net::build_hardened_client(),
             teams_service_urls: Arc::new(DashMap::new()),
         }
     }
@@ -220,27 +214,32 @@ impl ChannelRouter {
         let stored_secret =
             crate::api::services::webhook_manager::stored_webhook_secret(&trigger.configuration);
 
-        // A sealed secret is checked by seal, which answers yes or no.
-        if let (Some(stored), Some(header)) = (stored_secret, secret_header)
-            && let Some(sealed_secret) =
-                crate::api::services::webhook_manager::sealed_webhook_secret(stored)
-        {
-            let sealed = self.connections.sealed().ok_or_else(|| {
-                anyhow::anyhow!("The webhook secret is sealed, and this deployment has no seal")
-            })?;
-            return match sealed
-                .verify_webhook_secret(&tenant_id, connection_id, &sealed_secret, header)
-                .await
-            {
-                Ok(true) => Ok(()),
-                Ok(false) => anyhow::bail!("Invalid webhook secret"),
-                // seal's detail has identifiers and static text only.
-                Err(error) => anyhow::bail!("The webhook secret could not be checked: {error}"),
-            };
-        }
+        // The secret is sealed, and seal checks the call's against it,
+        // answering yes or no.
         match (stored_secret, secret_header) {
-            (Some(stored), Some(header)) if stored == header => Ok(()),
-            (Some(_), Some(_)) => anyhow::bail!("Invalid webhook secret"),
+            (Some(stored), Some(header)) => {
+                let Some(sealed_secret) =
+                    crate::api::services::webhook_manager::sealed_webhook_secret(stored)
+                else {
+                    // One an earlier release stored readable is sealed when
+                    // the server starts; nothing is checked against it as it
+                    // is.
+                    anyhow::bail!("The Channel trigger's webhook secret is not sealed");
+                };
+                match self
+                    .connections
+                    .sealed()
+                    .verify_webhook_secret(&tenant_id, connection_id, &sealed_secret, header)
+                    .await
+                {
+                    Ok(true) => Ok(()),
+                    Ok(false) => anyhow::bail!("Invalid webhook secret"),
+                    // seal's detail has identifiers and static text only.
+                    Err(error) => {
+                        anyhow::bail!("The webhook secret could not be checked: {error}")
+                    }
+                }
+            }
             (Some(_), None) => anyhow::bail!("Missing webhook secret header"),
             // Every webhook this runtime registers carries a secret, stored
             // before the platform is contacted. A trigger without one was
@@ -710,9 +709,8 @@ impl ChannelRouter {
                     "telegram_bot",
                     params,
                     "bot_token",
-                    super::channel::ReplyAuth::InPath,
                 )?;
-                Arc::new(TelegramChannel::new(auth, self.http_client.clone()))
+                Arc::new(TelegramChannel::new(auth))
             }
             "slack_bot" => {
                 let auth = super::channel::ReplyAuth::of(
@@ -722,12 +720,8 @@ impl ChannelRouter {
                     "slack_bot",
                     params,
                     "bot_token",
-                    super::channel::ReplyAuth::Bearer,
                 )?;
-                Arc::new(super::channel::SlackChannel::new(
-                    auth,
-                    self.http_client.clone(),
-                ))
+                Arc::new(super::channel::SlackChannel::new(auth))
             }
             "teams_bot" => {
                 // The adapter mints its token through the facade (correct
@@ -740,7 +734,6 @@ impl ChannelRouter {
                     connection_id.to_string(),
                     params.clone(),
                     self.connections.clone(),
-                    self.hardened_client.clone(),
                     self.teams_service_urls.clone(),
                 ))
             }
@@ -752,10 +745,6 @@ impl ChannelRouter {
                     "mailgun",
                     params,
                     "api_key",
-                    |password| super::channel::ReplyAuth::Basic {
-                        username: "api".to_string(),
-                        password,
-                    },
                 )?;
                 let domain = params["domain"]
                     .as_str()
@@ -765,7 +754,6 @@ impl ChannelRouter {
                     auth,
                     domain.to_string(),
                     region.to_string(),
-                    self.http_client.clone(),
                 ))
             }
             other => anyhow::bail!("Unsupported channel connection type: {}", other),

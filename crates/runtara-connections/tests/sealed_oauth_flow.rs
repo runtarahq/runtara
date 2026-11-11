@@ -82,27 +82,15 @@ async fn post(api: &axum::Router, uri: &str, body: Value) -> (StatusCode, Value)
     (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
 }
 
-/// With a readable client secret, as a connection stored before sealing was
-/// on has: the exchange is this process's, and the tokens are sealed as they
-/// become the connection's.
+/// seal sends the client secret with the code, so the tokens are sealed from
+/// the moment the provider issues them, through confirmation, use and
+/// refresh, to disconnect: no secret of the connection is ever readable.
 #[tokio::test]
-async fn a_flows_tokens_are_sealed_from_confirmation_to_disconnect() {
-    a_flow(false).await;
-}
-
-/// With the client secret sealed too: seal sends it with the code, so the
-/// tokens are sealed from the moment the provider issues them, and no secret
-/// of the connection is ever readable.
-#[tokio::test]
-async fn a_flow_with_a_sealed_client_secret_never_holds_a_readable_secret() {
-    a_flow(true).await;
-}
-
-async fn a_flow(sealed_client: bool) {
+async fn a_flow_never_holds_a_readable_secret() {
     allow_loopback_endpoints();
     let mut fixture = Fixture::start().await;
     let provider = MockServer::start().await;
-    fixture.sealed = Some(sealed_for(&provider));
+    fixture.sealed = sealed_for(&provider);
 
     // The provider: a code for the first pair, a refresh for the second, the
     // API, and revocation of the second pair's refresh token.
@@ -135,17 +123,13 @@ async fn a_flow(sealed_client: bool) {
     let mut connection = params(&provider, Some("tenantless"));
     connection["base_url"] = json!(format!("{}/api", provider.uri()));
     connection["revocation_url"] = json!(format!("{}/oauth/revoke", provider.uri()));
-    if sealed_client {
-        connection = fixture
-            .sealed
-            .as_ref()
-            .unwrap()
-            .seal_parameters("acme", "c1", TYPE, &connection, None)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(is_sealed(&connection["client_secret"]));
-    }
+    connection = fixture
+        .sealed
+        .seal_parameters("acme", "c1", TYPE, &connection, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(is_sealed(&connection["client_secret"]));
     fixture.insert("c1", "acme", connection).await;
 
     // A link flow completes at the provider and waits for a member. Until
@@ -169,14 +153,11 @@ async fn a_flow(sealed_client: bool) {
     assert_eq!(status, "PENDING_CONFIRMATION");
     assert!(pending.get("access_token").is_none());
     // Exchanged through seal, the pair is sealed even while it waits.
-    assert_eq!(
-        is_sealed(&pending["pending_oauth"]["fields"]["access_token"]),
-        sealed_client
-    );
-    if sealed_client {
-        assert!(!pending.to_string().contains("at-1"), "{pending}");
-        assert!(!pending.to_string().contains("csec"), "{pending}");
-    }
+    assert!(is_sealed(
+        &pending["pending_oauth"]["fields"]["access_token"]
+    ));
+    assert!(!pending.to_string().contains("at-1"), "{pending}");
+    assert!(!pending.to_string().contains("csec"), "{pending}");
 
     // Confirmed, the tokens become the connection's, sealed.
     let pending_id = fixture
@@ -250,8 +231,6 @@ async fn a_flow(sealed_client: bool) {
     // The token seal holds reaches the API.
     let response = fixture
         .sealed
-        .as_ref()
-        .unwrap()
         .send_bounded(
             "acme",
             "c1",
@@ -275,8 +254,8 @@ async fn a_flow(sealed_client: bool) {
             Arc::new(NoOpCipher),
         )),
         Arc::new(IntegrationCompatibility::from_catalog(&catalog)),
+        fixture.sealed.clone(),
     )
-    .with_sealed(fixture.sealed.clone())
     .delete_connection("c1", "acme")
     .await
     .expect("the connection is deleted");
@@ -290,7 +269,7 @@ async fn a_rejected_authorizations_sealed_tokens_are_revoked_through_seal() {
     allow_loopback_endpoints();
     let mut fixture = Fixture::start().await;
     let provider = MockServer::start().await;
-    fixture.sealed = Some(sealed_for(&provider));
+    fixture.sealed = sealed_for(&provider);
     provider_issuing(&provider, "code-1", "at-1").await;
     Mock::given(method("POST"))
         .and(path("/oauth/revoke"))
@@ -304,8 +283,6 @@ async fn a_rejected_authorizations_sealed_tokens_are_revoked_through_seal() {
     connection["revocation_url"] = json!(format!("{}/oauth/revoke", provider.uri()));
     let connection = fixture
         .sealed
-        .as_ref()
-        .unwrap()
         .seal_parameters("acme", "c1", TYPE, &connection, None)
         .await
         .unwrap()

@@ -58,6 +58,10 @@ pub enum SealingError {
         "`{field}` must be entered again: the change alters where this credential is sent or how"
     )]
     SecretRequired { field: String },
+    /// The parameters hold a secret seal cannot hold, and nothing else may:
+    /// why, in words for whoever entered them.
+    #[error("this connection's credentials cannot be stored: {reason}")]
+    CannotSeal { reason: String },
     /// seal refused or failed. Never includes a value.
     #[error("sealing failed: {0}")]
     Seal(String),
@@ -193,8 +197,9 @@ impl SealedCredentials {
 
     /// The parameters to store for a connection, with each secret sealed.
     ///
-    /// `Ok(None)` means the connection is not sealed (see [`policy::policies`])
-    /// and is stored as it always was.
+    /// `Ok(None)` means the parameters hold no secret, and are stored as they
+    /// are. A secret is stored sealed or not at all: parameters with one seal
+    /// cannot hold (see [`policy::policies`]) are refused, with the reason.
     ///
     /// `stored` is what the connection holds now, if it exists. A secret may be
     /// left as its marker only if `stored` has that very marker, and the policy
@@ -225,7 +230,10 @@ impl SealedCredentials {
                 Some(field) => Err(SealingError::SecretRequired {
                     field: (*field).clone(),
                 }),
-                None => Ok(None),
+                None if policy::readable_secrets(integration_id, parameters).is_empty() => Ok(None),
+                None => Err(SealingError::CannotSeal {
+                    reason: policy::why_unsealable(integration_id, parameters, &self.allowances),
+                }),
             };
         };
         // A marker anywhere but a secret's own field is not one this made.
@@ -244,16 +252,11 @@ impl SealedCredentials {
                     if key.is_none() {
                         key = Some(self.sealing_key(tenant_id).await.map_err(seal_failed)?);
                     }
-                    let (keyset, kid, public) = key.as_ref().expect("the key was just set");
-                    let binding = Binding {
-                        keyset,
-                        item: &item(connection_id)?,
-                        field: &field_name(field)?,
-                    };
-                    let envelope =
-                        seal_format::seal(public, kid, binding, secret.as_bytes(), policy)
-                            .map_err(|error| SealingError::Seal(error.to_string()))?;
-                    sealed.insert(field.clone(), marker(&envelope, &fingerprint)?);
+                    let key = key.as_ref().expect("the key was just set");
+                    sealed.insert(
+                        field.clone(),
+                        seal_one(key, connection_id, field, secret, policy)?,
+                    );
                 }
                 Some(value) if is_sealed(value) => {
                     let unchanged = stored.and_then(|stored| stored.get(field)) == Some(value)
@@ -268,7 +271,104 @@ impl SealedCredentials {
                 _ => {}
             }
         }
-        Ok(Some(Value::Object(sealed)))
+        // Each extra header of an MCP connection is a secret of its own,
+        // sealed where it is: in the map, under the header's name.
+        let held = stored.map(|stored| &stored[policy::EXTRA_HEADERS_FIELD]);
+        if integration_id == "mcp"
+            && let Some(extras) = sealed
+                .get_mut(policy::EXTRA_HEADERS_FIELD)
+                .and_then(Value::as_object_mut)
+        {
+            for (header, value) in extras.iter_mut() {
+                let parameter = policy::extra_header_parameter(header);
+                let policy = policy::extra_header_policy(parameters, header, &self.allowances)
+                    .ok_or_else(|| SealingError::CannotSeal {
+                        reason: policy::why_unsealable(
+                            integration_id,
+                            parameters,
+                            &self.allowances,
+                        ),
+                    })?;
+                match value {
+                    Value::String(secret) if !secret.is_empty() => {
+                        if key.is_none() {
+                            key = Some(self.sealing_key(tenant_id).await.map_err(seal_failed)?);
+                        }
+                        let key = key.as_ref().expect("the key was just set");
+                        *value = seal_one(
+                            key,
+                            connection_id,
+                            &policy::extra_header_field(header),
+                            secret,
+                            &policy,
+                        )?;
+                    }
+                    kept if is_sealed(kept) => {
+                        let unchanged = held.map(|held| &held[header.as_str()]) == Some(&*kept)
+                            && kept[SEALED_MARKER]["policy"].as_str()
+                                == Some(policy_fingerprint(&policy)?.as_str());
+                        if !unchanged {
+                            return Err(SealingError::SecretRequired { field: parameter });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let sealed = Value::Object(sealed);
+        // A secret the type's policies do not cover would be stored readable.
+        if let Some(field) = policy::readable_secrets(integration_id, &sealed).first() {
+            return Err(SealingError::CannotSeal {
+                reason: format!("`{field}` is a secret this connection has no use for"),
+            });
+        }
+        Ok(Some(sealed))
+    }
+
+    /// A connection on a platform OAuth app, as seal makes a request to the
+    /// provider for it (a code exchange, a refresh, a revocation): with the
+    /// app's client secret sealed as the connection's own would be, so that
+    /// seal sends it. For one request: the result is never stored.
+    pub async fn with_app_client(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        integration_id: &str,
+        parameters: &Value,
+        client_id: &str,
+        client_secret: &str,
+    ) -> Result<Value, SealingError> {
+        let mut own = parameters.clone();
+        let cannot = |reason: String| SealingError::CannotSeal { reason };
+        let fields = own
+            .as_object_mut()
+            .ok_or_else(|| cannot("the connection has no parameters".to_owned()))?;
+        fields.remove(crate::oauth_apps::OAUTH_APP_PARAM);
+        fields.insert("client_id".to_owned(), Value::String(client_id.to_owned()));
+        fields.insert(
+            policy::CLIENT_SECRET_FIELD.to_owned(),
+            Value::String(client_secret.to_owned()),
+        );
+        let policies =
+            policy::policies(integration_id, &own, &self.allowances).ok_or_else(|| {
+                cannot(policy::why_unsealable(
+                    integration_id,
+                    &own,
+                    &self.allowances,
+                ))
+            })?;
+        let policy = policies
+            .get(policy::CLIENT_SECRET_FIELD)
+            .ok_or_else(|| cannot("the connection's type takes no client secret".to_owned()))?;
+        let key = self.sealing_key(tenant_id).await.map_err(seal_failed)?;
+        own[policy::CLIENT_SECRET_FIELD] = seal_one(
+            &key,
+            connection_id,
+            policy::CLIENT_SECRET_FIELD,
+            client_secret,
+            policy,
+        )?;
+        Ok(own)
     }
 
     /// Sends a request with a sealed connection's credentials. seal attaches
@@ -405,16 +505,16 @@ impl SealedCredentials {
     }
 
     /// Revokes a connection's sealed token at the provider: the refresh
-    /// token, or the access token if that is all it holds. `authorization`
-    /// is the client's own, where the provider wants it. `Ok(false)` if the
-    /// connection has no sealed token or nowhere to revoke it.
+    /// token, or the access token if that is all it holds. The client's own
+    /// secret goes with it where the provider wants it, sealed too.
+    /// `Ok(false)` if the connection has no sealed token or nowhere to
+    /// revoke it.
     pub async fn revoke_token(
         &self,
         tenant_id: &str,
         connection_id: &str,
         integration_id: &str,
         parameters: &Value,
-        authorization: Option<String>,
     ) -> Result<bool, String> {
         let Some(url) = policy::authorized_tokens(integration_id, parameters)
             .and_then(|tokens| tokens.revocation_url)
@@ -431,18 +531,16 @@ impl SealedCredentials {
             .map_err(|reason| format!("refusing to send the revocation request: {reason}"))?;
         let (name, value) = presented(parameters, field).map_err(|error| error.detail)?;
         let mut values = BTreeMap::from([(name, value)]);
-        let mut request = http::Request::builder()
+        let request = http::Request::builder()
             .method("POST")
             .uri(url)
             .header("content-type", "application/json");
-        // A sealed client secret is seal's to send, where the provider has
-        // the client say who it is; a readable one came as `authorization`.
+        // The client secret is seal's to send, where the provider has the
+        // client say who it is.
         if policy::client_secret_revokes(integration_id, parameters) {
             let (name, value) =
                 presented(parameters, policy::CLIENT_SECRET_FIELD).map_err(|error| error.detail)?;
             values.insert(name, value);
-        } else if let Some(authorization) = authorization {
-            request = request.header("authorization", authorization);
         }
         // seal names the token in the body, as its policy says.
         let request = request
@@ -490,15 +588,16 @@ impl SealedCredentials {
         }
     }
 
-    /// Seals the secret token of a Telegram webhook registered for a
-    /// connection at `webhook_url`. Telegram sends it back with each call.
-    /// The marker names the connection too: a trigger moved to another
-    /// connection holds a token that is not that connection's.
+    /// Seals the secret token of a webhook of a connection: Telegram's, which
+    /// it sends back with each call, registered at `webhook_url`; or, with no
+    /// URL, one that is only ever checked. The marker names the connection
+    /// too: a trigger moved to another connection holds a token that is not
+    /// that connection's.
     pub async fn seal_webhook_secret(
         &self,
         tenant_id: &str,
         connection_id: &str,
-        webhook_url: &str,
+        webhook_url: Option<&str>,
         token: &str,
     ) -> Result<Value, SealingError> {
         let policy = policy::telegram_webhook_secret_policy(webhook_url, &self.allowances)
@@ -518,11 +617,11 @@ impl SealedCredentials {
 
     /// Whether a sealed webhook secret token is the one a webhook registered
     /// for this connection at `webhook_url` would have: sealed for this
-    /// connection, and for that URL.
+    /// connection, and for that URL (or, with none, only to be checked).
     pub fn webhook_secret_is_current(
         &self,
         connection_id: &str,
-        webhook_url: &str,
+        webhook_url: Option<&str>,
         marker: &Value,
     ) -> bool {
         let current = policy::telegram_webhook_secret_policy(webhook_url, &self.allowances)
@@ -617,7 +716,15 @@ fn plain_parts(
 
 /// A connection's sealed parameter, as seal takes it.
 fn presented(parameters: &Value, name: &str) -> Result<(FieldName, SealedValue), SealError> {
-    let value = &parameters[name];
+    // An extra header's value is in the map of them, and sealed under a
+    // name made from the header's.
+    let header = policy::extra_header_of(name);
+    let field = header.map(policy::extra_header_field);
+    let name = field.as_deref().unwrap_or(name);
+    let value = match header {
+        Some(header) => &parameters[policy::EXTRA_HEADERS_FIELD][header],
+        None => &parameters[name],
+    };
     if !is_sealed(value) {
         return Err(invalid_request(
             "the connection holds no sealed value for this",
@@ -636,7 +743,10 @@ fn presented(parameters: &Value, name: &str) -> Result<(FieldName, SealedValue),
 pub fn request_fields(integration_id: &str, parameters: &Value) -> Vec<String> {
     policy::request_fields(integration_id, parameters)
         .into_iter()
-        .filter(|name| is_sealed(&parameters[name.as_str()]))
+        .filter(|name| match policy::extra_header_of(name) {
+            Some(header) => is_sealed(&parameters[policy::EXTRA_HEADERS_FIELD][header]),
+            None => is_sealed(&parameters[name.as_str()]),
+        })
         .collect()
 }
 
@@ -715,23 +825,9 @@ impl SealedCredentials {
     }
 }
 
-/// Turns sealing on: connections of the types seal handles are sealed as
-/// they are saved. Off by default.
-pub const SEALED_CREDENTIALS_ENV: &str = "RUNTARA_SEALED_CREDENTIALS";
-
 /// The key that wraps tenants' seal keys: 32 bytes in base64. If unset, the key
 /// is derived from the credential encryption key.
 pub const WRAPPING_KEY_ENV: &str = "RUNTARA_SEAL_WRAPPING_KEY";
-
-/// Whether [`SEALED_CREDENTIALS_ENV`] turns sealing on.
-pub fn sealing_enabled(value: Option<&str>) -> bool {
-    matches!(
-        value
-            .map(|value| value.trim().to_ascii_lowercase())
-            .as_deref(),
-        Some("true" | "1" | "yes" | "on")
-    )
-}
 
 /// The wrapping key: `wrapping_key` (base64, 32 bytes) if set, else one
 /// derived from `encryption_key` (base64, as the credential cipher takes it).
@@ -759,7 +855,7 @@ pub fn wrapping_key(
     }
     let Some(value) = set(encryption_key) else {
         return Err(format!(
-            "{SEALED_CREDENTIALS_ENV} is on, but there is no key to wrap tenants' seal keys with: \
+            "there is no key to wrap tenants' seal keys with: \
              set {WRAPPING_KEY_ENV} (openssl rand -base64 32), or {}",
             crate::crypto::ENCRYPTION_KEY_ENV
         ));
@@ -768,16 +864,13 @@ pub fn wrapping_key(
     Ok(keys::wrapping_key_from_encryption_key(&bytes))
 }
 
-/// seal for this deployment, from its environment: `None` unless
-/// [`SEALED_CREDENTIALS_ENV`] turns it on. Tenants' keys are kept in `pool`.
-/// Needs a Tokio runtime.
+/// seal for this deployment, from its environment. Tenants' keys are kept in
+/// `pool`, wrapped by [`WRAPPING_KEY_ENV`] or, without it, a key derived
+/// from the credential encryption key. Needs a Tokio runtime.
 pub fn from_env(
     pool: sqlx::PgPool,
     allowances: Allowances,
-) -> Result<Option<Arc<SealedCredentials>>, String> {
-    if !sealing_enabled(std::env::var(SEALED_CREDENTIALS_ENV).ok().as_deref()) {
-        return Ok(None);
-    }
+) -> Result<Arc<SealedCredentials>, String> {
     let key = wrapping_key(
         std::env::var(WRAPPING_KEY_ENV).ok().as_deref(),
         std::env::var(crate::crypto::ENCRYPTION_KEY_ENV)
@@ -789,7 +882,118 @@ pub fn from_env(
         key.as_ref(),
         allowances,
     )?;
-    Ok(Some(Arc::new(sealed)))
+    Ok(Arc::new(sealed))
+}
+
+/// Has tenants' seal keys follow a rotation of the credential encryption key.
+///
+/// Without [`WRAPPING_KEY_ENV`], the key that wraps them is derived from the
+/// encryption key, so it changes when that key is rotated. The keys still
+/// wrapped under one derived from a retired encryption key
+/// ([`crate::crypto::factory::RETIRED_KEYS_ENV`]) are wrapped again under the current
+/// one, so that the retired key can then be dropped as the rotation says.
+/// Returns how many were. A deployment with its own wrapping key has nothing
+/// to do here.
+pub async fn follow_encryption_key_rotation(pool: &sqlx::PgPool) -> Result<usize, String> {
+    use base64::Engine;
+    let set = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .map(|value| zeroize::Zeroizing::new(value.trim().to_owned()))
+            .filter(|value| !value.is_empty())
+    };
+    if set(WRAPPING_KEY_ENV).is_some() {
+        return Ok(0);
+    }
+    let Some(retired) = set(crate::crypto::factory::RETIRED_KEYS_ENV) else {
+        return Ok(0);
+    };
+    let current = wrapping_key(
+        None,
+        set(crate::crypto::ENCRYPTION_KEY_ENV)
+            .as_ref()
+            .map(|key| key.as_str()),
+    )?;
+    let current = keys::key_wrap(current.as_ref()).map_err(|error| error.to_string())?;
+    let mut wraps = Vec::new();
+    for entry in retired
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let (_, key) = entry.split_once(':').ok_or_else(|| {
+            format!(
+                "{} entries are kid:base64",
+                crate::crypto::factory::RETIRED_KEYS_ENV
+            )
+        })?;
+        let bytes = zeroize::Zeroizing::new(
+            base64::engine::general_purpose::STANDARD
+                .decode(key.trim())
+                .map_err(|_| {
+                    format!(
+                        "{} holds a key that is not base64",
+                        crate::crypto::factory::RETIRED_KEYS_ENV
+                    )
+                })?,
+        );
+        let derived = keys::wrapping_key_from_encryption_key(&bytes);
+        wraps.push(keys::key_wrap(derived.as_ref()).map_err(|error| error.to_string())?);
+    }
+    keys::rewrap_retired(pool, current.as_ref(), &wraps).await
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl SealedCredentials {
+    /// seal for a test, as a development deployment has it: in this process,
+    /// and allowed to reach loopback, where a test's stand-in for a provider
+    /// listens. Needs a Tokio runtime.
+    ///
+    /// Every seal made here shares one set of keys, as the instances of one
+    /// deployment do: what one seals, another opens.
+    pub fn for_tests() -> Arc<Self> {
+        let loopback = || vec!["127.0.0.1".to_owned(), "localhost".to_owned()];
+        Self::for_tests_with(Allowances {
+            private_hosts: loopback(),
+            plain_http_hosts: loopback(),
+            private_databases: true,
+            ..Allowances::default()
+        })
+    }
+
+    /// [`Self::for_tests`], with only what a test lets seal reach.
+    pub fn for_tests_with(allowances: Allowances) -> Arc<Self> {
+        static KEYS: std::sync::OnceLock<Arc<MemoryKeySource>> = std::sync::OnceLock::new();
+        Arc::new(
+            Self::in_process(
+                KEYS.get_or_init(|| Arc::new(MemoryKeySource::default()))
+                    .clone(),
+                &[7_u8; 32],
+                allowances,
+            )
+            .expect("seal starts in a test"),
+        )
+    }
+}
+
+/// The marker of `secret`, sealed to a tenant's `key` for one field of one
+/// connection, to be used as `policy` says.
+fn seal_one(
+    key: &(KeysetId, KeyId, PublicKey),
+    connection_id: &str,
+    field: &str,
+    secret: &str,
+    policy: &Policy,
+) -> Result<Value, SealingError> {
+    let (keyset, kid, public) = key;
+    let binding = Binding {
+        keyset,
+        item: &item(connection_id)?,
+        field: &field_name(field)?,
+    };
+    let envelope = seal_format::seal(public, kid, binding, secret.as_bytes(), policy)
+        .map_err(|error| SealingError::Seal(error.to_string()))?;
+    marker(&envelope, &policy_fingerprint(policy)?)
 }
 
 /// Whether a parameter's value is a sealed value's marker.
@@ -801,9 +1005,14 @@ pub fn is_sealed(value: &Value) -> bool {
 
 /// Whether any of a connection's parameters is sealed.
 pub fn has_sealed_values(parameters: &Value) -> bool {
-    parameters
-        .as_object()
-        .is_some_and(|fields| fields.values().any(is_sealed))
+    parameters.as_object().is_some_and(|fields| {
+        fields.values().any(is_sealed)
+            // An MCP connection's extra headers are sealed in their map.
+            || fields
+                .get(policy::EXTRA_HEADERS_FIELD)
+                .and_then(Value::as_object)
+                .is_some_and(|extras| extras.values().any(is_sealed))
+    })
 }
 
 fn marker(envelope: &Envelope, fingerprint: &str) -> Result<Value, SealingError> {
