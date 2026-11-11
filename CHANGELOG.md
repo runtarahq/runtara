@@ -36,11 +36,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     where seal puts it.
   - **A webhook signing secret** (Slack, Mailgun) can be sent nowhere: seal
     checks a signature against it and answers yes or no.
-  - **A Telegram webhook's secret token**, which a Channel trigger holds:
-    where the connection's bot token is sealed, registration seals it too.
-    seal sends it beside the bot token to register the connection's own
-    webhook URL and no other, and checks the token of each inbound call
-    against it.
+  - **A webhook's secret token**, which a Channel trigger holds, is sealed
+    too. seal sends Telegram's beside the bot token to register the
+    connection's own webhook URL and no other, and checks the token of each
+    inbound call against it. One this runtime does not register (no
+    `WEBHOOK_BASE_URL`, or another platform) can be sent nowhere and is only
+    checked. Secrets earlier releases stored readable in triggers are sealed
+    when the server starts, as the same tokens.
   - **A key that signs requests** (`azure_blob_storage`, `aws_credentials`,
     `s3_compatible`): seal signs the request it sends, and a session token
     goes only with its key. A presigned URL or shared access signature for a
@@ -65,11 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     holds: seal sends the secret with the authorization code, and the pair
     comes back already sealed. A refresh and a revocation go through seal
     too. A platform OAuth app's client secret is the deployment's own, not
-    a connection's: it is sealed for the one exchange, so that a connection
-    on the app gets its tokens sealed too, and is sent with a refresh or a
-    revocation by seal. The HubSpot account is not named to whoever confirms
-    a flow started without a browser, since a sealed token is shown to no
-    one.
+    a connection's: it is sealed for each exchange, refresh and revocation
+    as the connection's own would be, so that seal sends it and a connection
+    on the app gets its tokens sealed too. The HubSpot account is not named
+    to whoever confirms a flow started without a browser, since a sealed
+    token is shown to no one.
   - **A Postgres password** (`postgres`): seal logs in and relays the
     session, through a Unix socket this process owns. seal is held to the
     protection the URL's `sslmode` asks for: `verify-full` verifies the
@@ -87,7 +89,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carries a query, a fragment or credentials, plain HTTP for a host not in
   `RUNTARA_PROXY_ALLOW_HTTP_HOSTS`, a Postgres URL as above, an `http_basic`
   username with a colon, an MCP header of the connection's own in the
-  credential's place, or a connection type this build does not know.
+  credential's place, or a connection type this build does not know. An MCP
+  connection's `extra_headers` are sent as they are and are no place for a
+  credential: one named as a credential is (`Authorization`, `Cookie`,
+  `X-Api-Key`, a `token`, `secret` or `password`) is refused, and belongs in
+  the bearer token or API key.
 
   The default object-model connection the server makes for each tenant no
   longer holds a copy of `OBJECT_MODEL_DATABASE_URL`: it stands for the

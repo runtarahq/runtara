@@ -28,7 +28,10 @@ scoped README files, examples.
   extractors. Do not add a
   normal workflow agent there.
 - `crates/runtara-connections` owns credential storage, OAuth, connection
-  schemas, and rate limiting.
+  schemas, and rate limiting. A connection's secrets are stored and used
+  sealed only (its `sealed` module, over
+  [seal](https://github.com/runtarahq/seal)): seal attaches them to the
+  requests it sends, and nothing else reads them.
 - `crates/runtara-object-store` owns schema-driven tenant object storage.
 - The console (React/Vite) lives in
   [runtarahq/runtara-frontend](https://github.com/runtarahq/runtara-frontend)
@@ -51,10 +54,14 @@ scoped README files, examples.
 - Make the smallest correct change and follow patterns in the affected module.
 - Search for every exhaustive match or registry when adding DSL variants,
   metadata fields, error types, or connection types.
-- Keep host and WASM boundaries explicit. Ordinary WASM agents do not receive
-  raw network, filesystem, or credential access. Only approved built-in
-  `trusted` capabilities receive credentials for their own connection types,
-  in fresh host-managed instances with network and filesystem access denied.
+- Keep host and WASM boundaries explicit. WASM agents do not receive raw
+  network, filesystem, or credential access. No component is given a
+  connection's credentials, the built-in `trusted` capabilities included:
+  what one would do with a key (presigning a URL), the host has seal do.
+- Do not add a path that stores a connection secret readable, or that uses
+  one except through seal. A new connection type says where each secret goes
+  in `runtara-connections`' `sealed::policy`; a secret seal cannot hold is
+  refused when the connection is saved.
 - Never read, print, log, or commit credential values. Treat `.env*`, tokens,
   connection parameters, and database URLs as sensitive.
 - Do not hand-edit generated artifacts or ignored build outputs.
