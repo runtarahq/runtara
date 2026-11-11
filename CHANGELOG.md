@@ -39,12 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `s3_compatible`): seal signs the request it sends, and a session token
     goes only with its key. A presigned URL or shared access signature for a
     sealed key is made by seal, for at most seven days as before; the key is
-    not given to the presigning capability. `aws_credentials` and
-    `s3_compatible` are sealed only by a seal that lets a request name its
-    operation (`X-Amz-Target`) and a whole endpoint copy between buckets;
-    with an earlier seal they stay as they were. A sealed AWS connection
-    signs for Bedrock and the regional services seal's policy lists; one
-    with an endpoint of its own must name its `service`.
+    not given to the presigning capability. A sealed AWS connection signs
+    for Bedrock and the regional services its policy lists (SQS, SNS,
+    DynamoDB, Lambda, Kinesis, STS, EventBridge, Step Functions, Secrets
+    Manager, Systems Manager); one with an endpoint of its own must name
+    its `service`, or it stays as it was.
   - **A client certificate's private key** (`http_mtls`): seal presents the
     certificate on the connection it opens. Changing the certificate or the
     server CA needs the key again.
