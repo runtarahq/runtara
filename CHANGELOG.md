@@ -23,7 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   secret or one not sealed yet). Tenants' seal keys are kept in
   `seal_wrapped_key`, wrapped by `RUNTARA_SEAL_WRAPPING_KEY` (base64, 32
   bytes) or, without it, a key derived from
-  `RUNTARA_CONNECTIONS_ENCRYPTION_KEY`. Editing a connection's base URL, or
+  `RUNTARA_CONNECTIONS_ENCRYPTION_KEY`; in that case they follow a rotation
+  of the encryption key, wrapped again under the new one when the server
+  starts or `reencrypt-connections` runs with the old key listed in
+  `RUNTARA_CONNECTIONS_RETIRED_KEYS`. Editing a connection's base URL, or
   anything else that changes where its secret goes, needs the secret
   entered again. What is sealed, by kind of connection:
   - **A key or token sent with each request** (`shopify_access_token`,
@@ -60,7 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     endpoint, and the access token comes back already sealed for the API.
     A sealed `teams_bot` reaches the Bot Connector hosts a service URL may
     name: `smba.trafficmanager.net`, `botframework.com`, and the names under
-    them.
+    them. A host in `RUNTARA_PROXY_ALLOWED_HOSTS` may stand for one (an
+    emulator); seal matches the port, so list it as `host:port`.
   - **The tokens of an authorization-code connection**
     (`hubspot_private_app`, `quickbooks_online`, `xero_oauth`,
     `http_oauth2_authorization_code`), and the client secret the connection
