@@ -139,14 +139,18 @@ set the new key (and `RUNTARA_CONNECTIONS_ENCRYPTION_KEY_ID`), list the old one
 in `RUNTARA_CONNECTIONS_RETIRED_KEYS` (`kid:base64,…`), re-encrypt, then drop
 it.
 
-Sealed credentials (`RUNTARA_SEALED_CREDENTIALS=1`, off by default) store each
-secret with the one place it may go; the [changelog](../CHANGELOG.md) lists
-what is sealed. Connections are sealed as they are saved. To seal the ones
-stored before, run `runtara-server seal-connections --dry-run` with the
-service's environment to see how many it would seal, then without `--dry-run`.
-Sealing is one-way. When a tenant leaves, `runtara-server destroy-seal-keys
---tenant-id <id> --confirm <id>` destroys its seal keys, after which nothing
-sealed for it can be opened; this cannot be undone.
+Each connection secret is stored sealed, with the one place it may go; the
+[changelog](../CHANGELOG.md) lists what is sealed and how. A secret that
+cannot be sealed is refused when the connection is saved. On start the server
+seals the connections an earlier release stored readable; `runtara-server
+seal-connections --dry-run`, run with the service's environment, shows how
+many it would seal and names the ones it cannot (`unsealable`), which must be
+entered again before they can be used. A Postgres connection's URL must say
+how its session is protected: `?sslmode=verify-full`, `?sslmode=require`, or
+`?sslmode=disable` for a host in `RUNTARA_PROXY_ALLOW_HTTP_HOSTS`. Sealing is
+one-way. When a tenant leaves, `runtara-server destroy-seal-keys --tenant-id
+<id> --confirm <id>` destroys its seal keys, after which nothing sealed for
+it can be opened; this cannot be undone.
 
 ### Authentication
 
