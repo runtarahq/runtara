@@ -85,6 +85,98 @@ async fn a_declared_connection_authenticates_as_its_base_on_the_vendor_host() {
     runtara_agents::derived::register(vec![]).unwrap();
 }
 
+/// A declared connection's secret is sealed as its base type's, for the URL
+/// the declaration renders: seal sends it to the vendor's host, and nowhere
+/// else, and this process attaches nothing.
+#[tokio::test]
+async fn a_declared_connections_secret_is_sealed_for_the_vendors_host() {
+    use runtara_connections::sealed::{
+        Allowances, MemoryKeySource, SealedCredentials, SendError, is_sealed, policy,
+    };
+    let _serial = SERIAL.lock().await;
+    runtara_agents::derived::register(vec![("example-crm".into(), example_crm())]).unwrap();
+
+    let entered = json!({"account": "acme", "username": "api", "password": "pw-CANARY"});
+    let policies = policy::policies("example_crm", &entered, &Allowances::default())
+        .expect("a declared type is sealed as its base");
+    assert_eq!(policies.keys().collect::<Vec<_>>(), ["password"]);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &policies["password"].canonical_json().unwrap()
+        )
+        .unwrap(),
+        json!({"rules": [{
+            "destination": {
+                "scheme": "https", "host": "acme.vendor.example", "path_prefix": "/api",
+            },
+            "inject": {"basic": {"username": {"literal": "api"}}},
+        }]})
+    );
+    assert!(policy::is_sealable_type("example_crm"));
+
+    let sealed = SealedCredentials::in_process(
+        std::sync::Arc::new(MemoryKeySource::default()),
+        &[7_u8; 32],
+        Allowances::default(),
+    )
+    .unwrap();
+    let stored = sealed
+        .seal_parameters("tenant", "conn-1", "example_crm", &entered, None)
+        .await
+        .unwrap()
+        .expect("the connection is sealed");
+    assert!(is_sealed(&stored["password"]));
+    assert!(!stored.to_string().contains("pw-CANARY"));
+    assert_eq!(policy::request_fields("example_crm", &stored), ["password"]);
+    assert_eq!(
+        policy::injected_headers("example_crm", &stored),
+        ["Authorization"]
+    );
+
+    // Sealed, the connection still resolves to the vendor's host, and this
+    // process has no credential to attach.
+    let (base_url, headers) = resolve(stored.clone()).await;
+    assert_eq!(base_url.as_deref(), Some("https://acme.vendor.example/api"));
+    assert!(headers.is_empty(), "{:?}", headers.keys());
+
+    // Another account's host is another destination: seal refuses it before
+    // anything is sent.
+    let refused = sealed
+        .send_bounded(
+            "tenant",
+            "conn-1",
+            "example_crm",
+            &stored,
+            "GET",
+            "https://other.vendor.example/api/contacts",
+            [],
+            None,
+            65536,
+        )
+        .await;
+    assert!(
+        matches!(&refused, Err(SendError::Seal(error)) if error.code.as_str() == "POLICY_DENIED"),
+        "{refused:?}"
+    );
+    // Moved to another account, the password must be entered again.
+    let mut moved = stored.clone();
+    moved["account"] = json!("other");
+    assert!(
+        sealed
+            .seal_parameters("tenant", "conn-1", "example_crm", &moved, Some(&stored))
+            .await
+            .is_err()
+    );
+    // Parameters that render no URL name no destination: nothing is sealed.
+    let invalid = json!({"account": "attacker.example#", "username": "api", "password": "pw"});
+    assert_eq!(
+        policy::policies("example_crm", &invalid, &Allowances::default()),
+        None
+    );
+
+    runtara_agents::derived::register(vec![]).unwrap();
+}
+
 #[tokio::test]
 async fn invalid_parameters_fail_closed_with_no_credential_and_no_base_url() {
     let _serial = SERIAL.lock().await;

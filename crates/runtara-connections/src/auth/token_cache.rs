@@ -301,7 +301,69 @@ pub(crate) async fn resolve_deferred_auth(
     }
 }
 
-async fn resolve_cached_token<F, Fut>(
+impl TokenCacheKey {
+    /// The key of the same credential held sealed: a sealed token and a
+    /// readable one are never taken for each other.
+    pub(crate) fn sealed(&self) -> Self {
+        Self {
+            connection_id: self.connection_id.clone(),
+            digest: format!("{}:sealed", self.digest),
+        }
+    }
+}
+
+/// What [`refreshed_token`] found.
+pub(crate) enum Refreshed {
+    /// A token kept from an earlier refresh, still fresh.
+    Kept(String),
+    /// The token endpoint's answer to a refresh made now.
+    Now(TokenResponse),
+}
+
+/// A refresh-token grant's access token: the kept one while it is fresh,
+/// else from `refresh`, which only one caller at a time runs for a
+/// connection. A provider that rotates refresh tokens voids the old one on
+/// use, so two refreshes at once would void each other. A refresh that just
+/// failed is not tried again at once.
+pub(crate) async fn refreshed_token<F, Fut>(
+    cache_key: &TokenCacheKey,
+    refresh: F,
+) -> Result<Refreshed, AuthResolutionError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<TokenResponse, AuthResolutionError>>,
+{
+    if let Some(token) = get_fresh_cached_token(cache_key) {
+        return Ok(Refreshed::Kept(token));
+    }
+    let lock = refresh_lock(cache_key);
+    let _guard = lock.lock().await;
+    if let Some(token) = get_fresh_cached_token(cache_key) {
+        return Ok(Refreshed::Kept(token));
+    }
+    if let Some(error) = recent_refresh_error(cache_key) {
+        return Err(error);
+    }
+    match refresh().await {
+        Ok(response) => {
+            clear_refresh_error(cache_key);
+            cache_token(
+                cache_key,
+                CachedAccessToken {
+                    access_token: response.access_token.clone(),
+                    expires_at: response.expires_at,
+                },
+            );
+            Ok(Refreshed::Now(response))
+        }
+        Err(error) => {
+            record_refresh_error(cache_key, &error);
+            Err(error)
+        }
+    }
+}
+
+pub(crate) async fn resolve_cached_token<F, Fut>(
     cache_key: &TokenCacheKey,
     fetch: F,
 ) -> Result<String, AuthResolutionError>
@@ -485,7 +547,7 @@ async fn parse_token_response(
 
 /// When the token expires: after its `expires_in`, or after the default
 /// lifetime when the provider sends none, or one too large to be a date.
-fn token_expiry(body: &Value, default_ttl_seconds: i64) -> Option<DateTime<Utc>> {
+pub(crate) fn token_expiry(body: &Value, default_ttl_seconds: i64) -> Option<DateTime<Utc>> {
     let after = |seconds: i64| Utc::now().checked_add_signed(Duration::try_seconds(seconds)?);
     match expires_in_seconds(body).and_then(after) {
         Some(expiry) => Some(expiry),
@@ -712,7 +774,7 @@ pub(crate) fn build_token_cache_key(connection_id: &str, parts: &[&str]) -> Toke
     }
 }
 
-fn form_urlencoded(fields: &[(String, String)]) -> String {
+pub(crate) fn form_urlencoded(fields: &[(String, String)]) -> String {
     fields
         .iter()
         .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))

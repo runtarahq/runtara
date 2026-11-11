@@ -45,6 +45,7 @@ pub async fn create_connection_handler(
     State(events): State<crate::events::ConnectionEvents>,
     State(oauth): State<crate::config::OAuthOptions>,
     State(agent_access): State<Arc<dyn crate::config::AgentAccess>>,
+    State(sealed): State<Option<Arc<crate::sealed::SealedCredentials>>>,
     Json(payload): Json<CreateConnectionRequest>,
 ) -> Result<(StatusCode, Json<CreateConnectionResponse>), (StatusCode, Json<Value>)> {
     // A connection type an agent declared exists only for the tenants that
@@ -68,7 +69,9 @@ pub async fn create_connection_handler(
     }
     // Create service with repository
     let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
-    let service = ConnectionService::new(repository, compatibility).with_oauth(&oauth);
+    let service = ConnectionService::new(repository, compatibility)
+        .with_oauth(&oauth)
+        .with_sealed(sealed);
 
     // Capture the integration id before `payload` is consumed by the service.
     let integration = payload.integration_id.clone();
@@ -324,18 +327,22 @@ pub async fn resolve_connection_resource_handler(
     ),
     tag = "connections-controller"
 ))]
+#[allow(clippy::too_many_arguments)] // axum extractors
 pub async fn update_connection_handler(
     crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
     State(pool): State<PgPool>,
     State(cipher): State<Arc<dyn CredentialCipher>>,
     State(compatibility): State<Arc<IntegrationCompatibility>>,
     State(oauth): State<crate::config::OAuthOptions>,
+    State(sealed): State<Option<Arc<crate::sealed::SealedCredentials>>>,
     Path(id): Path<String>,
     Json(payload): Json<UpdateConnectionRequest>,
 ) -> Result<Json<ConnectionResponse>, (StatusCode, Json<Value>)> {
     // Create service with repository
     let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
-    let service = ConnectionService::new(repository, compatibility).with_oauth(&oauth);
+    let service = ConnectionService::new(repository, compatibility)
+        .with_oauth(&oauth)
+        .with_sealed(sealed);
 
     match service.update_connection(&id, &tenant_id, payload).await {
         Ok(connection) => Ok(Json(ConnectionResponse {

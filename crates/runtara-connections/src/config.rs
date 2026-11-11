@@ -65,6 +65,12 @@ pub struct ConnectionsConfig {
     /// is offered to, and can be created by, only the tenants that may use
     /// one of the agents declaring it. [`EveryAgent`] allows every agent.
     pub agent_access: Arc<dyn AgentAccess>,
+
+    /// seal, if this deployment seals credentials. With it, saving a
+    /// connection of a type seal handles seals its secrets. Without it,
+    /// connections are stored as they always were, and one already sealed
+    /// cannot be used.
+    pub sealed: Option<Arc<crate::sealed::SealedCredentials>>,
 }
 
 /// Which agents a tenant may use (the host's entitlements).
@@ -173,6 +179,8 @@ pub struct ConnectionsState {
     pub connection_events: crate::events::ConnectionEvents,
     pub oauth: OAuthOptions,
     pub agent_access: Arc<dyn AgentAccess>,
+    /// See [`ConnectionsConfig::sealed`].
+    pub sealed: Option<Arc<crate::sealed::SealedCredentials>>,
 }
 
 impl ConnectionsState {
@@ -189,7 +197,14 @@ impl ConnectionsState {
             connection_events: config.connection_events,
             oauth: config.oauth,
             agent_access: config.agent_access,
+            sealed: config.sealed,
         }
+    }
+}
+
+impl axum::extract::FromRef<ConnectionsState> for Option<Arc<crate::sealed::SealedCredentials>> {
+    fn from_ref(state: &ConnectionsState) -> Self {
+        state.sealed.clone()
     }
 }
 

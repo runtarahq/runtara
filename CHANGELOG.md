@@ -13,6 +13,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Sealed credentials, off by default.** With `RUNTARA_SEALED_CREDENTIALS=1`,
+  a connection's secrets are sealed by [seal](https://github.com/runtarahq/seal)
+  when the connection is saved. A sealed secret is stored with the one place
+  it may go, and seal uses it there: this process keeps a value it cannot
+  send anywhere else. seal runs in the server process, so the server can
+  still open every credential. `connection_data_entity.credential_format`
+  says how a row's secrets are held (`cipher` or `seal`). Tenants' seal keys
+  are kept in `seal_wrapped_key`, wrapped by `RUNTARA_SEAL_WRAPPING_KEY`
+  (base64, 32 bytes) or, without it, a key derived from
+  `RUNTARA_CONNECTIONS_ENCRYPTION_KEY`. Editing a sealed connection's base
+  URL, or anything else that changes where its secret goes, needs the secret
+  entered again. What is sealed, by kind of connection:
+  - **A key or token sent with each request** (`shopify_access_token`,
+    `hubspot_access_token`, `stripe_api_key`, `pipedrive_api_token`,
+    `shippo_api_token`, `jira_api_token`, `openai_api_key`, `gemini_api_key`,
+    `slack_bot`, `mailgun`, `mcp`, `http_bearer`, `http_basic`,
+    `http_api_key`, and the types agents declare on the last three): seal
+    attaches it and sends the request, whether an agent's, a model listing
+    or a channel's reply. A `telegram_bot` token goes in the URL's path,
+    where seal puts it.
+  - **A webhook signing secret** (Slack, Mailgun) can be sent nowhere: seal
+    checks a signature against it and answers yes or no.
+  - **A Telegram webhook's secret token**, which a Channel trigger holds:
+    where the connection's bot token is sealed, registration seals it too.
+    seal sends it beside the bot token to register the connection's own
+    webhook URL and no other, and checks the token of each inbound call
+    against it.
+  - **A key that signs requests** (`azure_blob_storage`, `aws_credentials`,
+    `s3_compatible`): seal signs the request it sends, and a session token
+    goes only with its key. A presigned URL or shared access signature for a
+    sealed key is made by seal, for at most seven days as before; the key is
+    not given to the presigning capability. A sealed AWS key signs for
+    whatever service each request names, on AWS's hosts or on the
+    connection's own endpoint; its IAM permissions are what limit it.
+  - **A client certificate's private key** (`http_mtls`): seal presents the
+    certificate on the connection it opens. Changing the certificate or the
+    server CA needs the key again.
+  - **An OAuth client secret used for client credentials**
+    (`shopify_client_credentials`, `microsoft_entra_client_credentials`,
+    `http_oauth2_client_credentials`, `zendesk_client_credentials`,
+    `ups_client_credentials`, `teams_bot`): seal sends it to the token
+    endpoint, and the access token comes back already sealed for the API.
+    A sealed `teams_bot` reaches the Bot Connector hosts a service URL may
+    name: `smba.trafficmanager.net`, `botframework.com`, and the names under
+    them.
+  - **The tokens of an authorization-code connection**
+    (`hubspot_private_app`, `quickbooks_online`, `xero_oauth`,
+    `http_oauth2_authorization_code`), and the client secret the connection
+    holds: seal sends the secret with the authorization code, and the pair
+    comes back already sealed. A refresh and a revocation go through seal
+    too. A connection whose client secret is still readable, or is a
+    platform OAuth app's, has its tokens sealed as they become the
+    connection's. With sealed tokens, the HubSpot account is not named to
+    whoever confirms a flow started without a browser.
+  - **A Postgres password** (`postgres`): seal logs in and relays the
+    session, through a Unix socket this process owns. seal is held to the
+    protection the URL's `sslmode` asks for: `verify-full` verifies the
+    server; `require` encrypts without verifying it; `disable` uses no TLS,
+    and is sealed only for a host in `RUNTARA_PROXY_ALLOW_HTTP_HOSTS`. To a
+    server that is not verified, seal logs in with SCRAM only, so the
+    password is never sent: such a server must offer SCRAM. A URL with
+    `prefer`, `allow`, `verify-ca` or no `sslmode`, or with anything else in
+    its query, is not sealed and stays as it was. Where
+    `RUNTARA_DATABASE_CONNECTION_GUARD` is off, seal may reach private
+    database addresses too.
+
+  Connections stored before sealing was on are sealed when they are next
+  saved, or all at once by `runtara-server seal-connections [--tenant-id
+  <id>] [--dry-run]`. Sealing is one-way: a sealed secret is not stored
+  readable again. When a tenant leaves, `runtara-server destroy-seal-keys
+  --tenant-id <id> --confirm <id>` destroys its seal keys: everything
+  sealed for it, in the database and in every copy of its rows, can then no
+  longer be opened.
+
 - **`connector_gen` generates from a spec you write, and takes more of an API.**
   `spec: {path: openapi.yaml, sha256: …}` reads a spec kept in the crate, for a
   vendor that publishes none. `x-runtara-input-name` on a parameter or body field

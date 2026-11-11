@@ -64,6 +64,24 @@ pub trait TrustedCredentials: Send + Sync {
         allowed_types: &[String],
     ) -> Result<TrustedContext, String>;
 
+    /// The host's own answer to a call, in place of running the guest: for a
+    /// connection whose credentials the host cannot hand to any guest, such
+    /// as one whose secrets are sealed. `None` runs the guest as usual.
+    ///
+    /// Implementations make the same checks as [`Self::resolve`], and answer
+    /// as the capability would.
+    async fn answer(
+        &self,
+        _tenant: &str,
+        _agent: &str,
+        _capability: &str,
+        _connection: &str,
+        _allowed_types: &[String],
+        _input: &[u8],
+    ) -> Option<Result<Vec<u8>, String>> {
+        None
+    }
+
     /// Host policy for the authorized input and endpoint, before guest startup.
     fn validate_input(
         &self,
@@ -439,6 +457,29 @@ impl TrustedExecutor {
                 .credentials
                 .get()
                 .ok_or_else(|| error("TRUSTED_UNAVAILABLE", "Credential service unavailable"))?;
+            if let Some(answer) = provider
+                .answer(
+                    tenant,
+                    &agent_id,
+                    capability,
+                    connection,
+                    &target.integration_ids,
+                    &input,
+                )
+                .await
+            {
+                let output = answer?;
+                if output.len() > MAX_OUTPUT {
+                    return Err(error(
+                        "TRUSTED_OUTPUT_LIMIT",
+                        "Trusted output exceeds limit",
+                    ));
+                }
+                serde_json::from_slice::<serde::de::IgnoredAny>(&output).map_err(|_| {
+                    error("TRUSTED_INVALID_OUTPUT", "Trusted output is not valid JSON")
+                })?;
+                return Ok(output);
+            }
             let context = provider
                 .resolve(tenant, &agent_id, connection, &target.integration_ids)
                 .await?;
@@ -644,6 +685,14 @@ mod tests {
     }
 
     fn executor(wasm: &[u8]) -> (Arc<TrustedExecutor>, Arc<Credentials>) {
+        let credentials = Arc::new(Credentials(AtomicUsize::new(0)));
+        (executor_with(wasm, credentials.clone()), credentials)
+    }
+
+    fn executor_with(
+        wasm: &[u8],
+        credentials: Arc<dyn TrustedCredentials>,
+    ) -> Arc<TrustedExecutor> {
         let engine = crate::engine::build_engine(&crate::engine::EngineConfig::default()).unwrap();
         crate::engine::spawn_epoch_ticker(engine.clone());
         let mut executor = TrustedExecutor::new(engine);
@@ -656,9 +705,101 @@ mod tests {
         executor
             .register(&info, wasm, &serde_json::to_vec(&info).unwrap())
             .unwrap();
-        let credentials = Arc::new(Credentials(AtomicUsize::new(0)));
-        executor.set_credentials(credentials.clone()).unwrap();
-        (Arc::new(executor), credentials)
+        executor.set_credentials(credentials).unwrap();
+        Arc::new(executor)
+    }
+
+    /// A host that answers calls itself, as for a connection whose
+    /// credentials no guest may have.
+    struct Answering {
+        answer: Result<Vec<u8>, String>,
+        resolved: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl TrustedCredentials for Answering {
+        async fn resolve(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &[String],
+        ) -> Result<TrustedContext, String> {
+            self.resolved.fetch_add(1, Ordering::SeqCst);
+            Err(error("UNEXPECTED", "the guest was to be left out"))
+        }
+        async fn answer(
+            &self,
+            tenant: &str,
+            agent: &str,
+            capability: &str,
+            connection: &str,
+            allowed: &[String],
+            input: &[u8],
+        ) -> Option<Result<Vec<u8>, String>> {
+            assert_eq!(
+                (tenant, agent, capability, connection),
+                ("tenant", "crypto", "hash", "connection")
+            );
+            assert_eq!(allowed, ["test".to_owned()]);
+            assert_eq!(input, b"{}");
+            Some(self.answer.clone())
+        }
+    }
+
+    /// A host's own answer is the call's result: no credentials are resolved
+    /// and no guest runs. It is held to the same output rules as a guest's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hosts_own_answer_replaces_the_guest() {
+        let answering = |answer: Result<Vec<u8>, String>| {
+            let provider = Arc::new(Answering {
+                answer,
+                resolved: AtomicUsize::new(0),
+            });
+            // A guest that would trap if it ran.
+            let executor = executor_with(&fixture("unreachable", 1, ""), provider.clone());
+            (executor, provider)
+        };
+        let timeout = Duration::from_secs(5);
+
+        let (executor, provider) = answering(Ok(b"{\"success\":true}".to_vec()));
+        assert_eq!(
+            call(&executor, timeout).await.unwrap(),
+            b"{\"success\":true}"
+        );
+        assert_eq!(provider.resolved.load(Ordering::SeqCst), 0);
+
+        let (executor, _) = answering(Err(error("DENIED", "no")));
+        assert!(
+            call(&executor, timeout)
+                .await
+                .unwrap_err()
+                .contains("DENIED")
+        );
+
+        let (executor, _) = answering(Ok(b"not json".to_vec()));
+        let refused = call(&executor, timeout).await.unwrap_err();
+        assert!(refused.contains("TRUSTED_INVALID_OUTPUT"), "{refused}");
+
+        let (executor, _) = answering(Ok(vec![b'1'; MAX_OUTPUT + 1]));
+        let refused = call(&executor, timeout).await.unwrap_err();
+        assert!(refused.contains("TRUSTED_OUTPUT_LIMIT"), "{refused}");
+
+        // A capability that is not a trusted built-in is refused before the
+        // host is asked anything.
+        let (executor, provider) = answering(Ok(b"{}".to_vec()));
+        let denied = executor
+            .invoke(
+                "tenant",
+                "crypto",
+                "not-trusted",
+                "connection",
+                b"{}".to_vec(),
+                tokio::time::Instant::now() + timeout,
+            )
+            .await
+            .unwrap_err();
+        assert!(denied.contains("TRUSTED_CAPABILITY_DENIED"), "{denied}");
+        assert_eq!(provider.resolved.load(Ordering::SeqCst), 0);
     }
 
     async fn call(executor: &TrustedExecutor, timeout: Duration) -> Result<Vec<u8>, String> {

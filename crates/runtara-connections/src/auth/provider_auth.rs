@@ -29,6 +29,13 @@ pub struct ResolvedConnectionAuth {
     /// must be persisted back to the connection. `None` on every cache hit / fast
     /// path and for non-refresh grants. Consumed by the facade write-back.
     pub rotated_credentials: Option<RotatedCredentials>,
+    /// For a connection whose OAuth secrets are sealed: its parameters with
+    /// the sealed access token a request presents. The token was got through
+    /// seal and is never readable here.
+    pub sealed_parameters: Option<Value>,
+    /// The sealed tokens a refresh through seal brought back, to be stored
+    /// with the connection. `None` unless a refresh was made now.
+    pub rotated_sealed: Option<crate::sealed::RotatedSealed>,
 }
 
 /// Access + (possibly rotated) refresh token captured when an OAuth refresh fires,
@@ -83,6 +90,32 @@ pub async fn resolve_connection_auth(
     headers: &mut HashMap<String, String>,
     events: &crate::events::ConnectionEvents,
 ) -> Result<ResolvedConnectionAuth, token_cache::AuthResolutionError> {
+    resolve_connection_auth_with_seal(
+        client,
+        tenant_id,
+        connection_id,
+        integration_id,
+        params,
+        headers,
+        events,
+        None,
+    )
+    .await
+}
+
+/// [`resolve_connection_auth`], for a deployment with seal: a connection
+/// whose OAuth secrets are sealed gets its access token through it.
+#[allow(clippy::too_many_arguments)]
+pub async fn resolve_connection_auth_with_seal(
+    client: &Client,
+    tenant_id: &str,
+    connection_id: &str,
+    integration_id: &str,
+    params: &Value,
+    headers: &mut HashMap<String, String>,
+    events: &crate::events::ConnectionEvents,
+    sealed: Option<&crate::sealed::SealedCredentials>,
+) -> Result<ResolvedConnectionAuth, token_cache::AuthResolutionError> {
     // Authorized by a flow started without a browser and not yet confirmed:
     // its tokens are held apart, and the connection has none of its own.
     if params
@@ -95,7 +128,11 @@ pub async fn resolve_connection_auth(
         ));
     }
     let descriptor = describe_connection_auth(connection_id, integration_id, params, headers);
-    let mtls_client = if integration_id == "http_mtls" {
+    // A sealed private key makes no client here: seal presents the
+    // certificate on the connection it opens.
+    let mtls_client = if integration_id == "http_mtls"
+        && !crate::sealed::is_sealed(&params["client_private_key_pem"])
+    {
         Some(net::build_hardened_mtls_client(params).map_err(|error| {
             token_cache::AuthResolutionError::permanent(format!(
                 "Invalid HTTP mTLS configuration: {error}"
@@ -120,16 +157,51 @@ pub async fn resolve_connection_auth(
         rotated_credentials = resolved.rotated;
     }
 
+    // A sealed client secret is no use to the request above: the access
+    // token comes through seal, already sealed for the connection's API.
+    let mut sealed_parameters = None;
+    if crate::sealed::policy::sealed_token_grant(integration_id, params).is_some() {
+        let sealed = sealed.ok_or_else(|| {
+            token_cache::AuthResolutionError::permanent(
+                "the connection's credentials are sealed, and this deployment has no seal",
+            )
+        })?;
+        let token = sealed
+            .minted_access_token(tenant_id, connection_id, integration_id, params)
+            .await?;
+        let mut presenting = params.clone();
+        presenting[crate::sealed::policy::ACCESS_TOKEN_FIELD] = token;
+        sealed_parameters = Some(presenting);
+    }
+    // A sealed refresh token gets the next pair through seal, sealed too.
+    let mut rotated_sealed = None;
+    if crate::sealed::policy::sealed_authorized_tokens(integration_id, params).is_some() {
+        let sealed = sealed.ok_or_else(|| {
+            token_cache::AuthResolutionError::permanent(
+                "the connection's credentials are sealed, and this deployment has no seal",
+            )
+        })?;
+        let (token, rotated) = sealed
+            .refreshed_access_token(events, tenant_id, connection_id, integration_id, params)
+            .await?;
+        let mut presenting = params.clone();
+        presenting[crate::sealed::policy::ACCESS_TOKEN_FIELD] = token;
+        sealed_parameters = Some(presenting);
+        rotated_sealed = rotated;
+    }
+
     Ok(ResolvedConnectionAuth {
         base_url: descriptor.base_url,
         aws_signing: descriptor.aws_signing,
         azure_signing: descriptor.azure_signing,
         mtls_client,
         rotated_credentials,
+        sealed_parameters,
+        rotated_sealed,
     })
 }
 
-fn describe_connection_auth(
+pub(crate) fn describe_connection_auth(
     connection_id: &str,
     integration_id: &str,
     params: &Value,
@@ -309,8 +381,14 @@ fn describe_connection_auth(
             if let Some((email, token)) = credentials {
                 headers.insert("Authorization".into(), jira_basic_auth(email, token));
             }
+            // A sealed token is attached by seal, with the email, where the
+            // request is sent; the destination is still the account's.
+            let sealed =
+                filled("email").is_some() && crate::sealed::is_sealed(&params["api_token"]);
             ConnectionAuthDescriptor {
-                base_url: credentials.and_then(|_| jira_account_url(params)),
+                base_url: (credentials.is_some() || sealed)
+                    .then(|| jira_account_url(params))
+                    .flatten(),
                 aws_signing: None,
                 azure_signing: None,
                 deferred_auth: None,
@@ -596,7 +674,7 @@ fn zendesk_account_url(params: &Value) -> Option<String> {
     zendesk_base_url(params["subdomain"].as_str()?).ok()
 }
 
-fn jira_account_url(params: &Value) -> Option<String> {
+pub(crate) fn jira_account_url(params: &Value) -> Option<String> {
     jira_base_url(params["site"].as_str()?, params["cloud_id"].as_str()).ok()
 }
 
@@ -884,7 +962,7 @@ fn describe_oauth_authcode_auth(
 /// host when the connection's `environment` param is `"sandbox"`, then append any
 /// `{param}`-templated path (e.g. QuickBooks `/v3/company/{realm_id}`). Returns `None`
 /// when the descriptor declares no base URL.
-fn resolve_oauth_base_url(cfg: &OAuthConfig, params: &Value) -> Option<String> {
+pub(crate) fn resolve_oauth_base_url(cfg: &OAuthConfig, params: &Value) -> Option<String> {
     // Params-driven (generic) types: the base URL is the connection's own.
     if cfg.params_driven {
         return first_string_param(params, &["base_url"])
@@ -1148,6 +1226,25 @@ pub(crate) fn build_revoke_request(
     Some((basic, body, effective.revocation_endpoint))
 }
 
+/// The `Authorization` header a provider wants on a revocation request: the
+/// client's own credentials, for a provider that authenticates the client
+/// with HTTP Basic.
+pub(crate) fn revoke_authorization(oauth_config: &OAuthConfig, params: &Value) -> Option<String> {
+    let effective = resolve_effective_oauth_config(oauth_config, params);
+    match effective.token_endpoint_auth {
+        TokenEndpointAuth::HttpBasic => {
+            let client_id = params["client_id"].as_str().unwrap_or("");
+            // A sealed secret is not this process's to send.
+            let client_secret = params["client_secret"].as_str()?;
+            Some(format!(
+                "Basic {}",
+                BASE64.encode(format!("{client_id}:{client_secret}"))
+            ))
+        }
+        TokenEndpointAuth::FormBody => None,
+    }
+}
+
 /// Best-effort provider-side token revocation, called on disconnect. A no-op when the
 /// effective config declares no revocation endpoint or the connection has no token.
 pub async fn revoke_oauth_token(
@@ -1206,7 +1303,7 @@ pub fn openai_proxy_base_url(params: &Value) -> String {
     base_url.strip_suffix("/v1").unwrap_or(base_url).to_string()
 }
 
-fn first_string_param(params: &Value, keys: &[&str]) -> Option<String> {
+pub(crate) fn first_string_param(params: &Value, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| {
         params[*key]
             .as_str()
@@ -1216,7 +1313,7 @@ fn first_string_param(params: &Value, keys: &[&str]) -> Option<String> {
     })
 }
 
-fn normalize_endpoint(endpoint: &str) -> String {
+pub(crate) fn normalize_endpoint(endpoint: &str) -> String {
     if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
         endpoint.to_string()
     } else {
@@ -1235,7 +1332,7 @@ pub fn aws_default_endpoint(service: &str, region: &str) -> String {
     format!("https://{service}.{region}.amazonaws.com")
 }
 
-fn resolve_azure_blob_base_url(params: &Value, account_name: &str) -> Option<String> {
+pub(crate) fn resolve_azure_blob_base_url(params: &Value, account_name: &str) -> Option<String> {
     if let Some(raw) = first_string_param(params, &["endpoint_override", "endpoint"]) {
         let trimmed = raw.trim_end_matches('/').to_string();
         let normalized = normalize_endpoint(&trimmed);

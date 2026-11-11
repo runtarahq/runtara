@@ -220,6 +220,24 @@ impl ChannelRouter {
         let stored_secret =
             crate::api::services::webhook_manager::stored_webhook_secret(&trigger.configuration);
 
+        // A sealed secret is checked by seal, which answers yes or no.
+        if let (Some(stored), Some(header)) = (stored_secret, secret_header)
+            && let Some(sealed_secret) =
+                crate::api::services::webhook_manager::sealed_webhook_secret(stored)
+        {
+            let sealed = self.connections.sealed().ok_or_else(|| {
+                anyhow::anyhow!("The webhook secret is sealed, and this deployment has no seal")
+            })?;
+            return match sealed
+                .verify_webhook_secret(&tenant_id, connection_id, &sealed_secret, header)
+                .await
+            {
+                Ok(true) => Ok(()),
+                Ok(false) => anyhow::bail!("Invalid webhook secret"),
+                // seal's detail has identifiers and static text only.
+                Err(error) => anyhow::bail!("The webhook secret could not be checked: {error}"),
+            };
+        }
         match (stored_secret, secret_header) {
             (Some(stored), Some(header)) if stored == header => Ok(()),
             (Some(_), Some(_)) => anyhow::bail!("Invalid webhook secret"),
@@ -685,20 +703,29 @@ impl ChannelRouter {
         let params = &route.params;
         Ok(match route.integration_id.as_str() {
             "telegram_bot" => {
-                let bot_token = params["bot_token"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("Missing bot_token in connection"))?;
-                Arc::new(TelegramChannel::new(
-                    bot_token.to_string(),
-                    self.http_client.clone(),
-                ))
+                let auth = super::channel::ReplyAuth::of(
+                    &self.connections,
+                    &route.tenant_id,
+                    connection_id,
+                    "telegram_bot",
+                    params,
+                    "bot_token",
+                    super::channel::ReplyAuth::InPath,
+                )?;
+                Arc::new(TelegramChannel::new(auth, self.http_client.clone()))
             }
             "slack_bot" => {
-                let bot_token = params["bot_token"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("Missing bot_token in connection"))?;
+                let auth = super::channel::ReplyAuth::of(
+                    &self.connections,
+                    &route.tenant_id,
+                    connection_id,
+                    "slack_bot",
+                    params,
+                    "bot_token",
+                    super::channel::ReplyAuth::Bearer,
+                )?;
                 Arc::new(super::channel::SlackChannel::new(
-                    bot_token.to_string(),
+                    auth,
                     self.http_client.clone(),
                 ))
             }
@@ -718,15 +745,24 @@ impl ChannelRouter {
                 ))
             }
             "mailgun" => {
-                let api_key = params["api_key"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("Missing api_key in connection"))?;
+                let auth = super::channel::ReplyAuth::of(
+                    &self.connections,
+                    &route.tenant_id,
+                    connection_id,
+                    "mailgun",
+                    params,
+                    "api_key",
+                    |password| super::channel::ReplyAuth::Basic {
+                        username: "api".to_string(),
+                        password,
+                    },
+                )?;
                 let domain = params["domain"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("Missing domain in connection"))?;
                 let region = params["region"].as_str().unwrap_or("us");
                 Arc::new(super::channel::MailgunChannel::new(
-                    api_key.to_string(),
+                    auth,
                     domain.to_string(),
                     region.to_string(),
                     self.http_client.clone(),

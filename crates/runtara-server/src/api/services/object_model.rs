@@ -109,6 +109,14 @@ pub(crate) async fn resolve_database_url_uncached(
                 ServiceError::ValidationError(format!("Connection '{}' has no parameters", conn_id))
             })?;
 
+            // A sealed password is seal's to log in with.
+            if let Some(admitted) = admit_sealed(facade, &conn.id, params, tenant_id).await {
+                return admitted.map(Some).map_err(|reason| {
+                    ServiceError::ValidationError(format!(
+                        "Connection '{conn_id}' is refused: {reason}"
+                    ))
+                });
+            }
             let db_url = params
                 .get("database_url")
                 .and_then(|v| v.as_str())
@@ -163,6 +171,13 @@ pub(crate) async fn resolve_database_url_uncached(
                 )
             })?;
 
+            if let Some(admitted) = admit_sealed(facade, &conn.id, params, tenant_id).await {
+                return admitted.map(Some).map_err(|reason| {
+                    ServiceError::ValidationError(format!(
+                        "The default object_model connection is refused: {reason}"
+                    ))
+                });
+            }
             let db_url = params
                 .get("database_url")
                 .and_then(|v| v.as_str())
@@ -183,6 +198,26 @@ pub(crate) async fn resolve_database_url_uncached(
                 })
         }
     }
+}
+
+/// The URL to connect with for a Postgres connection whose password is
+/// sealed, or why it is refused; `None` for a connection that is not sealed.
+async fn admit_sealed(
+    facade: &ConnectionsFacade,
+    connection_id: &str,
+    params: &serde_json::Value,
+    tenant_id: &str,
+) -> Option<Result<String, String>> {
+    use runtara_connections::sealed::{is_sealed, policy::PG_URL_FIELD};
+    if !is_sealed(&params[PG_URL_FIELD]) {
+        return None;
+    }
+    let Some(sealed) = facade.sealed().cloned() else {
+        return Some(Err(
+            "its password is sealed, and this deployment has no seal".to_string(),
+        ));
+    };
+    Some(super::database_guard::admit_sealed(sealed, tenant_id, connection_id, params).await)
 }
 
 /// Gets the appropriate ObjectStore based on connection_id or default.

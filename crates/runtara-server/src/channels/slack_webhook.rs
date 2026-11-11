@@ -5,12 +5,11 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
 };
-use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
-use sha2::Sha256;
 use tracing::{debug, info, warn};
 
 use super::session::{Attachment, ChannelRouter, InboundMessage};
+use runtara_connections::SignatureCheck;
 
 /// Slack Events API webhook handler.
 ///
@@ -241,30 +240,15 @@ async fn verify_slack_signature(
         anyhow::bail!("Request timestamp too old (possible replay attack)");
     }
 
-    // Load the signing_secret from the connection.
-    let signing_secret = load_signing_secret(router, connection_id).await?;
+    // What Slack signs: `v0:{timestamp}:{body}`, the body as its bytes.
+    let mut message = format!("v0:{timestamp}:").into_bytes();
+    message.extend_from_slice(body);
+    let signature = signature
+        .strip_prefix("v0=")
+        .ok_or_else(|| anyhow::anyhow!("Signature mismatch"))?;
 
-    // Compute expected signature: v0=HMAC-SHA256(signing_secret, "v0:{timestamp}:{body}")
-    let sig_basestring = format!("v0:{}:{}", timestamp, String::from_utf8_lossy(body));
-
-    let mut mac = Hmac::<Sha256>::new_from_slice(signing_secret.as_bytes())
-        .map_err(|_| anyhow::anyhow!("Invalid signing secret"))?;
-    mac.update(sig_basestring.as_bytes());
-    let expected = format!("v0={}", hex::encode(mac.finalize().into_bytes()));
-
-    // Constant-time comparison to prevent timing attacks.
-    if !constant_time_eq(signature.as_bytes(), expected.as_bytes()) {
-        anyhow::bail!("Signature mismatch");
-    }
-
-    Ok(())
-}
-
-/// Load the signing_secret from the Slack connection's parameters.
-async fn load_signing_secret(
-    router: &ChannelRouter,
-    connection_id: &str,
-) -> anyhow::Result<String> {
+    // The connection's signing secret checks it: seal does if the secret is
+    // sealed, and then this process never reads it.
     let expected_tenant = router.served_connection_tenant(connection_id).await?;
     let conn = router
         .connections()
@@ -272,16 +256,22 @@ async fn load_signing_secret(
         .await
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?
         .ok_or_else(|| anyhow::anyhow!("Connection not found"))?;
-
-    let params = conn
-        .connection_parameters
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Connection has no parameters"))?;
-
-    params["signing_secret"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| anyhow::anyhow!("Missing signing_secret"))
+    match router
+        .connections()
+        .check_webhook_signature(
+            &conn,
+            &expected_tenant,
+            "signing_secret",
+            &message,
+            signature,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Signature check failed: {}", e))?
+    {
+        SignatureCheck::Valid => Ok(()),
+        SignatureCheck::Invalid => anyhow::bail!("Signature mismatch"),
+        SignatureCheck::NoSecret => anyhow::bail!("Missing signing_secret"),
+    }
 }
 
 /// Strip Slack mention markup (`<@U12345>`) from message text.
@@ -303,17 +293,6 @@ fn strip_slack_mentions(text: &str) -> String {
     }
 
     result
-}
-
-/// Constant-time byte comparison.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
 }
 
 /// Extract file attachments from a Slack message event.

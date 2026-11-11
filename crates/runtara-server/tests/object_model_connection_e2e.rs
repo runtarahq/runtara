@@ -114,6 +114,7 @@ async fn create_connection_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
             title VARCHAR(255) NOT NULL UNIQUE,
             connection_subtype VARCHAR(255) DEFAULT NULL,
             connection_parameters JSONB DEFAULT NULL,
+            credential_format TEXT NOT NULL DEFAULT 'cipher',
             integration_id VARCHAR(255) DEFAULT NULL,
             status VARCHAR(50) NOT NULL DEFAULT 'UNKNOWN',
             rate_limit_config JSONB DEFAULT NULL,
@@ -160,6 +161,7 @@ fn test_agent_catalog() -> Arc<runtara_dsl::agent_meta::AgentCatalog> {
 
 fn facade(pool: PgPool) -> ConnectionsFacade {
     ConnectionsFacade::new(ConnectionsState::from_config(ConnectionsConfig {
+        sealed: None,
         agent_access: std::sync::Arc::new(runtara_connections::EveryAgent),
         db_pool: pool,
         redis_manager: None,

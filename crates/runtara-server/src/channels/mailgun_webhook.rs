@@ -6,12 +6,11 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use hmac::{Hmac, Mac};
 use serde_json::Value;
-use sha2::Sha256;
 use tracing::{debug, warn};
 
 use super::session::{Attachment, ChannelRouter, InboundMessage};
+use runtara_connections::SignatureCheck;
 
 /// Mailgun inbound email webhook handler.
 ///
@@ -373,10 +372,14 @@ async fn verify_mailgun_signature(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Connection has no parameters"))?;
 
-    let signing_key = match params.get("webhook_signing_key").and_then(|v| v.as_str()) {
-        Some(key) if !key.is_empty() => key,
-        _ => return Ok(()), // No signing key → skip verification.
-    };
+    // No signing key → skip verification. Checked before the fields, so a
+    // connection without one accepts a webhook that carries no signature.
+    let has_key = params
+        .get("webhook_signing_key")
+        .is_some_and(|key| !key.is_null() && key.as_str() != Some(""));
+    if !has_key {
+        return Ok(());
+    }
 
     let timestamp = fields
         .get("timestamp")
@@ -388,27 +391,23 @@ async fn verify_mailgun_signature(
         .get("signature")
         .ok_or_else(|| anyhow::anyhow!("Missing signature"))?;
 
-    let mut mac = Hmac::<Sha256>::new_from_slice(signing_key.as_bytes())
-        .map_err(|_| anyhow::anyhow!("Invalid signing key"))?;
-    mac.update(timestamp.as_bytes());
-    mac.update(token.as_bytes());
-    let expected = hex::encode(mac.finalize().into_bytes());
-
-    if !constant_time_eq(signature.as_bytes(), expected.as_bytes()) {
-        anyhow::bail!("Signature mismatch");
+    // What Mailgun signs: the timestamp and the token, joined.
+    let message = format!("{timestamp}{token}");
+    match router
+        .connections()
+        .check_webhook_signature(
+            &conn,
+            &expected_tenant,
+            "webhook_signing_key",
+            message.as_bytes(),
+            signature,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Signature check failed: {}", e))?
+    {
+        SignatureCheck::Valid | SignatureCheck::NoSecret => Ok(()),
+        SignatureCheck::Invalid => anyhow::bail!("Signature mismatch"),
     }
-
-    Ok(())
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
 }
 
 #[cfg(test)]

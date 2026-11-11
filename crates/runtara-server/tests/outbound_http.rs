@@ -92,6 +92,7 @@ fn facade_with_redis(
     redis_manager: Option<redis::aio::ConnectionManager>,
 ) -> ConnectionsFacade {
     ConnectionsFacade::new(ConnectionsState::from_config(ConnectionsConfig {
+        sealed: None,
         agent_access: std::sync::Arc::new(runtara_connections::EveryAgent),
         db_pool: pool,
         redis_manager,
@@ -1033,5 +1034,713 @@ async fn native_preflight_rate_limit_returns_retry_headers_without_provider_io()
     );
     let _: () = manager.del(key).await?;
     provider.verify().await;
+    Ok(())
+}
+
+/// A sealed connection's request goes out through seal: the row holds no
+/// secret, seal attaches it, and the proxy's own pin still applies. Without
+/// seal, a sealed connection is refused rather than sent without credentials.
+#[tokio::test]
+async fn native_outbound_sends_a_sealed_connections_request_through_seal() -> anyhow::Result<()> {
+    use runtara_connections::sealed::keys::PgKeySource;
+    use runtara_connections::sealed::{Allowances, SealedCredentials, is_sealed};
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    allow_local_egress_for_this_test_binary();
+    init_server_config();
+    let pool = test_pool().await;
+    let provider = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/sealed/orders"))
+        .and(header("authorization", "Bearer synthetic-sealed-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("sealed"))
+        .expect(2)
+        .mount(&provider)
+        .await;
+
+    let sealed = Arc::new(
+        SealedCredentials::in_process(
+            Arc::new(PgKeySource::new(pool.clone())),
+            &[7_u8; 32],
+            Allowances {
+                private_hosts: vec!["127.0.0.1".into()],
+                plain_http_hosts: vec!["127.0.0.1".into()],
+                ..Default::default()
+            },
+        )
+        .map_err(|error| anyhow::anyhow!(error))?,
+    );
+    let tenant = format!("sealed-outbound-{}", Uuid::new_v4());
+    let connection = ConnectionService::new(
+        Arc::new(ConnectionRepository::new(
+            pool.clone(),
+            Arc::new(NoOpCipher),
+        )),
+        compatibility(),
+    )
+    .with_sealed(Some(sealed.clone()))
+    .create_connection(
+        CreateConnectionRequest {
+            title: format!("Sealed outbound {}", Uuid::new_v4()),
+            integration_id: Some("http_bearer".into()),
+            connection_subtype: None,
+            connection_parameters: Some(json!({
+                "base_url": format!("{}/sealed", provider.uri()),
+                "token": "synthetic-sealed-token",
+            })),
+            rate_limit_config: None,
+            valid_until: None,
+            is_default_file_storage: None,
+            default_for: None,
+        },
+        &tenant,
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("sealed connection creation failed"))?;
+
+    // The row is sealed, and holds no secret (the cipher here stores as is).
+    let (format, stored): (String, serde_json::Value) = sqlx::query_as(
+        "SELECT credential_format, connection_parameters FROM connection_data_entity WHERE id = $1",
+    )
+    .bind(&connection)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(format, "seal");
+    assert!(is_sealed(&stored["token"]));
+    assert!(!stored.to_string().contains("synthetic-sealed-token"));
+
+    let facade_with = |sealed| {
+        ConnectionsFacade::new(ConnectionsState::from_config(ConnectionsConfig {
+            sealed,
+            agent_access: Arc::new(runtara_connections::EveryAgent),
+            db_pool: pool.clone(),
+            redis_manager: None,
+            public_base_url: "http://localhost".to_string(),
+            oauth_complete_url: None,
+            http_client: runtara_connections::net::build_hardened_client(),
+            cipher: Arc::new(NoOpCipher),
+            compatibility: compatibility(),
+            agent_catalog: Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                Vec::new(),
+            )),
+            connection_events: None,
+            oauth: Default::default(),
+        }))
+    };
+    let outbound = NativeOutboundHttp {
+        facade: Arc::new(facade_with(Some(sealed))),
+        client: runtara_connections::net::build_hardened_client(),
+    };
+    let context = OutboundContext {
+        tenant_id: tenant.clone(),
+        instance_id: None,
+    };
+
+    let response = outbound
+        .request(&context, connection_request(&connection, "/orders"))
+        .await
+        .map_err(|error| anyhow::anyhow!("sealed request failed: {}", error.code))?;
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, b"sealed");
+
+    // A credential the agent sends itself never replaces the connection's.
+    let mut own = connection_request(&connection, "/orders");
+    own.headers = vec![("Authorization".into(), "Bearer agent-supplied".into())];
+    let response = outbound
+        .request(&context, own)
+        .await
+        .map_err(|error| anyhow::anyhow!("sealed request failed: {}", error.code))?;
+    assert_eq!(response.status, 200);
+
+    // Outside the connection's base path: refused, and nothing is sent.
+    let denied = outbound
+        .request(
+            &context,
+            connection_request(&connection, &format!("{}/outside", provider.uri())),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(denied.status, Some(403));
+
+    // A deployment without seal cannot use a sealed connection.
+    let without_seal = NativeOutboundHttp {
+        facade: Arc::new(facade_with(None)),
+        client: runtara_connections::net::build_hardened_client(),
+    };
+    let unavailable = without_seal
+        .request(&context, connection_request(&connection, "/orders"))
+        .await
+        .unwrap_err();
+    assert_eq!(unavailable.code, "SEALED_CREDENTIALS_UNAVAILABLE");
+    Ok(())
+}
+
+/// A sealed storage key signs nothing in the proxy: seal signs the request it
+/// sends, and the agent's own signing headers are dropped.
+#[tokio::test]
+async fn native_outbound_has_seal_sign_a_sealed_storage_connections_request() -> anyhow::Result<()>
+{
+    use base64::Engine;
+    use runtara_connections::sealed::keys::PgKeySource;
+    use runtara_connections::sealed::{Allowances, SealedCredentials, is_sealed, testing};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    allow_local_egress_for_this_test_binary();
+    init_server_config();
+    let pool = test_pool().await;
+    let provider = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(201))
+        .expect(1)
+        .mount(&provider)
+        .await;
+    let account_key = base64::engine::general_purpose::STANDARD.encode("synthetic-account-key");
+
+    let sealed = Arc::new(
+        SealedCredentials::in_process(
+            Arc::new(PgKeySource::new(pool.clone())),
+            &[7_u8; 32],
+            Allowances {
+                private_hosts: vec!["127.0.0.1".into()],
+                plain_http_hosts: vec!["127.0.0.1".into()],
+                ..Default::default()
+            },
+        )
+        .map_err(|error| anyhow::anyhow!(error))?,
+    );
+    let tenant = format!("sealed-storage-{}", Uuid::new_v4());
+    let connection = ConnectionService::new(
+        Arc::new(ConnectionRepository::new(
+            pool.clone(),
+            Arc::new(NoOpCipher),
+        )),
+        compatibility(),
+    )
+    .with_sealed(Some(sealed.clone()))
+    .create_connection(
+        CreateConnectionRequest {
+            title: format!("Sealed storage {}", Uuid::new_v4()),
+            integration_id: Some("azure_blob_storage".into()),
+            connection_subtype: None,
+            // An endpoint addressed by path, as Azurite's is.
+            connection_parameters: Some(json!({
+                "account_name": "devstore",
+                "account_key": account_key,
+                "endpoint_override": provider.uri(),
+            })),
+            rate_limit_config: None,
+            valid_until: None,
+            is_default_file_storage: None,
+            default_for: None,
+        },
+        &tenant,
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("sealed connection creation failed"))?;
+    let (format, stored): (String, serde_json::Value) = sqlx::query_as(
+        "SELECT credential_format, connection_parameters FROM connection_data_entity WHERE id = $1",
+    )
+    .bind(&connection)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(format, "seal");
+    assert!(is_sealed(&stored["account_key"]));
+    assert!(!stored.to_string().contains(&account_key));
+
+    let outbound = NativeOutboundHttp {
+        facade: Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
+            ConnectionsConfig {
+                sealed: Some(sealed),
+                agent_access: Arc::new(runtara_connections::EveryAgent),
+                db_pool: pool.clone(),
+                redis_manager: None,
+                public_base_url: "http://localhost".to_string(),
+                oauth_complete_url: None,
+                http_client: runtara_connections::net::build_hardened_client(),
+                cipher: Arc::new(NoOpCipher),
+                compatibility: compatibility(),
+                agent_catalog: Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                    Vec::new(),
+                )),
+                connection_events: None,
+                oauth: Default::default(),
+            },
+        ))),
+        client: runtara_connections::net::build_hardened_client(),
+    };
+    let mut put = connection_request(&connection, "/container/blob.txt");
+    put.method = "PUT".into();
+    put.body = Some(b"hello".to_vec());
+    put.headers = vec![
+        ("Content-Type".into(), "text/plain".into()),
+        ("x-ms-blob-type".into(), "BlockBlob".into()),
+        (
+            "Authorization".into(),
+            "SharedKey devstore:agent-supplied".into(),
+        ),
+    ];
+    let response = outbound
+        .request(
+            &OutboundContext {
+                tenant_id: tenant,
+                instance_id: None,
+            },
+            put,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("sealed request failed: {}", error.code))?;
+    assert_eq!(response.status, 201);
+
+    let received = &provider.received_requests().await.unwrap()[0];
+    let headers: Vec<(String, String)> = received
+        .headers
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.to_str().unwrap().to_owned()))
+        .collect();
+    assert_eq!(received.url.path(), "/devstore/container/blob.txt");
+    testing::check_shared_key(
+        "PUT",
+        &received.url,
+        &headers,
+        b"hello",
+        "devstore",
+        &account_key,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+    assert!(!format!("{headers:?}").contains("agent-supplied"));
+    Ok(())
+}
+
+/// A sealed storage key is never handed to the presigning guest: the host
+/// answers the capability by having seal presign the URL. A readable key is
+/// left to the guest, as before.
+#[tokio::test]
+async fn a_sealed_storage_connections_presigned_url_comes_from_seal() -> anyhow::Result<()> {
+    use base64::Engine;
+    use runtara_connections::sealed::keys::PgKeySource;
+    use runtara_connections::sealed::{Allowances, SealedCredentials};
+    use runtara_server::api::services::trusted::BuiltinTrustedCredentials;
+    allow_local_egress_for_this_test_binary();
+    init_server_config();
+    let pool = test_pool().await;
+    let account_key = base64::engine::general_purpose::STANDARD.encode("synthetic-account-key");
+    let sealed = Arc::new(
+        SealedCredentials::in_process(
+            Arc::new(PgKeySource::new(pool.clone())),
+            &[7_u8; 32],
+            Allowances::default(),
+        )
+        .map_err(|error| anyhow::anyhow!(error))?,
+    );
+    let tenant = format!("sealed-presign-{}", Uuid::new_v4());
+    let parameters = json!({"account_name": "acme", "account_key": account_key});
+    let create = |sealed: Option<Arc<SealedCredentials>>| {
+        let (pool, tenant, parameters) = (pool.clone(), tenant.clone(), parameters.clone());
+        async move {
+            ConnectionService::new(
+                Arc::new(ConnectionRepository::new(pool, Arc::new(NoOpCipher))),
+                compatibility(),
+            )
+            .with_sealed(sealed)
+            .create_connection(
+                CreateConnectionRequest {
+                    title: format!("Presign {}", Uuid::new_v4()),
+                    integration_id: Some("azure_blob_storage".into()),
+                    connection_subtype: None,
+                    connection_parameters: Some(parameters),
+                    rate_limit_config: None,
+                    valid_until: None,
+                    is_default_file_storage: None,
+                    default_for: None,
+                },
+                &tenant,
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("connection creation failed"))
+        }
+    };
+    let sealed_connection = create(Some(sealed.clone())).await?;
+    let readable_connection = create(None).await?;
+
+    let credentials = BuiltinTrustedCredentials(Arc::new(ConnectionsFacade::new(
+        ConnectionsState::from_config(ConnectionsConfig {
+            sealed: Some(sealed),
+            agent_access: Arc::new(runtara_connections::EveryAgent),
+            db_pool: pool.clone(),
+            redis_manager: None,
+            public_base_url: "http://localhost".to_string(),
+            oauth_complete_url: None,
+            http_client: runtara_connections::net::build_hardened_client(),
+            cipher: Arc::new(NoOpCipher),
+            compatibility: compatibility(),
+            agent_catalog: Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                Vec::new(),
+            )),
+            connection_events: None,
+            oauth: Default::default(),
+        }),
+    )));
+    let allowed = ["azure_blob_storage".to_string()];
+    let answer = |connection: String, capability: &'static str, input: serde_json::Value| {
+        let (credentials, tenant, allowed) = (&credentials, &tenant, &allowed);
+        async move {
+            credentials
+                .answer_for_sealed(
+                    tenant,
+                    capability,
+                    &connection,
+                    allowed,
+                    &serde_json::to_vec(&input).unwrap(),
+                )
+                .await
+        }
+    };
+    let download = json!({
+        "bucket": "exports", "key": "reports/q1 summary.csv", "operation": "download",
+        "expires_in_seconds": 900, "content_type": "text/csv",
+    });
+
+    let output = answer(
+        sealed_connection.clone(),
+        "storage-generate-presigned-url",
+        download.clone(),
+    )
+    .await
+    .expect("the host answers for a sealed connection")
+    .map_err(|error| anyhow::anyhow!(error))?;
+    let output: serde_json::Value = serde_json::from_slice(&output)?;
+    assert_eq!(output["success"], true, "{output}");
+    assert_eq!(output["expires_in_seconds"], 900);
+    let url = url::Url::parse(output["url"].as_str().unwrap())?;
+    assert_eq!(url.host_str(), Some("acme.blob.core.windows.net"));
+    assert_eq!(url.path(), "/exports/reports/q1%20summary.csv");
+    let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+    // Read only, one blob, with the content type asked for, and signed.
+    assert_eq!(query.get("sp").map(String::as_str), Some("r"));
+    assert_eq!(query.get("sr").map(String::as_str), Some("b"));
+    assert_eq!(query.get("rsct").map(String::as_str), Some("text/csv"));
+    assert!(
+        query
+            .get("sig")
+            .is_some_and(|signature| !signature.is_empty())
+    );
+    assert!(!url.as_str().contains(&account_key));
+
+    // What the guest refuses, the host refuses the same way.
+    let mut unsupported = download.clone();
+    unsupported["operation"] = json!("rename");
+    let output = answer(
+        sealed_connection.clone(),
+        "storage-generate-presigned-url",
+        unsupported,
+    )
+    .await
+    .unwrap()
+    .map_err(|error| anyhow::anyhow!(error))?;
+    let output: serde_json::Value = serde_json::from_slice(&output)?;
+    assert_eq!(output["success"], false);
+    assert!(
+        output["error"]
+            .as_str()
+            .unwrap()
+            .contains("Unsupported operation")
+    );
+    let missing = answer(
+        sealed_connection.clone(),
+        "storage-generate-presigned-url",
+        json!({"bucket": "exports", "operation": "download"}),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(missing.contains("INVALID_INPUT"), "{missing}");
+    let escaping = answer(
+        sealed_connection.clone(),
+        "storage-generate-presigned-url",
+        json!({"bucket": "exports", "key": "a?comp=list", "operation": "download"}),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(escaping.contains("INVALID_PATH"), "{escaping}");
+    // No other capability gets a sealed key.
+    let other = answer(
+        sealed_connection,
+        "storage-something-else",
+        download.clone(),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(other.contains("TRUSTED_CREDENTIALS_UNAVAILABLE"), "{other}");
+
+    // A readable key goes to the guest.
+    assert!(
+        answer(
+            readable_connection,
+            "storage-generate-presigned-url",
+            download
+        )
+        .await
+        .is_none()
+    );
+    Ok(())
+}
+
+/// A sealed client certificate key makes no TLS client in the proxy: seal
+/// presents the certificate on the connection it opens, checks the server
+/// against the connection's CA, and the proxy's pin still applies.
+#[tokio::test]
+async fn native_outbound_has_seal_present_a_sealed_client_certificate() -> anyhow::Result<()> {
+    use runtara_connections::sealed::keys::PgKeySource;
+    use runtara_connections::sealed::{Allowances, SealedCredentials, is_sealed};
+    allow_local_egress_for_this_test_binary();
+    init_server_config();
+    let pool = test_pool().await;
+    let tenant_id = format!("sealed-mtls-{}", Uuid::new_v4());
+    let MtlsFixture {
+        base_url,
+        client_certificate_pem,
+        client_private_key_pem,
+        server_ca_pem,
+        server,
+    } = mtls_fixture().await;
+    let sealed = Arc::new(
+        SealedCredentials::in_process(
+            Arc::new(PgKeySource::new(pool.clone())),
+            &[7_u8; 32],
+            Allowances {
+                private_hosts: vec!["127.0.0.1".into()],
+                ..Default::default()
+            },
+        )
+        .map_err(|error| anyhow::anyhow!(error))?,
+    );
+    let service = ConnectionService::new(
+        Arc::new(ConnectionRepository::new(
+            pool.clone(),
+            Arc::new(NoOpCipher),
+        )),
+        compatibility(),
+    )
+    .with_sealed(Some(sealed.clone()));
+    let connection_id = service
+        .create_connection(
+            CreateConnectionRequest {
+                title: format!("Sealed mTLS {tenant_id}"),
+                connection_subtype: None,
+                connection_parameters: Some(json!({
+                    "base_url": base_url,
+                    "client_certificate_pem": client_certificate_pem,
+                    "client_private_key_pem": client_private_key_pem,
+                    "server_ca_pem": server_ca_pem,
+                })),
+                integration_id: Some("http_mtls".to_string()),
+                rate_limit_config: None,
+                valid_until: None,
+                is_default_file_storage: None,
+                default_for: None,
+            },
+            &tenant_id,
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("sealed mTLS connection creation failed"))?;
+    let (format, stored): (String, serde_json::Value) = sqlx::query_as(
+        "SELECT credential_format, connection_parameters FROM connection_data_entity WHERE id = $1",
+    )
+    .bind(&connection_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(format, "seal");
+    assert!(is_sealed(&stored["client_private_key_pem"]));
+    assert!(!stored.to_string().contains("PRIVATE KEY"));
+    // The certificate is public, and stays readable.
+    assert_eq!(stored["client_certificate_pem"], client_certificate_pem);
+
+    // An edit that keeps the sealed key is checked without it.
+    let version = service
+        .get_connection(&connection_id, &tenant_id)
+        .await
+        .map_err(|_| anyhow::anyhow!("reading the sealed mTLS connection failed"))?
+        .edit_projection
+        .expect("a connection has an edit projection")
+        .version;
+    service
+        .update_connection(
+            &connection_id,
+            &tenant_id,
+            serde_json::from_value(json!({
+                "version": version,
+                "connectionParameterPatch": {"set": {"base_url": stored["base_url"]}},
+            }))?,
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("saving a sealed mTLS connection again failed: {error:?}")
+        })?;
+
+    let outbound = NativeOutboundHttp {
+        facade: Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
+            ConnectionsConfig {
+                sealed: Some(sealed),
+                agent_access: Arc::new(runtara_connections::EveryAgent),
+                db_pool: pool.clone(),
+                redis_manager: None,
+                public_base_url: "http://localhost".to_string(),
+                oauth_complete_url: None,
+                http_client: runtara_connections::net::build_hardened_client(),
+                cipher: Arc::new(NoOpCipher),
+                compatibility: compatibility(),
+                agent_catalog: Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                    Vec::new(),
+                )),
+                connection_events: None,
+                oauth: Default::default(),
+            },
+        ))),
+        client: runtara_connections::net::build_hardened_client(),
+    };
+    let response = outbound
+        .request(
+            &OutboundContext {
+                tenant_id: tenant_id.clone(),
+                instance_id: None,
+            },
+            connection_request(&connection_id, "/whoami"),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("sealed mTLS request failed: {}", error.code))?;
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&response.body)?,
+        json!({"mtls": true})
+    );
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("TLS server should receive one request")
+        .expect("TLS server task should succeed");
+    Ok(())
+}
+
+/// A connection whose OAuth client secret is sealed: the proxy gets its
+/// access token through seal, already sealed, and seal attaches it.
+#[tokio::test]
+async fn native_outbound_presents_a_token_got_with_a_sealed_client_secret() -> anyhow::Result<()> {
+    use runtara_connections::sealed::keys::PgKeySource;
+    use runtara_connections::sealed::{Allowances, SealedCredentials, is_sealed};
+    use wiremock::matchers::{body_string_contains, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    allow_local_egress_for_this_test_binary();
+    init_server_config();
+    let pool = test_pool().await;
+    let provider = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .and(body_string_contains("grant_type=client_credentials"))
+        .and(body_string_contains(
+            "client_secret=synthetic-client-secret",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "synthetic-access-token", "expires_in": 3600,
+        })))
+        .expect(1)
+        .mount(&provider)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/orders"))
+        .and(header("authorization", "Bearer synthetic-access-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("orders"))
+        .expect(2)
+        .mount(&provider)
+        .await;
+
+    let sealed = Arc::new(
+        SealedCredentials::in_process(
+            Arc::new(PgKeySource::new(pool.clone())),
+            &[7_u8; 32],
+            Allowances {
+                private_hosts: vec!["127.0.0.1".into()],
+                plain_http_hosts: vec!["127.0.0.1".into()],
+                ..Default::default()
+            },
+        )
+        .map_err(|error| anyhow::anyhow!(error))?,
+    );
+    let tenant = format!("sealed-client-{}", Uuid::new_v4());
+    let connection = ConnectionService::new(
+        Arc::new(ConnectionRepository::new(
+            pool.clone(),
+            Arc::new(NoOpCipher),
+        )),
+        compatibility(),
+    )
+    .with_sealed(Some(sealed.clone()))
+    .create_connection(
+        CreateConnectionRequest {
+            title: format!("Sealed client {}", Uuid::new_v4()),
+            integration_id: Some("http_oauth2_client_credentials".into()),
+            connection_subtype: None,
+            connection_parameters: Some(json!({
+                "token_url": format!("{}/oauth/token", provider.uri()),
+                "base_url": format!("{}/api", provider.uri()),
+                "client_id": "synthetic-client",
+                "client_secret": "synthetic-client-secret",
+            })),
+            rate_limit_config: None,
+            valid_until: None,
+            is_default_file_storage: None,
+            default_for: None,
+        },
+        &tenant,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("sealed connection creation failed: {error:?}"))?;
+    let (format, stored): (String, serde_json::Value) = sqlx::query_as(
+        "SELECT credential_format, connection_parameters FROM connection_data_entity WHERE id = $1",
+    )
+    .bind(&connection)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(format, "seal");
+    assert!(is_sealed(&stored["client_secret"]));
+    // The token is never stored, sealed or not.
+    assert!(stored.get("access_token").is_none());
+
+    let outbound = NativeOutboundHttp {
+        facade: Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
+            ConnectionsConfig {
+                sealed: Some(sealed),
+                agent_access: Arc::new(runtara_connections::EveryAgent),
+                db_pool: pool.clone(),
+                redis_manager: None,
+                public_base_url: "http://localhost".to_string(),
+                oauth_complete_url: None,
+                http_client: runtara_connections::net::build_hardened_client(),
+                cipher: Arc::new(NoOpCipher),
+                compatibility: compatibility(),
+                agent_catalog: Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                    Vec::new(),
+                )),
+                connection_events: None,
+                oauth: Default::default(),
+            },
+        ))),
+        client: runtara_connections::net::build_hardened_client(),
+    };
+    let context = OutboundContext {
+        tenant_id: tenant,
+        instance_id: None,
+    };
+    // Twice: the token is got once.
+    for _ in 0..2 {
+        let mut request = connection_request(&connection, "/orders");
+        request.headers = vec![("Authorization".into(), "Bearer agent-supplied".into())];
+        let response = outbound
+            .request(&context, request)
+            .await
+            .map_err(|error| anyhow::anyhow!("sealed request failed: {}", error.code))?;
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"orders");
+    }
     Ok(())
 }
