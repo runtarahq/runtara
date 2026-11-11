@@ -16,25 +16,17 @@ use crate::crypto::{CipherContext, CredentialCipher, is_envelope};
 use crate::types::*;
 use sqlx::PgPool;
 
-/// SHA-256 (hex) of a refresh token — a non-reversible fingerprint stored in the
-/// `refresh_token_hash` column for the rotation optimistic-concurrency guard. The
-/// token value itself is never persisted in plaintext.
-/// The rotation guard of a stored refresh token: the hash of the token, or
-/// of its envelope when it is sealed. Each rotation seals a new envelope, so
-/// the guard tells one stored token from the next either way.
+/// The rotation guard of a stored refresh token, kept in the
+/// `refresh_token_hash` column for the rotation's optimistic-concurrency
+/// check: the SHA-256 (hex) of the token's sealed envelope. Each rotation
+/// seals a new envelope, so the guard tells one stored token from the next.
+/// A token that is not sealed has no guard: none is stored or used so.
 pub fn refresh_token_guard(stored: &serde_json::Value) -> Option<String> {
-    match stored {
-        serde_json::Value::String(token) => Some(refresh_token_hash(token)),
-        sealed if crate::sealed::is_sealed(sealed) => Some(refresh_token_hash(
-            &sealed[crate::sealed::SEALED_MARKER]["envelope"].to_string(),
-        )),
-        _ => None,
-    }
-}
-
-pub fn refresh_token_hash(token: &str) -> String {
     use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(token.as_bytes()))
+    crate::sealed::is_sealed(stored).then(|| {
+        let envelope = stored[crate::sealed::SEALED_MARKER]["envelope"].to_string();
+        hex::encode(Sha256::digest(envelope.as_bytes()))
+    })
 }
 
 /// The parameter of a `postgres` connection that stands for the platform's
