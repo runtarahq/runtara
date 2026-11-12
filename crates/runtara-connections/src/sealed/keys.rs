@@ -30,6 +30,17 @@ pub fn keyset_for_tenant(tenant_id: &str) -> KeysetId {
     KeysetId::new(format!("{HASHED}{digest}")).expect("a hashed keyset name is a valid identifier")
 }
 
+/// The platform's own keyset: what it seals of its own, to use with any
+/// tenant's records (a platform OAuth app's client secret). Its name is no
+/// tenant's keyset: one that starts as a hashed name does is hashed again.
+pub fn platform_keyset() -> KeysetId {
+    KeysetId::new("t-platform").expect("the platform's keyset name is a valid identifier")
+}
+
+/// The tenant the platform's keys are stored for. No tenant: an id of one
+/// is never empty.
+const PLATFORM_TENANT: &str = "";
+
 /// The key that wraps tenants' private keys, derived from the deployment's
 /// credential encryption key. The two keys differ, so a value made with one
 /// means nothing to the other.
@@ -75,6 +86,9 @@ impl PgKeySource {
     }
 
     fn tenant_of(&self, keyset: &KeysetId) -> Option<String> {
+        if *keyset == platform_keyset() {
+            return Some(PLATFORM_TENANT.to_owned());
+        }
         self.tenants
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -86,67 +100,28 @@ impl PgKeySource {
 #[async_trait]
 impl KeySource for PgKeySource {
     async fn wrapped_keys(&self, keyset: &KeysetId) -> Result<Vec<WrappedKey>, KeyError> {
-        let rows = sqlx::query_as::<_, (String, String, i64, String, String)>(
-            r#"
-            SELECT kid, public_key, created, wrap_id, wrapped
-            FROM seal_wrapped_key
-            WHERE keyset = $1
-            ORDER BY created, kid
-            "#,
-        )
-        .bind(keyset.as_str())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, "could not read seal keys");
-            KeyError::Unavailable
-        })?;
-        rows.into_iter()
-            .map(|(kid, public, created, wrap_id, wrapped)| {
-                Ok(WrappedKey {
-                    keyset: keyset.clone(),
-                    kid: KeyId::new(kid).map_err(|_| KeyError::Invalid("stored kid"))?,
-                    public,
-                    created: u64::try_from(created)
-                        .map_err(|_| KeyError::Invalid("stored creation time"))?,
-                    wrap_id,
-                    wrapped,
-                })
-            })
-            .collect()
+        if *keyset == platform_keyset() {
+            // The platform's keys are no tenant's rows, so a tenant's scope
+            // hides them. A task of its own leaves the scope.
+            let (pool, keyset) = (self.pool.clone(), keyset.clone());
+            return tokio::spawn(async move { read_keys(&pool, &keyset).await })
+                .await
+                .map_err(|_| KeyError::Unavailable)?;
+        }
+        read_keys(&self.pool, keyset).await
     }
 
     async fn store(&self, key: &WrappedKey) -> Result<(), KeyError> {
         let tenant = self
             .tenant_of(&key.keyset)
             .ok_or(KeyError::Invalid("a key for a keyset with no known tenant"))?;
-        let created = i64::try_from(key.created).map_err(|_| KeyError::Invalid("creation time"))?;
-        // Never replaces a key: a second key with the same id is refused.
-        let stored = sqlx::query(
-            r#"
-            INSERT INTO seal_wrapped_key
-                (keyset, kid, tenant_id, public_key, created, wrap_id, wrapped)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (keyset, kid) DO NOTHING
-            "#,
-        )
-        .bind(key.keyset.as_str())
-        .bind(key.kid.as_str())
-        .bind(tenant)
-        .bind(&key.public)
-        .bind(created)
-        .bind(&key.wrap_id)
-        .bind(&key.wrapped)
-        .execute(&self.pool)
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, "could not store a seal key");
-            KeyError::Unavailable
-        })?;
-        if stored.rows_affected() == 0 {
-            return Err(KeyError::AlreadyExists);
+        if key.keyset == platform_keyset() {
+            let (pool, key) = (self.pool.clone(), key.clone());
+            return tokio::spawn(async move { store_key(&pool, &key, &tenant).await })
+                .await
+                .map_err(|_| KeyError::Unavailable)?;
         }
-        Ok(())
+        store_key(&self.pool, key, &tenant).await
     }
 
     async fn delete_keyset(&self, keyset: &KeysetId) -> Result<(), KeyError> {
@@ -160,6 +135,67 @@ impl KeySource for PgKeySource {
             })?;
         Ok(())
     }
+}
+
+async fn read_keys(pool: &PgPool, keyset: &KeysetId) -> Result<Vec<WrappedKey>, KeyError> {
+    let rows = sqlx::query_as::<_, (String, String, i64, String, String)>(
+        r#"
+        SELECT kid, public_key, created, wrap_id, wrapped
+        FROM seal_wrapped_key
+        WHERE keyset = $1
+        ORDER BY created, kid
+        "#,
+    )
+    .bind(keyset.as_str())
+    .fetch_all(pool)
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "could not read seal keys");
+        KeyError::Unavailable
+    })?;
+    rows.into_iter()
+        .map(|(kid, public, created, wrap_id, wrapped)| {
+            Ok(WrappedKey {
+                keyset: keyset.clone(),
+                kid: KeyId::new(kid).map_err(|_| KeyError::Invalid("stored kid"))?,
+                public,
+                created: u64::try_from(created)
+                    .map_err(|_| KeyError::Invalid("stored creation time"))?,
+                wrap_id,
+                wrapped,
+            })
+        })
+        .collect()
+}
+
+/// Never replaces a key: a second key with the same id is refused.
+async fn store_key(pool: &PgPool, key: &WrappedKey, tenant: &str) -> Result<(), KeyError> {
+    let created = i64::try_from(key.created).map_err(|_| KeyError::Invalid("creation time"))?;
+    let stored = sqlx::query(
+        r#"
+        INSERT INTO seal_wrapped_key
+            (keyset, kid, tenant_id, public_key, created, wrap_id, wrapped)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (keyset, kid) DO NOTHING
+        "#,
+    )
+    .bind(key.keyset.as_str())
+    .bind(key.kid.as_str())
+    .bind(tenant)
+    .bind(&key.public)
+    .bind(created)
+    .bind(&key.wrap_id)
+    .bind(&key.wrapped)
+    .execute(pool)
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "could not store a seal key");
+        KeyError::Unavailable
+    })?;
+    if stored.rows_affected() == 0 {
+        return Err(KeyError::AlreadyExists);
+    }
+    Ok(())
 }
 
 /// Wraps again, under `current`, every seal key in the table that is still
@@ -257,6 +293,15 @@ mod tests {
         let impostor = keyset_for_tenant(victim.as_str());
         assert_ne!(victim, impostor);
         assert!(impostor.as_str().starts_with("t-"));
+    }
+
+    /// No tenant's id names the platform's keyset.
+    #[test]
+    fn the_platforms_keyset_is_no_tenants() {
+        let platform = platform_keyset();
+        for tenant in ["t-platform", "platform", "", "t-"] {
+            assert_ne!(keyset_for_tenant(tenant), platform, "{tenant}");
+        }
     }
 
     #[test]
