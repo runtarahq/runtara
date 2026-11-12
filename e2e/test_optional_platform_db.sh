@@ -1,9 +1,9 @@
 #!/bin/bash
-# E2E Test: a server without a platform object model database (M3.5).
+# E2E Test: a tenant's object model database is its own connection (M3.5).
 #
-#   1. NO DEFAULT — booted without OBJECT_MODEL_DATABASE_URL, the object model
-#      API asked for its default database answers what to do instead; no
-#      default connection exists.
+#   1. NO DEFAULT — the platform supplies no database: for a tenant with
+#      none of its own, the object model API asked for the default answers
+#      what to do instead; no default connection exists.
 #   2. GUARD — a tenant Postgres connection to the cloud metadata address or
 #      to localhost is refused before anything connects.
 #   3. TENANT DATABASE — with the test host on the operator's allowlist
@@ -110,7 +110,7 @@ create_and_compile() {
 
 #-------------------------------------------------------------------------
 echo "==============================================================="
-echo "E2E Test: a server without a platform object model database"
+echo "E2E Test: a tenant's object model database is its own connection"
 echo "==============================================================="
 
 [ -n "${POSTGRES_PASSWORD}" ] \
@@ -148,7 +148,7 @@ TENANT2_DB_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:${P
 SERVER_DB_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}"
 
 start_server() {
-    # From the test's own dir: no .env elsewhere may supply a platform database.
+    # From the test's own dir, so that no .env elsewhere is read.
     cd "${TEST_DATA_DIR}"
     print_step "Starting runtara-server on :${TEST_PORT_PUBLIC}..."
     RUNTARA_SERVER_DATABASE_URL="${SERVER_DB_URL}" \
@@ -224,17 +224,15 @@ create_connection() {
 SCHEMA='{"name": "Item", "tableName": "optional_db_items", "columns": [{"name": "sku", "type": "string"}, {"name": "qty", "type": "integer"}]}'
 
 #-------------------------------------------------------------------------
-print_step "1. No platform database: the default is refused with what to do..."
-grep -q "No platform object model database" "${TEST_LOG}" \
-    || { print_error "the server did not boot without a platform database"; exit 1; }
+print_step "1. No database of the tenant's own: the default is refused with what to do..."
 OUT=$(api_post_status /object-model/schemas "${SCHEMA}")
 case "${OUT}" in
-    4??\ *"add a Postgres connection"*) ;;
+    4??\ *"object-model set --tenant-id"*) ;;
     *) print_error "the default database was not refused helpfully: ${OUT}"; exit 1 ;;
 esac
 [ "$(curl -sS "${API}/connections" | jq '[.. | objects | select(.integrationId? == "postgres" and ((.defaultFor? // []) | index("object_model")))] | length')" = "0" ] \
     || { print_error "a default object_model connection was created"; exit 1; }
-echo "  no default database: refused with 'add a Postgres connection'; no default connection ✓"
+echo "  no default database: refused with how to set one; no default connection ✓"
 
 #-------------------------------------------------------------------------
 print_step "2. Connections to metadata and loopback addresses are refused..."
@@ -316,4 +314,4 @@ OUT=$(api_post_status "/object-model/schemas?connectionId=${SECOND}" "${SCHEMA}"
 case "${OUT}" in *"OBJECT_MODEL_TENANT_POOL_MAX"*) ;; *) print_error "a second pool was not refused: ${OUT}"; exit 1 ;; esac
 echo "  a second database refused at OBJECT_MODEL_TENANT_POOL_MAX=1 ✓"
 
-print_success "optional platform database: no default without it, tenant connections guarded and pool-limited, and workflows run on the tenant's own database"
+print_success "no platform database: no default until one is set, tenant connections guarded and pool-limited, and workflows run on the tenant's own database"

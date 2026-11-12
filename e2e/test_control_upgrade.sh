@@ -107,7 +107,6 @@ start_server() {
         # dotenvy walks parent directories; start outside the repository.
         cd "${TEST_DATA_DIR}"
         RUNTARA_SERVER_DATABASE_URL="${SERVER_DB_URL}" \
-        OBJECT_MODEL_DATABASE_URL="${SERVER_DB_URL}" \
         RUNTARA_DATABASE_URL="${RUNTIME_DB_URL}" \
         TENANT_ID="${TENANT}" \
         SERVER_HOST=127.0.0.1 \

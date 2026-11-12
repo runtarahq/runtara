@@ -140,8 +140,18 @@ psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_SERVER}" >/dev/null
 psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_RUNTIME}" >/dev/null
 
 print_step "Starting runtara-server on :${TEST_PORT_PUBLIC}..."
+# The tenant's object model database, entered as an operator enters one:
+# once, on standard input, and stored sealed. It is this test's own
+# Postgres, on a private address and reached with no TLS.
+printf '%s' "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}?sslmode=disable" | \
+    RUNTARA_SERVER_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}" TENANT_ID=tier3_e2e \
+    RUNTARA_MCP_SESSION_STORE=local RUNTARA_DATABASE_CONNECTION_GUARD=off \
+    RUNTARA_PROXY_ALLOW_HTTP_HOSTS="${POSTGRES_HOST}" \
+    "${RUNTARA_SERVER_BIN}" object-model set --tenant-id tier3_e2e --if-unset >/dev/null
+
 RUNTARA_SERVER_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}" \
-OBJECT_MODEL_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}" \
+RUNTARA_DATABASE_CONNECTION_GUARD=off \
+RUNTARA_PROXY_ALLOW_HTTP_HOSTS="${POSTGRES_HOST}" \
 RUNTARA_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_RUNTIME}" \
 TENANT_ID=tier3_e2e \
 SERVER_HOST=127.0.0.1 \

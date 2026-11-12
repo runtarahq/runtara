@@ -91,7 +91,6 @@ trap cleanup EXIT
 # start_server <components dir>
 start_server() {
     RUNTARA_SERVER_DATABASE_URL="${SERVER_DB_URL}" \
-    OBJECT_MODEL_DATABASE_URL="${SERVER_DB_URL}" \
     RUNTARA_DATABASE_URL="${RUNTIME_DB_URL}" \
     TENANT_ID="${TENANT}" \
     SERVER_HOST=127.0.0.1 \
