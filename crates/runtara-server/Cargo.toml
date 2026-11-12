@@ -304,10 +304,12 @@ opentelemetry-appender-tracing = "0.32"
 # Environment
 dotenvy = "0.15"
 
+# A platform OAuth app's client secret is held only until it is sealed.
+zeroize = "1.8"
+
 [build-dependencies]
 runtara-dsl = { path = "../runtara-dsl" }
 serde_json = { workspace = true }
-
 [dev-dependencies]
 # Tests store connections with the plaintext `NoOpCipher`.
 runtara-connections = { path = "../runtara-connections", features = ["utoipa", "test-util"] }

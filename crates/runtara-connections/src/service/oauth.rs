@@ -557,21 +557,13 @@ impl OAuthService {
 
         let params = conn.connection_parameters.unwrap_or(json!({}));
         // seal sends the client secret with the code, so the pair comes back
-        // already sealed. A platform app's secret is sealed for this exchange
-        // as the connection's own would be, and is never written back.
+        // already sealed. A platform app's sealed secret goes with this
+        // exchange, and is never written back.
         let app = self.app_for(tenant_id, &flow.integration_id, &params)?;
         let with_app = match &app {
             Some(app) => Some(
                 self.sealed
-                    .with_app_client(
-                        tenant_id,
-                        &flow.connection_id,
-                        &flow.integration_id,
-                        &params,
-                        &app.client_id,
-                        app.client_secret.as_str(),
-                    )
-                    .await
+                    .with_app(&flow.integration_id, &params, app)
                     .map_err(|error| OAuthError::Internal(error.to_string()))?,
             ),
             None => None,
@@ -874,19 +866,11 @@ impl OAuthService {
             .and_then(|meta| meta.oauth_config);
         if let (Some(_), Some(integration_id)) = (oauth_config, integration_id) {
             // The dropped tokens, with the connection's client credentials.
-            // A platform app's client secret is sealed for this request.
+            // A platform app's sealed client secret goes with this request.
             let mut revoked = match self.app_for(tenant_id, &integration_id, &params) {
                 Ok(Some(app)) => self
                     .sealed
-                    .with_app_client(
-                        tenant_id,
-                        connection_id,
-                        &integration_id,
-                        &params,
-                        &app.client_id,
-                        app.client_secret.as_str(),
-                    )
-                    .await
+                    .with_app(&integration_id, &params, &app)
                     .unwrap_or_else(|_| params.clone()),
                 _ => params.clone(),
             };

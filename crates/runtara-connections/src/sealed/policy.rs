@@ -811,6 +811,22 @@ pub fn authorized_tokens(integration_id: &str, params: &Value) -> Option<Authori
             }
             api
         }
+        // A connection on a platform app uses the app's client secret, which
+        // is sealed once for every connection on the app: for the API's
+        // hosts in either environment, since the policy of the tokens it
+        // gets is sealed inside it.
+        _ if on_platform_app(params) => {
+            let mut api = Vec::new();
+            for of_environment in &environments(params) {
+                let base_url =
+                    crate::auth::provider_auth::resolve_oauth_base_url(config, of_environment)?;
+                let entry = (base_url, !config.base_url_path_template.is_empty());
+                if !api.contains(&entry) {
+                    api.push(entry);
+                }
+            }
+            api
+        }
         _ => {
             let base_url = crate::auth::provider_auth::resolve_oauth_base_url(config, params)?;
             // A base that takes part of its path from the authorization
@@ -820,9 +836,19 @@ pub fn authorized_tokens(integration_id: &str, params: &Value) -> Option<Authori
             vec![(base_url, !config.base_url_path_template.is_empty())]
         }
     };
+    let endpoint_environments = if on_platform_app(params) {
+        environments(params)
+    } else {
+        vec![params.clone()]
+    };
     for endpoint in meta.named_endpoints {
-        if let Ok(resolved) = resolve_named_endpoint(meta, endpoint.name, params) {
-            api.push((resolved.base_url, false));
+        for of_environment in &endpoint_environments {
+            if let Ok(resolved) = resolve_named_endpoint(meta, endpoint.name, of_environment) {
+                let entry = (resolved.base_url, false);
+                if !api.contains(&entry) {
+                    api.push(entry);
+                }
+            }
         }
     }
     Some(AuthorizedTokens {
@@ -837,16 +863,29 @@ pub fn authorized_tokens(integration_id: &str, params: &Value) -> Option<Authori
     })
 }
 
-/// How an authorization-code connection's own client secret is sent to its
-/// token endpoint, if the connection holds one: a connection on a platform
-/// OAuth app does not.
-fn authorized_client(integration_id: &str, params: &Value) -> Option<Inject> {
+/// Whether a connection uses a platform OAuth app in place of a client of
+/// its own.
+fn on_platform_app(params: &Value) -> bool {
+    params.get(crate::oauth_apps::OAUTH_APP_PARAM).is_some()
+}
+
+/// A connection's parameters in each environment a type's descriptor tells
+/// apart.
+fn environments(params: &Value) -> Vec<Value> {
+    ["production", "sandbox"]
+        .into_iter()
+        .map(|environment| {
+            let mut of_environment = params.clone();
+            of_environment["environment"] = json!(environment);
+            of_environment
+        })
+        .collect()
+}
+
+/// How an authorization-code client's secret is sent to the type's token
+/// endpoint.
+fn client_inject(integration_id: &str, params: &Value) -> Option<Inject> {
     use runtara_dsl::agent_meta::TokenEndpointAuth;
-    if !holds(params, CLIENT_SECRET_FIELD)
-        || params.get(crate::oauth_apps::OAUTH_APP_PARAM).is_some()
-    {
-        return None;
-    }
     let config = find_connection_type(integration_id)?.oauth_config?;
     let effective = crate::auth::provider_auth::resolve_effective_oauth_config(config, params);
     Some(match effective.token_endpoint_auth {
@@ -855,6 +894,42 @@ fn authorized_client(integration_id: &str, params: &Value) -> Option<Inject> {
             name: CLIENT_SECRET_FIELD.to_owned(),
         },
     })
+}
+
+/// How an authorization-code connection's client secret is sent to its token
+/// endpoint, if it has one: its own, or, for a connection on a platform OAuth
+/// app, the app's, which is among the parameters only as a request is made
+/// (see [`super::SealedCredentials::with_shared_client`]). A connection on an
+/// app holds no client secret of its own: one stored with it is not this.
+fn authorized_client(integration_id: &str, params: &Value) -> Option<Inject> {
+    if on_platform_app(params) {
+        if !super::is_shared(&params[CLIENT_SECRET_FIELD]) {
+            return None;
+        }
+    } else if !holds(params, CLIENT_SECRET_FIELD) {
+        return None;
+    }
+    client_inject(integration_id, params)
+}
+
+/// The policy a platform OAuth app's client secret is sealed with, for
+/// connections whose parameters are `params` (with the app's client ID): to
+/// the type's token endpoint, for a code exchange or a refresh only, with any
+/// tenant's record. `None` if the type takes no such client.
+pub fn shared_client_policy(
+    integration_id: &str,
+    params: &Value,
+    allowances: &Allowances,
+) -> Option<Policy> {
+    if !on_platform_app(params) {
+        return None;
+    }
+    let mut tokens = authorized_tokens(integration_id, params)?;
+    if let Some(api_base) = allowances.api_bases.get(integration_id) {
+        tokens.api = vec![(api_base.clone(), true)];
+    }
+    let client = client_inject(integration_id, params)?;
+    authorized_client_policy(&tokens, &client, true, allowances)
 }
 
 /// Whether an authorization-code connection's client secret is sealed, and
@@ -988,15 +1063,26 @@ fn token_policy(
 /// The policy of an authorization-code connection's client secret: to the
 /// token endpoint, where what comes back is sealed as the tokens' own
 /// policies say, and to the revocation endpoint if the client authenticates
-/// there.
+/// there. `shared` for a platform OAuth app's, which serves every tenant's
+/// connections on the app.
 fn authorized_client_policy(
     tokens: &AuthorizedTokens,
     client: &Inject,
+    shared: bool,
     allowances: &Allowances,
 ) -> Option<Policy> {
     let rules = token_rules(tokens, allowances)?;
     let mut to_token_endpoint = rule_for(&tokens.token_url, client, false, allowances)?;
     to_token_endpoint.seal_response = Some(rules.seal_response);
+    // A platform's secret goes with any tenant's record, so only with the
+    // grants a tenant's own authorization makes: never one that gets a token
+    // for the client itself.
+    if shared {
+        to_token_endpoint.require_form = BTreeMap::from([(
+            "grant_type".to_owned(),
+            vec!["authorization_code".to_owned(), "refresh_token".to_owned()],
+        )]);
+    }
     let mut client_rules = vec![to_token_endpoint];
     if let (Some(url), Inject::Basic { .. }) = (&tokens.revocation_url, client) {
         client_rules.push(rule_for(url, client, false, allowances)?);
@@ -1004,7 +1090,7 @@ fn authorized_client_policy(
     Some(Policy {
         rules: client_rules,
         definitions: rules.definitions,
-        shared: false,
+        shared,
         verify: None,
     })
 }
@@ -1643,7 +1729,7 @@ pub fn policies(
                 if let Some(api_base) = allowances.api_bases.get(integration_id) {
                     tokens.api = vec![(api_base.clone(), true)];
                 }
-                authorized_client_policy(&tokens, client, allowances)?
+                authorized_client_policy(&tokens, client, on_platform_app(params), allowances)?
             }
             Usage::ClientSecret(grant) => {
                 let mut grant = grant.clone();
@@ -2495,6 +2581,63 @@ mod tests {
                 .keys()
                 .collect::<Vec<_>>(),
             ["access_token", "refresh_token"]
+        );
+        // The app's secret is the platform's: shared, for a tenant's own
+        // grants only, and for the API in either environment, as are the
+        // tokens it gets.
+        let shared = canonical(
+            &shared_client_policy("quickbooks_online", &on_app, &Allowances::default()).unwrap(),
+        );
+        assert_eq!(shared["shared"], true);
+        assert_eq!(
+            shared["rules"][0]["require_form"],
+            json!({"grant_type": ["authorization_code", "refresh_token"]})
+        );
+        assert!(shared["rules"][1].get("require_form").is_none());
+        let api_hosts = |policy: &Value| -> Vec<String> {
+            policy["definitions"]["api"]["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|rule| rule["destination"]["host"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let hosts = api_hosts(&shared);
+        assert!(
+            hosts.contains(&"quickbooks.api.intuit.com".to_owned()),
+            "{hosts:?}"
+        );
+        assert!(
+            hosts.contains(&"sandbox-quickbooks.api.intuit.com".to_owned()),
+            "{hosts:?}"
+        );
+        let mut in_sandbox = on_app.clone();
+        in_sandbox["environment"] = json!("sandbox");
+        assert_eq!(
+            canonical(
+                &shared_client_policy("quickbooks_online", &in_sandbox, &Allowances::default())
+                    .unwrap()
+            ),
+            shared
+        );
+        let of_app = super::policies("quickbooks_online", &on_app, &Allowances::default()).unwrap();
+        assert_eq!(
+            canonical(&of_app["access_token"])["definitions"],
+            shared["definitions"]
+        );
+        // A tenant's own client is never shared.
+        assert!(
+            canonical(&policies["client_secret"])
+                .get("shared")
+                .is_none()
+        );
+        assert!(
+            shared_client_policy(
+                "quickbooks_online",
+                &json!({"client_id": "cid"}),
+                &Allowances::default()
+            )
+            .is_none()
         );
         // Xero's access token says which consent it came from, and this
         // process is told that much of it.

@@ -61,7 +61,10 @@ scoped README files, examples.
 - Do not add a path that stores a connection secret readable, or that uses
   one except through seal. A new connection type says where each secret goes
   in `runtara-connections`' `sealed::policy`; a secret seal cannot hold is
-  refused when the connection is saved.
+  refused when the connection is saved. The same holds for a platform OAuth
+  app's client secret: it is sealed as it is entered (`runtara-server
+  oauth-apps put`) and kept in `platform_oauth_app`; no file, setting or
+  host hands one over readable.
 - Never read, print, log, or commit credential values. Treat `.env*`, tokens,
   connection parameters, and database URLs as sensitive.
 - Do not hand-edit generated artifacts or ignored build outputs.

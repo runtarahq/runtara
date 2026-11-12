@@ -973,3 +973,89 @@ async fn an_mcp_connections_extra_headers_are_stored_sealed() {
     assert!(matches!(moved, Err(ServiceError::ValidationError(_))));
     assert_eq!(fixture.row(&id).await.1, edited);
 }
+
+/// The platform's OAuth apps are stored with their client secrets sealed,
+/// and read back as apps a connection can use. Nothing readable is kept.
+#[tokio::test]
+async fn a_platform_oauth_app_is_stored_sealed_and_read_back() {
+    use runtara_connections::oauth_apps::{self, OAuthApps, StoredOAuthApps};
+    let fixture = Fixture::new().await;
+    // As the server's migration makes it.
+    sqlx::query(include_str!(
+        "../../runtara-server/migrations/20261112000000_platform_oauth_apps.sql"
+    ))
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+    let sealed = fixture.sealed();
+    let app = runtara_connections::NewOAuthApp {
+        id: "zoho-eu".into(),
+        integration_id: "zoho_crm_oauth".into(),
+        display_name: "Zoho (EU)".into(),
+        client_id: "1000.client".into(),
+        scopes: "ZohoCRM.modules.ALL".into(),
+        required_scopes: String::new(),
+        parameters: json!({"data_center": "eu"}),
+    };
+    let apps = StoredOAuthApps::load(fixture.pool.clone(), &sealed)
+        .await
+        .unwrap();
+    assert!(apps.available("acme").is_empty());
+
+    oauth_apps::put(&fixture.pool, &sealed, &app, "zoho-CANARY")
+        .await
+        .unwrap();
+    let stored: String = sqlx::query_scalar("SELECT to_jsonb(a)::text FROM platform_oauth_app a")
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    assert!(!stored.contains("CANARY"), "{stored}");
+    assert_eq!(
+        oauth_apps::entered(&fixture.pool).await.unwrap(),
+        std::slice::from_ref(&app)
+    );
+
+    // Seen once it is read again, by an instance with the same keys.
+    assert!(apps.get("acme", "zoho-eu").is_none());
+    apps.reload(&fixture.sealed()).await.unwrap();
+    let held = apps.get("acme", "zoho-eu").expect("the app is offered");
+    assert_eq!(apps.available("acme")[0].display_name, "Zoho (EU)");
+    let on_app = |data_center: &str| json!({"oauth_app": "zoho-eu", "data_center": data_center});
+    sealed
+        .with_app("zoho_crm_oauth", &on_app("eu"), &held)
+        .unwrap();
+    // The app's region is its connections': one elsewhere cannot use it.
+    let error = sealed
+        .with_app("zoho_crm_oauth", &on_app("us"), &held)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("region differs"), "{error}");
+
+    // Entered again, it is replaced; an app that cannot be is refused whole.
+    oauth_apps::put(&fixture.pool, &sealed, &app, "zoho-2-CANARY")
+        .await
+        .unwrap();
+    let mut generic = app.clone();
+    generic.integration_id = "http_oauth2_authorization_code".into();
+    let error = oauth_apps::put(&fixture.pool, &sealed, &generic, "s")
+        .await
+        .unwrap_err();
+    assert!(error.contains("takes its endpoints"), "{error}");
+    assert!(
+        oauth_apps::put(&fixture.pool, &sealed, &app, "")
+            .await
+            .is_err()
+    );
+    assert_eq!(oauth_apps::entered(&fixture.pool).await.unwrap().len(), 1);
+
+    // A row whose secret this deployment cannot open is not offered.
+    sqlx::query("DELETE FROM seal_wrapped_key WHERE keyset = 't-platform'")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    apps.reload(&fixture.sealed()).await.unwrap();
+    assert!(apps.get("acme", "zoho-eu").is_none());
+
+    assert!(oauth_apps::remove(&fixture.pool, "zoho-eu").await.unwrap());
+    assert!(!oauth_apps::remove(&fixture.pool, "zoho-eu").await.unwrap());
+}

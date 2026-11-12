@@ -2,39 +2,49 @@
 //! connect with instead of registering their own.
 //!
 //! A connection names one in its `oauth_app` parameter in place of a client
-//! ID and secret. Its credentials are resolved where a request to the
-//! provider needs them, and its secret is sealed for that request as the
-//! connection's own would be, for seal to send
-//! ([`crate::sealed::SealedCredentials::with_app_client`]); they are never
-//! written into the connection, so nothing that stores the connection back
-//! can persist them.
+//! ID and secret. The app's secret is sealed as it is entered, to the
+//! platform's own key, for seal to send with any tenant's connection on the
+//! app and only to the app's token endpoint
+//! ([`crate::sealed::SealedCredentials::seal_app_secret`]). Nothing holds it
+//! readable: not a file, not the database, not this process. It is resolved
+//! where a request to the provider needs it, and is never written into the
+//! connection, so nothing that stores the connection back can persist it.
 //!
-//! The host supplies the apps ([`OAuthApps`]); runtara reads them from the
-//! file `RUNTARA_OAUTH_APPS_FILE` names ([`FileOAuthApps`]) when it supplies
-//! none.
+//! The host supplies the apps ([`OAuthApps`]); runtara keeps them in its
+//! database ([`StoredOAuthApps`], written by [`put`]) when it supplies none.
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, RwLock};
 
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::Counter;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use zeroize::Zeroizing;
+use sqlx::PgPool;
+
+use crate::sealed::SealedCredentials;
 
 /// The reserved connection parameter naming the platform app a connection
 /// uses.
 pub const OAUTH_APP_PARAM: &str = "oauth_app";
 
-/// A platform app's credentials.
+/// A platform app, with its client secret sealed.
 pub struct OAuthAppCredentials {
     pub app_id: String,
     /// The one connection type it may serve.
     pub integration_id: String,
     pub display_name: String,
     pub client_id: String,
-    pub client_secret: Zeroizing<String>,
+    /// The client secret, sealed: the marker
+    /// [`crate::sealed::SealedCredentials::seal_app_secret`] made. Nothing
+    /// here can read it.
+    pub client_secret: Value,
+    /// The parameters of the app's connections that say where its client
+    /// secret goes, for a type with several token endpoints (a Zoho
+    /// `data_center`): an object. The secret is sealed for those, and a
+    /// connection elsewhere cannot use the app.
+    pub parameters: Value,
     /// The scopes the app was registered for, space-separated.
     pub scopes: String,
     /// The scopes always requested, a subset of `scopes`.
@@ -129,103 +139,214 @@ pub fn record_provider_error(app_id: &str, stage: &'static str, message: &str) {
     );
 }
 
-/// The settings that name the apps file.
-pub const OAUTH_APPS_FILE_ENV: &str = "RUNTARA_OAUTH_APPS_FILE";
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AppsFile {
-    apps: Vec<AppEntry>,
+/// A platform app as it is entered, without its secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewOAuthApp {
+    pub id: String,
+    pub integration_id: String,
+    pub display_name: String,
+    pub client_id: String,
+    pub scopes: String,
+    pub required_scopes: String,
+    /// See [`OAuthAppCredentials::parameters`].
+    pub parameters: Value,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AppEntry {
-    id: String,
-    integration_id: String,
-    display_name: String,
-    client_id: String,
-    client_secret: String,
-    scopes: String,
-    #[serde(default)]
-    required_scopes: String,
-}
-
-/// Platform apps from a JSON file, every one available to every tenant:
-///
-/// ```json
-/// {"apps": [{"id": "hubspot", "integrationId": "hubspot_private_app",
-///            "displayName": "HubSpot", "clientId": "…", "clientSecret": "…",
-///            "scopes": "oauth crm.objects.contacts.read", "requiredScopes": "oauth"}]}
-/// ```
-pub struct FileOAuthApps {
-    apps: HashMap<String, Arc<OAuthAppCredentials>>,
-}
-
-impl FileOAuthApps {
-    /// The apps in `json`. Refuses an app for a connection type that takes
-    /// its endpoints from the connection (a platform secret must never go to
-    /// an endpoint a tenant chose), and one whose required scopes it was not
-    /// registered for.
-    pub fn from_json(json: &str) -> Result<Self, String> {
-        let file: AppsFile = serde_json::from_str(json)
-            .map_err(|error| format!("the OAuth apps are not valid: {error}"))?;
-        let mut apps = HashMap::new();
-        for entry in file.apps {
-            let app = OAuthAppCredentials {
-                app_id: entry.id,
-                integration_id: entry.integration_id,
-                display_name: entry.display_name,
-                client_id: entry.client_id,
-                client_secret: Zeroizing::new(entry.client_secret),
-                scopes: entry.scopes,
-                required_scopes: entry.required_scopes,
-            };
-            check_app(&app)?;
-            if apps.insert(app.app_id.clone(), Arc::new(app)).is_some() {
-                return Err("the OAuth apps name one app twice".to_string());
-            }
-        }
-        Ok(Self { apps })
+/// Seals `client_secret` for `app` and stores the app, in place of any with
+/// its id. The secret is not kept anywhere else, and cannot be read back.
+pub async fn put(
+    pool: &PgPool,
+    sealed: &SealedCredentials,
+    app: &NewOAuthApp,
+    client_secret: &str,
+) -> Result<(), String> {
+    check_app(app)?;
+    if client_secret.is_empty() {
+        return Err(format!("OAuth app '{}' needs a client secret", app.id));
     }
+    let marker = sealed
+        .seal_app_secret(
+            &app.id,
+            &app.integration_id,
+            &app.client_id,
+            &app.parameters,
+            client_secret,
+        )
+        .await
+        .map_err(|error| format!("OAuth app '{}': {error}", app.id))?;
+    sqlx::query(
+        r#"
+        INSERT INTO platform_oauth_app
+            (id, integration_id, display_name, client_id, client_secret, scopes,
+             required_scopes, parameters)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT (id) DO UPDATE SET
+            integration_id = EXCLUDED.integration_id,
+            display_name = EXCLUDED.display_name,
+            client_id = EXCLUDED.client_id,
+            client_secret = EXCLUDED.client_secret,
+            scopes = EXCLUDED.scopes,
+            required_scopes = EXCLUDED.required_scopes,
+            parameters = EXCLUDED.parameters,
+            updated_at = NOW()
+        "#,
+    )
+    .bind(&app.id)
+    .bind(&app.integration_id)
+    .bind(&app.display_name)
+    .bind(&app.client_id)
+    .bind(&marker)
+    .bind(&app.scopes)
+    .bind(&app.required_scopes)
+    .bind(&app.parameters)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("OAuth app '{}' was not stored: {error}", app.id))?;
+    Ok(())
+}
 
-    /// The apps in the file `RUNTARA_OAUTH_APPS_FILE` names; `None` when it
-    /// names none.
-    pub fn from_env() -> Result<Option<Self>, String> {
-        let Some(path) = std::env::var_os(OAUTH_APPS_FILE_ENV).filter(|path| !path.is_empty())
-        else {
-            return Ok(None);
+/// Removes a stored app. `false` if there was none. Connections on it stop
+/// working until it is entered again.
+pub async fn remove(pool: &PgPool, app_id: &str) -> Result<bool, String> {
+    sqlx::query("DELETE FROM platform_oauth_app WHERE id = $1")
+        .bind(app_id)
+        .execute(pool)
+        .await
+        .map(|deleted| deleted.rows_affected() > 0)
+        .map_err(|error| format!("OAuth app '{app_id}' was not removed: {error}"))
+}
+
+/// The stored apps as they were entered, by id. No secrets.
+pub async fn entered(pool: &PgPool) -> Result<Vec<NewOAuthApp>, String> {
+    Ok(stored(pool)
+        .await?
+        .into_iter()
+        .map(|app| NewOAuthApp {
+            id: app.app_id,
+            integration_id: app.integration_id,
+            display_name: app.display_name,
+            client_id: app.client_id,
+            scopes: app.scopes,
+            required_scopes: app.required_scopes,
+            parameters: app.parameters,
+        })
+        .collect())
+}
+
+/// The stored apps, by id.
+async fn stored(pool: &PgPool) -> Result<Vec<OAuthAppCredentials>, String> {
+    type Row = (String, String, String, String, Value, String, String, Value);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT id, integration_id, display_name, client_id, client_secret, scopes, \
+                required_scopes, parameters \
+         FROM platform_oauth_app ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("the platform OAuth apps could not be read: {error}"))?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                app_id,
+                integration_id,
+                display_name,
+                client_id,
+                client_secret,
+                scopes,
+                required_scopes,
+                parameters,
+            )| {
+                OAuthAppCredentials {
+                    app_id,
+                    integration_id,
+                    display_name,
+                    client_id,
+                    client_secret,
+                    parameters,
+                    scopes,
+                    required_scopes,
+                }
+            },
+        )
+        .collect())
+}
+
+/// The platform apps in runtara's database, every one available to every
+/// tenant. It answers from memory, and reads the database when told to
+/// ([`Self::reload`]).
+pub struct StoredOAuthApps {
+    pool: PgPool,
+    apps: RwLock<HashMap<String, Arc<OAuthAppCredentials>>>,
+}
+
+impl StoredOAuthApps {
+    /// The stored apps, read now.
+    pub async fn load(pool: PgPool, sealed: &SealedCredentials) -> Result<Self, String> {
+        let apps = Self {
+            pool,
+            apps: RwLock::new(HashMap::new()),
         };
-        let json = Zeroizing::new(std::fs::read_to_string(&path).map_err(|error| {
-            format!(
-                "{OAUTH_APPS_FILE_ENV}: cannot read {}: {error}",
-                path.to_string_lossy()
-            )
-        })?);
-        Self::from_json(&json)
-            .map(Some)
-            .map_err(|error| format!("{OAUTH_APPS_FILE_ENV}: {error}"))
+        apps.reload(sealed).await?;
+        Ok(apps)
+    }
+
+    /// Reads the stored apps again, so that one entered, changed or removed
+    /// since is seen. An app whose secret this deployment cannot open (its
+    /// row came from another deployment, or the platform's seal key is gone)
+    /// is left out, and named in the log.
+    pub async fn reload(&self, sealed: &SealedCredentials) -> Result<(), String> {
+        let mut apps = HashMap::new();
+        for app in stored(&self.pool).await? {
+            if !sealed
+                .holds_app_secret(&app.app_id, &app.client_secret)
+                .await
+            {
+                tracing::error!(
+                    app = %app.app_id,
+                    "A platform OAuth app's sealed client secret cannot be opened here; \
+                     enter the app again"
+                );
+                continue;
+            }
+            apps.insert(app.app_id.clone(), Arc::new(app));
+        }
+        *self.apps.write().unwrap_or_else(|e| e.into_inner()) = apps;
+        Ok(())
     }
 }
 
-impl OAuthApps for FileOAuthApps {
+impl OAuthApps for StoredOAuthApps {
     fn get(&self, _tenant: &str, app_id: &str) -> Option<Arc<OAuthAppCredentials>> {
-        self.apps.get(app_id).cloned()
+        let apps = self.apps.read().unwrap_or_else(|e| e.into_inner());
+        apps.get(app_id).cloned()
     }
 
     fn available(&self, _tenant: &str) -> Vec<OAuthAppSummary> {
-        let mut apps: Vec<_> = self.apps.values().map(|app| app.as_ref().into()).collect();
+        let apps = self.apps.read().unwrap_or_else(|e| e.into_inner());
+        let mut apps: Vec<_> = apps.values().map(|app| app.as_ref().into()).collect();
         apps.sort_by(|a: &OAuthAppSummary, b| a.id.cmp(&b.id));
         apps
     }
 }
 
 /// Whether `app` can serve a connection at all.
-pub fn check_app(app: &OAuthAppCredentials) -> Result<(), String> {
-    let id = &app.app_id;
-    if id.is_empty() || app.client_id.is_empty() || app.client_secret.is_empty() {
+pub fn check_app(app: &NewOAuthApp) -> Result<(), String> {
+    let id = &app.id;
+    if id.is_empty() || app.client_id.is_empty() {
+        return Err(format!("OAuth app '{id}' needs an id and a client ID"));
+    }
+    // The id names the record its secret is sealed for, in seal's audit log.
+    let named = id.len() <= 100
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    if !named {
+        return Err("an OAuth app's id is up to 100 letters, digits, `.`, `_` and `-`".to_string());
+    }
+    if !app.parameters.is_object() {
         return Err(format!(
-            "OAuth app '{id}' needs an id, a client ID and a client secret"
+            "OAuth app '{id}': its parameters are not an object"
         ));
     }
     let Some(oauth_config) = runtara_agents::registry::find_connection_type(&app.integration_id)
@@ -332,49 +453,64 @@ pub fn app_for(
 pub(crate) mod tests {
     use super::*;
 
+    /// A sealed value's marker, as a test that sends nothing needs one.
     pub(crate) fn app(id: &str, integration: &str) -> OAuthAppCredentials {
         OAuthAppCredentials {
             app_id: id.into(),
             integration_id: integration.into(),
             display_name: "HubSpot".into(),
             client_id: "platform-client".into(),
-            client_secret: Zeroizing::new("platform-secret".into()),
+            client_secret: serde_json::json!({"$sealed": {"record": "oauth-app:test"}}),
             scopes: "oauth crm.objects.contacts.read crm.objects.deals.read".into(),
             required_scopes: "oauth".into(),
+            parameters: serde_json::json!({}),
         }
     }
 
     #[test]
-    fn the_file_is_read_and_checked() {
-        let apps = FileOAuthApps::from_json(
-            r#"{"apps":[{"id":"hubspot","integrationId":"hubspot_private_app",
-                "displayName":"HubSpot","clientId":"c","clientSecret":"s",
-                "scopes":"oauth crm.objects.contacts.read","requiredScopes":"oauth"}]}"#,
-        )
+    fn an_app_is_checked_as_it_is_entered() {
+        let entered = |integration: &str, required: &str, parameters: Value| NewOAuthApp {
+            id: "app".into(),
+            integration_id: integration.into(),
+            display_name: "App".into(),
+            client_id: "c".into(),
+            scopes: "a".into(),
+            required_scopes: required.into(),
+            parameters,
+        };
+        let none = || serde_json::json!({});
+        check_app(&entered("hubspot_private_app", "a", none())).unwrap();
+        check_app(&entered(
+            "zoho_crm_oauth",
+            "",
+            serde_json::json!({"data_center": "eu"}),
+        ))
         .unwrap();
-        let hubspot = apps.get("any-tenant", "hubspot").unwrap();
-        assert_eq!(hubspot.client_id, "c");
-        assert_eq!(apps.available("any-tenant")[0].id, "hubspot");
-        assert!(!format!("{hubspot:?}").contains("client_secret"));
-
+        assert!(!format!("{:?}", app("hubspot", "hubspot_private_app")).contains("client_secret"));
         for (bad, why) in [
             (
-                r#"{"apps":[{"id":"g","integrationId":"http_oauth2_authorization_code","displayName":"G","clientId":"c","clientSecret":"s","scopes":"a"}]}"#,
+                entered("http_oauth2_authorization_code", "", none()),
                 "takes its endpoints",
             ),
+            (entered("stripe", "", none()), "not an authorization-code"),
             (
-                r#"{"apps":[{"id":"x","integrationId":"stripe","displayName":"X","clientId":"c","clientSecret":"s","scopes":"a"}]}"#,
-                "not an authorization-code",
-            ),
-            (
-                r#"{"apps":[{"id":"h","integrationId":"hubspot_private_app","displayName":"H","clientId":"c","clientSecret":"s","scopes":"a","requiredScopes":"b"}]}"#,
+                entered("hubspot_private_app", "b", none()),
                 "requires scope 'b'",
             ),
-            (r#"{"apps":[{"id":"h"}]}"#, "not valid"),
+            (
+                entered("hubspot_private_app", "", serde_json::json!([])),
+                "not an object",
+            ),
+            (
+                NewOAuthApp {
+                    id: "hub spot/eu".into(),
+                    ..entered("hubspot_private_app", "", none())
+                },
+                "letters, digits",
+            ),
         ] {
-            let error = FileOAuthApps::from_json(bad).err().unwrap();
+            let error = check_app(&bad).unwrap_err();
             assert!(error.contains(why), "{error}");
-            assert!(!error.contains("\"s\""), "no secret in {error}");
         }
     }
 

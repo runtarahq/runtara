@@ -416,6 +416,15 @@ impl SealedCredentials {
         let client_id = parameters["client_id"].as_str().ok_or_else(|| {
             AuthResolutionError::permanent("The connection has no client_id to exchange with")
         })?;
+        // The pair comes back sealed to the tenant's key. A tenant whose
+        // first connection is on a platform app has sealed nothing yet, and
+        // so has no key until now.
+        self.sealing_key(tenant_id).await.map_err(|error| {
+            AuthResolutionError::transient(format!(
+                "The tenant's seal key is not available: {}",
+                error.code.as_str()
+            ))
+        })?;
         let mut grant = vec![
             ("grant_type".to_string(), "authorization_code".to_string()),
             ("code".to_string(), code.to_string()),
