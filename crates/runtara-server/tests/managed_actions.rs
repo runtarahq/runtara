@@ -76,9 +76,7 @@ fn mcp_server(
         );
     runtara_server::mcp::server::SmoMcpServer::new(
         pool,
-        Arc::new(
-            runtara_server::api::repositories::object_model::ObjectStoreManager::new(String::new()),
-        ),
+        Arc::new(runtara_server::api::repositories::object_model::ObjectStoreManager::new()),
         client,
         tenant.into(),
         router,

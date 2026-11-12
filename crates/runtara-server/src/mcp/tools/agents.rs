@@ -252,7 +252,7 @@ mod tests {
         let server = |tenant: &str| {
             SmoMcpServer::new(
                 pool.clone(),
-                Arc::new(ObjectStoreManager::new(String::new())),
+                Arc::new(ObjectStoreManager::new()),
                 None,
                 tenant.into(),
                 crate::api::handlers::operators::agent_lookup_routes(),

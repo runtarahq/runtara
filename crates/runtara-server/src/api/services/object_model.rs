@@ -10,7 +10,7 @@ use runtara_connections::ConnectionsFacade;
 use runtara_object_store::ObjectStore;
 use std::sync::{Arc, OnceLock};
 
-const OBJECT_MODEL_DEFAULT_FOR: &str = "object_model";
+pub(crate) const OBJECT_MODEL_DEFAULT_FOR: &str = "object_model";
 
 // ============================================================================
 // Connection Resolution Helper
@@ -19,8 +19,7 @@ const OBJECT_MODEL_DEFAULT_FOR: &str = "object_model";
 /// Process-wide cache of resolved object-model connection URLs.
 ///
 /// Keyed by `(tenant, "c:<connection_id>" | "default:object_model")`; the value
-/// is the resolved `Option<String>` URL (`None` = no connection configured, i.e.
-/// the legacy default store). This collapses the per-request internal-DB lookup
+/// is the resolved URL; a tenant with no default connection is not cached. This collapses the per-request internal-DB lookup
 /// plus credential decrypt to once per TTL. The TTL is *time-to-live* (since
 /// write), so a rotated credential or deleted connection propagates within the
 /// window even for a hot key — default 60s, override with
@@ -66,7 +65,11 @@ pub(crate) async fn resolve_database_url(
         return Ok(cached);
     }
     let resolved = resolve_database_url_uncached(facade, connection_id, tenant_id).await?;
-    metadata_cache().insert(key, resolved.clone()).await;
+    // A tenant with no database yet is asked again: one set for it
+    // (`runtara-server object-model set`) is used by the next request.
+    if resolved.is_some() {
+        metadata_cache().insert(key, resolved.clone()).await;
+    }
     Ok(resolved)
 }
 
@@ -109,10 +112,6 @@ pub(crate) async fn resolve_database_url_uncached(
                 ServiceError::ValidationError(format!("Connection '{}' has no parameters", conn_id))
             })?;
 
-            // The platform's own database is the operator's, not a tenant's.
-            if is_platform_database(params) {
-                return Ok(None);
-            }
             // The password is sealed, and seal's to log in with.
             admit_sealed(facade, &conn.id, params, tenant_id)
                 .await
@@ -145,7 +144,7 @@ pub(crate) async fn resolve_database_url_uncached(
             else {
                 tracing::debug!(
                     tenant_id = %tenant_id,
-                    "No default object_model connection; using the platform object model store, if any"
+                    "No default object_model connection"
                 );
                 return Ok(None);
             };
@@ -164,9 +163,6 @@ pub(crate) async fn resolve_database_url_uncached(
                 )
             })?;
 
-            if is_platform_database(params) {
-                return Ok(None);
-            }
             admit_sealed(facade, &conn.id, params, tenant_id)
                 .await
                 .ok_or_else(|| {
@@ -183,13 +179,6 @@ pub(crate) async fn resolve_database_url_uncached(
                 })
         }
     }
-}
-
-/// Whether a connection stands for the platform's own database: it holds no
-/// URL, and the platform object-model store is used.
-fn is_platform_database(params: &serde_json::Value) -> bool {
-    params[runtara_connections::repository::connections::PLATFORM_DATABASE_PARAM].as_bool()
-        == Some(true)
 }
 
 /// The URL to connect with for a Postgres connection, whose password is
@@ -224,13 +213,11 @@ pub(crate) async fn get_store(
             .map_err(|e| {
                 ServiceError::DatabaseError(format!("Failed to connect to database: {}", e))
             }),
-        None => manager.get_store(tenant_id).await.map_err(|e| match e {
-            // No platform database: say what to do, as a request error.
-            runtara_object_store::ObjectStoreError::Validation(message) => {
-                ServiceError::ValidationError(message)
-            }
-            e => ServiceError::DatabaseError(format!("Failed to get default store: {}", e)),
-        }),
+        // The tenant has no object model database of its own, and there is
+        // no other: say what to do, as a request error.
+        None => Err(ServiceError::ValidationError(
+            crate::api::repositories::object_model::NO_OBJECT_MODEL_DATABASE.to_string(),
+        )),
     }
 }
 

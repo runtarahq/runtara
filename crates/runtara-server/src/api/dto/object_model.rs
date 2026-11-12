@@ -369,7 +369,7 @@ pub struct ObjectModelQueryParams {
     #[serde(default = "default_limit")]
     pub limit: i64,
     /// Optional connection ID to use a specific database instead of the default.
-    /// If not provided, uses the default OBJECT_MODEL_DATABASE_URL.
+    /// If not provided, uses the tenant's default object model database.
     #[serde(rename = "connectionId")]
     pub connection_id: Option<String>,
 }
@@ -378,7 +378,7 @@ pub struct ObjectModelQueryParams {
 #[derive(Debug, Deserialize)]
 pub struct ConnectionQueryParams {
     /// Optional connection ID to use a specific database instead of the default.
-    /// If not provided, uses the default OBJECT_MODEL_DATABASE_URL.
+    /// If not provided, uses the tenant's default object model database.
     #[serde(rename = "connectionId")]
     pub connection_id: Option<String>,
 }

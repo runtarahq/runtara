@@ -64,7 +64,8 @@ fn allow_local_egress_for_this_test_binary() {
         std::env::set_var("RUNTARA_PROXY_ALLOWED_HOSTS", "127.0.0.1");
         std::env::set_var("RUNTARA_PROXY_ALLOW_HTTP_HOSTS", "127.0.0.1");
         std::env::set_var("TENANT_ID", "native_outbound_test");
-        std::env::set_var("OBJECT_MODEL_DATABASE_URL", database_url());
+        // Databases a test reaches are its own, on loopback.
+        std::env::set_var("RUNTARA_DATABASE_CONNECTION_GUARD", "off");
         std::env::set_var("RUNTARA_MCP_SESSION_STORE", "local");
         std::env::set_var("ADAPTIVE_RATE_LIMITING", "true");
         std::env::set_var("RUNTARA_ENDPOINT_REF_SECRET", "synthetic-outbound-ref-key");
