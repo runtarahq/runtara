@@ -13,9 +13,10 @@ use uuid::Uuid;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-/// Tables with no tenant: the migration record and the process's own
-/// plan-check record. Anything else must be policed.
-const GLOBAL: &[&str] = &["_sqlx_migrations", "metadata"];
+/// Tables with no tenant: the migration record, the process's own
+/// plan-check record, and the platform's OAuth apps (which tenants may use
+/// one is the host's to say, and each holds its secret sealed). Anything else must be policed.
+const GLOBAL: &[&str] = &["_sqlx_migrations", "metadata", "platform_oauth_app"];
 
 fn url() -> String {
     std::env::var("TEST_RUNTARA_SERVER_DATABASE_URL")
@@ -286,4 +287,52 @@ async fn an_outbox_row_takes_its_requests_tenant() {
         .execute(&admin)
         .await
         .unwrap();
+}
+
+/// The platform's seal key is no tenant's row: a tenant's scope hides it,
+/// and seal still makes and reads it from inside one, where a request for a
+/// tenant's connection on a platform OAuth app runs.
+#[tokio::test]
+async fn the_platforms_seal_key_is_reached_from_inside_a_tenants_scope() {
+    use runtara_connections::sealed::{Allowances, SealedCredentials, keys::PgKeySource};
+    let admin = admin().await;
+    const COUNT: &str = "SELECT count(*) FROM seal_wrapped_key WHERE keyset = 't-platform'";
+    let before: i64 = sqlx::query_scalar(COUNT).fetch_one(&admin).await.unwrap();
+    let restricted = Restricted::new(&admin).await;
+    let sealed = SealedCredentials::in_process(
+        std::sync::Arc::new(PgKeySource::new(restricted.pool.clone())),
+        &[7_u8; 32],
+        Allowances::default(),
+    )
+    .unwrap();
+    let tenant = format!("tenant-{}", Uuid::new_v4().simple());
+
+    let marker = scoped(
+        tenant.clone(),
+        sealed.seal_app_secret(
+            "probe",
+            "hubspot_private_app",
+            "client",
+            &serde_json::json!({}),
+            "not-a-real-secret",
+        ),
+    )
+    .await
+    .unwrap();
+    let seen: i64 = scoped(
+        tenant.clone(),
+        sqlx::query_scalar(COUNT).fetch_one(&restricted.pool),
+    )
+    .await
+    .unwrap();
+    assert_eq!(seen, 0, "a tenant's scope sees no platform key");
+    assert!(scoped(tenant, sealed.holds_app_secret("probe", &marker)).await);
+
+    if before == 0 {
+        sqlx::query("DELETE FROM seal_wrapped_key WHERE keyset = 't-platform'")
+            .execute(&admin)
+            .await
+            .unwrap();
+    }
+    restricted.drop().await;
 }

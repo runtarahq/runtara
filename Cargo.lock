@@ -5495,6 +5495,7 @@ dependencies = [
  "wasmtime",
  "wasmtime-wasi",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]

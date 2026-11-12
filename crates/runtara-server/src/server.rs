@@ -863,7 +863,7 @@ pub struct ServerOptions {
     pub credential_cipher: Option<Arc<dyn runtara_connections::CredentialCipher>>,
     /// OAuth apps the platform registered with providers, which tenants'
     /// connections may use in place of their own client credentials; `None`
-    /// reads them from the file `RUNTARA_OAUTH_APPS_FILE` names, if any.
+    /// keeps them in its database (`runtara-server oauth-apps`).
     pub oauth_apps: Option<Arc<dyn runtara_connections::OAuthApps>>,
 }
 
@@ -1386,20 +1386,6 @@ pub async fn start_with(
         }
     };
 
-    let oauth_apps: Option<Arc<dyn runtara_connections::OAuthApps>> = match options
-        .oauth_apps
-        .clone()
-    {
-        Some(apps) => Some(apps),
-        None => match runtara_connections::FileOAuthApps::from_env() {
-            Ok(apps) => apps.map(|apps| Arc::new(apps) as Arc<dyn runtara_connections::OAuthApps>),
-            Err(msg) => {
-                eprintln!("❌ Configuration error: {msg}");
-                std::process::exit(1);
-            }
-        },
-    };
-
     // seal holds every connection's secrets, and sends their requests. The
     // proxy's development allowances are seal's too.
     // Tenants' seal keys follow a rotation of the encryption key their
@@ -1431,6 +1417,40 @@ pub async fn start_with(
     // Releases before seal stored secrets readable, which nothing uses any
     // more: seal them first.
     seal_readable_credentials(&pool, cipher.clone(), &sealed_credentials).await;
+    // The platform's OAuth apps: the host's, or those stored here, each
+    // with its client secret sealed.
+    let oauth_apps: Option<Arc<dyn runtara_connections::OAuthApps>> = match options
+        .oauth_apps
+        .clone()
+    {
+        Some(apps) => Some(apps),
+        None => {
+            let stored =
+                match runtara_connections::StoredOAuthApps::load(pool.clone(), &sealed_credentials)
+                    .await
+                {
+                    Ok(stored) => Arc::new(stored),
+                    Err(msg) => {
+                        eprintln!("❌ {msg}");
+                        std::process::exit(1);
+                    }
+                };
+            // An app entered, changed or removed (`runtara-server oauth-apps`)
+            // is seen by every instance within a minute.
+            let (apps, sealed) = (stored.clone(), sealed_credentials.clone());
+            tokio::spawn(async move {
+                let mut every = tokio::time::interval(std::time::Duration::from_secs(60));
+                every.tick().await;
+                loop {
+                    every.tick().await;
+                    if let Err(error) = apps.reload(&sealed).await {
+                        tracing::warn!(%error, "The platform's OAuth apps were not read again");
+                    }
+                }
+            });
+            Some(stored)
+        }
+    };
 
     // Construct connections crate config and facade.
     let connections_config = runtara_connections::ConnectionsConfig {
