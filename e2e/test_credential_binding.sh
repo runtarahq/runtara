@@ -154,6 +154,8 @@ start_server() {
     DATA_DIR="${TEST_DATA_DIR}" \
     RUST_LOG="warn,runtara_server=info" \
     AUTH_PROVIDER=local \
+    RUNTARA_PROXY_ALLOWED_HOSTS="${POSTGRES_HOST}" \
+    RUNTARA_PROXY_ALLOW_HTTP_HOSTS="${POSTGRES_HOST}" \
     VALKEY_HOST=127.0.0.1 \
     VALKEY_PORT="${TEST_VALKEY_PORT}" \
     OTEL_SDK_DISABLED=true \
@@ -214,10 +216,13 @@ restart() {
 
 #-------------------------------------------------------------------------
 print_step "1. Credentials are bound to their connection..."
-CONN=$(create_connection "bound" "${SERVER_DB_URL}")
+# The URL says how its session is protected: here a local database with no
+# TLS, which the server is told it may reach so. Its password is sealed, and
+# the parameters are encrypted around that.
+CONN=$(create_connection "bound" "${SERVER_DB_URL}?sslmode=disable")
 [ "$(envelope_of "${CONN}")" = "2:k1" ] || { print_error "the stored envelope is $(envelope_of "${CONN}"), not 2:k1"; exit 1; }
 [ "$(schemas_status "${CONN}")" = "200" ] || { print_error "the connection does not decrypt for itself"; exit 1; }
-OTHER=$(create_connection "other" "postgresql://u:p@db.invalid/x")
+OTHER=$(create_connection "other" "postgresql://u:p@db.invalid/x?sslmode=require")
 server_sql "UPDATE connection_data_entity SET connection_parameters =
               (SELECT connection_parameters FROM connection_data_entity WHERE id = '${CONN}')
             WHERE id = '${OTHER}'" >/dev/null

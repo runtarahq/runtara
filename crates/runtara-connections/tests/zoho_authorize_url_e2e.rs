@@ -44,6 +44,7 @@ impl PgFixture {
                 integration_id VARCHAR(255),
                 connection_subtype VARCHAR(255),
                 connection_parameters JSONB,
+                credential_format TEXT NOT NULL DEFAULT 'cipher',
                 rate_limit_config JSONB
             )
             "#,
@@ -96,6 +97,7 @@ async fn zoho_authorizes_at_its_data_centre_and_asks_for_a_refresh_token() {
             fixture.pool.clone(),
             Arc::new(NoOpCipher),
             "https://platform.example.com".to_string(),
+            runtara_connections::sealed::SealedCredentials::for_tests(),
         )
         .with_flows(valkey.manager.clone());
         let url = service

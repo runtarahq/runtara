@@ -55,6 +55,7 @@ async fn create_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
             title VARCHAR(255) NOT NULL UNIQUE,
             connection_subtype VARCHAR(255) DEFAULT NULL,
             connection_parameters JSONB DEFAULT NULL,
+            credential_format TEXT NOT NULL DEFAULT 'cipher',
             integration_id VARCHAR(255) DEFAULT NULL,
             status VARCHAR(50) NOT NULL DEFAULT 'UNKNOWN',
             rate_limit_config JSONB DEFAULT NULL,
@@ -276,15 +277,27 @@ async fn native_descriptions_and_resources_enforce_tenant_and_safe_metadata() {
     use serde_json::json;
     let fixture = PgFixture::start().await;
     seed(&fixture.pool).await;
-    // Only synthetic fixture values are stored here.
+    // Only synthetic fixture values are stored here, as a save stores them:
+    // the secret sealed.
+    let sealed = runtara_connections::sealed::SealedCredentials::for_tests();
+    let parameters = sealed
+        .seal_parameters(
+            TENANT,
+            "mcp-active",
+            "mcp",
+            &json!({"url":"https://example.test/rpc", "auth_mode":"bearer",
+                "bearer_token":"synthetic-secret", "extra_headers":{"X-Team":"synthetic-secret"},
+                "tool_scope":["search"],"tool_hints":{"search":"Find documents"}}),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
     sqlx::query(
-        "UPDATE connection_data_entity SET connection_parameters = $1 WHERE id = 'mcp-active'",
+        "UPDATE connection_data_entity SET connection_parameters = $1, credential_format = 'seal' \
+         WHERE id = 'mcp-active'",
     )
-    .bind(
-        json!({"url":"https://example.test/rpc?token=synthetic-secret",
-            "bearer_token":"synthetic-secret", "extra_headers":{"Authorization":"synthetic-secret"},
-            "tool_scope":["search"],"tool_hints":{"search":"Find documents"}}),
-    )
+    .bind(parameters)
     .execute(&fixture.pool)
     .await
     .unwrap();
@@ -301,6 +314,7 @@ async fn native_descriptions_and_resources_enforce_tenant_and_safe_metadata() {
         connection_events: None,
         oauth: Default::default(),
         agent_access: Arc::new(runtara_connections::EveryAgent),
+        sealed,
     });
     assert!(
         facade

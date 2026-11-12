@@ -238,16 +238,33 @@ pub(crate) fn validate_mtls_client_parameters(
     Ok(())
 }
 
-/// Build a request-scoped hardened mTLS client for an `http_mtls` connection.
-///
-/// This preserves every regular credentialed-egress control (no redirects and
-/// the guarded DNS resolver), forces Rustls for PEM identity support, and
-/// accepts HTTPS only. Optional server CAs are *added* to the normal trust
-/// roots; hostname and certificate verification remain enabled.
-pub(crate) fn build_hardened_mtls_client(
+/// Validate the public half of mTLS material at save time: the client
+/// certificate and any server CA parse as PEM. For a connection whose private
+/// key is sealed and so cannot be checked against its certificate here; seal
+/// refuses a key that does not match before it connects.
+pub(crate) fn validate_mtls_certificates(
     params: &serde_json::Value,
-) -> Result<reqwest::Client, MtlsClientConfigError> {
-    build_hardened_mtls_client_from_material(parse_mtls_material(params)?)
+) -> Result<(), MtlsClientConfigError> {
+    let pem = |name: &str| {
+        params
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+    };
+    let certificates = pem("client_certificate_pem")
+        .and_then(|bundle| reqwest::Certificate::from_pem_bundle(bundle.as_bytes()).ok())
+        .ok_or(MtlsClientConfigError::InvalidClientIdentity)?;
+    if certificates.is_empty() {
+        return Err(MtlsClientConfigError::InvalidClientIdentity);
+    }
+    if let Some(bundle) = pem("server_ca_pem") {
+        let certificates = reqwest::Certificate::from_pem_bundle(bundle.as_bytes())
+            .map_err(|_| MtlsClientConfigError::InvalidServerCa)?;
+        if certificates.is_empty() {
+            return Err(MtlsClientConfigError::InvalidServerCa);
+        }
+    }
+    Ok(())
 }
 
 /// Process-shared hardened client for OAuth token / refresh / revoke egress.
@@ -327,48 +344,8 @@ pub fn connection_http_allowed(host: &str) -> bool {
 /// egress list, which loopback emulators such as the Teams mock rely on).
 pub fn validate_credentialed_endpoint(raw: &str) -> Result<(), String> {
     validate_public_url(raw, |host| {
-        connection_http_allowed(host)
-            || host_is_allowlisted_for_egress(host)
-            || test_allowlist::contains(host)
+        connection_http_allowed(host) || host_is_allowlisted_for_egress(host)
     })
-}
-
-/// Unit tests cannot use the read-once env allowlists (other tests in the same
-/// binary assert they are empty), so they allow a host on their own thread.
-#[cfg(test)]
-pub(crate) mod test_allowlist {
-    use std::cell::RefCell;
-
-    thread_local! {
-        static HOSTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
-    }
-
-    /// Allow `host` for credentialed endpoints on this thread until the guard drops.
-    pub(crate) fn allow(host: &str) -> Guard {
-        HOSTS.with(|hosts| hosts.borrow_mut().push(host.to_ascii_lowercase()));
-        Guard
-    }
-
-    pub(crate) fn contains(host: &str) -> bool {
-        let host = host.to_ascii_lowercase();
-        HOSTS.with(|hosts| hosts.borrow().contains(&host))
-    }
-
-    pub(crate) struct Guard;
-
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            HOSTS.with(|hosts| hosts.borrow_mut().clear());
-        }
-    }
-}
-
-#[cfg(not(test))]
-mod test_allowlist {
-    #[inline]
-    pub(super) fn contains(_host: &str) -> bool {
-        false
-    }
 }
 
 #[cfg(test)]

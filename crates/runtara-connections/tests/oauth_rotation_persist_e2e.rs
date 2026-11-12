@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use runtara_connections::crypto::noop::NoOpCipher;
-use runtara_connections::repository::connections::{ConnectionRepository, refresh_token_hash};
+use runtara_connections::repository::connections::{ConnectionRepository, refresh_token_guard};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use sqlx::Row;
@@ -43,6 +43,7 @@ impl PgFixture {
                 id VARCHAR(255) PRIMARY KEY,
                 tenant_id VARCHAR(255) NOT NULL,
                 connection_parameters JSONB DEFAULT NULL,
+                credential_format TEXT NOT NULL DEFAULT 'cipher',
                 refresh_token_hash TEXT DEFAULT NULL,
                 status VARCHAR(64) DEFAULT NULL,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -177,16 +178,26 @@ async fn a_reauthorization_starts_a_new_rotation_chain() {
         .expect("first chain rotates");
     assert_eq!(rows, 1);
 
-    // The user authorizes again: a new refresh token, from a new chain.
-    repo.update_parameters_and_status(id, tenant, &json!({ "refresh_token": "R0" }), "ACTIVE")
-        .await
-        .expect("re-authorization is stored");
+    // The user authorizes again: a new refresh token, from a new chain,
+    // sealed as an authorization leaves it. Its guard is its envelope's.
+    let reauthorized = json!({ "$sealed": { "envelope": { "ct": "R0" }, "policy": "p" } });
+    repo.update_parameters_and_status(
+        id,
+        tenant,
+        &json!({ "refresh_token": reauthorized }),
+        "ACTIVE",
+    )
+    .await
+    .expect("re-authorization is stored");
+    let r0 = refresh_token_guard(&reauthorized).expect("a sealed token has a guard");
     let (_, hash) = read_back(&fixture.pool, id).await;
     assert_eq!(
         hash.as_deref(),
-        Some(refresh_token_hash("R0").as_str()),
+        Some(r0.as_str()),
         "the guard follows the new chain, not the old one"
     );
+    // A token that is not sealed has none.
+    assert_eq!(refresh_token_guard(&json!("R0")), None);
 
     // A refresh that started on the old chain finishes late: it must not
     // overwrite the new authorization's tokens.
@@ -202,10 +213,9 @@ async fn a_reauthorization_starts_a_new_rotation_chain() {
         .expect("stale persist call succeeds at the SQL level");
     assert_eq!(rows, 0, "the old chain must lose to the new authorization");
     let (params, _) = read_back(&fixture.pool, id).await;
-    assert_eq!(params["refresh_token"], "R0");
+    assert_eq!(params["refresh_token"], reauthorized);
 
     // The new chain's first rotation is persisted.
-    let r0 = refresh_token_hash("R0");
     let rows = repo
         .persist_refreshed_oauth(
             id,

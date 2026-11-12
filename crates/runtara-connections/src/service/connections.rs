@@ -177,7 +177,18 @@ fn validate_http_mtls_parameters(params: Option<&serde_json::Value>) -> Result<(
             "HTTP mTLS Base URL must not include a query or fragment".to_string(),
         ));
     }
-    crate::net::validate_mtls_client_parameters(params).map_err(|error| {
+    // A private key that stays sealed is a stand-in here: only the
+    // certificates can be checked.
+    let key_is_sealed = params
+        .get("client_private_key_pem")
+        .and_then(|key| key.as_str())
+        == Some(SEALED_STAND_IN);
+    let checked = if key_is_sealed {
+        crate::net::validate_mtls_certificates(params)
+    } else {
+        crate::net::validate_mtls_client_parameters(params)
+    };
+    checked.map_err(|error| {
         ServiceError::ValidationError(format!("Invalid HTTP mTLS configuration: {error}"))
     })
 }
@@ -291,7 +302,7 @@ fn build_edit_projection(
             } else if field.access != runtara_dsl::form::FieldAccessMode::Write
                 && let Some(value) = current
             {
-                values.insert(field.name.to_string(), value.clone());
+                values.insert(field.name.to_string(), shown(value));
             }
         }
     }
@@ -398,11 +409,13 @@ fn apply_connection_parameter_patch_to_meta(
 
     let merged = serde_json::Value::Object(values);
     let definition = runtara_dsl::form::connection_form_definition(meta);
+    // The form sees a secret that stays sealed as the text it stands for.
+    let with_stand_ins = with_sealed_stand_ins(&merged);
     let form_values = serde_json::Value::Object(
         meta.fields
             .iter()
             .filter_map(|field| {
-                merged
+                with_stand_ins
                     .get(field.name)
                     .cloned()
                     .map(|value| (field.name.to_string(), value))
@@ -513,6 +526,108 @@ pub struct ConnectionService {
     rate_limit_service: Option<Arc<RateLimitService>>,
     tenantless_oauth_callback: bool,
     oauth_apps: Option<Arc<dyn crate::oauth_apps::OAuthApps>>,
+    sealed: Arc<crate::sealed::SealedCredentials>,
+}
+
+/// A parameter that is no secret field, as an edit shows it. A map may still
+/// hold sealed values (an MCP connection's extra headers): each is shown
+/// blank, and an edit that leaves it blank keeps it.
+fn shown(value: &serde_json::Value) -> serde_json::Value {
+    let mut value = value.clone();
+    if let Some(entries) = value.as_object_mut() {
+        for entry in entries.values_mut() {
+            if crate::sealed::is_sealed(entry) {
+                *entry = serde_json::Value::String(String::new());
+            }
+        }
+    }
+    value
+}
+
+/// An edit shows a sealed extra header blank ([`shown`]): one sent back blank
+/// is the one the connection holds, not a header with no value.
+fn keep_sealed_extra_headers(merged: &mut serde_json::Value, stored: &serde_json::Value) {
+    let field = crate::sealed::policy::EXTRA_HEADERS_FIELD;
+    let Some(held) = stored[field].as_object() else {
+        return;
+    };
+    for (header, value) in merged[field].as_object_mut().into_iter().flatten() {
+        if value.as_str() == Some("")
+            && let Some(kept) = held
+                .get(header)
+                .filter(|kept| crate::sealed::is_sealed(kept))
+        {
+            *value = kept.clone();
+        }
+    }
+}
+
+/// What stands in for a sealed secret while a connection is checked against
+/// its type's form, which asks for a value. Never stored.
+const SEALED_STAND_IN: &str = "(sealed)";
+
+/// `params` with a stand-in for each sealed secret.
+fn with_sealed_stand_ins(params: &serde_json::Value) -> serde_json::Value {
+    let mut params = params.clone();
+    if let Some(fields) = params.as_object_mut() {
+        for value in fields.values_mut() {
+            if crate::sealed::is_sealed(value) {
+                *value = serde_json::Value::String(SEALED_STAND_IN.into());
+            }
+            // A map of secrets holds a sealed value under each name.
+            for entry in value
+                .as_object_mut()
+                .into_iter()
+                .flatten()
+                .map(|(_, entry)| entry)
+            {
+                if crate::sealed::is_sealed(entry) {
+                    *entry = serde_json::Value::String(SEALED_STAND_IN.into());
+                }
+            }
+        }
+    }
+    params
+}
+
+/// A request may not supply a sealed value's marker: only what the connection
+/// already holds may stay as one.
+fn reject_supplied_markers(
+    params: &serde_json::Value,
+    stored: Option<&serde_json::Value>,
+) -> Result<(), ServiceError> {
+    for (name, value) in params.as_object().into_iter().flatten() {
+        let held = stored.and_then(|stored| stored.get(name));
+        if crate::sealed::is_sealed(value) && held != Some(value) {
+            return Err(ServiceError::ValidationError(format!(
+                "Connection field '{name}' has a reserved form"
+            )));
+        }
+        // Nor inside a map of secrets.
+        for (entry, value) in value.as_object().into_iter().flatten() {
+            if crate::sealed::is_sealed(value)
+                && held.and_then(|held| held.get(entry)) != Some(value)
+            {
+                return Err(ServiceError::ValidationError(format!(
+                    "Connection field '{name}.{entry}' has a reserved form"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sealing_error(error: crate::sealed::SealingError) -> ServiceError {
+    match error {
+        crate::sealed::SealingError::SecretRequired { .. }
+        | crate::sealed::SealingError::CannotSeal { .. } => {
+            ServiceError::ValidationError(error.to_string())
+        }
+        crate::sealed::SealingError::Seal(_) => {
+            tracing::error!(%error, "could not seal connection credentials");
+            ServiceError::DatabaseError("Could not seal the connection's credentials".to_string())
+        }
+    }
 }
 
 /// What stands in for a platform app's client credentials while a connection
@@ -545,9 +660,12 @@ fn requested_app(value: &serde_json::Value) -> Result<String, ServiceError> {
 }
 
 impl ConnectionService {
+    /// A service that seals every connection's secrets with `sealed` as the
+    /// connection is saved.
     pub fn new(
         repository: Arc<ConnectionRepository>,
         compatibility: Arc<IntegrationCompatibility>,
+        sealed: Arc<crate::sealed::SealedCredentials>,
     ) -> Self {
         Self {
             repository,
@@ -555,6 +673,7 @@ impl ConnectionService {
             rate_limit_service: None,
             tenantless_oauth_callback: false,
             oauth_apps: None,
+            sealed,
         }
     }
 
@@ -617,6 +736,7 @@ impl ConnectionService {
         repository: Arc<ConnectionRepository>,
         compatibility: Arc<IntegrationCompatibility>,
         rate_limit_service: Arc<RateLimitService>,
+        sealed: Arc<crate::sealed::SealedCredentials>,
     ) -> Self {
         Self {
             repository,
@@ -624,6 +744,7 @@ impl ConnectionService {
             rate_limit_service: Some(rate_limit_service),
             tenantless_oauth_callback: false,
             oauth_apps: None,
+            sealed,
         }
     }
 
@@ -715,6 +836,10 @@ impl ConnectionService {
         // Validate the effective rate-limit config (user-supplied or default).
         if let Some(ref cfg) = request.rate_limit_config {
             validate_rate_limit_config(cfg)?;
+        }
+
+        if let Some(params) = request.connection_parameters.as_ref() {
+            reject_supplied_markers(params, None)?;
         }
 
         // A platform OAuth app, named in the reserved `oauth_app`, stands in for
@@ -813,6 +938,18 @@ impl ConnectionService {
 
         // Generate new connection ID
         let connection_id = Uuid::new_v4().to_string();
+
+        // Seal the secrets, now that the connection they are bound to has an
+        // id. One seal cannot hold is refused: none is stored readable.
+        if let Some(params) = request.connection_parameters.as_ref()
+            && let Some(stored) = self
+                .sealed
+                .seal_parameters(tenant_id, &connection_id, &integration_id, params, None)
+                .await
+                .map_err(sealing_error)?
+        {
+            request.connection_parameters = Some(stored);
+        }
 
         // Delegate to repository
         self.repository
@@ -1012,8 +1149,13 @@ impl ConnectionService {
         // Validate the EFFECTIVE (merged) parameters against the type schema — a
         // partial edit (e.g. only `environment`) must still satisfy required fields
         // that live in the preserved existing params.
-        if effective_parameters.is_some() {
-            validate_connection_parameters(&integration_id, effective_parameters.as_ref())?;
+        if let Some(merged) = effective_parameters.as_mut() {
+            keep_sealed_extra_headers(merged, &old_params);
+        }
+        if let Some(merged) = effective_parameters.as_ref() {
+            // A secret that stays sealed is the marker the connection holds.
+            reject_supplied_markers(merged, Some(&old_params))?;
+            validate_connection_parameters(&integration_id, Some(&with_sealed_stand_ins(merged)))?;
         }
 
         let mut new_app = old_app.clone();
@@ -1086,6 +1228,12 @@ impl ConnectionService {
                 })
             })
             .unwrap_or(false);
+        // Sealed tokens the edit leaves sealed for somewhere else are no use
+        // either: they go, and the connection needs a new authorization.
+        let authorization_change_requires_reconnect = authorization_change_requires_reconnect
+            || effective_parameters
+                .as_ref()
+                .is_some_and(|merged| self.sealed.holds_stale_tokens(&integration_id, merged));
         let effective_status = authorization_change_requires_reconnect
             .then_some(ConnectionStatus::RequiresReconnection);
         if authorization_change_requires_reconnect
@@ -1100,6 +1248,18 @@ impl ConnectionService {
             // An authorization waiting for confirmation was for the client
             // being replaced; it goes with the tokens.
             obj.remove(crate::service::oauth::PENDING_OAUTH_PARAM);
+        }
+
+        // Seal secrets entered now. One left sealed stays as it is, unless the
+        // edit changes where it is sent or how: then it must be entered again.
+        if let Some(merged) = effective_parameters.as_ref()
+            && let Some(stored) = self
+                .sealed
+                .seal_parameters(tenant_id, id, &integration_id, merged, Some(&old_params))
+                .await
+                .map_err(sealing_error)?
+        {
+            effective_parameters = Some(stored);
         }
 
         // Execute update
@@ -1179,31 +1339,46 @@ impl ConnectionService {
         let Some(integration_id) = conn.integration_id.as_deref() else {
             return;
         };
-        let Some(oauth_config) = runtara_agents::registry::find_connection_type(integration_id)
+        if runtara_agents::registry::find_connection_type(integration_id)
             .and_then(|meta| meta.oauth_config)
-        else {
+            .is_none()
+        {
             return;
-        };
+        }
         // No static-descriptor pre-check here: for params-driven types the
-        // revocation endpoint lives in the connection params, and
-        // build_revoke_request (inside revoke_oauth_token) resolves the
-        // EFFECTIVE endpoint — returning None (a no-op) when there is none.
+        // revocation endpoint lives in the connection params, and seal's
+        // revocation resolves the EFFECTIVE endpoint: a no-op when there is
+        // none.
         let params = conn
             .connection_parameters
             .unwrap_or(serde_json::Value::Null);
-        // A platform app's credentials, for this request only.
+        // A platform app's client secret, sealed for this request only.
         let params = match crate::oauth_apps::app_for(
             self.oauth_apps.as_deref(),
             tenant_id,
             integration_id,
             &params,
         ) {
-            Ok(Some(app)) => crate::oauth_apps::with_app_credentials(&params, &app),
+            Ok(Some(app)) => self
+                .sealed
+                .with_app_client(
+                    tenant_id,
+                    id,
+                    integration_id,
+                    &params,
+                    &app.client_id,
+                    app.client_secret.as_str(),
+                )
+                .await
+                .unwrap_or(params),
             _ => params,
         };
-        let client = crate::net::shared_hardened_client();
-        if let Err(e) =
-            crate::auth::provider_auth::revoke_oauth_token(client, oauth_config, &params).await
+        // The tokens are sealed, and seal names one to the provider. A
+        // connection that holds none has nothing to revoke.
+        if let Err(e) = self
+            .sealed
+            .revoke_token(tenant_id, id, integration_id, &params)
+            .await
         {
             tracing::warn!(connection_id = id, error = %e, "provider token revocation failed on disconnect (continuing)");
         }

@@ -162,6 +162,7 @@ async fn teardown(admin: &PgPool, n: &Names) {
 fn service(admin: &PgPool) -> InstanceService {
     let connections = Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
         ConnectionsConfig {
+            sealed: runtara_connections::sealed::SealedCredentials::for_tests(),
             agent_access: std::sync::Arc::new(runtara_connections::EveryAgent),
             db_pool: admin.clone(),
             redis_manager: None,

@@ -13,6 +13,113 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Sealed credentials.** A connection's secrets are sealed by
+  [seal](https://github.com/runtarahq/seal) when the connection is saved, and
+  seal is the only thing that uses them. A sealed secret is stored with the
+  one place it may go, and seal uses it there: this process keeps a value it
+  cannot send anywhere else. seal runs in the server process, so the server
+  can still open every credential. `connection_data_entity.credential_format`
+  says how a row's secrets are held (`seal`, or `cipher` for a row with no
+  secret or one not sealed yet). Tenants' seal keys are kept in
+  `seal_wrapped_key`, wrapped by `RUNTARA_SEAL_WRAPPING_KEY` (base64, 32
+  bytes) or, without it, a key derived from
+  `RUNTARA_CONNECTIONS_ENCRYPTION_KEY`; in that case they follow a rotation
+  of the encryption key, wrapped again under the new one when the server
+  starts or `reencrypt-connections` runs with the old key listed in
+  `RUNTARA_CONNECTIONS_RETIRED_KEYS`. Editing a connection's base URL, or
+  anything else that changes where its secret goes, needs the secret
+  entered again. What is sealed, by kind of connection:
+  - **A key or token sent with each request** (`shopify_access_token`,
+    `hubspot_access_token`, `stripe_api_key`, `pipedrive_api_token`,
+    `shippo_api_token`, `jira_api_token`, `openai_api_key`, `gemini_api_key`,
+    `slack_bot`, `mailgun`, `mcp`, `http_bearer`, `http_basic`,
+    `http_api_key`, and the types agents declare on the last three): seal
+    attaches it and sends the request, whether an agent's, a model listing
+    or a channel's reply. A `telegram_bot` token goes in the URL's path,
+    where seal puts it.
+  - **A webhook signing secret** (Slack, Mailgun) can be sent nowhere: seal
+    checks a signature against it and answers yes or no.
+  - **A webhook's secret token**, which a Channel trigger holds, is sealed
+    too. seal sends Telegram's beside the bot token to register the
+    connection's own webhook URL and no other, and checks the token of each
+    inbound call against it. One this runtime does not register (no
+    `WEBHOOK_BASE_URL`, or another platform) can be sent nowhere and is only
+    checked. Secrets earlier releases stored readable in triggers are sealed
+    when the server starts, as the same tokens.
+  - **A key that signs requests** (`azure_blob_storage`, `aws_credentials`,
+    `s3_compatible`): seal signs the request it sends, and a session token
+    goes only with its key. A presigned URL or shared access signature for a
+    sealed key is made by seal, for at most seven days as before; the key is
+    not given to the presigning capability. A sealed AWS key signs for
+    whatever service each request names, on AWS's hosts or on the
+    connection's own endpoint; its IAM permissions are what limit it.
+  - **A client certificate's private key** (`http_mtls`): seal presents the
+    certificate on the connection it opens. Changing the certificate or the
+    server CA needs the key again.
+  - **An OAuth client secret used for client credentials**
+    (`shopify_client_credentials`, `microsoft_entra_client_credentials`,
+    `http_oauth2_client_credentials`, `zendesk_client_credentials`,
+    `ups_client_credentials`, `teams_bot`): seal sends it to the token
+    endpoint, and the access token comes back already sealed for the API.
+    A sealed `teams_bot` reaches the Bot Connector hosts a service URL may
+    name: `smba.trafficmanager.net`, `botframework.com`, and the names under
+    them. A host in `RUNTARA_PROXY_ALLOWED_HOSTS` may stand for one (an
+    emulator); seal matches the port, so list it as `host:port`.
+  - **The tokens of an authorization-code connection**
+    (`hubspot_private_app`, `quickbooks_online`, `xero_oauth`,
+    `zoho_crm_oauth`, `http_oauth2_authorization_code`), and the client secret the connection
+    holds: seal sends the secret with the authorization code, and the pair
+    comes back already sealed. A refresh and a revocation go through seal
+    too. A platform OAuth app's client secret is the deployment's own, not
+    a connection's: it is sealed for each exchange, refresh and revocation
+    as the connection's own would be, so that seal sends it and a connection
+    on the app gets its tokens sealed too. The HubSpot account is not named
+    to whoever confirms a flow started without a browser, since a sealed
+    token is shown to no one.
+  - **A Postgres password** (`postgres`): seal logs in and relays the
+    session, through a Unix socket this process owns. seal is held to the
+    protection the URL's `sslmode` asks for: `verify-full` verifies the
+    server; `require` encrypts without verifying it; `disable` uses no TLS,
+    and is sealed only for a host in `RUNTARA_PROXY_ALLOW_HTTP_HOSTS`. To a
+    server that is not verified, seal logs in with SCRAM only, so the
+    password is never sent: such a server must offer SCRAM. A URL with
+    `prefer`, `allow`, `verify-ca` or no `sslmode`, or with anything else in
+    its query, cannot be sealed and is refused. Where
+    `RUNTARA_DATABASE_CONNECTION_GUARD` is off, seal may reach private
+    database addresses too.
+
+  **A secret is stored sealed or not at all, and is used only sealed.** A
+  save whose secret seal cannot hold is refused, with the reason: a URL that
+  carries a query, a fragment or credentials, plain HTTP for a host not in
+  `RUNTARA_PROXY_ALLOW_HTTP_HOSTS`, a Postgres URL as above, an `http_basic`
+  username with a colon, an MCP header of the connection's own in the
+  credential's place, or a connection type this build does not know.
+
+  An MCP connection's `extra_headers` may carry a credential under any name,
+  so each value is sealed too, for the connection's server, and seal sets
+  the headers on its requests. The API shows the header names with blank
+  values: in an edit, a value left blank is kept, one entered replaces it,
+  and a header left out is removed. Changing the server's URL needs the
+  header values entered again.
+
+  The default object-model connection the server makes for each tenant no
+  longer holds a copy of `OBJECT_MODEL_DATABASE_URL`: it stands for the
+  platform's database (`platform_database: true`) and holds no secret, and
+  the URL stays the operator's, in the configuration. The copies earlier
+  releases stored are converted when the server starts. Entering a URL in
+  such a connection makes it the tenant's own, sealed like any other.
+
+  Connections an earlier release stored readable are sealed when the server
+  starts, or by `runtara-server seal-connections [--tenant-id <id>]
+  [--dry-run]`, which also counts the ones seal cannot hold
+  (`unsealable`) and names each in a warning. Those are left as they are
+  and cannot be used until their secrets are entered again in a form seal
+  can hold. Sealing is one-way: a sealed secret is not stored readable
+  again. When a tenant leaves, `runtara-server destroy-seal-keys
+  --tenant-id <id> --confirm <id>` destroys its seal keys: everything
+  sealed for it, in the database and in every copy of its rows, can then no
+  longer be opened.
+
 - **Zoho CRM agent, generated from Zoho's own OpenAPI files.** Fifteen
   capabilities over records of any module (leads, contacts, deals, …): list,
   read, create, update, upsert and delete them, list deleted ones, search them
@@ -26,7 +133,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Edition, a sandbox), and a Zoho token works only on the environment of the
   organisation chosen on Zoho's consent screen, so after the code exchange the
   host asks Zoho which organisation that is and stores its environment, ID and
-  name. Zoho issues a refresh
+  name; the lookup goes through seal, and the tokens are sealed for the data
+  centre's API hosts, whichever environment that turns out to be. Zoho issues
+  a refresh
   token only for offline access, which the connection asks for, and keeps at
   most 20 per user and app: the oldest stops working, so a user who authorizes
   more than 20 connections with one app loses the first. It is limited by

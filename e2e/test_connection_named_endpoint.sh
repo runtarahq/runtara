@@ -344,7 +344,9 @@ echo "  Saved, validated and compiled ✓"
 #-------------------------------------------------------------------------
 print_step "Case 1: no selector → GraphQL host blocked by the accounting-base pin..."
 run_case "https://qb.api.intuit.com/graphql" ""
-assert_err_contains "/v3/company" \
+# The proxy says that the path is outside the base, not which base: the
+# base path is the connection's, and is not put in an error an agent reads.
+assert_err_contains "PATH_OUTSIDE_BASE" \
     "pinned to the accounting base path (the reported blocker)"
 
 #-------------------------------------------------------------------------
@@ -353,12 +355,12 @@ assert_err_contains "/v3/company" \
 #-------------------------------------------------------------------------
 print_step "Case 2: 'graphql' selector → base URL swaps to the GraphQL endpoint..."
 run_case "https://qb.api.intuit.com/v3/company/${REALM}/invoice" "graphql"
-assert_err_contains "base path '/graphql'" \
+# Under the accounting base this URL would have been inside the pin. That it
+# is refused as outside the base is the swap; which base each selector pins
+# is asserted offline by
+# `outbound_http::tests::named_endpoint_round_trips_through_the_pin`.
+assert_err_contains "PATH_OUTSIDE_BASE" \
     "base URL swapped to the declared GraphQL endpoint"
-# If the selector had been ignored, this URL would sit happily under the
-# accounting base and would not have been rejected at all.
-assert_err_lacks "base path '/v3/company" \
-    "the accounting base is no longer the pin base"
 
 #-------------------------------------------------------------------------
 # Assertion 4 — an undeclared selector is refused outright, and must NOT quietly

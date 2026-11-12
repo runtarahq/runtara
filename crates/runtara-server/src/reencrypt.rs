@@ -83,6 +83,15 @@ pub async fn run(
         ));
     }
 
+    // Tenants' seal keys are wrapped by a key derived from the encryption
+    // key: they move with it, whatever tenant the rows are of.
+    let rewrapped = runtara_connections::sealed::follow_encryption_key_rotation(&pool)
+        .await
+        .map_err(|error| format!("seal keys could not be wrapped again: {error}"))?;
+    if rewrapped > 0 {
+        println!("seal_keys_rewrapped={rewrapped}");
+    }
+
     let scope = args.tenant_id.as_deref().unwrap_or("all tenants");
     println!("Re-encrypting connection parameters ({scope})...");
     let stats = ConnectionRepository::new(pool, cipher)

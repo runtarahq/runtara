@@ -19,58 +19,31 @@ use crate::api::repositories::triggers::TriggerRepository;
 /// They run inline in API requests after the database change has committed,
 /// and every caller treats a failure as best-effort, so a stalled platform
 /// must turn into a logged failure rather than a request that never returns.
-const PLATFORM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const PLATFORM_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-
-fn platform_http_client(connect_timeout: Duration, request_timeout: Duration) -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(connect_timeout)
-        .timeout(request_timeout)
-        .build()
-        .expect("failed to build reqwest client")
-}
-
-/// Map a failed platform call to a `WebhookError` without the request URL.
-/// Telegram puts the bot token in the URL path, and reqwest's error text
-/// includes the URL, so keeping it would leak the token wherever the error
-/// is logged.
-///
-/// A connect failure means the request never reached the platform, so it
-/// certainly applied nothing. Any later failure (a timeout waiting for the
-/// reply, a dropped connection, an unreadable reply) leaves the outcome
-/// unknown: the platform may have applied the request.
-fn platform_error(error: reqwest::Error) -> WebhookError {
-    let unreached = error.is_connect();
-    let message = error.without_url().to_string();
-    if unreached {
-        WebhookError::NotApplied(message)
-    } else {
-        WebhookError::PlatformError(message)
-    }
-}
 
 /// Manages webhook registration with external platforms.
 ///
 /// Called by the trigger service when Channel triggers are created/updated/deleted.
 pub struct WebhookManager {
     facade: Arc<ConnectionsFacade>,
-    http_client: reqwest::Client,
     /// Public base URL of this runtime instance (e.g. "https://runtime.example.com")
     base_url: Option<String>,
     /// Base URL of the Telegram Bot API.
     telegram_api_base: String,
+    /// The bound on a platform call, which seal sends.
+    request_timeout: Duration,
 }
 
-const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
+use runtara_connections::sealed::policy::TELEGRAM_API_BASE;
 
 impl WebhookManager {
     pub fn new(facade: Arc<ConnectionsFacade>) -> Self {
         let base_url = std::env::var("WEBHOOK_BASE_URL").ok();
         Self {
             facade,
-            http_client: platform_http_client(PLATFORM_CONNECT_TIMEOUT, PLATFORM_REQUEST_TIMEOUT),
             base_url,
             telegram_api_base: TELEGRAM_API_BASE.to_string(),
+            request_timeout: PLATFORM_REQUEST_TIMEOUT,
         }
     }
 
@@ -83,9 +56,9 @@ impl WebhookManager {
     ) -> Self {
         Self {
             facade,
-            http_client: platform_http_client(Duration::from_secs(1), request_timeout),
             base_url,
             telegram_api_base,
+            request_timeout,
         }
     }
 
@@ -137,15 +110,12 @@ impl WebhookManager {
 
         match integration_id {
             "telegram_bot" => {
-                let bot_token = params["bot_token"]
-                    .as_str()
-                    .ok_or_else(|| WebhookError::InvalidConnection("Missing bot_token".into()))?;
-
+                let bot = self.telegram_bot(tenant_id, connection_id, params)?;
                 let webhook_url = format!(
                     "{}/api/events/{}/webhook/telegram/{}",
                     base_url, tenant_id, connection_id
                 );
-                self.telegram_set_webhook(bot_token, &webhook_url, webhook_secret)
+                self.telegram_set_webhook(&bot, &webhook_url, webhook_secret)
                     .await?;
                 info!(
                     connection_id = %connection_id,
@@ -219,10 +189,8 @@ impl WebhookManager {
         // the user in the provider's dashboard and cannot be revoked from here).
         match integration_id {
             "telegram_bot" => {
-                let bot_token = params["bot_token"]
-                    .as_str()
-                    .ok_or_else(|| WebhookError::InvalidConnection("Missing bot_token".into()))?;
-                self.telegram_delete_webhook(bot_token).await?;
+                let bot = self.telegram_bot(tenant_id, connection_id, params)?;
+                self.telegram_delete_webhook(&bot).await?;
                 info!(connection_id = %connection_id, "Telegram webhook unregistered");
             }
             "slack_bot" | "teams_bot" | "mailgun" => {
@@ -257,53 +225,268 @@ impl WebhookManager {
             })
     }
 
+    /// How calls to the Bot API carry a connection's token.
+    fn telegram_bot(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        params: &Value,
+    ) -> Result<TelegramBot, WebhookError> {
+        if !runtara_connections::sealed::is_sealed(&params["bot_token"]) {
+            return Err(WebhookError::InvalidConnection("Missing bot_token".into()));
+        }
+        Ok(TelegramBot {
+            tenant_id: tenant_id.to_string(),
+            connection_id: connection_id.to_string(),
+            parameters: params.clone(),
+        })
+    }
+
+    /// Calls a Bot API method and returns Telegram's reply.
+    async fn telegram_call(
+        &self,
+        bot: &TelegramBot,
+        method: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, WebhookError> {
+        let api_base = self.telegram_api_base.trim_end_matches('/');
+        // seal puts the token in the path and sends the request; the URL
+        // here names the method only.
+        let sealed = self.facade.sealed();
+        let headers = body.map(|_| ("content-type".to_string(), "application/json".to_string()));
+        let body = body
+            .map(serde_json::to_vec)
+            .transpose()
+            .map_err(|e| WebhookError::NotApplied(e.to_string()))?;
+        let response = tokio::time::timeout(
+            self.request_timeout,
+            sealed.send_bounded(
+                &bot.tenant_id,
+                &bot.connection_id,
+                "telegram_bot",
+                &bot.parameters,
+                "POST",
+                &format!("{api_base}/{method}"),
+                headers,
+                body,
+                MAX_PLATFORM_REPLY_BYTES,
+            ),
+        )
+        .await
+        // No reply in time: Telegram may have applied the request.
+        .map_err(|_| WebhookError::PlatformError("the request timed out".into()))?
+        .map_err(sealed_platform_error)?;
+        serde_json::from_slice(&response.body)
+            .map_err(|_| WebhookError::PlatformError("the platform's reply is not JSON".into()))
+    }
+
     async fn telegram_set_webhook(
         &self,
-        bot_token: &str,
+        bot: &TelegramBot,
         webhook_url: &str,
         secret_token: &str,
     ) -> Result<(), WebhookError> {
-        let url = format!("{}/bot{}/setWebhook", self.telegram_api_base, bot_token);
-        let resp = self
-            .http_client
-            .post(&url)
-            .json(&json!({
-                "url": webhook_url,
-                "allowed_updates": ["message"],
-                "secret_token": secret_token,
-            }))
-            .send()
+        // The secret token is sealed for this registration, or is not sent.
+        let sealed_secret = sealed_webhook_secret(secret_token).ok_or_else(|| {
+            WebhookError::InvalidConnection("the webhook's secret is not sealed".into())
+        })?;
+        self.telegram_set_webhook_sealed(bot, webhook_url, sealed_secret)
             .await
-            .map_err(platform_error)?;
+    }
 
-        let body: Value = resp.json().await.map_err(platform_error)?;
-
+    /// `setWebhook` with a sealed secret token: seal puts the bot token in
+    /// the path and the secret token in the form, and sends the request only
+    /// if it registers the URL the secret token was sealed for.
+    async fn telegram_set_webhook_sealed(
+        &self,
+        bot: &TelegramBot,
+        webhook_url: &str,
+        sealed_secret: Value,
+    ) -> Result<(), WebhookError> {
+        let TelegramBot {
+            tenant_id,
+            connection_id,
+            parameters,
+        } = bot;
+        let sealed = self.facade.sealed();
+        let mut presenting = parameters.clone();
+        presenting[runtara_connections::sealed::policy::WEBHOOK_SECRET_FIELD] = sealed_secret;
+        // A form, which seal holds to the one URL: Telegram reads a list in
+        // a form as JSON.
+        let form = format!(
+            "url={}&allowed_updates={}",
+            urlencoding::encode(webhook_url),
+            urlencoding::encode(r#"["message"]"#),
+        );
+        let response = tokio::time::timeout(
+            self.request_timeout,
+            sealed.send_bounded(
+                tenant_id,
+                connection_id,
+                "telegram_bot",
+                &presenting,
+                "POST",
+                &format!(
+                    "{}/setWebhook",
+                    self.telegram_api_base.trim_end_matches('/')
+                ),
+                [(
+                    "content-type".to_string(),
+                    "application/x-www-form-urlencoded".to_string(),
+                )],
+                Some(form.into_bytes()),
+                MAX_PLATFORM_REPLY_BYTES,
+            ),
+        )
+        .await
+        // No reply in time: Telegram may have applied the request.
+        .map_err(|_| WebhookError::PlatformError("the request timed out".into()))?
+        .map_err(sealed_platform_error)?;
+        let body: Value = serde_json::from_slice(&response.body)
+            .map_err(|_| WebhookError::PlatformError("the platform's reply is not JSON".into()))?;
         if body["ok"].as_bool() != Some(true) {
             return Err(WebhookError::NotApplied(format!(
                 "Telegram setWebhook refused: {}",
                 body
             )));
         }
-
         Ok(())
     }
 
-    async fn telegram_delete_webhook(&self, bot_token: &str) -> Result<(), WebhookError> {
-        let url = format!("{}/bot{}/deleteWebhook", self.telegram_api_base, bot_token);
-        let resp = self
-            .http_client
-            .post(&url)
-            .send()
-            .await
-            .map_err(platform_error)?;
+    /// The webhook secret to register for a connection, from one a trigger
+    /// holds or was given (`candidate`): as it is, sealed, or none if it
+    /// cannot be this connection's.
+    ///
+    /// A webhook's secret is held sealed: a readable one is sealed as the
+    /// same token, so the platform, if it already holds it, still agrees. A
+    /// sealed one is kept only if it was sealed for this connection and its
+    /// webhook URL: one a trigger brought from another connection cannot be
+    /// opened here.
+    pub async fn webhook_secret_for(
+        &self,
+        connection_id: &str,
+        tenant_id: &str,
+        candidate: Option<&str>,
+    ) -> Option<String> {
+        let candidate = candidate?;
+        // A connection that cannot be read now changes nothing: registration
+        // fails on it next, and the trigger keeps a sealed secret it has.
+        let Ok(conn) = self.load_connection(connection_id, tenant_id).await else {
+            return sealed_webhook_secret(candidate).map(|_| candidate.to_owned());
+        };
+        // Telegram's is sealed for the one registration; any other, or one
+        // this runtime cannot register, is only ever checked.
+        let webhook_url = (conn.integration_id.as_deref() == Some("telegram_bot"))
+            .then(|| self.telegram_webhook_url(tenant_id, connection_id))
+            .flatten();
+        held_webhook_secret(
+            self.facade.sealed(),
+            tenant_id,
+            connection_id,
+            webhook_url.as_deref(),
+            candidate,
+        )
+        .await
+    }
 
-        let body: Value = resp.json().await.map_err(platform_error)?;
+    /// The URL Telegram calls for a connection, if this runtime knows its own.
+    fn telegram_webhook_url(&self, tenant_id: &str, connection_id: &str) -> Option<String> {
+        self.base_url.as_deref().map(|base_url| {
+            format!(
+                "{}/api/events/{}/webhook/telegram/{}",
+                base_url.trim_end_matches('/'),
+                tenant_id,
+                connection_id
+            )
+        })
+    }
+
+    async fn telegram_delete_webhook(&self, bot: &TelegramBot) -> Result<(), WebhookError> {
+        let body = self.telegram_call(bot, "deleteWebhook", None).await?;
 
         if body["ok"].as_bool() != Some(true) {
             warn!("Telegram deleteWebhook returned: {}", body);
         }
 
         Ok(())
+    }
+}
+
+/// The largest reply read from a platform's API through seal.
+const MAX_PLATFORM_REPLY_BYTES: usize = 1024 * 1024;
+
+/// A connection whose calls to the Bot API carry its sealed token: seal puts
+/// it in the path and sends the request.
+struct TelegramBot {
+    tenant_id: String,
+    connection_id: String,
+    parameters: Value,
+}
+
+/// Map a platform call seal did not complete to a `WebhookError`. As for
+/// [`platform_error`], a request that never left certainly applied nothing,
+/// and any later failure leaves the outcome unknown.
+fn sealed_platform_error(error: runtara_connections::sealed::SendError) -> WebhookError {
+    use runtara_connections::sealed::{SealErrorCode, SendError};
+    match error {
+        SendError::InvalidRequest => WebhookError::NotApplied("the request is not valid".into()),
+        SendError::TooLarge | SendError::BodyFailed => {
+            WebhookError::PlatformError("the platform's reply could not be read".into())
+        }
+        // seal's detail has identifiers and static text only.
+        SendError::Seal(error) => {
+            let message = format!("{}: {}", error.code.as_str(), error.detail);
+            match error.code {
+                SealErrorCode::UpstreamTimeout
+                | SealErrorCode::UpstreamReset
+                | SealErrorCode::ResponseTooLarge
+                | SealErrorCode::ResponseUnparseable
+                | SealErrorCode::Transport
+                | SealErrorCode::Internal => WebhookError::PlatformError(message),
+                _ => WebhookError::NotApplied(message),
+            }
+        }
+    }
+}
+
+/// What marks a trigger's webhook secret as sealed. A sealed secret is kept
+/// as text, like a readable one, so that everything that stores, compares
+/// and restores a trigger's secret treats both alike.
+const SEALED_SECRET_PREFIX: &str = "$sealed:";
+
+/// The sealed value of a webhook secret a trigger holds sealed.
+pub fn sealed_webhook_secret(stored: &str) -> Option<Value> {
+    serde_json::from_str(stored.strip_prefix(SEALED_SECRET_PREFIX)?)
+        .ok()
+        .filter(runtara_connections::sealed::is_sealed)
+}
+
+/// See [`WebhookManager::webhook_secret_for`]. `webhook_url` is the URL the
+/// secret is registered at, if it is registered at all.
+async fn held_webhook_secret(
+    sealed: &runtara_connections::sealed::SealedCredentials,
+    tenant_id: &str,
+    connection_id: &str,
+    webhook_url: Option<&str>,
+    candidate: &str,
+) -> Option<String> {
+    match sealed_webhook_secret(candidate) {
+        Some(marker) => sealed
+            .webhook_secret_is_current(connection_id, webhook_url, &marker)
+            .then(|| candidate.to_owned()),
+        None if usable_webhook_secret(candidate) => {
+            match sealed
+                .seal_webhook_secret(tenant_id, connection_id, webhook_url, candidate)
+                .await
+            {
+                Ok(marker) => Some(format!("{SEALED_SECRET_PREFIX}{marker}")),
+                Err(error) => {
+                    warn!(connection_id, %error, "Could not seal the webhook's secret");
+                    None
+                }
+            }
+        }
+        None => None,
     }
 }
 
@@ -357,8 +540,10 @@ struct SecretChoice {
 /// skipped. Reusing the stored secret keeps re-registration idempotent, so a
 /// failed call cannot strand the platform on a secret the trigger never kept.
 fn choose_webhook_secret(stored: Option<&str>, preferred: Option<&str>) -> SecretChoice {
-    let stored = stored.filter(|s| usable_webhook_secret(s));
-    match (preferred.filter(|s| usable_webhook_secret(s)), stored) {
+    // A sealed secret was a usable token when it was sealed.
+    let usable = |s: &&str| usable_webhook_secret(s) || sealed_webhook_secret(s).is_some();
+    let stored = stored.filter(usable);
+    match (preferred.filter(usable), stored) {
         (Some(preferred), stored) => SecretChoice {
             secret: preferred.to_string(),
             store_first: stored != Some(preferred),
@@ -415,14 +600,39 @@ pub async fn register_trigger_webhook(
             .as_ref()
             .and_then(|c| c.get("webhook_secret"))
             .and_then(Value::as_str);
-        let choice = choose_webhook_secret(
-            stored_webhook_secret(&trigger.configuration),
-            preferred_secret,
-        );
+        // Each as this connection's webhook can hold it: sealed, where the
+        // connection's bot token is.
+        let held = stored_webhook_secret(&trigger.configuration);
+        let stored = manager.webhook_secret_for(conn_id, tenant_id, held).await;
+        let preferred = manager
+            .webhook_secret_for(conn_id, tenant_id, preferred_secret)
+            .await;
+        let mut choice = choose_webhook_secret(stored.as_deref(), preferred.as_deref());
+        if choice.generated
+            && let Some(sealed) = manager
+                .webhook_secret_for(conn_id, tenant_id, Some(&choice.secret))
+                .await
+        {
+            choice.secret = sealed;
+        }
+        // A secret that could not be sealed is neither stored nor sent.
+        if sealed_webhook_secret(&choice.secret).is_none() {
+            warn!(
+                trigger_id = %trigger.id,
+                connection_id = %conn_id,
+                "The webhook's secret could not be sealed; not registering the webhook"
+            );
+            return;
+        }
+        // Whatever the trigger does not hold as it is, it stores first: a
+        // secret just sealed is one.
+        choice.store_first = held != Some(choice.secret.as_str());
 
         // Every write below merges only the keys registration manages, so an
         // edit saved while the platform is being called is kept.
-        let stored_first = choice.store_first && manager.auto_registers();
+        // A runtime that registers nothing itself keeps the secret it was
+        // given, sealed: a generated one would be known to no platform.
+        let stored_first = choice.store_first && (manager.auto_registers() || !choice.generated);
         if stored_first {
             match repo
                 .merge_webhook_keys(
@@ -496,6 +706,41 @@ pub async fn register_trigger_webhook(
             }
         }
     }
+}
+
+/// Seal the webhook secrets earlier releases stored readable in Channel
+/// triggers: each as the same token, so the platform that holds it still
+/// agrees. Nothing checks a call against a readable secret any more. One
+/// changed meanwhile is left to that change. Returns how many were sealed.
+pub async fn seal_stored_webhook_secrets(
+    pool: &PgPool,
+    manager: &WebhookManager,
+    tenant_id: &str,
+) -> Result<usize, sqlx::Error> {
+    let repo = TriggerRepository::new(pool.clone());
+    let mut sealed = 0;
+    for (trigger_id, connection_id, secret) in repo.readable_webhook_secrets(tenant_id).await? {
+        let Some(held) = manager
+            .webhook_secret_for(&connection_id, tenant_id, Some(&secret))
+            .await
+            .filter(|held| sealed_webhook_secret(held).is_some())
+        else {
+            warn!(
+                trigger_id = %trigger_id,
+                connection_id = %connection_id,
+                "A trigger's webhook secret could not be sealed; its webhook calls are refused \
+                 until the trigger is activated again"
+            );
+            continue;
+        };
+        if repo
+            .restore_webhook_secret(&trigger_id, &connection_id, &secret, Some(&held))
+            .await?
+        {
+            sealed += 1;
+        }
+    }
+    Ok(sealed)
 }
 
 /// Best-effort webhook registration for a Channel trigger that has just
@@ -734,7 +979,6 @@ mod tests {
     use super::*;
     use axum::http::StatusCode;
     use std::net::SocketAddr;
-    use std::time::Instant;
 
     /// A platform that accepts connections and holds them open without ever
     /// responding.
@@ -798,11 +1042,18 @@ mod tests {
                 "/{bot}/setWebhook",
                 axum::routing::post(
                     move |axum::extract::Path(bot): axum::extract::Path<String>,
-                          axum::Json(body): axum::Json<Value>| async move {
-                        let secret = body["secret_token"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .to_string();
+                          body: axum::body::Bytes| async move {
+                        // As Telegram does, it takes JSON or a form.
+                        let secret = match serde_json::from_slice::<Value>(&body) {
+                            Ok(body) => body["secret_token"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                            Err(_) => url::form_urlencoded::parse(&body)
+                                .find(|(name, _)| name == "secret_token")
+                                .map(|(_, value)| value.into_owned())
+                                .unwrap_or_default(),
+                        };
                         set_recorder
                             .lock()
                             .unwrap()
@@ -832,13 +1083,18 @@ mod tests {
         (format!("http://{addr}"), received)
     }
 
-    pub(super) fn connections_facade(pool: PgPool) -> Arc<ConnectionsFacade> {
+    pub(super) fn connections_facade_with_seal(
+        pool: PgPool,
+        sealed: Option<Arc<runtara_connections::sealed::SealedCredentials>>,
+    ) -> Arc<ConnectionsFacade> {
         use runtara_connections::{
             ConnectionsConfig, ConnectionsState, crypto::noop::NoOpCipher,
             integration_compatibility::IntegrationCompatibility,
         };
         Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
             ConnectionsConfig {
+                sealed: sealed
+                    .unwrap_or_else(runtara_connections::sealed::SealedCredentials::for_tests),
                 agent_access: std::sync::Arc::new(runtara_connections::EveryAgent),
                 db_pool: pool,
                 redis_manager: None,
@@ -863,61 +1119,264 @@ mod tests {
     /// Request budget for a platform that never answers: the call must time out.
     const SILENT_PLATFORM_BUDGET: Duration = Duration::from_millis(500);
 
-    /// One `setWebhook` call against `telegram_api_base`, with no database.
+    /// One `setWebhook` call against `telegram_api_base`, with no database:
+    /// seal in this process, with `telegram_api_base` standing in for
+    /// Telegram, and a connection whose token it sealed.
     async fn set_webhook_against(
         telegram_api_base: String,
         request_timeout: Duration,
     ) -> Result<(), WebhookError> {
+        use runtara_connections::sealed::{Allowances, MemoryKeySource, SealedCredentials};
+        let address = telegram_api_base.trim_start_matches("http://").to_string();
+        let host = address.split(':').next().unwrap().to_string();
+        let sealed = Arc::new(
+            SealedCredentials::in_process(
+                Arc::new(MemoryKeySource::default()),
+                &[7_u8; 32],
+                Allowances {
+                    private_hosts: vec![address],
+                    plain_http_hosts: vec![host],
+                    api_bases: [("telegram_bot".to_string(), telegram_api_base.clone())].into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        let parameters = sealed
+            .seal_parameters(
+                "acme",
+                "c-1",
+                "telegram_bot",
+                &json!({"bot_token": "000000:sealed-token"}),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgresql://localhost:1/unused")
             .unwrap();
-        WebhookManager::for_test(
-            connections_facade(pool),
+        let manager = WebhookManager::for_test(
+            connections_facade_with_seal(pool, Some(sealed)),
             Some("http://runtime.test".into()),
             telegram_api_base,
             request_timeout,
-        )
-        .telegram_set_webhook("000000:test-token", "http://runtime.test/hook", "secret")
-        .await
-    }
-
-    #[tokio::test]
-    async fn platform_client_gives_up_on_a_platform_that_never_answers() {
-        let addr = silent_platform().await;
-
-        let client = platform_http_client(Duration::from_secs(1), Duration::from_millis(300));
-        let started = Instant::now();
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            client.post(format!("http://{addr}/setWebhook")).send(),
+        );
+        let bot = manager.telegram_bot("acme", "c-1", &parameters).unwrap();
+        // The secret token is sealed for the one registration.
+        let secret = held_webhook_secret(
+            manager.facade.sealed(),
+            "acme",
+            "c-1",
+            Some("http://runtime.test/hook"),
+            "secret",
         )
         .await
-        .expect("the client's own timeout must fire before the guard");
-
-        let error = result.expect_err("a platform that never answers is an error");
-        assert!(error.is_timeout(), "expected a timeout, got: {error}");
-        assert!(started.elapsed() < Duration::from_secs(2));
-    }
-
-    #[tokio::test]
-    async fn platform_error_does_not_leak_the_bot_token_in_the_url() {
-        let addr = silent_platform().await;
-        let client = platform_http_client(Duration::from_secs(1), Duration::from_millis(300));
-        let token = "123456:token-that-must-not-be-logged";
-
-        let error = client
-            .post(format!("http://{addr}/bot{token}/setWebhook"))
-            .send()
+        .expect("a usable secret is sealed");
+        manager
+            .telegram_set_webhook(&bot, "http://runtime.test/hook", &secret)
             .await
-            .expect_err("a platform that never answers is an error");
-        assert!(
-            error.to_string().contains(token),
-            "precondition: reqwest's own error text carries the URL"
+    }
+
+    /// seal in this process with `telegram_api_base` standing in for
+    /// Telegram, a connection whose bot token it sealed, and a manager.
+    async fn sealed_bot(
+        telegram_api_base: &str,
+    ) -> (
+        Arc<runtara_connections::sealed::SealedCredentials>,
+        WebhookManager,
+        TelegramBot,
+    ) {
+        use runtara_connections::sealed::{Allowances, MemoryKeySource, SealedCredentials};
+        let address = telegram_api_base.trim_start_matches("http://").to_string();
+        let host = address.split(':').next().unwrap().to_string();
+        let sealed = Arc::new(
+            SealedCredentials::in_process(
+                Arc::new(MemoryKeySource::default()),
+                &[7_u8; 32],
+                Allowances {
+                    private_hosts: vec![address],
+                    plain_http_hosts: vec![host],
+                    api_bases: [("telegram_bot".to_string(), telegram_api_base.to_string())].into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        let parameters = sealed
+            .seal_parameters(
+                "acme",
+                "c-1",
+                "telegram_bot",
+                &json!({"bot_token": "000000:sealed-token"}),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost:1/unused")
+            .unwrap();
+        let manager = WebhookManager::for_test(
+            connections_facade_with_seal(pool, Some(sealed.clone())),
+            Some("http://runtime.test".into()),
+            telegram_api_base.to_string(),
+            ANSWERING_PLATFORM_BUDGET,
+        );
+        let bot = manager.telegram_bot("acme", "c-1", &parameters).unwrap();
+        (sealed, manager, bot)
+    }
+
+    /// Where the connection's bot token is sealed, its webhook's secret is
+    /// too: seal sends both to register the webhook, and only for the URL
+    /// the secret was sealed for.
+    #[tokio::test]
+    async fn a_sealed_webhook_secret_is_registered_through_seal() {
+        let (base, received) = fake_telegram(ACCEPTED).await;
+        let (sealed, manager, bot) = sealed_bot(&base).await;
+        let webhook_url = "http://runtime.test/api/events/acme/webhook/telegram/c-1";
+        let secret = held_webhook_secret(&sealed, "acme", "c-1", Some(webhook_url), "plain-secret")
+            .await
+            .expect("a readable secret is sealed for the connection");
+        assert!(secret.starts_with(SEALED_SECRET_PREFIX));
+        assert!(!secret.contains("plain-secret"));
+
+        manager
+            .telegram_set_webhook(&bot, webhook_url, &secret)
+            .await
+            .unwrap();
+        // Telegram got the token in the path and the same secret as before.
+        assert_eq!(
+            *received.lock().unwrap(),
+            [(
+                "bot000000:sealed-token".to_string(),
+                TelegramCall::SetWebhook("plain-secret".into())
+            )]
         );
 
-        let message = platform_error(error).to_string();
-        assert!(!message.contains(token), "token leaked: {message}");
-        assert!(!message.contains("/bot"), "URL leaked: {message}");
+        // Telegram would send the secret to whatever URL is registered: seal
+        // registers the one it was sealed for, and no other.
+        let elsewhere = manager
+            .telegram_set_webhook(&bot, "http://attacker.test/hook", &secret)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(elsewhere, WebhookError::NotApplied(_)),
+            "{elsewhere}"
+        );
+        assert!(elsewhere.platform_unchanged());
+        assert_eq!(received.lock().unwrap().len(), 1);
+    }
+
+    /// Which secret a connection's webhook can hold: a sealed one, and only
+    /// one sealed for this connection and its URL.
+    #[tokio::test]
+    async fn a_webhook_secret_is_held_sealed_only_as_this_connections() {
+        let (base, _) = fake_telegram(ACCEPTED).await;
+        let (sealed, _, _) = sealed_bot(&base).await;
+        let url = "http://runtime.test/api/events/acme/webhook/telegram/c-1";
+        let held = |sealed, connection: &'static str, url, candidate: String| async move {
+            held_webhook_secret(sealed, "acme", connection, url, &candidate).await
+        };
+
+        let ours = held(&*sealed, "c-1", Some(url), "plain".into())
+            .await
+            .unwrap();
+        assert!(sealed_webhook_secret(&ours).is_some());
+        // Without a URL to register, a secret is sealed to be checked only:
+        // it is not the one a registration at `url` holds, nor the reverse.
+        let checked_only = held(&*sealed, "c-1", None, "plain".into()).await.unwrap();
+        assert!(sealed_webhook_secret(&checked_only).is_some());
+        assert_eq!(
+            held(&*sealed, "c-1", None, checked_only.clone()).await,
+            Some(checked_only.clone())
+        );
+        assert_eq!(held(&*sealed, "c-1", Some(url), checked_only).await, None);
+        assert_eq!(held(&*sealed, "c-1", None, ours.clone()).await, None);
+
+        // Sealed for this connection and URL: kept as it is.
+        assert_eq!(
+            held(&*sealed, "c-1", Some(url), ours.clone()).await,
+            Some(ours.clone())
+        );
+        // A trigger moved here from another connection, or a URL since
+        // changed: it cannot be this webhook's, and a new one is made.
+        assert_eq!(held(&*sealed, "c-2", Some(url), ours.clone()).await, None);
+        assert_eq!(
+            held(
+                &*sealed,
+                "c-1",
+                Some("http://other.test/hook"),
+                ours.clone()
+            )
+            .await,
+            None
+        );
+        // What Telegram would refuse is not sealed either.
+        assert_eq!(
+            held(&*sealed, "c-1", Some(url), "not usable!".into()).await,
+            None
+        );
+
+        // The bookkeeping takes a sealed secret as it takes a readable one.
+        assert_eq!(
+            choose_webhook_secret(Some(&ours), None),
+            SecretChoice {
+                secret: ours.clone(),
+                store_first: false,
+                generated: false
+            }
+        );
+        assert_eq!(sealed_webhook_secret("plain"), None);
+        assert_eq!(sealed_webhook_secret("$sealed:not json"), None);
+        assert_eq!(sealed_webhook_secret("$sealed:{\"other\":1}"), None);
+    }
+
+    #[tokio::test]
+    async fn a_sealed_token_registers_the_webhook_through_seal() {
+        let (base, received) = fake_telegram(ACCEPTED).await;
+        set_webhook_against(base, ANSWERING_PLATFORM_BUDGET)
+            .await
+            .unwrap();
+        // seal wrote the token into the path; the secret token went as given.
+        assert_eq!(
+            *received.lock().unwrap(),
+            [(
+                "bot000000:sealed-token".to_string(),
+                TelegramCall::SetWebhook("secret".into())
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sealed_tokens_failures_say_whether_telegram_was_changed() {
+        let (base, received) = fake_telegram(REFUSED).await;
+        let error = set_webhook_against(base, ANSWERING_PLATFORM_BUDGET)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, WebhookError::NotApplied(_)), "{error}");
+        assert_eq!(received.lock().unwrap().len(), 1);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let error = set_webhook_against(format!("http://{addr}"), ANSWERING_PLATFORM_BUDGET)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, WebhookError::NotApplied(_)), "{error}");
+
+        let (base, _) = fake_telegram(APPLIED_REPLY_LOST).await;
+        let error = set_webhook_against(base, ANSWERING_PLATFORM_BUDGET)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, WebhookError::PlatformError(_)), "{error}");
+
+        let addr = silent_platform().await;
+        let error = set_webhook_against(format!("http://{addr}"), SILENT_PLATFORM_BUDGET)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, WebhookError::PlatformError(_)), "{error}");
+        assert!(!error.to_string().contains("sealed-token"), "{error}");
     }
 
     #[tokio::test]
@@ -1064,33 +1523,64 @@ mod tests {
 #[cfg(all(test, feature = "db-integration-tests"))]
 mod registration_tests {
     use super::tests::{
-        ACCEPTED, APPLIED_REPLY_LOST, REFUSED, Received, TelegramCall, connections_facade,
-        fake_telegram_holding,
+        ACCEPTED, APPLIED_REPLY_LOST, REFUSED, Received, TelegramCall,
+        connections_facade_with_seal, fake_telegram_holding,
     };
     use super::*;
     use crate::api::dto::triggers::CreateInvocationTriggerRequest;
     use crate::api::dto::triggers::UpdateInvocationTriggerRequest;
     use crate::api::repositories::workflows::WorkflowRepository;
     use axum::http::StatusCode;
+    use runtara_connections::sealed::SealedCredentials;
     use uuid::Uuid;
 
     const BOT_TOKEN: &str = "000000:test-token";
 
-    /// A `telegram_bot` connection with `bot_token`, returning its id.
-    async fn insert_bot(pool: &PgPool, tenant: &str, bot_token: &str) -> String {
+    /// A `telegram_bot` connection with `bot_token`, stored as a save
+    /// stores it (the token sealed), returning its id.
+    async fn insert_bot(
+        pool: &PgPool,
+        sealed: &SealedCredentials,
+        tenant: &str,
+        bot_token: &str,
+    ) -> String {
         let connection_id = Uuid::new_v4().to_string();
+        let parameters = sealed
+            .seal_parameters(
+                tenant,
+                &connection_id,
+                "telegram_bot",
+                &json!({"bot_token": bot_token}),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
         sqlx::query(
-            "INSERT INTO connection_data_entity (id, tenant_id, title, integration_id, connection_parameters, status)
-             VALUES ($1, $2, $3, 'telegram_bot', $4, 'ACTIVE')",
+            "INSERT INTO connection_data_entity
+                 (id, tenant_id, title, integration_id, connection_parameters, status, credential_format)
+             VALUES ($1, $2, $3, 'telegram_bot', $4, 'ACTIVE', 'seal')",
         )
         .bind(&connection_id)
         .bind(tenant)
         .bind(format!("telegram {connection_id}"))
-        .bind(json!({"bot_token": bot_token}))
+        .bind(parameters)
         .execute(pool)
         .await
         .unwrap();
         connection_id
+    }
+
+    /// seal with `telegram_api_base` standing in for Telegram.
+    fn seal_reaching(telegram_api_base: &str) -> Arc<SealedCredentials> {
+        let address = telegram_api_base.trim_start_matches("http://").to_string();
+        let host = address.split(':').next().unwrap().to_string();
+        SealedCredentials::for_tests_with(runtara_connections::sealed::Allowances {
+            private_hosts: vec![address],
+            plain_http_hosts: vec![host],
+            api_bases: [("telegram_bot".to_string(), telegram_api_base.to_string())].into(),
+            ..Default::default()
+        })
     }
 
     struct Harness {
@@ -1099,6 +1589,10 @@ mod registration_tests {
         received: Received,
         tenant: String,
         connection_id: String,
+        sealed: Arc<SealedCredentials>,
+        /// The secrets a test gave a trigger: a stored secret is sealed, and
+        /// is known only by which of these it is.
+        given: std::sync::Mutex<Vec<String>>,
     }
 
     impl Harness {
@@ -1123,11 +1617,12 @@ mod registration_tests {
             sqlx::migrate!("./migrations").run(&pool).await.unwrap();
 
             let tenant = format!("t-{}", Uuid::new_v4());
-            let connection_id = insert_bot(&pool, &tenant, BOT_TOKEN).await;
-
             let (telegram_api_base, received) = fake_telegram_holding(reply, hold).await;
+            let sealed = seal_reaching(&telegram_api_base);
+            let connection_id = insert_bot(&pool, &sealed, &tenant, BOT_TOKEN).await;
+
             let manager = WebhookManager::for_test(
-                connections_facade(pool.clone()),
+                connections_facade_with_seal(pool.clone(), Some(sealed.clone())),
                 Some("http://runtime.test".into()),
                 telegram_api_base,
                 Duration::from_secs(5),
@@ -1138,6 +1633,8 @@ mod registration_tests {
                 received,
                 tenant,
                 connection_id,
+                sealed,
+                given: Default::default(),
             }
         }
 
@@ -1168,6 +1665,7 @@ mod registration_tests {
             let mut configuration = json!({"connection_id": self.connection_id});
             if let Some(secret) = webhook_secret {
                 configuration["webhook_secret"] = json!(secret);
+                self.given(secret);
             }
             let request = CreateInvocationTriggerRequest {
                 workflow_id,
@@ -1228,7 +1726,11 @@ mod registration_tests {
 
         /// A second bot in the harness's tenant, returning its connection id.
         async fn another_bot(&self, bot_token: &str) -> String {
-            insert_bot(&self.pool, &self.tenant, bot_token).await
+            insert_bot(&self.pool, &self.sealed, &self.tenant, bot_token).await
+        }
+
+        fn given(&self, secret: &str) {
+            self.given.lock().unwrap().push(secret.to_owned());
         }
 
         /// Point `trigger` at another connection, returning the updated row.
@@ -1248,6 +1750,9 @@ mod registration_tests {
             key: &str,
             value: Value,
         ) -> InvocationTrigger {
+            if let (true, Some(secret)) = (key == "webhook_secret", value.as_str()) {
+                self.given(secret);
+            }
             sqlx::query_as::<_, InvocationTrigger>(
                 r#"
                 UPDATE invocation_trigger SET configuration = configuration || jsonb_build_object($2::text, $3::jsonb)
@@ -1267,6 +1772,9 @@ mod registration_tests {
         /// Save `configuration` for `trigger` through the trigger update, as a
         /// client edit does.
         async fn edit(&self, trigger: &InvocationTrigger, configuration: Value) {
+            if let Some(secret) = configuration["webhook_secret"].as_str() {
+                self.given(secret);
+            }
             let request = UpdateInvocationTriggerRequest {
                 workflow_id: trigger.workflow_id.clone(),
                 trigger_type: trigger.trigger_type.clone(),
@@ -1293,14 +1801,20 @@ mod registration_tests {
             .expect("Telegram was called");
         }
 
+        /// The configuration `trigger` stores, with its secret as
+        /// [`Self::stored_secret`] knows it.
         async fn stored_configuration(&self, trigger: &InvocationTrigger) -> Value {
-            TriggerRepository::new(self.pool.clone())
+            let mut configuration = TriggerRepository::new(self.pool.clone())
                 .get_by_id(&trigger.id, Some(&self.tenant))
                 .await
                 .unwrap()
                 .expect("trigger exists")
                 .configuration
-                .unwrap_or(Value::Null)
+                .unwrap_or(Value::Null);
+            if let Some(secret) = self.stored_secret(trigger).await {
+                configuration["webhook_secret"] = json!(secret);
+            }
+            configuration
         }
 
         async fn update(&self, before: &InvocationTrigger, after: &InvocationTrigger) {
@@ -1319,6 +1833,9 @@ mod registration_tests {
         }
 
         async fn register(&self, trigger: &InvocationTrigger, preferred_secret: Option<&str>) {
+            if let Some(secret) = preferred_secret {
+                self.given(secret);
+            }
             register_trigger_webhook(
                 &self.pool,
                 &self.manager,
@@ -1329,13 +1846,38 @@ mod registration_tests {
             .await;
         }
 
+        /// The secret `trigger` stores. One stored sealed cannot be read: it
+        /// is whichever of the secrets a test gave, or Telegram was sent,
+        /// seal says it is.
         async fn stored_secret(&self, trigger: &InvocationTrigger) -> Option<String> {
             let trigger = TriggerRepository::new(self.pool.clone())
                 .get_by_id(&trigger.id, Some(&self.tenant))
                 .await
                 .unwrap()
                 .expect("trigger exists");
-            stored_webhook_secret(&trigger.configuration).map(str::to_string)
+            let stored = stored_webhook_secret(&trigger.configuration)?;
+            let Some(marker) = sealed_webhook_secret(stored) else {
+                return Some(stored.to_string());
+            };
+            // The connection it was sealed for, which a trigger moved since
+            // has left.
+            let connection_id = marker[runtara_connections::sealed::SEALED_MARKER]["connection"]
+                .as_str()?
+                .to_owned();
+            let connection_id = connection_id.as_str();
+            let mut known = self.given.lock().unwrap().clone();
+            known.extend(self.sent_secrets());
+            for secret in known {
+                if self
+                    .sealed
+                    .verify_webhook_secret(&self.tenant, connection_id, &marker, &secret)
+                    .await
+                    .unwrap_or(false)
+                {
+                    return Some(secret);
+                }
+            }
+            Some("(a sealed secret no test gave and Telegram was not sent)".to_string())
         }
 
         /// The secrets sent with `setWebhook`, in order.

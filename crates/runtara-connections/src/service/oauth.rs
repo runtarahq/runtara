@@ -172,10 +172,19 @@ pub struct OAuthService {
     flows: Option<FlowStore>,
     tenantless_callback: bool,
     apps: Option<Arc<dyn OAuthApps>>,
+    /// seal, if this deployment seals: the tokens a flow brings are sealed
+    /// as they are stored.
+    sealed: Arc<crate::sealed::SealedCredentials>,
 }
 
 impl OAuthService {
-    pub fn new(pool: PgPool, cipher: Arc<dyn CredentialCipher>, public_base_url: String) -> Self {
+    /// A service that seals the tokens flows bring with `sealed`.
+    pub fn new(
+        pool: PgPool,
+        cipher: Arc<dyn CredentialCipher>,
+        public_base_url: String,
+        sealed: Arc<crate::sealed::SealedCredentials>,
+    ) -> Self {
         Self {
             oauth_repo: OAuthRepository::new(pool.clone()),
             connection_repo: ConnectionRepository::new(pool, cipher),
@@ -183,6 +192,47 @@ impl OAuthService {
             flows: None,
             tenantless_callback: true,
             apps: None,
+            sealed,
+        }
+    }
+
+    /// A connection's parameters as they are stored: with its tokens sealed,
+    /// if this deployment seals and the type's tokens can be. `stored` is
+    /// what the connection holds now.
+    async fn with_sealed_tokens(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        integration_id: &str,
+        params: Value,
+        stored: &Value,
+    ) -> Result<Value, OAuthError> {
+        let sealed = &self.sealed;
+        // Tokens seal sealed as they came from the provider are the
+        // connection's to hold, as if it held them already: they are kept if
+        // their policy is the one the type calls for.
+        let mut held = stored.clone();
+        for token in [
+            crate::sealed::policy::ACCESS_TOKEN_FIELD,
+            crate::sealed::policy::REFRESH_TOKEN_FIELD,
+        ] {
+            if crate::sealed::is_sealed(&params[token]) {
+                held[token] = params[token].clone();
+            }
+        }
+        match sealed
+            .seal_parameters(
+                tenant_id,
+                connection_id,
+                integration_id,
+                &params,
+                Some(&held),
+            )
+            .await
+        {
+            Ok(Some(sealed)) => Ok(sealed),
+            Ok(None) => Ok(params),
+            Err(error) => Err(OAuthError::Internal(error.to_string())),
         }
     }
 
@@ -209,6 +259,7 @@ impl OAuthService {
             state.db_pool.clone(),
             state.cipher.clone(),
             state.public_base_url.clone(),
+            state.sealed.clone(),
         )
         .with_tenantless_callback(state.oauth.tenantless_callback)
         .with_apps(state.oauth.apps.clone());
@@ -481,47 +532,75 @@ impl OAuthService {
             .ok_or(OAuthError::ConnectionNotFound)?;
 
         let params = conn.connection_parameters.unwrap_or(json!({}));
-        // A platform app's credentials go to the provider only: `effective`
-        // is never written back.
+        // seal sends the client secret with the code, so the pair comes back
+        // already sealed. A platform app's secret is sealed for this exchange
+        // as the connection's own would be, and is never written back.
         let app = self.app_for(tenant_id, &flow.integration_id, &params)?;
-        let effective = match &app {
-            Some(app) => oauth_apps::with_app_credentials(&params, app),
-            None => params.clone(),
+        let with_app = match &app {
+            Some(app) => Some(
+                self.sealed
+                    .with_app_client(
+                        tenant_id,
+                        &flow.connection_id,
+                        &flow.integration_id,
+                        &params,
+                        &app.client_id,
+                        app.client_secret.as_str(),
+                    )
+                    .await
+                    .map_err(|error| OAuthError::Internal(error.to_string()))?,
+            ),
+            None => None,
         };
-        let client_id = effective["client_id"]
-            .as_str()
-            .ok_or(OAuthError::MissingParameter("client_id".to_string()))?;
-        let client_secret = effective["client_secret"]
-            .as_str()
-            .ok_or(OAuthError::MissingParameter("client_secret".to_string()))?;
+        let exchanging = with_app.as_ref().unwrap_or(&params);
+        if exchanging["client_id"].as_str().is_none() {
+            return Err(OAuthError::MissingParameter("client_id".to_string()));
+        }
+        if !crate::sealed::policy::sealed_authorized_client(&flow.integration_id, exchanging) {
+            return Err(OAuthError::MissingParameter("client_secret".to_string()));
+        }
+        check_callback_region(&flow.integration_id, oauth_config, &params, callback_params)?;
 
-        check_callback_region(
-            &flow.integration_id,
-            oauth_config,
-            &effective,
-            callback_params,
-        )?;
-
-        // Exchange authorization code for tokens (sending the PKCE verifier if the
-        // authorize step generated one).
-        let token_response = exchange_code(
-            oauth_config,
-            &effective,
-            code,
-            client_id,
-            client_secret,
-            &flow.redirect_uri,
-            flow.code_verifier.as_deref(),
-        )
-        .await
-        .inspect_err(|error| {
-            if let (Some(app), OAuthError::TokenExchangeFailed(message)) = (&app, error) {
-                oauth_apps::record_provider_error(&app.app_id, "exchange", message);
-            }
-        })?;
+        let sealed = &self.sealed;
+        let grant = sealed
+            .exchange_code(
+                tenant_id,
+                &flow.connection_id,
+                &flow.integration_id,
+                exchanging,
+                code,
+                &flow.redirect_uri,
+                flow.code_verifier.as_deref(),
+            )
+            .await
+            .map_err(|error| {
+                if let Some(app) = &app {
+                    oauth_apps::record_provider_error(&app.app_id, "exchange", &error.message);
+                }
+                OAuthError::TokenExchangeFailed(error.message)
+            })?;
+        // What the access token says of the consent it came from, where seal
+        // read it: a sealed token cannot be read here.
+        let access_token_claims = grant.claims;
+        let mut token_response = json!({
+            "access_token": grant.access_token,
+            "expires_in": grant.expires_in,
+        });
+        if let Some(refresh_token) = grant.refresh_token {
+            token_response["refresh_token"] = refresh_token;
+        }
 
         let mut granted = granted_fields(&token_response, oauth_config, callback_params)?;
-        add_provider_account_fields(&flow.integration_id, &mut granted, &params).await?;
+        add_provider_account_fields_through_seal(
+            sealed,
+            tenant_id,
+            &flow.connection_id,
+            &flow.integration_id,
+            &mut granted,
+            &params,
+            access_token_claims.as_ref(),
+        )
+        .await?;
         let mut updated_params = params.clone();
         let status = match started_by {
             None => {
@@ -561,6 +640,15 @@ impl OAuthService {
             }
         };
 
+        let updated_params = self
+            .with_sealed_tokens(
+                tenant_id,
+                &flow.connection_id,
+                &flow.integration_id,
+                updated_params,
+                &params,
+            )
+            .await?;
         self.connection_repo
             .update_parameters_and_status(
                 &flow.connection_id,
@@ -583,15 +671,26 @@ impl OAuthService {
         tenant_id: &str,
         connection_id: &str,
     ) -> Result<(Value, Option<Value>), OAuthError> {
+        let (params, pending, _) = self.pending_of(tenant_id, connection_id).await?;
+        Ok((params, pending))
+    }
+
+    /// [`Self::pending`], with the connection's type.
+    async fn pending_of(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+    ) -> Result<(Value, Option<Value>, String), OAuthError> {
         let conn = self
             .connection_repo
             .get_with_parameters(connection_id, tenant_id)
             .await
             .map_err(|e| OAuthError::Internal(e.to_string()))?
             .ok_or(OAuthError::ConnectionNotFound)?;
+        let integration_id = conn.integration_id.unwrap_or_default();
         let params = conn.connection_parameters.unwrap_or(json!({}));
         let pending = params.get(PENDING_OAUTH_PARAM).cloned();
-        Ok((params, pending))
+        Ok((params, pending, integration_id))
     }
 
     /// What a pending connection shows whoever is to confirm it.
@@ -627,7 +726,8 @@ impl OAuthService {
         connection_id: &str,
         pending_id: &str,
     ) -> Result<(), OAuthError> {
-        let (mut params, pending) = self.pending(tenant_id, connection_id).await?;
+        let (mut params, pending, integration_id) =
+            self.pending_of(tenant_id, connection_id).await?;
         let pending = pending.ok_or(OAuthError::NotPending)?;
         if !pending_named(&pending, pending_id) {
             return Err(OAuthError::PendingChanged);
@@ -637,12 +737,17 @@ impl OAuthService {
                 .await?;
             return Err(OAuthError::ConfirmationExpired);
         }
+        let stored = params.clone();
         if let Some(obj) = params.as_object_mut() {
             obj.remove(PENDING_OAUTH_PARAM);
             if let Some(fields) = pending["fields"].as_object() {
                 obj.extend(fields.clone());
             }
         }
+        // The tokens become the connection's, and are sealed as they do.
+        let params = self
+            .with_sealed_tokens(tenant_id, connection_id, &integration_id, params, &stored)
+            .await?;
         self.connection_repo
             .update_parameters_and_status(
                 connection_id,
@@ -743,10 +848,22 @@ impl OAuthService {
             .as_deref()
             .and_then(find_connection_type)
             .and_then(|meta| meta.oauth_config);
-        if let (Some(oauth_config), Some(integration_id)) = (oauth_config, integration_id) {
+        if let (Some(_), Some(integration_id)) = (oauth_config, integration_id) {
             // The dropped tokens, with the connection's client credentials.
+            // A platform app's client secret is sealed for this request.
             let mut revoked = match self.app_for(tenant_id, &integration_id, &params) {
-                Ok(Some(app)) => oauth_apps::with_app_credentials(&params, &app),
+                Ok(Some(app)) => self
+                    .sealed
+                    .with_app_client(
+                        tenant_id,
+                        connection_id,
+                        &integration_id,
+                        &params,
+                        &app.client_id,
+                        app.client_secret.as_str(),
+                    )
+                    .await
+                    .unwrap_or_else(|_| params.clone()),
                 _ => params.clone(),
             };
             if let (Some(obj), Some(fields)) =
@@ -756,13 +873,13 @@ impl OAuthService {
                 obj.remove("refresh_token");
                 obj.extend(fields.clone());
             }
-            if let Err(error) = crate::auth::provider_auth::revoke_oauth_token(
-                crate::net::shared_hardened_client(),
-                oauth_config,
-                &revoked,
-            )
-            .await
-            {
+            // The tokens came sealed, and seal names one to the provider.
+            let outcome = self
+                .sealed
+                .revoke_token(tenant_id, connection_id, &integration_id, &revoked)
+                .await
+                .map(|_| ());
+            if let Err(error) = outcome {
                 tracing::warn!(
                     connection_id,
                     %error,
@@ -824,30 +941,8 @@ async fn oauth_account(
                 "display": format!("Zoho CRM organisation {name} ({environment})"),
             }))
         }
-        // HubSpot describes a token: its portal (hub) and the approving user.
-        "hubspot_private_app" => {
-            let token = granted.get("access_token")?.as_str()?;
-            let response = crate::net::shared_hardened_client()
-                .get(format!(
-                    "https://api.hubapi.com/oauth/v1/access-tokens/{}",
-                    urlencoding::encode(token)
-                ))
-                .timeout(std::time::Duration::from_secs(10))
-                .send()
-                .await
-                .ok()?;
-            if !response.status().is_success() {
-                return None;
-            }
-            let info: Value = response.json().await.ok()?;
-            let hub = info["hub_id"].as_u64()?;
-            let domain = info["hub_domain"].as_str().unwrap_or_default();
-            let user = info["user"].as_str().unwrap_or_default();
-            Some(json!({
-                "id": hub.to_string(),
-                "display": format!("{domain} ({user})").trim().to_string(),
-            }))
-        }
+        // HubSpot names an account only to whoever shows it the token, in a
+        // URL: a sealed token is shown to no one.
         _ => None,
     }
 }
@@ -904,45 +999,99 @@ const XERO_CONNECTIONS_URL: &str = "https://api.xero.com/connections";
 /// just issued and stored with them. `params` are the connection's own, from
 /// before this authorization. A failure fails the flow: the connection could
 /// not reach the account the user chose.
-async fn add_provider_account_fields(
+///
+/// The tokens came back sealed: the lookup goes through seal, which attaches
+/// the token, and what the token says of its consent is what seal read from
+/// it.
+async fn add_provider_account_fields_through_seal(
+    sealed: &crate::sealed::SealedCredentials,
+    tenant_id: &str,
+    connection_id: &str,
     integration_id: &str,
     granted: &mut serde_json::Map<String, Value>,
     params: &Value,
+    access_token_claims: Option<&Value>,
 ) -> Result<(), OAuthError> {
+    let lookup = AccountLookup {
+        sealed,
+        tenant_id,
+        connection_id,
+        integration_id,
+    };
     match integration_id {
-        "xero_oauth" => add_xero_organisation(granted, params).await,
-        "zoho_crm_oauth" => add_zoho_organisation(granted, params).await,
+        "xero_oauth" => add_xero_organisation(&lookup, granted, params, access_token_claims).await,
+        "zoho_crm_oauth" => add_zoho_organisation(&lookup, granted, params).await,
         _ => Ok(()),
     }
 }
 
+/// A lookup made with the access token just issued, which is sealed: seal
+/// attaches it, and sends the request only where the token may go.
+struct AccountLookup<'a> {
+    sealed: &'a crate::sealed::SealedCredentials,
+    tenant_id: &'a str,
+    connection_id: &'a str,
+    integration_id: &'a str,
+}
+
+impl AccountLookup<'_> {
+    /// GETs `url` as the connection `params` describe, with the access token
+    /// in `granted`. Returns the status and the body.
+    async fn get(
+        &self,
+        granted: &serde_json::Map<String, Value>,
+        params: &Value,
+        url: &str,
+    ) -> Result<(u16, Vec<u8>), String> {
+        let mut presenting = params.clone();
+        presenting[crate::sealed::policy::ACCESS_TOKEN_FIELD] = granted
+            .get(crate::sealed::policy::ACCESS_TOKEN_FIELD)
+            .cloned()
+            .ok_or_else(|| "no access_token".to_string())?;
+        let response = self
+            .sealed
+            .send_bounded(
+                self.tenant_id,
+                self.connection_id,
+                self.integration_id,
+                &presenting,
+                "GET",
+                url,
+                [("accept".to_string(), "application/json".to_string())],
+                None,
+                1024 * 1024,
+            )
+            .await
+            .map_err(|error| match error {
+                // seal's detail has identifiers and static text only.
+                crate::sealed::SendError::Seal(error) => error.to_string(),
+                other => format!("{other:?}"),
+            })?;
+        Ok((response.status, response.body))
+    }
+}
+
 async fn add_xero_organisation(
+    lookup: &AccountLookup<'_>,
     granted: &mut serde_json::Map<String, Value>,
     params: &Value,
+    access_token_claims: Option<&Value>,
 ) -> Result<(), OAuthError> {
-    let token = granted
-        .get("access_token")
-        .and_then(Value::as_str)
-        .ok_or_else(|| OAuthError::TokenExchangeFailed("no access_token".to_string()))?;
     let unresolved =
         |cause: String| OAuthError::AccountUnresolved(format!("Xero organisations: {cause}"));
-    let response = crate::net::shared_hardened_client()
-        .get(XERO_CONNECTIONS_URL)
-        .bearer_auth(token)
-        .header("Accept", "application/json")
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
+    let (status, body) = lookup
+        .get(granted, params, XERO_CONNECTIONS_URL)
         .await
-        .map_err(|e| unresolved(e.to_string()))?;
-    let status = response.status();
-    if !status.is_success() {
+        .map_err(unresolved)?;
+    if !(200..300).contains(&status) {
         return Err(unresolved(format!("HTTP {status}")));
     }
-    let connections: Value = response
-        .json()
-        .await
-        .map_err(|e| unresolved(e.to_string()))?;
-    let fields = xero_account_fields(&connections, token, params["tenant_id"].as_str())
+    let connections: Value =
+        serde_json::from_slice(&body).map_err(|e| unresolved(e.to_string()))?;
+    let event = access_token_claims
+        .and_then(|claims| claims[crate::sealed::policy::XERO_EVENT_CLAIM].as_str())
+        .map(str::to_owned);
+    let fields = xero_account_fields(&connections, event, params["tenant_id"].as_str())
         .map_err(OAuthError::AccountUnresolved)?;
     granted.extend(fields);
     Ok(())
@@ -954,14 +1103,11 @@ async fn add_xero_organisation(
 /// API on the data centre's `www.` host answers for any environment, with the
 /// organisation's `type`, so the connection takes its environment from there.
 async fn add_zoho_organisation(
+    lookup: &AccountLookup<'_>,
     granted: &mut serde_json::Map<String, Value>,
     params: &Value,
 ) -> Result<(), OAuthError> {
     use runtara_agents::extractors::connection_types::zoho_hosts;
-    let token = granted
-        .get("access_token")
-        .and_then(Value::as_str)
-        .ok_or_else(|| OAuthError::TokenExchangeFailed("no access_token".to_string()))?;
     let unresolved =
         |cause: String| OAuthError::AccountUnresolved(format!("Zoho CRM organisation: {cause}"));
     let mut production = params.clone();
@@ -969,25 +1115,14 @@ async fn add_zoho_organisation(
     let base = zoho_hosts(&production)
         .ok_or_else(|| unresolved("the connection names no Zoho data centre".to_string()))?
         .base_url;
-    let scheme = find_connection_type("zoho_crm_oauth")
-        .and_then(|meta| meta.oauth_config)
-        .map_or("Bearer", crate::auth::provider_auth::token_header_scheme);
-    let response = crate::net::shared_hardened_client()
-        .get(format!("{base}/crm/v8/org"))
-        .header("Authorization", format!("{scheme} {token}"))
-        .header("Accept", "application/json")
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
+    let (status, body) = lookup
+        .get(granted, params, &format!("{base}/crm/v8/org"))
         .await
-        .map_err(|e| unresolved(e.to_string()))?;
-    let status = response.status();
-    if !status.is_success() {
+        .map_err(unresolved)?;
+    if !(200..300).contains(&status) {
         return Err(unresolved(zoho_lookup_refused(status)));
     }
-    let org: Value = response
-        .json()
-        .await
-        .map_err(|e| unresolved(e.to_string()))?;
+    let org: Value = serde_json::from_slice(&body).map_err(|e| unresolved(e.to_string()))?;
     let fields = zoho_account_fields(&org, params).map_err(OAuthError::AccountUnresolved)?;
     granted.extend(fields);
     Ok(())
@@ -996,8 +1131,8 @@ async fn add_zoho_organisation(
 /// Why Zoho refused the organisation lookup. A token without
 /// `ZohoCRM.org.READ` (scopes narrowed on the connection) gets a 401 or 403,
 /// which says nothing of the scope, so the message names it.
-fn zoho_lookup_refused(status: reqwest::StatusCode) -> String {
-    match status.as_u16() {
+fn zoho_lookup_refused(status: u16) -> String {
+    match status {
         401 | 403 => format!(
             "HTTP {status}; the connection's scopes must include ZohoCRM.org.READ, \
              which the organisation lookup needs"
@@ -1055,10 +1190,10 @@ fn zoho_account_fields(
 /// earlier organisation does not stay.
 fn xero_account_fields(
     connections: &Value,
-    access_token: &str,
+    event: Option<String>,
     previous: Option<&str>,
 ) -> Result<serde_json::Map<String, Value>, String> {
-    let (tenant_id, tenant_name) = select_xero_tenant(connections, access_token, previous)?;
+    let (tenant_id, tenant_name) = select_xero_tenant_of_event(connections, event, previous)?;
     let mut fields = serde_json::Map::new();
     fields.insert("tenant_id".to_string(), Value::String(tenant_id));
     fields.insert(
@@ -1069,8 +1204,8 @@ fn xero_account_fields(
 }
 
 /// The organisation a Xero consent authorized, from Xero's connections list:
-/// the organisation whose `authEventId` is the access token's
-/// `authentication_event_id`.
+/// the organisation whose `authEventId` is `event`, the access token's
+/// `authentication_event_id` as seal read it.
 ///
 /// Reconnecting authorizes no organisation anew: Xero's consent screen shows
 /// those already connected as fixed, and the token's event names none of them.
@@ -1080,9 +1215,9 @@ fn xero_account_fields(
 /// none takes the only organisation Xero lists, as does one whose token does
 /// not say. One consent can authorize several organisations, but a connection
 /// works with one, so several (none of them the connection's own) is an error.
-fn select_xero_tenant(
+fn select_xero_tenant_of_event(
     connections: &Value,
-    access_token: &str,
+    event: Option<String>,
     previous: Option<&str>,
 ) -> Result<(String, Option<String>), String> {
     let organisations: Vec<&Value> = connections
@@ -1092,7 +1227,7 @@ fn select_xero_tenant(
         .filter(|c| c["tenantType"].as_str() == Some("ORGANISATION"))
         .collect();
     let previous = previous.filter(|tenant| !tenant.is_empty());
-    let authorized: Vec<&Value> = match jwt_claim(access_token, "authentication_event_id") {
+    let authorized: Vec<&Value> = match event {
         Some(event) => organisations
             .iter()
             .copied()
@@ -1146,15 +1281,6 @@ fn select_xero_tenant(
         tenant_id.to_string(),
         chosen["tenantName"].as_str().map(str::to_string),
     ))
-}
-
-/// A string claim of a JWT's payload, read without verifying the signature:
-/// the token came straight from the provider's token endpoint.
-fn jwt_claim(token: &str, claim: &str) -> Option<String> {
-    let payload = token.split('.').nth(1)?;
-    let bytes = URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?;
-    let claims: Value = serde_json::from_slice(&bytes).ok()?;
-    claims[claim].as_str().map(str::to_string)
 }
 
 /// What a completed flow adds to a connection: the tokens, their expiry, the
@@ -1229,107 +1355,6 @@ fn generate_pkce() -> (String, String) {
     (verifier, challenge)
 }
 
-/// Exchange an authorization code for access + refresh tokens.
-async fn exchange_code(
-    oauth_config: &OAuthConfig,
-    params: &Value,
-    code: &str,
-    client_id: &str,
-    client_secret: &str,
-    redirect_uri: &str,
-    code_verifier: Option<&str>,
-) -> Result<Value, OAuthError> {
-    let effective =
-        crate::auth::provider_auth::resolve_effective_oauth_config(oauth_config, params);
-    if effective.token_url.is_empty() {
-        return Err(OAuthError::MissingParameter("token_url".to_string()));
-    }
-    // Re-check the endpoint before the code and client secret are sent: a
-    // stored URL may predate save-time validation. Nothing is sent on failure.
-    crate::net::validate_credentialed_endpoint(&effective.token_url).map_err(|reason| {
-        OAuthError::TokenExchangeFailed(format!(
-            "refusing to send credentials to the token endpoint: {reason}"
-        ))
-    })?;
-    // Hardened egress: no redirect following (a 3xx must not carry the client
-    // secret/Basic header to another host), DNS-guarded resolver (private-host
-    // token endpoints rejected at connect time).
-    let client = crate::net::shared_hardened_client();
-
-    // Present credentials per the provider's token-endpoint style (Intuit requires
-    // HTTP Basic; the OAuth2 default is credentials in the body).
-    let mut grant_fields = vec![
-        ("grant_type".to_string(), "authorization_code".to_string()),
-        ("code".to_string(), code.to_string()),
-        ("redirect_uri".to_string(), redirect_uri.to_string()),
-    ];
-    // PKCE: prove possession of the verifier that produced the authorize challenge.
-    if let Some(verifier) = code_verifier {
-        grant_fields.push(("code_verifier".to_string(), verifier.to_string()));
-    }
-    let (basic_auth, body) = crate::auth::token_cache::token_request_parts(
-        effective.token_endpoint_auth,
-        grant_fields,
-        client_id,
-        client_secret,
-    );
-
-    let mut request = client
-        .post(&effective.token_url)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(body)
-        // Bound a hostile/slow token endpoint, matching the mint/refresh/revoke
-        // egress calls (token_cache.rs:269/304, provider_auth.rs revoke).
-        .timeout(std::time::Duration::from_secs(10));
-    if let Some(header) = basic_auth {
-        request = request.header("Authorization", header);
-    }
-
-    let response = request
-        .send()
-        .await
-        .map_err(|e| OAuthError::TokenExchangeFailed(e.to_string()))?;
-
-    let status = response.status();
-    let body: Value = response
-        .json()
-        .await
-        .map_err(|e| OAuthError::TokenExchangeFailed(format!("Failed to parse response: {}", e)))?;
-
-    // NEVER echo the full token-endpoint response body upward: it reaches the
-    // popup page + postMessage and is persisted to the (plaintext) event store,
-    // and a provider's error body can echo back the client_secret/tokens it was
-    // sent. Log it host-side; surface only status + the standard OAuth fields.
-    // Mirrors parse_token_response() in token_cache.rs.
-    if !status.is_success() {
-        tracing::debug!(status = %status, body = %body, "oauth code exchange returned non-success");
-        let code = body["error"].as_str().unwrap_or("unknown_error");
-        let desc = body["error_description"].as_str().unwrap_or("");
-        return Err(OAuthError::TokenExchangeFailed(
-            format!("token endpoint returned {status}: {code} {desc}")
-                .trim()
-                .to_string(),
-        ));
-    }
-
-    if body.get("access_token").is_none() {
-        tracing::debug!(body = %body, "oauth code exchange response missing access_token");
-        // Some providers (Zoho) refuse a code with 200 and an OAuth `error`.
-        let message = match body["error"].as_str() {
-            Some(code) => {
-                let desc = body["error_description"].as_str().unwrap_or("");
-                format!("token endpoint returned {status}: {code} {desc}")
-                    .trim()
-                    .to_string()
-            }
-            None => "token endpoint response missing access_token".to_string(),
-        };
-        return Err(OAuthError::TokenExchangeFailed(message));
-    }
-
-    Ok(body)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1355,140 +1380,6 @@ mod tests {
             authorize_params: "",
             token_header_prefix: "",
         }
-    }
-
-    fn params_driven_cfg() -> OAuthConfig {
-        OAuthConfig {
-            params_driven: true,
-            ..cfg_with(&[])
-        }
-    }
-
-    async fn provider(route: &str, expected_calls: u64) -> wiremock::MockServer {
-        use wiremock::matchers::{method, path};
-        let server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(method("POST"))
-            .and(path(route))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
-                serde_json::json!({"access_token": "at-1", "refresh_token": "rt-1"}),
-            ))
-            .expect(expected_calls)
-            .mount(&server)
-            .await;
-        server
-    }
-
-    async fn exchange(token_url: String) -> Result<Value, OAuthError> {
-        exchange_code(
-            &params_driven_cfg(),
-            &serde_json::json!({ "token_url": token_url }),
-            "code-1",
-            "cid",
-            "csec",
-            "https://runtara.example/callback",
-            None,
-        )
-        .await
-    }
-
-    #[tokio::test]
-    async fn code_exchange_refuses_plain_http_token_endpoint_before_sending() {
-        let server = provider("/token", 0).await;
-        for token_url in [
-            "http://auth.example.com/token".to_string(),
-            format!("{}/token", server.uri()),
-        ] {
-            let Err(OAuthError::TokenExchangeFailed(message)) = exchange(token_url.clone()).await
-            else {
-                panic!("{token_url}: an http token endpoint must be refused")
-            };
-            assert!(message.contains("https"), "{token_url}: {message}");
-        }
-    }
-
-    #[tokio::test]
-    async fn code_exchange_sends_to_an_allowlisted_http_token_endpoint() {
-        let _loopback = crate::net::test_allowlist::allow("127.0.0.1");
-        let server = provider("/token", 1).await;
-        let body = exchange(format!("{}/token", server.uri()))
-            .await
-            .unwrap_or_else(|err| panic!("allowlisted endpoint must be used: {err}"));
-        assert_eq!(body["access_token"], "at-1");
-    }
-
-    #[tokio::test]
-    async fn revocation_refuses_plain_http_endpoint_before_sending() {
-        let server = provider("/revoke", 0).await;
-        let params = serde_json::json!({
-            "revocation_url": format!("{}/revoke", server.uri()),
-            "refresh_token": "rt-1",
-        });
-        let err = crate::auth::provider_auth::revoke_oauth_token(
-            crate::net::shared_hardened_client(),
-            &params_driven_cfg(),
-            &params,
-        )
-        .await
-        .expect_err("an http revocation endpoint must be refused");
-        assert!(err.contains("https"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn a_platform_apps_credentials_go_to_the_provider_and_nowhere_else() {
-        use wiremock::matchers::{body_string_contains, header, method, path};
-        let _loopback = crate::net::test_allowlist::allow("127.0.0.1");
-        let server = wiremock::MockServer::start().await;
-        // base64("platform-client:platform-secret")
-        wiremock::Mock::given(method("POST"))
-            .and(path("/token"))
-            .and(header(
-                "Authorization",
-                "Basic cGxhdGZvcm0tY2xpZW50OnBsYXRmb3JtLXNlY3JldA==",
-            ))
-            .and(body_string_contains("code=code-1"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"access_token": "at-1"})),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-        let config = OAuthConfig {
-            token_url: Box::leak(format!("{}/token", server.uri()).into_boxed_str()),
-            token_endpoint_auth: TokenEndpointAuth::HttpBasic,
-            ..cfg_with(&[])
-        };
-        let app = crate::oauth_apps::tests::app("hubspot", "hubspot_private_app");
-        let stored = serde_json::json!({ "oauth_app": "hubspot", "scopes": "oauth" });
-        let effective = crate::oauth_apps::with_app_credentials(&stored, &app);
-        exchange_code(
-            &config,
-            &effective,
-            "code-1",
-            effective["client_id"].as_str().unwrap(),
-            effective["client_secret"].as_str().unwrap(),
-            "https://runtara.example/api/oauth/callback",
-            None,
-        )
-        .await
-        .unwrap_or_else(|err| panic!("exchange: {err}"));
-
-        // What a completed flow writes back is the stored parameters and the
-        // grant; neither holds the app's secret.
-        let mut written = stored.clone();
-        written.as_object_mut().unwrap().extend(
-            granted_fields(
-                &serde_json::json!({"access_token": "at-1"}),
-                &config,
-                &HashMap::new(),
-            )
-            .unwrap(),
-        );
-        assert!(
-            !written.to_string().contains("platform-secret"),
-            "{written}"
-        );
-        assert!(written.get("client_id").is_none());
     }
 
     static REALM: &[ExtraCallbackParam] = &[ExtraCallbackParam {
@@ -1551,13 +1442,11 @@ mod tests {
         assert!(obj.is_empty());
     }
 
-    /// An unsigned JWT whose payload carries `claims`.
-    fn token_with(claims: Value) -> String {
-        format!(
-            "{}.{}.signature",
-            URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256"}"#),
-            URL_SAFE_NO_PAD.encode(claims.to_string())
-        )
+    /// The consent a token with `claims` names, as seal reads it.
+    fn token_with(claims: Value) -> Option<String> {
+        claims["authentication_event_id"]
+            .as_str()
+            .map(str::to_owned)
     }
 
     const ORG_A: &str = "a3b9b4c0-1d2e-4f50-8a6b-7c8d9e0f1a2b";
@@ -1581,7 +1470,7 @@ mod tests {
         ]);
         let token = token_with(json!({ "authentication_event_id": "event-2" }));
         assert_eq!(
-            select_xero_tenant(&connections, &token, None).unwrap(),
+            select_xero_tenant_of_event(&connections, token.clone(), None).unwrap(),
             (ORG_B.to_string(), Some("Demo Company (UK)".to_string()))
         );
     }
@@ -1595,13 +1484,15 @@ mod tests {
             connection(ORG_B, "Practice", "event-1", "PRACTICEMANAGER"),
         ]);
         for token in [
-            "not-a-jwt".to_string(),
+            None,
             token_with(json!({ "authentication_event_id": "event-9" })),
         ] {
             assert_eq!(
-                select_xero_tenant(&connections, &token, None).unwrap().0,
+                select_xero_tenant_of_event(&connections, token.clone(), None)
+                    .unwrap()
+                    .0,
                 ORG_A,
-                "{token}"
+                "{token:?}"
             );
         }
     }
@@ -1613,14 +1504,14 @@ mod tests {
             connection(ORG_A, "One", "event-1", "ORGANISATION"),
             connection(ORG_B, "Two", "event-1", "ORGANISATION"),
         ]);
-        let err = select_xero_tenant(&both, &token, None).unwrap_err();
+        let err = select_xero_tenant_of_event(&both, token.clone(), None).unwrap_err();
         assert!(err.contains("2 Xero organisations"), "{err}");
 
         for connections in [json!([]), json!({ "not": "a list" })] {
-            assert!(select_xero_tenant(&connections, &token, None).is_err());
+            assert!(select_xero_tenant_of_event(&connections, token.clone(), None).is_err());
         }
         let invalid = json!([connection("not-a-uuid", "Bad", "event-1", "ORGANISATION")]);
-        assert!(select_xero_tenant(&invalid, &token, None).is_err());
+        assert!(select_xero_tenant_of_event(&invalid, token.clone(), None).is_err());
     }
 
     #[test]
@@ -1633,19 +1524,19 @@ mod tests {
             connection(ORG_B, "Two", "event-2", "ORGANISATION"),
         ]);
         assert_eq!(
-            select_xero_tenant(&connected, &token, Some(ORG_B)).unwrap(),
+            select_xero_tenant_of_event(&connected, token.clone(), Some(ORG_B)).unwrap(),
             (ORG_B.to_string(), Some("Two".to_string()))
         );
         // An organisation Xero no longer lists is not kept.
         let gone = "c5d1e2f3-3f40-4b72-8c8d-9e0f1a2b3c4d";
-        assert!(select_xero_tenant(&connected, &token, Some(gone)).is_err());
+        assert!(select_xero_tenant_of_event(&connected, token.clone(), Some(gone)).is_err());
         // Several authorized at once, one of them the connection's: that one.
         let both_now = json!([
             connection(ORG_A, "One", "event-3", "ORGANISATION"),
             connection(ORG_B, "Two", "event-3", "ORGANISATION"),
         ]);
         assert_eq!(
-            select_xero_tenant(&both_now, &token, Some(ORG_A))
+            select_xero_tenant_of_event(&both_now, token.clone(), Some(ORG_A))
                 .unwrap()
                 .0,
             ORG_A
@@ -1656,7 +1547,7 @@ mod tests {
             connection(ORG_B, "Two", "event-3", "ORGANISATION"),
         ]);
         assert_eq!(
-            select_xero_tenant(&switched, &token, Some(ORG_A))
+            select_xero_tenant_of_event(&switched, token.clone(), Some(ORG_A))
                 .unwrap()
                 .0,
             ORG_B
@@ -1669,14 +1560,16 @@ mod tests {
         // Xero still lists came from an earlier consent, not this one.
         let token = token_with(json!({ "authentication_event_id": "event-3" }));
         let other = json!([connection(ORG_A, "Other", "event-1", "ORGANISATION")]);
-        let err = select_xero_tenant(&other, &token, Some(ORG_B)).unwrap_err();
+        let err = select_xero_tenant_of_event(&other, token.clone(), Some(ORG_B)).unwrap_err();
         assert!(err.contains("no longer lists"), "{err}");
         // Nor when the token does not name its consent.
-        assert!(select_xero_tenant(&other, "not-a-jwt", Some(ORG_B)).is_err());
+        assert!(select_xero_tenant_of_event(&other, None, Some(ORG_B)).is_err());
         // A new connection (no organisation yet, or an empty one) takes it.
         for previous in [None, Some("")] {
             assert_eq!(
-                select_xero_tenant(&other, &token, previous).unwrap().0,
+                select_xero_tenant_of_event(&other, token.clone(), previous)
+                    .unwrap()
+                    .0,
                 ORG_A,
                 "{previous:?}"
             );
@@ -1692,17 +1585,17 @@ mod tests {
             connection(ORG_A, "One", "event-1", "ORGANISATION"),
             connection(ORG_B, "Two", "event-2", "ORGANISATION"),
         ]);
-        let err = select_xero_tenant(&connected, &token, None).unwrap_err();
+        let err = select_xero_tenant_of_event(&connected, token.clone(), None).unwrap_err();
         assert!(err.contains("Settings → Connected apps"), "{err}");
 
         let both = json!([
             connection(ORG_A, "One", "event-3", "ORGANISATION"),
             connection(ORG_B, "Two", "event-3", "ORGANISATION"),
         ]);
-        let err = select_xero_tenant(&both, &token, None).unwrap_err();
+        let err = select_xero_tenant_of_event(&both, token.clone(), None).unwrap_err();
         for message in [
             err,
-            select_xero_tenant(&connected, &token, None).unwrap_err(),
+            select_xero_tenant_of_event(&connected, token.clone(), None).unwrap_err(),
         ] {
             assert!(!message.contains("  "), "{message}");
         }
@@ -1717,7 +1610,7 @@ mod tests {
             "tenantType": "ORGANISATION",
         }]);
         let mut params = json!({ "tenant_id": ORG_B, "tenant_name": "Earlier Org" });
-        let fields = xero_account_fields(&unnamed, &token, Some(ORG_B)).unwrap();
+        let fields = xero_account_fields(&unnamed, token, Some(ORG_B)).unwrap();
         params.as_object_mut().unwrap().extend(fields);
         assert_eq!(params, json!({ "tenant_id": ORG_A, "tenant_name": null }));
     }
@@ -1746,15 +1639,11 @@ mod tests {
 
     #[test]
     fn a_refused_zoho_lookup_names_the_scope_it_needs() {
-        for status in [
-            reqwest::StatusCode::UNAUTHORIZED,
-            reqwest::StatusCode::FORBIDDEN,
-        ] {
+        for status in [401, 403] {
             let message = zoho_lookup_refused(status);
             assert!(message.contains("ZohoCRM.org.READ"), "{message}");
         }
-        let message = zoho_lookup_refused(reqwest::StatusCode::BAD_GATEWAY);
-        assert_eq!(message, "HTTP 502 Bad Gateway");
+        assert_eq!(zoho_lookup_refused(502), "HTTP 502");
     }
 
     #[test]
@@ -1823,16 +1712,5 @@ mod tests {
             .and_then(|meta| meta.oauth_config)
             .unwrap();
         assert!(check_callback_region("xero_oauth", xero, &params, &callback("x")).is_ok());
-    }
-
-    #[test]
-    fn jwt_claim_reads_the_payload() {
-        let token = token_with(json!({ "authentication_event_id": "event-3", "n": 1 }));
-        assert_eq!(
-            jwt_claim(&token, "authentication_event_id").as_deref(),
-            Some("event-3")
-        );
-        assert_eq!(jwt_claim(&token, "n"), None);
-        assert_eq!(jwt_claim("opaque-token", "authentication_event_id"), None);
     }
 }

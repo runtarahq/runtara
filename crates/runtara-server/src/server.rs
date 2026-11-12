@@ -626,6 +626,62 @@ async fn encrypt_plaintext_credentials(
     }
 }
 
+/// Seal connection secrets an earlier release stored readable: nothing uses
+/// a readable secret any more. One seal cannot hold is logged and left as it
+/// is, unusable until it is entered again, so that one such row does not
+/// keep every tenant from starting.
+async fn seal_readable_credentials(
+    pool: &PgPool,
+    cipher: Arc<dyn runtara_connections::CredentialCipher>,
+    sealed: &runtara_connections::sealed::SealedCredentials,
+) {
+    let repository = runtara_connections::repository::connections::ConnectionRepository::new(
+        pool.clone(),
+        cipher,
+    );
+    // The platform's own database URL, which earlier releases copied into
+    // each tenant's default connection, is the operator's and no tenant
+    // secret: such a connection now stands for the platform database.
+    if let Some(platform_url) = crate::config::object_model_database_url() {
+        match repository.adopt_platform_database(&platform_url).await {
+            Ok(0) => {}
+            Ok(adopted) => tracing::info!(
+                adopted,
+                "Default object-model connections now stand for the platform database"
+            ),
+            Err(e) => tracing::error!(
+                error = %e,
+                "Could not convert default object-model connections holding the platform's URL"
+            ),
+        }
+    }
+    match repository.seal_existing(sealed, None, false).await {
+        Ok(stats) if stats.sealed + stats.unsealable + stats.failed == 0 => {}
+        Ok(stats) => {
+            tracing::info!(
+                sealed = stats.sealed,
+                unsealable = stats.unsealable,
+                failed = stats.failed,
+                "Sealed connection credentials stored readable"
+            );
+            if stats.unsealable + stats.failed > 0 {
+                tracing::error!(
+                    unsealable = stats.unsealable,
+                    failed = stats.failed,
+                    "Some connection credentials could not be sealed; those connections \
+                     cannot be used until they are entered again \
+                     (`runtara-server seal-connections --dry-run` names them)"
+                );
+            }
+        }
+        Err(e) => tracing::error!(
+            error = %e,
+            "Could not seal readable connection credentials; \
+             run `runtara-server seal-connections`"
+        ),
+    }
+}
+
 /// Readiness, as distinct from liveness: can this process actually validate the tokens it is
 /// about to be presented?
 ///
@@ -1344,8 +1400,41 @@ pub async fn start_with(
         },
     };
 
+    // seal holds every connection's secrets, and sends their requests. The
+    // proxy's development allowances are seal's too.
+    // Tenants' seal keys follow a rotation of the encryption key their
+    // wrapping key is derived from: without that, every sealed secret would
+    // be lost with the retired key.
+    match runtara_connections::sealed::follow_encryption_key_rotation(&pool).await {
+        Ok(0) => {}
+        Ok(rewrapped) => tracing::info!(
+            rewrapped,
+            "Seal keys wrapped under a retired encryption key are wrapped under the current one"
+        ),
+        Err(msg) => {
+            eprintln!("❌ Seal keys could not follow the encryption key's rotation: {msg}");
+            std::process::exit(1);
+        }
+    }
+    let sealed_credentials =
+        match runtara_connections::sealed::from_env(pool.clone(), crate::seal_allowances()) {
+            Ok(sealed) => sealed,
+            Err(msg) => {
+                eprintln!("❌ Configuration error: {msg}");
+                std::process::exit(1);
+            }
+        };
+    tracing::info!(
+        mode = sealed_credentials.mode(),
+        "Connection secrets are held by seal"
+    );
+    // Releases before seal stored secrets readable, which nothing uses any
+    // more: seal them first.
+    seal_readable_credentials(&pool, cipher.clone(), &sealed_credentials).await;
+
     // Construct connections crate config and facade.
     let connections_config = runtara_connections::ConnectionsConfig {
+        sealed: sealed_credentials,
         db_pool: pool.clone(),
         redis_manager: redis_manager.clone(),
         public_base_url,
@@ -1524,17 +1613,47 @@ pub async fn start_with(
         }
     });
 
-    // Each served tenant gets the platform database as its default connection.
+    // Webhook secrets earlier releases stored readable in Channel triggers
+    // are sealed: nothing checks a call against a readable one any more.
+    {
+        let webhooks =
+            crate::api::services::webhook_manager::WebhookManager::new(connections_facade.clone());
+        for tenant_id in config::served_tenants() {
+            match crate::api::services::webhook_manager::seal_stored_webhook_secrets(
+                &pool, &webhooks, tenant_id,
+            )
+            .await
+            {
+                Ok(0) => {}
+                Ok(sealed) => tracing::info!(
+                    tenant_id = %tenant_id,
+                    sealed,
+                    "Sealed Channel triggers' webhook secrets stored readable"
+                ),
+                Err(error) => tracing::error!(
+                    tenant_id = %tenant_id,
+                    %error,
+                    "Could not seal Channel triggers' webhook secrets"
+                ),
+            }
+        }
+    }
+
+    // Each served tenant gets the platform database as its default
+    // connection. The connection stands for that database and holds no URL:
+    // the URL is the operator's, and stays in the configuration.
     for tenant_id in config::served_tenants() {
         let default_connection = match &object_model_database_url {
-            Some(object_model_database_url) => Some(
+            Some(_) => Some(
                 connections_facade
                     .ensure_default_connection(
                         tenant_id,
                         "object_model",
                         format!("Default Object Model Database ({})", tenant_id),
                         "postgres".to_string(),
-                        serde_json::json!({ "database_url": object_model_database_url }),
+                        serde_json::json!({
+                            runtara_connections::repository::connections::PLATFORM_DATABASE_PARAM: true
+                        }),
                     )
                     .await,
             ),
