@@ -1108,13 +1108,12 @@ pub fn is_shared(value: &Value) -> bool {
     is_sealed(value) && value[SEALED_MARKER][SHARED_RECORD].is_string()
 }
 
-/// The record a platform OAuth app's client secret is bound to. An app's id
-/// is any text, so the record is named by its hash.
+/// The record a platform OAuth app's client secret is bound to, named after
+/// the app so that seal's audit log says which app a request used. An app's
+/// id is one seal takes in a record's name
+/// ([`crate::oauth_apps::check_app`]).
 fn app_record(app_id: &str) -> String {
-    format!(
-        "oauth-app:{}",
-        hex::encode(Sha256::digest(app_id.as_bytes()))
-    )
+    format!("oauth-app:{app_id}")
 }
 
 /// The parameters of a connection on a platform app that its client secret's

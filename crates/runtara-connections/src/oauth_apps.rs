@@ -336,6 +336,14 @@ pub fn check_app(app: &NewOAuthApp) -> Result<(), String> {
     if id.is_empty() || app.client_id.is_empty() {
         return Err(format!("OAuth app '{id}' needs an id and a client ID"));
     }
+    // The id names the record its secret is sealed for, in seal's audit log.
+    let named = id.len() <= 100
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    if !named {
+        return Err("an OAuth app's id is up to 100 letters, digits, `.`, `_` and `-`".to_string());
+    }
     if !app.parameters.is_object() {
         return Err(format!(
             "OAuth app '{id}': its parameters are not an object"
@@ -492,6 +500,13 @@ pub(crate) mod tests {
             (
                 entered("hubspot_private_app", "", serde_json::json!([])),
                 "not an object",
+            ),
+            (
+                NewOAuthApp {
+                    id: "hub spot/eu".into(),
+                    ..entered("hubspot_private_app", "", none())
+                },
+                "letters, digits",
             ),
         ] {
             let error = check_app(&bad).unwrap_err();

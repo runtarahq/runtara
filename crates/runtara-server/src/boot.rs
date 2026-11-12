@@ -111,7 +111,8 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
         None => None,
     };
 
-    let oauth_apps = match crate::oauth_apps::parse_args(std::env::args_os()) {
+    // What to do with the platform's apps, if that is what was asked.
+    let apps_command = match crate::oauth_apps::parse_args(std::env::args_os()) {
         Some(Ok(args)) => Some(args),
         Some(Err(msg)) => {
             eprintln!("{msg}");
@@ -215,7 +216,7 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
 
     // Maintenance command: the platform's OAuth apps are kept in a table of
     // this build's schema, so it runs once that is in place.
-    if let Some(args) = oauth_apps {
+    if let Some(args) = apps_command {
         crate::observability::init_cli_logging();
         if let Err(msg) = crate::oauth_apps::run(pool, args).await {
             eprintln!("❌ {msg}");
