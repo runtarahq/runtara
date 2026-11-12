@@ -1442,6 +1442,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A run that could not be placed is offered again instead of failing.**
+  When a runner that places runs elsewhere (a fleet, an executor) was refused
+  a placement, the run was reported lost, but nothing read the report: the
+  launch waited out its start gate and ended `start_gate_failed`. The runner
+  now declines the start, and the launch is recovered at once like any run
+  whose executor was lost.
+
 - **A POST, PUT or PATCH without content now says `Content-Length: 0`.** The
   host's outbound HTTP sent such a request (an agent's bodyless POST, such as
   eBay's `publishOffer`) with no length at all, and some servers refuse that
