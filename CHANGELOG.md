@@ -134,12 +134,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a header left out is removed. Changing the server's URL needs the
   header values entered again.
 
-  The default object-model connection the server makes for each tenant no
-  longer holds a copy of `OBJECT_MODEL_DATABASE_URL`: it stands for the
-  platform's database (`platform_database: true`) and holds no secret, and
-  the URL stays the operator's, in the configuration. The copies earlier
-  releases stored are converted when the server starts. Entering a URL in
-  such a connection makes it the tenant's own, sealed like any other.
+  The platform supplies no object model database. `OBJECT_MODEL_DATABASE_URL`
+  is no longer read, and the server makes no default connection: a tenant's
+  object model database is a Postgres connection of the tenant's, which an
+  operator enters once with `runtara-server object-model set --tenant-id <id>
+  [--if-unset]`. The URL is read from standard input and stored sealed, so
+  seal logs in with it and nothing can read it back; it must name its
+  `sslmode`. A tenant with no default is told that one is needed. Tenant
+  database connections are refused private addresses unless allowlisted
+  (`RUNTARA_DATABASE_CONNECTION_GUARD` is `enforce` by default, always). The
+  Docker Compose evaluation stack enters its own database for its tenant at
+  start; `install.sh` and `bootstrap-install.sh` configure none, and say how
+  to. The boot-time warning about the object-model role's privileges is gone
+  with the database it checked.
 
   Connections an earlier release stored readable are sealed when the server
   starts, or by `runtara-server seal-connections [--tenant-id <id>]

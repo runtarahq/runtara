@@ -65,6 +65,10 @@ scoped README files, examples.
   app's client secret: it is sealed as it is entered (`runtara-server
   oauth-apps put`) and kept in `platform_oauth_app`; no file, setting or
   host hands one over readable.
+- The platform supplies no object model database. A tenant's is a `postgres`
+  connection of the tenant's, entered with `runtara-server object-model set`
+  and sealed; do not add a database URL to the server's configuration for
+  tenants' data.
 - Never read, print, log, or commit credential values. Treat `.env*`, tokens,
   connection parameters, and database URLs as sensitive.
 - Do not hand-edit generated artifacts or ignored build outputs.
