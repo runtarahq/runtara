@@ -462,8 +462,7 @@ impl ConnectionsFacade {
             )
         })?;
         // The stored token, while it is fresh, needs no client. Otherwise
-        // the app's secret is sealed for the refresh, as the connection's
-        // own would be: seal sends it.
+        // the app's sealed secret goes with the refresh: seal sends it.
         let fresh = crate::sealed::is_sealed(&params[crate::sealed::policy::ACCESS_TOKEN_FIELD])
             && crate::auth::token_cache::token_is_fresh(crate::auth::token_cache::parse_expiry(
                 params["token_expires_at"].as_str(),
@@ -472,15 +471,7 @@ impl ConnectionsFacade {
             Some(app) if !fresh => Some(
                 self.state
                     .sealed
-                    .with_app_client(
-                        tenant_id,
-                        connection_id,
-                        integration_id,
-                        params,
-                        &app.client_id,
-                        app.client_secret.as_str(),
-                    )
-                    .await
+                    .with_app(integration_id, params, app)
                     .map_err(|error| {
                         ConnectionsError::AuthResolution(
                             crate::auth::token_cache::AuthResolutionError::permanent(

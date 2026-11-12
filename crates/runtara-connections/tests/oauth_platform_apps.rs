@@ -17,11 +17,11 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use runtara_connections::config::{EveryTenant, OAuthOptions};
 use runtara_connections::oauth_apps::{OAuthAppCredentials, OAuthAppSummary, OAuthApps};
+use runtara_connections::sealed::SealedCredentials;
 use runtara_connections::service::oauth::StartBinding;
 use runtara_connections::{Caller, CallerChannel, TenantId, connections_router};
 use serde_json::{Value, json};
 use tower::ServiceExt;
-use zeroize::Zeroizing;
 
 mod oauth_support;
 mod valkey_support;
@@ -31,15 +31,27 @@ use oauth_support::*;
 struct PlatformApps(Arc<OAuthAppCredentials>);
 
 impl PlatformApps {
-    fn new() -> Self {
+    /// The app, with its client secret sealed as the platform enters one.
+    async fn new() -> Self {
+        let client_secret = SealedCredentials::for_tests()
+            .seal_app_secret(
+                "hubspot",
+                "hubspot_private_app",
+                "platform-client",
+                &json!({}),
+                "platform-secret",
+            )
+            .await
+            .unwrap();
         Self(Arc::new(OAuthAppCredentials {
             app_id: "hubspot".into(),
             integration_id: "hubspot_private_app".into(),
             display_name: "HubSpot".into(),
             client_id: "platform-client".into(),
-            client_secret: Zeroizing::new("platform-secret".into()),
+            client_secret,
             scopes: "oauth crm.objects.contacts.read crm.objects.deals.read".into(),
             required_scopes: "oauth".into(),
+            parameters: json!({}),
         }))
     }
 }
@@ -57,10 +69,10 @@ impl OAuthApps for PlatformApps {
     }
 }
 
-fn oauth(tenantless_callback: bool) -> OAuthOptions {
+async fn oauth(tenantless_callback: bool) -> OAuthOptions {
     OAuthOptions {
         tenantless_callback,
-        apps: Some(Arc::new(PlatformApps::new())),
+        apps: Some(Arc::new(PlatformApps::new().await)),
         ..OAuthOptions::default()
     }
 }
@@ -120,7 +132,7 @@ fn created_id(body: &Value) -> String {
 #[tokio::test]
 async fn a_connection_on_a_platform_app_has_no_credentials_of_its_own() {
     let fixture = Fixture::start().await;
-    let api = api(&fixture, "acme", oauth(true));
+    let api = api(&fixture, "acme", oauth(true).await);
 
     let (status, body) = create(
         &api,
@@ -148,7 +160,7 @@ async fn a_connection_on_a_platform_app_has_no_credentials_of_its_own() {
     // with the app's required scope, to the shared callback.
     let service = fixture
         .service()
-        .with_apps(Some(Arc::new(PlatformApps::new())));
+        .with_apps(Some(Arc::new(PlatformApps::new().await)));
     let flow = service
         .start(&id, "acme", StartBinding::Browser)
         .await
@@ -200,19 +212,31 @@ async fn the_listing_offers_the_apps_a_tenant_may_use() {
             .cloned()
     };
 
-    let acme = types("acme", oauth(true)).await;
+    let acme = types("acme", oauth(true).await).await;
     let apps = managed(&acme, "hubspot_private_app").expect("HubSpot offers the app");
     assert_eq!(apps[0]["id"], "hubspot");
     assert_eq!(apps[0]["requiredScopes"], "oauth");
     assert!(!acme.to_string().contains("platform-secret"));
     assert!(!acme.to_string().contains("platform-client"));
     assert!(managed(&acme, "quickbooks_online").is_none());
-    assert!(managed(&types("beta", oauth(true)).await, "hubspot_private_app").is_none());
+    assert!(
+        managed(
+            &types("beta", oauth(true).await).await,
+            "hubspot_private_app"
+        )
+        .is_none()
+    );
     // Without the shared callback, platform apps cannot be used.
-    assert!(managed(&types("acme", oauth(false)).await, "hubspot_private_app").is_none());
+    assert!(
+        managed(
+            &types("acme", oauth(false).await).await,
+            "hubspot_private_app"
+        )
+        .is_none()
+    );
 
     let (status, one) = send(
-        &api(&fixture, "acme", oauth(true)),
+        &api(&fixture, "acme", oauth(true).await),
         "GET",
         "/connections/types/hubspot_private_app",
         None,
@@ -225,7 +249,7 @@ async fn the_listing_offers_the_apps_a_tenant_may_use() {
 #[tokio::test]
 async fn a_platform_app_is_refused_where_it_does_not_fit() {
     let fixture = Fixture::start().await;
-    let acme = api(&fixture, "acme", oauth(true));
+    let acme = api(&fixture, "acme", oauth(true).await);
     let refused = [
         (
             "the generic type",
@@ -268,7 +292,7 @@ async fn a_platform_app_is_refused_where_it_does_not_fit() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{case}: {body}");
     }
     let (status, body) = create(
-        &api(&fixture, "beta", oauth(true)),
+        &api(&fixture, "beta", oauth(true).await),
         hubspot(json!({ "oauth_app": "hubspot" })),
     )
     .await;
@@ -278,7 +302,7 @@ async fn a_platform_app_is_refused_where_it_does_not_fit() {
         "a tenant without the app: {body}"
     );
     let (status, body) = create(
-        &api(&fixture, "acme", oauth(false)),
+        &api(&fixture, "acme", oauth(false).await),
         hubspot(json!({ "oauth_app": "hubspot" })),
     )
     .await;
@@ -302,7 +326,7 @@ async fn a_platform_app_is_refused_where_it_does_not_fit() {
 #[tokio::test]
 async fn moving_between_a_platform_app_and_the_tenants_own_needs_reauthorization() {
     let fixture = Fixture::start().await;
-    let api = api(&fixture, "acme", oauth(true));
+    let api = api(&fixture, "acme", oauth(true).await);
     let (status, body) = create(
         &api,
         hubspot(json!({ "client_id": "own-client", "client_secret": "own-secret" })),
@@ -434,7 +458,7 @@ async fn requests_use_the_app_while_the_tenant_may_and_fail_when_it_may_not() {
     };
 
     let mut headers = std::collections::HashMap::new();
-    facade(oauth(true))
+    facade(oauth(true).await)
         .resolve_connection_auth("c1", "acme", "hubspot_private_app", &stored, &mut headers)
         .await
         .expect("the tenant may use the app");
@@ -444,7 +468,7 @@ async fn requests_use_the_app_while_the_tenant_may_and_fail_when_it_may_not() {
     // A tenant that lost the app gets a clear failure, and the connection
     // is kept.
     let mut headers = std::collections::HashMap::new();
-    let Err(error) = facade(oauth(true))
+    let Err(error) = facade(oauth(true).await)
         .resolve_connection_auth("c1", "beta", "hubspot_private_app", &stored, &mut headers)
         .await
     else {

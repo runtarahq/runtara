@@ -162,7 +162,14 @@ impl SealedCredentials {
         &self,
         tenant_id: &str,
     ) -> Result<(KeysetId, KeyId, PublicKey), SealError> {
-        let keyset = self.keys.expect_tenant(tenant_id);
+        self.current_key(self.keys.expect_tenant(tenant_id)).await
+    }
+
+    /// A keyset's current public key, making its first key if it has none.
+    async fn current_key(
+        &self,
+        keyset: KeysetId,
+    ) -> Result<(KeysetId, KeyId, PublicKey), SealError> {
         let current = match self.client.public_keys(&keyset).await {
             Ok(keys) => keys.into_iter().next_back(),
             Err(error) if error.code == SealErrorCode::KeysetUnknown => None,
@@ -325,49 +332,128 @@ impl SealedCredentials {
         Ok(Some(sealed))
     }
 
-    /// A connection on a platform OAuth app, as seal makes a request to the
-    /// provider for it (a code exchange, a refresh, a revocation): with the
-    /// app's client secret sealed as the connection's own would be, so that
-    /// seal sends it. For one request: the result is never stored.
-    pub async fn with_app_client(
+    /// Seals a platform OAuth app's client secret, once for every connection
+    /// on the app: to the platform's own key, to be sent only to the token
+    /// endpoint of the app's connection type, for a code exchange or a
+    /// refresh. `parameters` are those of the app's connections that say
+    /// where that is, for a type that has several (a Zoho data centre).
+    ///
+    /// The marker names the app's record beside the envelope, as a request
+    /// for a tenant's connection presents it.
+    pub async fn seal_app_secret(
         &self,
-        tenant_id: &str,
-        connection_id: &str,
+        app_id: &str,
         integration_id: &str,
-        parameters: &Value,
         client_id: &str,
+        parameters: &Value,
         client_secret: &str,
     ) -> Result<Value, SealingError> {
-        let mut own = parameters.clone();
+        let of_app = app_parameters(app_id, client_id, parameters);
+        let policy = policy::shared_client_policy(integration_id, &of_app, &self.allowances)
+            .ok_or_else(|| SealingError::CannotSeal {
+                reason: format!(
+                    "the platform OAuth app '{app_id}' names no token endpoint seal can send \
+                     its client secret to"
+                ),
+            })?;
+        let key = self
+            .current_key(keys::platform_keyset())
+            .await
+            .map_err(seal_failed)?;
+        let record = app_record(app_id);
+        let mut marker = seal_one(
+            &key,
+            &record,
+            policy::CLIENT_SECRET_FIELD,
+            client_secret,
+            &policy,
+        )?;
+        marker[SEALED_MARKER][SHARED_RECORD] = Value::String(record);
+        Ok(marker)
+    }
+
+    /// Whether `marker` is a platform OAuth app's client secret this
+    /// deployment can open: sealed for `app_id`, to a key of the platform's
+    /// that is here. A value sealed for another deployment, or for another
+    /// app, is not.
+    pub async fn holds_app_secret(&self, app_id: &str, marker: &Value) -> bool {
+        let Ok(envelope) =
+            serde_json::from_value::<Envelope>(marker[SEALED_MARKER]["envelope"].clone())
+        else {
+            return false;
+        };
+        let platform = keys::platform_keyset();
+        if !is_shared(marker)
+            || marker[SEALED_MARKER][SHARED_RECORD].as_str() != Some(app_record(app_id).as_str())
+            || *envelope.keyset() != platform
+        {
+            return false;
+        }
+        self.client
+            .public_keys(&platform)
+            .await
+            .is_ok_and(|keys| keys.iter().any(|key| key.kid == envelope.kid().as_str()))
+    }
+
+    /// [`Self::with_shared_client`] for `app`.
+    pub fn with_app(
+        &self,
+        integration_id: &str,
+        parameters: &Value,
+        app: &crate::oauth_apps::OAuthAppCredentials,
+    ) -> Result<Value, SealingError> {
+        self.with_shared_client(
+            integration_id,
+            parameters,
+            &app.app_id,
+            &app.client_id,
+            &app.client_secret,
+        )
+    }
+
+    /// A connection on a platform OAuth app, as seal makes a request to the
+    /// provider for it (a code exchange, a refresh, a revocation): with the
+    /// app's sealed client secret among its parameters, for seal to send.
+    /// For one request: the result is never stored.
+    ///
+    /// Refuses a connection whose parameters call for another policy than
+    /// the secret was sealed with: its tokens would go, or come from,
+    /// somewhere the app's secret was not sealed for.
+    pub fn with_shared_client(
+        &self,
+        integration_id: &str,
+        parameters: &Value,
+        app_id: &str,
+        client_id: &str,
+        client_secret: &Value,
+    ) -> Result<Value, SealingError> {
         let cannot = |reason: String| SealingError::CannotSeal { reason };
+        if !is_shared(client_secret) {
+            return Err(cannot(format!(
+                "the platform OAuth app '{app_id}' has no sealed client secret"
+            )));
+        }
+        let mut own = parameters.clone();
         let fields = own
             .as_object_mut()
             .ok_or_else(|| cannot("the connection has no parameters".to_owned()))?;
-        fields.remove(crate::oauth_apps::OAUTH_APP_PARAM);
         fields.insert("client_id".to_owned(), Value::String(client_id.to_owned()));
         fields.insert(
             policy::CLIENT_SECRET_FIELD.to_owned(),
-            Value::String(client_secret.to_owned()),
+            client_secret.clone(),
         );
-        let policies =
-            policy::policies(integration_id, &own, &self.allowances).ok_or_else(|| {
-                cannot(policy::why_unsealable(
-                    integration_id,
-                    &own,
-                    &self.allowances,
-                ))
-            })?;
-        let policy = policies
-            .get(policy::CLIENT_SECRET_FIELD)
-            .ok_or_else(|| cannot("the connection's type takes no client secret".to_owned()))?;
-        let key = self.sealing_key(tenant_id).await.map_err(seal_failed)?;
-        own[policy::CLIENT_SECRET_FIELD] = seal_one(
-            &key,
-            connection_id,
-            policy::CLIENT_SECRET_FIELD,
-            client_secret,
-            policy,
-        )?;
+        let current = policy::shared_client_policy(integration_id, &own, &self.allowances)
+            .map(|policy| policy_fingerprint(&policy))
+            .transpose()?;
+        if current.is_none()
+            || client_secret[SEALED_MARKER]["policy"].as_str() != current.as_deref()
+        {
+            return Err(cannot(format!(
+                "the platform OAuth app '{app_id}' was sealed for other endpoints than this \
+                 connection's: the connection's region differs from the app's, or the server's \
+                 settings changed since the app was sealed"
+            )));
+        }
         Ok(own)
     }
 
@@ -734,7 +820,16 @@ fn presented(parameters: &Value, name: &str) -> Result<(FieldName, SealedValue),
         .map_err(|_| invalid_request("a stored sealed value is not an envelope"))?;
     let field = FieldName::new(name)
         .map_err(|_| invalid_request("a sealed parameter's name is not a field name"))?;
-    Ok((field, SealedValue::from(envelope)))
+    // A platform's value is bound to its own record, not the connection's.
+    let value = match value[SEALED_MARKER][SHARED_RECORD].as_str() {
+        Some(record) => SealedValue::from_record(
+            envelope,
+            ItemId::new(record)
+                .map_err(|_| invalid_request("a shared value's record is not an item id"))?,
+        ),
+        None => SealedValue::from(envelope),
+    };
+    Ok((field, value))
 }
 
 /// The sealed secrets a connection's requests present to seal. Empty means a
@@ -1001,6 +1096,37 @@ pub fn is_sealed(value: &Value) -> bool {
     value
         .as_object()
         .is_some_and(|object| object.len() == 1 && object.contains_key(SEALED_MARKER))
+}
+
+/// The key, in a marker, of the record a platform's shared value is bound
+/// to. Only [`SealedCredentials::seal_app_secret`] makes such a marker, and a
+/// connection never stores one.
+const SHARED_RECORD: &str = "record";
+
+/// Whether a value is the marker of a platform's shared value.
+pub fn is_shared(value: &Value) -> bool {
+    is_sealed(value) && value[SEALED_MARKER][SHARED_RECORD].is_string()
+}
+
+/// The record a platform OAuth app's client secret is bound to. An app's id
+/// is any text, so the record is named by its hash.
+fn app_record(app_id: &str) -> String {
+    format!(
+        "oauth-app:{}",
+        hex::encode(Sha256::digest(app_id.as_bytes()))
+    )
+}
+
+/// The parameters of a connection on a platform app that its client secret's
+/// policy is made from.
+fn app_parameters(app_id: &str, client_id: &str, parameters: &Value) -> Value {
+    let mut of_app = match parameters {
+        Value::Object(_) => parameters.clone(),
+        _ => json!({}),
+    };
+    of_app[crate::oauth_apps::OAUTH_APP_PARAM] = Value::String(app_id.to_owned());
+    of_app["client_id"] = Value::String(client_id.to_owned());
+    of_app
 }
 
 /// Whether any of a connection's parameters is sealed.

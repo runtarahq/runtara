@@ -363,11 +363,11 @@ async fn sealed_tokens_are_revoked_through_seal_and_go_stale_with_their_destinat
     assert!(sealed.holds_stale_tokens(TYPE, &moved));
 }
 
-/// A connection on a platform OAuth app holds no client secret. The app's is
-/// sealed for the refresh as the connection's own would be: seal sends it,
-/// and the tokens come back sealed all the same.
+/// A connection on a platform OAuth app holds no client secret. The app's
+/// sealed one goes with the refresh: seal sends it, and the tokens come back
+/// sealed all the same.
 #[tokio::test]
-async fn a_platform_apps_client_secret_is_sealed_for_a_refresh() {
+async fn a_platform_apps_sealed_client_secret_goes_with_a_refresh() {
     allow_loopback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -397,18 +397,20 @@ async fn a_platform_apps_client_secret_is_sealed_for_a_refresh() {
     // Without a client, there is no refresh.
     assert!(resolve(&sealed, connection, &first).await.is_err());
 
-    let effective = sealed
-        .with_app_client(
-            TENANT,
-            connection,
+    let app = sealed
+        .seal_app_secret(
+            "platform",
             TYPE,
-            &first,
             "platform-client",
+            &held,
             "platform-CANARY",
         )
         .await
         .unwrap();
-    assert!(!effective.to_string().contains("CANARY"));
+    assert!(!app.to_string().contains("CANARY"));
+    let effective = sealed
+        .with_shared_client(TYPE, &first, "platform", "platform-client", &app)
+        .unwrap();
     let resolved = resolve(&sealed, connection, &effective).await.unwrap();
     assert!(is_sealed(
         &resolved
@@ -416,6 +418,186 @@ async fn a_platform_apps_client_secret_is_sealed_for_a_refresh() {
             .expect("a refresh was made")
             .access_token
     ));
+}
+
+/// A connection on a platform app, authorized, with its tokens sealed for
+/// `tenant`.
+async fn on_platform_app(
+    sealed: &SealedCredentials,
+    server: &MockServer,
+    tenant: &str,
+    connection: &str,
+) -> Value {
+    let mut held = authorized(server, "form_body");
+    for field in ["client_id", "client_secret"] {
+        held.as_object_mut().unwrap().remove(field);
+    }
+    held["oauth_app"] = json!("platform");
+    sealed
+        .seal_parameters(tenant, connection, TYPE, &held, None)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+/// A platform app's client secret is sealed once, to the platform's key, and
+/// goes with the refresh of any tenant's connection on the app. The tokens
+/// that come back are that tenant's alone.
+#[tokio::test]
+async fn one_sealed_app_secret_serves_every_tenants_connection() {
+    allow_loopback();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .and(body_string_contains("grant_type=refresh_token"))
+        .and(body_string_contains("client_secret=platform-CANARY"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "at-1-CANARY", "expires_in": 3600,
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/me"))
+        .and(header("Authorization", "Bearer at-1-CANARY"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let sealed = sealed_for(&server);
+    let app = sealed
+        .seal_app_secret(
+            "platform",
+            TYPE,
+            "platform-client",
+            &authorized(&server, "form_body"),
+            "platform-CANARY",
+        )
+        .await
+        .unwrap();
+    assert!(runtara_connections::sealed::is_shared(&app));
+    assert_eq!(app["$sealed"]["envelope"]["keyset"], "t-platform");
+    assert!(sealed.holds_app_secret("platform", &app).await);
+    assert!(!sealed.holds_app_secret("another", &app).await);
+    // Another deployment has other keys.
+    assert!(!sealed_for(&server).holds_app_secret("platform", &app).await);
+
+    let mut refreshed = Vec::new();
+    for (tenant, connection) in [("acme", "conn-app-acme"), ("beta", "conn-app-beta")] {
+        let stored = on_platform_app(&sealed, &server, tenant, connection).await;
+        let effective = sealed
+            .with_shared_client(TYPE, &stored, "platform", "platform-client", &app)
+            .unwrap();
+        let mut headers = HashMap::new();
+        let resolved = resolve_connection_auth(
+            tenant,
+            connection,
+            TYPE,
+            &effective,
+            &mut headers,
+            &Default::default(),
+            &sealed,
+        )
+        .await
+        .map_err(|error| error.message)
+        .unwrap();
+        let mut now = stored.clone();
+        now["access_token"] = resolved.rotated_sealed.expect("a refresh").access_token;
+        now["token_expires_at"] =
+            json!((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339());
+        refreshed.push((tenant, connection, now));
+    }
+
+    let api = format!("{}/api/me", server.uri());
+    let (tenant, connection, own) = &refreshed[0];
+    let (_, _, others) = &refreshed[1];
+    let sent = sealed
+        .send_bounded(tenant, connection, TYPE, own, "GET", &api, [], None, 65536)
+        .await
+        .unwrap();
+    assert_eq!(sent.status, 200);
+    // The token the app's secret got for one tenant is not another's to use.
+    assert!(
+        sealed
+            .send_bounded(
+                tenant,
+                connection,
+                TYPE,
+                others,
+                "GET",
+                &api,
+                [],
+                None,
+                65536
+            )
+            .await
+            .is_err()
+    );
+}
+
+/// The app's secret is sealed for its own endpoints. A connection that
+/// names others, or a value that is not the platform's, cannot use it.
+#[tokio::test]
+async fn a_connection_elsewhere_cannot_use_the_apps_secret() {
+    allow_loopback();
+    let server = MockServer::start().await;
+    let sealed = sealed_for(&server);
+    let stored = on_platform_app(&sealed, &server, TENANT, "conn-app-elsewhere").await;
+    let app = sealed
+        .seal_app_secret(
+            "platform",
+            TYPE,
+            "platform-client",
+            &stored,
+            "platform-CANARY",
+        )
+        .await
+        .unwrap();
+    sealed
+        .with_shared_client(TYPE, &stored, "platform", "platform-client", &app)
+        .unwrap();
+
+    let mut elsewhere = stored.clone();
+    elsewhere["token_url"] = json!(format!("{}/other/token", server.uri()));
+    let error = sealed
+        .with_shared_client(TYPE, &elsewhere, "platform", "platform-client", &app)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("sealed for other endpoints"), "{error}");
+    assert!(!error.contains("CANARY"));
+
+    // A tenant's own sealed value is not a platform's.
+    let own = sealed
+        .seal_parameters(
+            TENANT,
+            "conn-own-client",
+            TYPE,
+            &authorized(&server, "form_body"),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        sealed
+            .with_shared_client(
+                TYPE,
+                &stored,
+                "platform",
+                "platform-client",
+                &own["client_secret"]
+            )
+            .is_err()
+    );
+    // Nor can a connection store the platform's value as its own.
+    let mut taking = stored.clone();
+    taking["client_secret"] = app.clone();
+    assert!(
+        sealed
+            .seal_parameters(TENANT, "conn-app-elsewhere", TYPE, &taking, Some(&stored))
+            .await
+            .is_err()
+    );
 }
 
 /// With a sealed client secret, an authorization code is exchanged through
@@ -564,16 +746,18 @@ async fn a_platform_apps_code_is_exchanged_through_seal_too() {
     }
     stored["oauth_app"] = json!("platform");
 
-    let exchanging = sealed
-        .with_app_client(
-            TENANT,
-            connection,
+    let app = sealed
+        .seal_app_secret(
+            "platform",
             TYPE,
-            &stored,
             "platform-client",
+            &stored,
             "platform-CANARY",
         )
         .await
+        .unwrap();
+    let exchanging = sealed
+        .with_shared_client(TYPE, &stored, "platform", "platform-client", &app)
         .unwrap();
     assert!(is_sealed(&exchanging["client_secret"]));
     assert_eq!(exchanging["client_id"], "platform-client");

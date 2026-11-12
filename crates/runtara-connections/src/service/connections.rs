@@ -1352,7 +1352,7 @@ impl ConnectionService {
         let params = conn
             .connection_parameters
             .unwrap_or(serde_json::Value::Null);
-        // A platform app's client secret, sealed for this request only.
+        // A platform app's sealed client secret, for this request only.
         let params = match crate::oauth_apps::app_for(
             self.oauth_apps.as_deref(),
             tenant_id,
@@ -1361,15 +1361,7 @@ impl ConnectionService {
         ) {
             Ok(Some(app)) => self
                 .sealed
-                .with_app_client(
-                    tenant_id,
-                    id,
-                    integration_id,
-                    &params,
-                    &app.client_id,
-                    app.client_secret.as_str(),
-                )
-                .await
+                .with_app(integration_id, &params, &app)
                 .unwrap_or(params),
             _ => params,
         };
