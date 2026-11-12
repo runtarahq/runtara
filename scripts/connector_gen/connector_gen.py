@@ -420,44 +420,89 @@ def clean_text(text: str) -> str:
 class PlainText(html.parser.HTMLParser):
     """The text of an HTML description as the step editor shows it: line
     breaks for `<br>`, paragraphs and list items, backticks for `<code>`, a
-    link's text without its (often site-relative) URL, entities decoded."""
+    link's text without its (often site-relative) URL, entities decoded, and
+    a `<pre>` block as it is laid out."""
 
     BREAKS = {"br": "\n", "p": "\n\n", "div": "\n\n", "ul": "\n\n", "ol": "\n\n", "table": "\n\n", "tr": "\n"}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
+        # Text, and whether it is laid out already (inside a `<pre>`).
         self.parts = []
+        self.pre = 0
+        # `<code>` opened inside a `<pre>`, whose end tag may come after the
+        # block's (eBay writes `<pre><code>…</pre></code>`).
+        self.pre_code = 0
 
     def handle_starttag(self, tag, attrs):
-        if tag == "li":
-            self.parts.append("\n- ")
+        if tag == "pre":
+            self.pre += 1
+            self.parts.append(("\n\n", False))
+        elif self.pre:
+            if tag == "br":
+                self.parts.append(("\n", True))
+            elif tag == "code":
+                self.pre_code += 1
+        elif tag == "li":
+            self.parts.append(("\n- ", False))
         elif tag == "code":
-            self.parts.append("`")
+            self.parts.append(("`", False))
         elif tag in ("td", "th"):
-            self.parts.append(" ")
+            self.parts.append((" ", False))
         else:
-            self.parts.append(self.BREAKS.get(tag, ""))
+            self.parts.append((self.BREAKS.get(tag, ""), False))
 
     def handle_startendtag(self, tag, attrs):
         self.handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag):
-        if tag == "code":
-            self.parts.append("`")
+        if tag == "pre":
+            self.pre = max(0, self.pre - 1)
+            self.parts.append(("\n\n", False))
+        elif tag == "code" and self.pre_code:
+            self.pre_code -= 1
+        elif self.pre:
+            pass
+        elif tag == "code":
+            self.parts.append(("`", False))
         elif tag in ("p", "div", "ul", "ol", "table"):
-            self.parts.append("\n\n")
+            self.parts.append(("\n\n", False))
 
     def handle_data(self, data):
-        self.parts.append(re.sub(r"\s+", " ", data))
+        if self.pre:
+            self.parts.append((data, True))
+        else:
+            self.parts.append((re.sub(r"\s+", " ", data), False))
 
     def text(self) -> str:
-        lines = [line.strip() for line in "".join(self.parts).split("\n")]
-        return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+        # A `<pre>` block keeps its lines and indentation: it stands in as a
+        # token while the rest is tidied, then goes back.
+        blocks, flowing = [], []
+        for text, laid_out in self.parts:
+            if laid_out:
+                if flowing and flowing[-1].startswith("\0"):
+                    blocks[-1] += text
+                    continue
+                blocks.append(text)
+                flowing.append(f"\0{len(blocks) - 1}\0")
+            else:
+                flowing.append(text)
+        lines = [line.strip() for line in "".join(flowing).split("\n")]
+        text = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+        return re.sub(r"\0(\d+)\0", lambda m: blocks[int(m.group(1))].strip("\n").rstrip(), text)
+
+
+# What `<` may start in a description: an HTML element. Anything else (eBay's
+# `<start>` placeholder, a description that begins `<This type…`) is text.
+HTML_TAGS = ("a", "abbr", "b", "blockquote", "br", "code", "dd", "div", "dl", "dt", "em", "h1",
+             "h2", "h3", "h4", "h5", "h6", "hr", "i", "img", "li", "ol", "p", "pre", "small",
+             "span", "strong", "sub", "sup", "table", "tbody", "td", "th", "thead", "tr", "u", "ul")
+NOT_A_TAG = re.compile(r"<(?!/?(?:%s)\b)(?!!--)" % "|".join(HTML_TAGS), re.IGNORECASE)
 
 
 def plain_text(text: str) -> str:
     parser = PlainText()
-    parser.feed(text)
+    parser.feed(NOT_A_TAG.sub("&lt;", text))
     parser.close()
     return parser.text()
 
@@ -1393,7 +1438,9 @@ def fold_base_paths(slices: list) -> None:
     if len(origins) > 1:
         sys.exit(f"the specs list `servers` on different hosts ({', '.join(origins)}); "
                  "the generated requests share one base path")
-    for (_, sliced), (origin, base) in zip(slices, split):
+    for (name, sliced), (origin, base) in zip(slices, split):
+        print(f"note: {name}: its paths go under {origin}{base or '/'}, as its `servers` say; "
+              "the specs share the host")
         sliced["paths"] = {base + path: item for path, item in sliced["paths"].items()}
         sliced["servers"] = [{"url": origin}]
 

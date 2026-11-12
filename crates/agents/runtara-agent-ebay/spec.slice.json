@@ -518,12 +518,12 @@
         "description": "This type is used to specify the dimensions (and the unit used to measure those dimensions) of a shipping package. The dimensions container is conditionally required if the seller will be offering calculated shipping rates to determine shipping cost. See the Calculated shipping help page for more information on calculated shipping.",
         "properties": {
           "height": {
-            "description": "The actual height (in the measurement unit specified in the unit field) of the shipping package. All fields of the dimensions container are required if package dimensions are specified.\n\nIf a shipping package measured 21.5 inches in length, 15.0 inches in width, and 12.0 inches in height, the dimensions container would look as follows:\n`\"dimensions\": {\n\"length\": 21.5,\n\"width\": 15.0,\n\"height\": 12.0,\n\"unit\": \"INCH\"\n} `",
+            "description": "The actual height (in the measurement unit specified in the unit field) of the shipping package. All fields of the dimensions container are required if package dimensions are specified.\n\nIf a shipping package measured 21.5 inches in length, 15.0 inches in width, and 12.0 inches in height, the dimensions container would look as follows:\n\n\"dimensions\": {\n \"length\": 21.5,\n \"width\": 15.0,\n \"height\": 12.0,\n \"unit\": \"INCH\"\n }",
             "type": "number",
             "x-runtara-label": "Height"
           },
           "length": {
-            "description": "The actual length (in the measurement unit specified in the unit field) of the shipping package. All fields of the dimensions container are required if package dimensions are specified.\n\nIf a shipping package measured 21.5 inches in length, 15.0 inches in width, and 12.0 inches in height, the dimensions container would look as follows:\n`\"dimensions\": {\n\"length\": 21.5,\n\"width\": 15.0,\n\"height\": 12.0,\n\"unit\": \"INCH\"\n} `",
+            "description": "The actual length (in the measurement unit specified in the unit field) of the shipping package. All fields of the dimensions container are required if package dimensions are specified.\n\nIf a shipping package measured 21.5 inches in length, 15.0 inches in width, and 12.0 inches in height, the dimensions container would look as follows:\n\n\"dimensions\": {\n \"length\": 21.5,\n \"width\": 15.0,\n \"height\": 12.0,\n \"unit\": \"INCH\"\n }",
             "type": "number",
             "x-runtara-label": "Length"
           },
@@ -533,7 +533,7 @@
             "x-runtara-label": "Unit"
           },
           "width": {
-            "description": "The actual width (in the measurement unit specified in the unit field) of the shipping package. All fields of the dimensions container are required if package dimensions are specified.\n\nIf a shipping package measured 21.5 inches in length, 15.0 inches in width, and 12.0 inches in height, the dimensions container would look as follows:\n`\"dimensions\": {\n\"length\": 21.5,\n\"width\": 15.0,\n\"height\": 12.0,\n\"unit\": \"INCH\"\n} `",
+            "description": "The actual width (in the measurement unit specified in the unit field) of the shipping package. All fields of the dimensions container are required if package dimensions are specified.\n\nIf a shipping package measured 21.5 inches in length, 15.0 inches in width, and 12.0 inches in height, the dimensions container would look as follows:\n\n\"dimensions\": {\n \"length\": 21.5,\n \"width\": 15.0,\n \"height\": 12.0,\n \"unit\": \"INCH\"\n }",
             "type": "number",
             "x-runtara-label": "Width"
           }
@@ -771,7 +771,7 @@
             "x-runtara-label": "Status"
           },
           "storeCategoryNames": {
-            "description": "This container is returned if the seller chose to place the inventory item into one or two eBay store categories that the seller has set up for their eBay store. The string value(s) in this container will be the full path(s) to the eBay store categories, as shown below:\n`\"storeCategoryNames\": [\n\"/Fashion/Men/Shirts\",\n\"/Fashion/Men/Accessories\" ], `",
+            "description": "This container is returned if the seller chose to place the inventory item into one or two eBay store categories that the seller has set up for their eBay store. The string value(s) in this container will be the full path(s) to the eBay store categories, as shown below:\n\n\"storeCategoryNames\": [\n \"/Fashion/Men/Shirts\", \n \"/Fashion/Men/Accessories\" ],",
             "items": {
               "type": "string"
             },
@@ -791,7 +791,7 @@
         "type": "object"
       },
       "EbayOfferDetailsWithId": {
-        "description": "updateOffer call. Every field that is currently set with the unpublished/published offer must also be passed into the updateOffer call, even those fields whose values are not changing. Note that for published offers, a successful updateOffer call will actually update the active eBay listing with whatever changes were made.",
+        "description": "<This type provides details of an offer, and is used by the base request payload of the updateOffer call. Every field that is currently set with the unpublished/published offer must also be passed into the updateOffer call, even those fields whose values are not changing. Note that for published offers, a successful updateOffer call will actually update the active eBay listing with whatever changes were made.",
         "properties": {
           "availableQuantity": {
             "description": "This integer value sets the quantity of the inventory item that will be available through the offer. Quantity must be set to `1` or more in order for the inventory item to be purchasable. This value should not be more than the quantity that is specified for the inventory item record. For auction listings, this field should not be provided.\n\nIf this field exists for the current unpublished or published offer, it should be provided again in the updateOffer call, even if the value is not changing. If this particular field is omitted in an updateOffer call, the general available quantity set for the inventory item record may be used instead, and this may not be accurate if the inventory item is being sold across multiple marketplaces.",
@@ -897,7 +897,7 @@
             "x-runtara-label": "Secondary Category ID"
           },
           "storeCategoryNames": {
-            "description": "This container is used if the seller would like to place the inventory item into one or two store categories that the seller has set up for their eBay store. The string value(s) passed in to this container will be the full path(s) to the store categories, as shown below:\n`\"storeCategoryNames\": [\n\"/Fashion/Men/Shirts\",\n\"/Fashion/Men/Accessories\" ], `If this field currently exists for an unpublished or published offer, it should be provided again in an updateOffer call, even if the eBay categories are not changing.",
+            "description": "This container is used if the seller would like to place the inventory item into one or two store categories that the seller has set up for their eBay store. The string value(s) passed in to this container will be the full path(s) to the store categories, as shown below:\n\n\"storeCategoryNames\": [\n \"/Fashion/Men/Shirts\", \n \"/Fashion/Men/Accessories\" ],\n\nIf this field currently exists for an unpublished or published offer, it should be provided again in an updateOffer call, even if the eBay categories are not changing.",
             "items": {
               "type": "string"
             },
@@ -1038,7 +1038,7 @@
             "x-runtara-label": "SKU"
           },
           "storeCategoryNames": {
-            "description": "This container is used if the seller would like to place the inventory item into one or two eBay store categories that the seller has set up for their eBay store. The string value(s) passed in to this container will be the full path(s) to the eBay store categories, as shown below:\n`\"storeCategoryNames\": [\n\"/Fashion/Men/Shirts\",\n\"/Fashion/Men/Accessories\" ], `",
+            "description": "This container is used if the seller would like to place the inventory item into one or two eBay store categories that the seller has set up for their eBay store. The string value(s) passed in to this container will be the full path(s) to the eBay store categories, as shown below:\n\n\"storeCategoryNames\": [\n \"/Fashion/Men/Shirts\", \n \"/Fashion/Men/Accessories\" ],",
             "items": {
               "type": "string"
             },
@@ -2710,7 +2710,7 @@
         "description": "This type contains data on a line item that is related to, but not a part of the order.",
         "properties": {
           "lineItemAspects": {
-            "description": "This array contains the complete set of items aspects for the linked line item. For example:\n\"lineItemAspects\": [\n{\n\"name\": \"Tire Type\",\n\"value\": \"All Season\"\n},\n\n...\n\n{\n\"name\": \"Car Type\",\n\"value\": \"Performance\"\n}\n]Note: All item specifics for the listing are returned. The name/value pairs returned are in the language of the linked line item's listing site, which may vary from the seller's language.",
+            "description": "This array contains the complete set of items aspects for the linked line item. For example:\n\n\"lineItemAspects\": [\n    {\n        \"name\": \"Tire Type\",\n        \"value\": \"All Season\"\n    },\n\n    ...\n \n    {\n        \"name\": \"Car Type\",\n        \"value\": \"Performance\"\n    }\n]\n\nNote: All item specifics for the listing are returned. The name/value pairs returned are in the language of the linked line item's listing site, which may vary from the seller's language.",
             "items": {
               "$ref": "#/components/schemas/NameValuePair"
             },
@@ -4967,7 +4967,7 @@
             "x-runtara-label": "Unit"
           },
           "value": {
-            "description": "The actual weight (in the measurement unit specified in the unit field) of the shipping package. Both the unit and value fields are required if the weight container is used. If a shipping package weighed 20.5 ounces, the container would look as follows:\n\"weight\": {\n\"value\": 20.5,\n\"unit\": \"OUNCE\"\n}",
+            "description": "The actual weight (in the measurement unit specified in the unit field) of the shipping package. Both the unit and value fields are required if the weight container is used. If a shipping package weighed 20.5 ounces, the container would look as follows:\n\n\"weight\": {\n \"value\": 20.5,\n \"unit\": \"OUNCE\"\n }",
             "type": "number",
             "x-runtara-label": "Value"
           }

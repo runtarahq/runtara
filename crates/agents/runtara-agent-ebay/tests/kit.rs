@@ -90,7 +90,8 @@ fn ebays_error_envelope_gives_the_message() {
         "EBAY HTTP 404 at /sell/inventory/v1/inventory_item: 25702 The SKU MUG-2 is not \
          available in the system. (sku=MUG-2)"
     );
-    assert_eq!(err.attributes["error_id"], json!("25702"));
+    // eBay's own number, as in a refused bulk entry.
+    assert_eq!(err.attributes["error_id"], json!(25702));
     assert_eq!(err.attributes["errors"], body["errors"]);
 
     // The long message says why when the short one is a template eBay left
@@ -352,6 +353,45 @@ fn a_refused_entry_ends_its_sentence_once() {
 }
 
 #[test]
+fn an_entry_without_a_status_counts_as_refused() {
+    // Nothing says eBay carried it out, so the batch is not a success.
+    let err = bulk(
+        207,
+        json!({ "responses": [
+            updated("MUG-1", "5005317010"),
+            { "sku": "MUG-2", "offerId": "5005317011" },
+            { "sku": "MUG-3", "offerId": "5005317012", "statusCode": "200" },
+        ]}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "EBAY_VALIDATION_FAILED");
+    assert_eq!(
+        err.attributes["refused"],
+        json!([{ "index": 1, "sku": "MUG-2", "offer_id": "5005317011",
+                 "status_code": null, "message": "eBay gave no status for it" }])
+    );
+    // A status eBay sends as text still counts.
+    assert_eq!(
+        err.attributes["saved"],
+        json!([
+            { "sku": "MUG-1", "offer_id": "5005317010" },
+            { "sku": "MUG-3", "offer_id": "5005317012" },
+        ])
+    );
+    // An answer whose `responses` carry no status at all is not a bulk
+    // answer, and is its output.
+    let other = json!({ "responses": [{ "note": "not a bulk entry" }] });
+    let output: Value = kit::decode(
+        &response(200, &other.to_string(), &[]),
+        "POST",
+        "/sell/inventory/v1/offer",
+        "EBAY",
+    )
+    .unwrap();
+    assert_eq!(output, other);
+}
+
+#[test]
 fn a_bulk_update_without_refused_entries_is_its_output() {
     let output = bulk(
         200,
@@ -381,6 +421,12 @@ fn retry_hint_prefers_the_hosts_milliseconds() {
     assert_eq!(
         decode::<Value>(seconds).unwrap_err().retry_after_ms,
         Some(2000)
+    );
+    // A wait too long to count in milliseconds is the longest there is.
+    let huge = response(429, "", &[("Retry-After", "18446744073709551615")]);
+    assert_eq!(
+        decode::<Value>(huge).unwrap_err().retry_after_ms,
+        Some(u64::MAX)
     );
 }
 

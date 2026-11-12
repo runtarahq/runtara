@@ -328,8 +328,9 @@ field_types:
 its own site). With `html_descriptions`, `fetch` writes every description and
 summary as the plain text the step editor shows: line breaks for `<br>`,
 paragraphs and list items (`- `), backticks for `<code>`, a link's text
-without its URL, entities decoded. Examples, defaults and enums keep their
-text.
+without its URL, entities decoded, and a `<pre>` block laid out as it is. A
+`<` that starts no HTML element (a `<start>` placeholder) stays text.
+Examples, defaults and enums keep their text.
 
 ```yaml
 html_descriptions: true

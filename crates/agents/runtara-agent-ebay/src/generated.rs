@@ -815,12 +815,13 @@ pub struct Dimension {
         description = r##"The actual height (in the measurement unit specified in the unit field) of the shipping package. All fields of the dimensions container are required if package dimensions are specified.
 
 If a shipping package measured 21.5 inches in length, 15.0 inches in width, and 12.0 inches in height, the dimensions container would look as follows:
-`"dimensions": {
-"length": 21.5,
-"width": 15.0,
-"height": 12.0,
-"unit": "INCH"
-} `"##
+
+"dimensions": {
+ "length": 21.5,
+ "width": 15.0,
+ "height": 12.0,
+ "unit": "INCH"
+ }"##
     )]
     #[serde(rename = "height", default, skip_serializing_if = "Option::is_none")]
     pub height: Option<f64>,
@@ -829,12 +830,13 @@ If a shipping package measured 21.5 inches in length, 15.0 inches in width, and 
         description = r##"The actual length (in the measurement unit specified in the unit field) of the shipping package. All fields of the dimensions container are required if package dimensions are specified.
 
 If a shipping package measured 21.5 inches in length, 15.0 inches in width, and 12.0 inches in height, the dimensions container would look as follows:
-`"dimensions": {
-"length": 21.5,
-"width": 15.0,
-"height": 12.0,
-"unit": "INCH"
-} `"##
+
+"dimensions": {
+ "length": 21.5,
+ "width": 15.0,
+ "height": 12.0,
+ "unit": "INCH"
+ }"##
     )]
     #[serde(rename = "length", default, skip_serializing_if = "Option::is_none")]
     pub length: Option<f64>,
@@ -849,12 +851,13 @@ If a shipping package measured 21.5 inches in length, 15.0 inches in width, and 
         description = r##"The actual width (in the measurement unit specified in the unit field) of the shipping package. All fields of the dimensions container are required if package dimensions are specified.
 
 If a shipping package measured 21.5 inches in length, 15.0 inches in width, and 12.0 inches in height, the dimensions container would look as follows:
-`"dimensions": {
-"length": 21.5,
-"width": 15.0,
-"height": 12.0,
-"unit": "INCH"
-} `"##
+
+"dimensions": {
+ "length": 21.5,
+ "width": 15.0,
+ "height": 12.0,
+ "unit": "INCH"
+ }"##
     )]
     #[serde(rename = "width", default, skip_serializing_if = "Option::is_none")]
     pub width: Option<f64>,
@@ -1233,9 +1236,10 @@ Max Length: 50"##
     #[field(
         display_name = r##"Store Category Names"##,
         description = r##"This container is returned if the seller chose to place the inventory item into one or two eBay store categories that the seller has set up for their eBay store. The string value(s) in this container will be the full path(s) to the eBay store categories, as shown below:
-`"storeCategoryNames": [
-"/Fashion/Men/Shirts",
-"/Fashion/Men/Accessories" ], `"##
+
+"storeCategoryNames": [
+ "/Fashion/Men/Shirts", 
+ "/Fashion/Men/Accessories" ],"##
     )]
     #[serde(
         rename = "storeCategoryNames",
@@ -1465,9 +1469,12 @@ Note: You cannot list US eBay Motors vehicles in two categories. However, you ca
     #[field(
         display_name = r##"Store Category Names"##,
         description = r##"This container is used if the seller would like to place the inventory item into one or two store categories that the seller has set up for their eBay store. The string value(s) passed in to this container will be the full path(s) to the store categories, as shown below:
-`"storeCategoryNames": [
-"/Fashion/Men/Shirts",
-"/Fashion/Men/Accessories" ], `If this field currently exists for an unpublished or published offer, it should be provided again in an updateOffer call, even if the eBay categories are not changing."##
+
+"storeCategoryNames": [
+ "/Fashion/Men/Shirts", 
+ "/Fashion/Men/Accessories" ],
+
+If this field currently exists for an unpublished or published offer, it should be provided again in an updateOffer call, even if the eBay categories are not changing."##
     )]
     #[serde(
         rename = "storeCategoryNames",
@@ -1735,9 +1742,10 @@ Max Length: 50"##
     #[field(
         display_name = r##"Store Category Names"##,
         description = r##"This container is used if the seller would like to place the inventory item into one or two eBay store categories that the seller has set up for their eBay store. The string value(s) passed in to this container will be the full path(s) to the eBay store categories, as shown below:
-`"storeCategoryNames": [
-"/Fashion/Men/Shirts",
-"/Fashion/Men/Accessories" ], `"##
+
+"storeCategoryNames": [
+ "/Fashion/Men/Shirts", 
+ "/Fashion/Men/Accessories" ],"##
     )]
     #[serde(
         rename = "storeCategoryNames",
@@ -4409,19 +4417,22 @@ pub struct LinkedOrderLineItem {
     #[field(
         display_name = r##"Line Item Aspects"##,
         description = r##"This array contains the complete set of items aspects for the linked line item. For example:
+
 "lineItemAspects": [
-{
-"name": "Tire Type",
-"value": "All Season"
-},
+    {
+        "name": "Tire Type",
+        "value": "All Season"
+    },
 
-...
+    ...
+ 
+    {
+        "name": "Car Type",
+        "value": "Performance"
+    }
+]
 
-{
-"name": "Car Type",
-"value": "Performance"
-}
-]Note: All item specifics for the listing are returned. The name/value pairs returned are in the language of the linked line item's listing site, which may vary from the seller's language."##
+Note: All item specifics for the listing are returned. The name/value pairs returned are in the language of the linked line item's listing site, which may vary from the seller's language."##
     )]
     #[serde(
         rename = "lineItemAspects",
@@ -8103,10 +8114,11 @@ pub struct Weight {
     #[field(
         display_name = r##"Value"##,
         description = r##"The actual weight (in the measurement unit specified in the unit field) of the shipping package. Both the unit and value fields are required if the weight container is used. If a shipping package weighed 20.5 ounces, the container would look as follows:
+
 "weight": {
-"value": 20.5,
-"unit": "OUNCE"
-}"##
+ "value": 20.5,
+ "unit": "OUNCE"
+ }"##
     )]
     #[serde(rename = "value", default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
@@ -9123,9 +9135,10 @@ Max Length: 50"##
     #[field(
         display_name = r##"Store Category Names"##,
         description = r##"This container is used if the seller would like to place the inventory item into one or two eBay store categories that the seller has set up for their eBay store. The string value(s) passed in to this container will be the full path(s) to the eBay store categories, as shown below:
-`"storeCategoryNames": [
-"/Fashion/Men/Shirts",
-"/Fashion/Men/Accessories" ], `"##
+
+"storeCategoryNames": [
+ "/Fashion/Men/Shirts", 
+ "/Fashion/Men/Accessories" ],"##
     )]
     #[serde(
         rename = "storeCategoryNames",
@@ -9646,9 +9659,12 @@ Note: You cannot list US eBay Motors vehicles in two categories. However, you ca
     #[field(
         display_name = r##"Store Category Names"##,
         description = r##"This container is used if the seller would like to place the inventory item into one or two store categories that the seller has set up for their eBay store. The string value(s) passed in to this container will be the full path(s) to the store categories, as shown below:
-`"storeCategoryNames": [
-"/Fashion/Men/Shirts",
-"/Fashion/Men/Accessories" ], `If this field currently exists for an unpublished or published offer, it should be provided again in an updateOffer call, even if the eBay categories are not changing."##
+
+"storeCategoryNames": [
+ "/Fashion/Men/Shirts", 
+ "/Fashion/Men/Accessories" ],
+
+If this field currently exists for an unpublished or published offer, it should be provided again in an updateOffer call, even if the eBay categories are not changing."##
     )]
     #[serde(
         rename = "storeCategoryNames",

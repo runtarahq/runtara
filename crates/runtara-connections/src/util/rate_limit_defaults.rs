@@ -149,9 +149,11 @@ pub fn get_default_rate_limit_config(integration_id: &str) -> Option<RateLimitCo
             max_wait_ms: 60000,
         }),
         // eBay: each Sell API has a daily call limit per application (Inventory
-        // 2,000,000, Fulfillment's orders 100,000, Account 25,000), and eBay publishes no
-        // per-second one. 5 req/s with a burst of 10 keeps one connection's
-        // bursts well inside those, and a 429 is retried after its wait.
+        // 2,000,000, Fulfillment's orders 100,000, Account 25,000), and eBay
+        // publishes no per-second one. A per-second limiter cannot enforce a
+        // daily quota: 5 req/s with a burst of 10 only spaces one connection's
+        // calls out, so that at full rate it takes more than an hour to use up
+        // the smallest quota. A 429 is retried after its wait, a few times.
         "ebay_oauth" => Some(RateLimitConfigDto {
             requests_per_second: 5,
             burst_size: 10,
@@ -319,11 +321,11 @@ mod tests {
     }
 
     #[test]
-    fn test_ebay_defaults_stay_inside_the_lowest_daily_limit() {
+    fn test_ebay_defaults_take_over_an_hour_to_use_up_the_smallest_daily_quota() {
         let config = get_default_rate_limit_config("ebay_oauth").unwrap();
-        // Even at its full rate all day, one connection would not use up the
-        // smallest Sell API quota it calls this much (Account, 25,000 a day)
-        // within an hour.
+        // At its full rate, one connection needs more than an hour to use up
+        // the smallest Sell API quota (Account, 25,000 calls a day); the
+        // limiter does not count calls per day.
         assert!(config.requests_per_second * 3600 <= 25_000);
         assert!(config.retry_on_limit);
     }

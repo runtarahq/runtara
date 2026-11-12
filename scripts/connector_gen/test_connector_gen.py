@@ -726,6 +726,17 @@ class HtmlDescriptionsTest(unittest.TestCase):
              "See Publishing offers."),
             ("A &amp; B &lt;5&gt; &quot;x&quot;", 'A & B <5> "x"'),
             ("Spread\n   over\tlines", "Spread over lines"),
+            # A `<` that starts no HTML element is text: a placeholder, a typo.
+            ("filter=creationdate:[<start>..<end>]", "filter=creationdate:[<start>..<end>]"),
+            ("<This type is used by <b>updateOffer</b>.", "<This type is used by updateOffer."),
+            ("x < 5 and y<3", "x < 5 and y<3"),
+            # A `<pre>` block keeps its lines and indentation.
+            ('<p>Example:</p><pre>{\n  "Brand": ["GoPro"],\n  "Type": ["Camera"]\n}</pre>Done.',
+             'Example:\n\n{\n  "Brand": ["GoPro"],\n  "Type": ["Camera"]\n}\n\nDone.'),
+            ("<pre>a <b>b</b>\n  c</pre>", "a b\n  c"),
+            # eBay closes the block before its `<code>`.
+            ("As follows: <br> <pre><code>{<br> \"a\": 1<br> } </pre></code>Then.",
+             'As follows:\n\n{\n "a": 1\n }\n\nThen.'),
         )
         for html_text, plain in cases:
             with self.subTest(html_text):
@@ -1678,6 +1689,16 @@ class MergeComponentsTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as raised:
             merge(("Records", "records", spec("/records", "records", "y")), ("Users", "users", other))
         self.assertIn("different hosts (https://zohoapis.com, https://zohoapis.eu)", str(raised.exception))
+        # A variable in the path may differ: each spec's requests keep the
+        # path its own server names.
+        older = spec("/users", "users", "x")
+        older["servers"][0]["variables"]["version"]["default"] = "v7"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            merged = merge(("Records", "records", spec("/records", "records", "y")), ("Users", "users", older))
+        self.assertEqual(merged["servers"], [{"url": "https://zohoapis.com"}])
+        self.assertEqual(sorted(merged["paths"]), ["/crm/v7/users", "/crm/v8/records"])
+        self.assertIn("note: Users: its paths go under https://zohoapis.com/crm/v7", out.getvalue())
 
     def test_a_parameter_the_specs_define_differently_gets_the_spec_name(self):
         def spec(path, op_id, description):

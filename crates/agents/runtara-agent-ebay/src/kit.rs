@@ -469,8 +469,9 @@ pub fn decode<T: DeserializeOwned>(
             .with_attr("status_code", status.to_string())
             .with_attr("path", path);
         if let Some(errors) = errors {
+            // eBay's own value (a number), as in a refused bulk entry.
             if let Some(id) = errors.first().and_then(|first| first.get("errorId")) {
-                err = err.with_attr("error_id", id.to_string());
+                err = err.with_attr_value("error_id", id.clone());
             }
             err = err.with_attr_value("errors", Value::Array(errors));
         }
@@ -583,20 +584,31 @@ fn describe(error: &Value) -> String {
 /// would let a workflow go on as if every price and quantity were set. The
 /// error is permanent, as eBay would refuse the same entries again; `saved`
 /// names the entries it carried out, and `refused` each refused entry's
-/// position, SKU, offer, status, error ID and message.
+/// position, SKU, offer, status, error ID and message. An entry without a
+/// status it can read counts as refused: nothing says eBay carried it out.
 fn refused_entries(body: &Value, method: &str, path: &str, prefix: &str) -> Option<AgentError> {
     let entries = body.get("responses")?.as_array()?;
+    let status_of = |entry: &Value| {
+        let status = entry.get("statusCode")?;
+        status
+            .as_u64()
+            .or_else(|| status.as_str()?.trim().parse().ok())
+    };
+    // Some other answer that happens to have a `responses` list.
+    if !entries.iter().any(|entry| status_of(entry).is_some()) {
+        return None;
+    }
     let mut saved = Vec::new();
     let mut refused = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
-        let status = entry.get("statusCode")?.as_u64()?;
+        let status = status_of(entry);
         let mut named = serde_json::Map::new();
         for (key, field) in [("sku", "sku"), ("offerId", "offer_id")] {
             if let Some(value) = entry.get(key).and_then(Value::as_str) {
                 named.insert(field.to_string(), Value::String(value.to_string()));
             }
         }
-        if status < 400 {
+        if status.is_some_and(|status| status < 400) {
             saved.push(Value::Object(named));
             continue;
         }
@@ -609,9 +621,11 @@ fn refused_entries(body: &Value, method: &str, path: &str, prefix: &str) -> Opti
         if let Some(id) = first.and_then(|error| error.get("errorId")) {
             named.insert("error_id".to_string(), id.clone());
         }
-        let message = first
-            .map(describe)
-            .unwrap_or_else(|| "eBay gave no reason".to_string());
+        let message = match (first, status) {
+            (Some(error), _) => describe(error),
+            (None, Some(_)) => "eBay gave no reason".to_string(),
+            (None, None) => "eBay gave no status for it".to_string(),
+        };
         named.insert("message".to_string(), Value::String(message));
         refused.push(Value::Object(named));
     }
@@ -662,6 +676,6 @@ fn retry_after_ms(headers: &HashMap<String, String>) -> Option<u64> {
         .or_else(|| {
             header(headers, "retry-after")
                 .and_then(|value| value.parse::<u64>().ok())
-                .map(|seconds| seconds * 1000)
+                .map(|seconds| seconds.saturating_mul(1000))
         })
 }
