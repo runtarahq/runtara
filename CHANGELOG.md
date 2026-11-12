@@ -13,6 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Workflows on an executor, each in a sandboxed process of its own.** With
+  `RUNTARA_RUNNER=executor` the server runs no workflow itself: it places each
+  run with a `runtara-executor`, a service on a host of its own that holds no
+  database connection and none of the server's keys. Every run there is a
+  `runtara-run` process that gives up files, sockets, new programs and other
+  processes (seccomp and Landlock) before it loads the workflow, and whose
+  guest reaches only the workflow API, over a socket pair to the executor.
+  The server and the executor authenticate each other with certificates of a
+  CA made by `runtara-executor init-pki`. The release bundle and the image
+  carry the two new binaries; `docker-compose.executor.yml` adds the executor
+  to the evaluation stack. Linux only; see `docs/executor.md` for what it
+  isolates and what differs from the embedded runner (no isolated agent
+  children, no debug mode, one executor per server).
+
 - **eBay agent, generated from eBay's Sell API OpenAPI files.** Twenty-five
   capabilities for a seller: list and read orders, ship them (with tracking)
   and refund them; create, replace, list and delete inventory items, update

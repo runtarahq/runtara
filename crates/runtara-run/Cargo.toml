@@ -1,0 +1,67 @@
+[package]
+name = "runtara-run"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "One workflow run in a process of its own: the guest under Wasmtime, sandboxed, reaching only the workflow API over an inherited socket"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "runtara-run"
+path = "src/main.rs"
+
+[features]
+# Tests that run the probe workflow component, which
+# scripts/build-agent-components.sh builds.
+component-integration-tests = []
+
+[dependencies]
+# No disk cache and no debug info reader: this process opens no file.
+wasmtime = { version = "50", default-features = false, features = [
+    "std",
+    "anyhow",
+    "runtime",
+    "component-model",
+    "component-model-async",
+    "async",
+    "cranelift",
+    "parallel-compilation",
+    "backtrace",
+    "demangle",
+] }
+# Without `default-send-request`: no TLS and no socket code. The only request
+# this process sends is the workflow API's, over the socket it was handed.
+wasmtime-wasi = { version = "50", default-features = false, features = ["p2", "p3"] }
+wasmtime-wasi-http = { version = "50", default-features = false, features = ["p2", "p3"] }
+runtara-workflow-api = { path = "../runtara-workflow-api" }
+tokio = { version = "1", features = ["rt", "net", "time", "sync"] }
+hyper = { version = "1", features = ["client", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = "0.5"
+landlock = "0.4"
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util"] }
+hyper = { version = "1", features = ["server", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "service"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
+[[test]]
+name = "run"
+path = "tests/run.rs"
+required-features = ["component-integration-tests"]

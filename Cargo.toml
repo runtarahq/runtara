@@ -50,6 +50,12 @@ members = [
     "crates/runtara-runner-delegate",
     # Content-addressed artifact storage (M3.2).
     "crates/runtara-artifact-store",
+    # One workflow run in a sandboxed process of its own.
+    "crates/runtara-run",
+    # The executor service, which starts one of those per run.
+    "crates/runtara-executor",
+    # The server's side of it: the runner that places runs there.
+    "crates/runtara-runner-executor",
     # Every workflow agent component; scripts/build-agent-components.sh builds
     # each crate it finds here.
     "crates/agents/*",

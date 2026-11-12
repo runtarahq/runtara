@@ -51,6 +51,17 @@ pub const ORIGIN: &str = "http://api.runtara.internal";
 /// Path prefix of every v1 endpoint.
 pub const PATH_PREFIX: &str = "/v1";
 
+/// Whether a request addresses the workflow API origin exactly: [`SCHEME`],
+/// [`HOST`], the default port, no userinfo. `authority` is the URI's whole
+/// authority, `host` and `port` what it parsed to. Every host that routes a
+/// guest's requests decides with this, so they all refuse the same ones.
+pub fn is_api_origin(scheme: Option<&str>, authority: &str, host: &str, port: Option<u16>) -> bool {
+    scheme == Some(SCHEME)
+        && !authority.contains('@')
+        && host.eq_ignore_ascii_case(HOST)
+        && port.is_none_or(|port| port == 80)
+}
+
 /// Major version carried in the path.
 pub const API_MAJOR: u32 = 1;
 /// Highest minor version this build understands.
