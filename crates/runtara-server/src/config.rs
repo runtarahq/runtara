@@ -46,13 +46,9 @@ pub struct Config {
     pub max_429_retries: u32,
     /// Maximum retry delay in milliseconds.
     pub max_retry_delay_ms: u64,
-    /// The platform's object model database URL. Optional: without it there
-    /// is no default database, and the object model, SQL steps and database
-    /// tools use the tenant's own Postgres connections.
-    pub object_model_database_url: Option<String>,
     /// Whether tenant database connections must not reach private, loopback
     /// or metadata addresses (`RUNTARA_DATABASE_CONNECTION_GUARD`,
-    /// `enforce`/`off`; enforced by default without a platform database).
+    /// `enforce`/`off`; enforced by default).
     pub database_connection_guard: bool,
     /// The most database pools one tenant's connections may hold open at once
     /// (`OBJECT_MODEL_TENANT_POOL_MAX`).
@@ -153,9 +149,6 @@ impl Config {
     ///
     /// Required:
     /// - `TENANT_ID`: organization identifier
-    ///
-    /// Optional:
-    /// - `OBJECT_MODEL_DATABASE_URL`: the platform's object model database
     pub fn from_env() -> Result<Self, ConfigError> {
         let tenant_id =
             std::env::var("TENANT_ID").map_err(|_| ConfigError::Missing("TENANT_ID"))?;
@@ -191,32 +184,12 @@ impl Config {
         let max_retry_delay_ms: u64 = parse_u64_or("MAX_RETRY_DELAY_MS", 60_000)?;
         let execution_timeout_policy = execution_timeout_policy_from_env()?;
 
-        let object_model_database_url = std::env::var("OBJECT_MODEL_DATABASE_URL")
-            .ok()
-            .map(|url| url.trim().to_owned())
-            .filter(|url| !url.is_empty());
-        // A platform object-model database has no tenant column or row-level
-        // security, and raw SQL runs on it as its role: a process serving
-        // several tenants, or one required to be bound by row-level security,
-        // would let each read and write the others' (M7.16). They use their
-        // own connections instead.
-        if platform_database_refused(
-            object_model_database_url.is_some(),
-            served_tenants.len(),
-            parse_bool_or("RUNTARA_REQUIRE_ROW_SECURITY", false)?,
-        ) {
-            return Err(ConfigError::Invalid(
-                "OBJECT_MODEL_DATABASE_URL",
-                "is shared by every tenant with no row-level security; a process serving several \
-                 tenants or requiring row-level security takes none",
-            ));
-        }
         let database_connection_guard = match std::env::var("RUNTARA_DATABASE_CONNECTION_GUARD")
             .ok()
             .map(|mode| mode.trim().to_ascii_lowercase())
             .as_deref()
         {
-            None | Some("") => object_model_database_url.is_none(),
+            None | Some("") => true,
             Some("enforce") => true,
             Some("off") => false,
             Some(_) => {
@@ -376,7 +349,6 @@ impl Config {
             auto_retry_on_429_enabled,
             max_429_retries,
             max_retry_delay_ms,
-            object_model_database_url,
             database_connection_guard,
             object_model_tenant_pool_max,
             legacy_member_keys,
@@ -711,11 +683,7 @@ pub(crate) fn init_for_test() {
     }
     // Only fill what `from_env` requires and only when absent, so a test that
     // has deliberately configured the process is never overwritten.
-    for (key, value) in [
-        ("TENANT_ID", "test-tenant"),
-        ("OBJECT_MODEL_DATABASE_URL", "postgres://unused/unused"),
-        ("VALKEY_HOST", "127.0.0.1"),
-    ] {
+    for (key, value) in [("TENANT_ID", "test-tenant"), ("VALKEY_HOST", "127.0.0.1")] {
         if std::env::var(key).is_err() {
             unsafe { std::env::set_var(key, value) };
         }
@@ -759,13 +727,6 @@ pub fn served_tenants() -> &'static [String] {
 /// tenant are refused.
 pub fn is_served_tenant(tenant: &str) -> bool {
     try_get().is_some_and(|config| config.served_tenants.iter().any(|served| served == tenant))
-}
-
-/// Whether a platform object-model database is refused: it has no tenant
-/// column or row-level security, so not where tenants share a process or
-/// row-level security is required.
-fn platform_database_refused(configured: bool, served: usize, row_security: bool) -> bool {
-    configured && (served > 1 || row_security)
 }
 
 fn served_tenants_from_raw(primary: &str, extra: Option<String>) -> Vec<String> {
@@ -859,11 +820,6 @@ pub fn max_429_retries() -> u32 {
 /// Get maximum retry delay in milliseconds.
 pub fn max_retry_delay_ms() -> u64 {
     get().max_retry_delay_ms
-}
-
-/// The platform's object model database URL, when the server has one.
-pub fn object_model_database_url() -> Option<String> {
-    get().object_model_database_url.clone()
 }
 
 /// Whether tenant database connections are refused private, loopback and
@@ -1110,23 +1066,6 @@ pub fn valkey_admission_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_platform_object_model_database_is_refused_where_tenants_share_a_process() {
-        assert!(
-            !platform_database_refused(true, 1, false),
-            "one tenant, as before"
-        );
-        assert!(platform_database_refused(true, 2, false), "several tenants");
-        assert!(
-            platform_database_refused(true, 1, true),
-            "row-level security required"
-        );
-        assert!(
-            !platform_database_refused(false, 3, true),
-            "none configured"
-        );
-    }
 
     #[test]
     fn production_lowering_identity_uses_standard_composition() {

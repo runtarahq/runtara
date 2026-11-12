@@ -86,8 +86,18 @@ cleanup() {
 trap cleanup EXIT
 
 start_server() {
+    # The tenant's object model database, entered as an operator enters one:
+    # once, on standard input, and stored sealed. It is this test's own
+    # Postgres, on a private address and reached with no TLS.
+    printf '%s' "${SERVER_DB_URL}?sslmode=disable" | \
+        RUNTARA_SERVER_DATABASE_URL="${SERVER_DB_URL}" TENANT_ID="${TENANT}" \
+        RUNTARA_MCP_SESSION_STORE=local RUNTARA_DATABASE_CONNECTION_GUARD=off \
+        RUNTARA_PROXY_ALLOW_HTTP_HOSTS="${POSTGRES_HOST}" \
+        "${RUNTARA_SERVER_BIN}" object-model set --tenant-id "${TENANT}" --if-unset >/dev/null
+
     RUNTARA_SERVER_DATABASE_URL="${SERVER_DB_URL}" \
-    OBJECT_MODEL_DATABASE_URL="${SERVER_DB_URL}" \
+    RUNTARA_DATABASE_CONNECTION_GUARD=off \
+    RUNTARA_PROXY_ALLOW_HTTP_HOSTS="${POSTGRES_HOST}" \
     RUNTARA_DATABASE_URL="${RUNTIME_DB_URL}" \
     TENANT_ID="${TENANT}" \
     SERVER_HOST=127.0.0.1 \

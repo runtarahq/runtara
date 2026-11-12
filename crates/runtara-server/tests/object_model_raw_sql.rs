@@ -52,7 +52,8 @@ fn init_config() {
         // SAFETY: runs once, before any test in this binary reads the config.
         unsafe {
             std::env::set_var("TENANT_ID", TENANT);
-            std::env::set_var("OBJECT_MODEL_DATABASE_URL", database_url());
+            // The tenant's database is the test database, on loopback.
+            std::env::set_var("RUNTARA_DATABASE_CONNECTION_GUARD", "off");
             std::env::set_var("RUNTARA_MCP_SESSION_STORE", "local");
             std::env::set_var(
                 "RUNTARA_RAW_SQL_STATEMENT_TIMEOUT_MS",
@@ -66,6 +67,9 @@ fn init_config() {
 }
 
 struct Fixture {
+    /// The fixture's own tenant: a tenant's default database is resolved
+    /// once and kept for a while, and each fixture sets one of its own.
+    tenant: String,
     pool: PgPool,
     state: Arc<ObjectModelState>,
     table: String,
@@ -114,21 +118,43 @@ impl Fixture {
                 oauth: Default::default(),
             },
         )));
+        // The tenant's object model database, as an operator sets one: a
+        // sealed Postgres connection that is the tenant's default.
+        let mut tenant_database = url::Url::parse(&database_url()).expect("the test URL parses");
+        tenant_database.set_query(Some("sslmode=disable"));
+        let tenant = format!("{TENANT}_{}", Uuid::new_v4().simple());
+        connections
+            .set_default_connection(
+                &tenant,
+                "object_model",
+                // A tenant's connections have distinct titles.
+                format!("Object Model Database {}", Uuid::new_v4().simple()),
+                "postgres".to_string(),
+                json!({ "database_url": tenant_database.as_str() }),
+            )
+            .await
+            .expect("the tenant's object model database is set");
         let state = Arc::new(ObjectModelState {
-            manager: Arc::new(ObjectStoreManager::new(database_url())),
+            manager: Arc::new(ObjectStoreManager::new()),
             pool: pool.clone(),
             connections,
             events: ProductEventSink::new(tokio::sync::mpsc::channel(8).0),
         });
-        Self { pool, state, table }
+        Self {
+            tenant,
+            pool,
+            state,
+            table,
+        }
     }
 
     /// The four SQL routes behind the production authorization layer, called
     /// as an API key with `scope` (issued by an Owner, so only the scope can
     /// narrow it).
     fn app(&self, scope: ApiKeyScope) -> Router {
+        let tenant = self.tenant.clone();
         let inject = move |mut req: Request, next: Next| {
-            let mut ctx = AuthContext::new(TENANT.into(), "user-1".into(), AuthMethod::ApiKey);
+            let mut ctx = AuthContext::new(tenant.clone(), "user-1".into(), AuthMethod::ApiKey);
             ctx.role = Some(Role::Owner);
             ctx.api_key_scope = scope;
             req.extensions_mut().insert(ctx);
@@ -411,22 +437,5 @@ async fn read_only_api_key_reads_but_cannot_write_or_execute() {
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
 
     assert_eq!(fixture.row_count().await, 2, "nothing was deleted");
-    fixture.cleanup().await;
-}
-
-#[tokio::test]
-async fn boot_privilege_check_detects_a_shared_database() {
-    let fixture = Fixture::start().await;
-    let facts =
-        runtara_server::object_model_privileges::collect_facts(&fixture.pool, &fixture.pool)
-            .await
-            .unwrap();
-    assert!(facts.shares_server_database);
-    let superuser: bool =
-        sqlx::query_scalar("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
-            .fetch_one(&fixture.pool)
-            .await
-            .unwrap();
-    assert_eq!(facts.superuser, superuser);
     fixture.cleanup().await;
 }

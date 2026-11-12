@@ -144,7 +144,6 @@ To run the full application server directly:
 
 ```bash
 export RUNTARA_DATABASE_URL=postgres://localhost/runtara
-export OBJECT_MODEL_DATABASE_URL=postgres://localhost/runtara_object_model
 export VALKEY_HOST=localhost
 # Credentials are always encrypted at rest; the server won't start without a
 # key. Keep it: what is stored under a lost key cannot be recovered.

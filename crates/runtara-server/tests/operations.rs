@@ -36,7 +36,6 @@ impl Fixture {
             unsafe {
                 std::env::set_var("TENANT_ID", "operations-tests");
                 std::env::set_var("RUNTARA_MCP_SESSION_STORE", "local");
-                std::env::set_var("OBJECT_MODEL_DATABASE_URL", "postgres://unused/unused");
             }
             runtara_server::config::init(
                 runtara_server::config::Config::from_env().expect("test configuration"),

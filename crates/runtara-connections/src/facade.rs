@@ -341,13 +341,13 @@ impl ConnectionsFacade {
             .and_then(sealed_only)
     }
 
-    /// Ensure a tenant has a default connection for an agent/operator.
-    ///
-    /// If the default already exists, returns that connection id. Otherwise a
-    /// new active connection is created and mapped as the default, with its
-    /// secrets sealed. Parameters with a secret seal cannot hold are refused,
-    /// and no connection is made.
-    pub async fn ensure_default_connection(
+    /// Sets a tenant's default connection for an agent/operator to these
+    /// parameters, with their secrets sealed. A default of this type is
+    /// replaced where it is, keeping its id, so that nothing is left holding
+    /// what it held; otherwise a new active connection is made the default.
+    /// Parameters with a secret seal cannot hold are refused, and nothing
+    /// changes.
+    pub async fn set_default_connection(
         &self,
         tenant_id: &str,
         default_for: &str,
@@ -355,54 +355,17 @@ impl ConnectionsFacade {
         integration_id: String,
         connection_parameters: Value,
     ) -> Result<String, ConnectionsError> {
-        let repo = self.repo();
-        if let Some(connection_id) = repo
-            .get_default_connection_id(tenant_id, default_for)
-            .await
-            .map_err(ConnectionsError::Database)?
-        {
-            return Ok(connection_id);
-        }
-
-        let connection_id = uuid::Uuid::new_v4().to_string();
-        // As any save: a secret is stored sealed, or the connection is not
-        // made.
-        let connection_parameters = self
-            .state
-            .sealed
-            .seal_parameters(
-                tenant_id,
-                &connection_id,
-                &integration_id,
-                &connection_parameters,
-                None,
-            )
-            .await
-            .map_err(|error| ConnectionsError::Validation(error.to_string()))?
-            .unwrap_or(connection_parameters);
-        let request = CreateConnectionRequest {
-            title,
-            connection_subtype: None,
-            connection_parameters: Some(connection_parameters),
-            integration_id: Some(integration_id),
-            rate_limit_config: None,
-            valid_until: None,
-            is_default_file_storage: None,
-            default_for: None,
-        };
-        repo.create(
-            &request,
+        set_default_connection(
+            &self.repo(),
+            &self.state.sealed,
             tenant_id,
-            &connection_id,
-            &ConnectionStatus::Active,
-            &[default_for.to_string()],
+            default_for,
+            title,
+            integration_id,
+            connection_parameters,
         )
         .await
-        .map_err(ConnectionsError::Database)?;
-
-        Ok(connection_id)
     }
-
     /// Get a connection by ID without tenant filter (for webhook routing).
     ///
     /// SECURITY: Used only by channel webhook routing where the connection_id
@@ -1055,4 +1018,88 @@ mod signature_tests {
             );
         }
     }
+}
+
+/// [`ConnectionsFacade::set_default_connection`], for a caller that has a
+/// repository and seal but no facade (a maintenance command).
+pub async fn set_default_connection(
+    repo: &ConnectionRepository,
+    sealed: &crate::sealed::SealedCredentials,
+    tenant_id: &str,
+    default_for: &str,
+    title: String,
+    integration_id: String,
+    connection_parameters: Value,
+) -> Result<String, ConnectionsError> {
+    let existing = match repo
+        .get_default_connection_id(tenant_id, default_for)
+        .await
+        .map_err(ConnectionsError::Database)?
+    {
+        Some(id) => repo
+            .get_with_parameters(&id, tenant_id)
+            .await
+            .map_err(ConnectionsError::Database)?
+            .filter(|held| held.integration_id.as_deref() == Some(integration_id.as_str()))
+            .map(|held| held.id),
+        None => None,
+    };
+    if let Some(connection_id) = existing {
+        // Entered anew, so sealed anew: nothing of what it held is kept.
+        let sealed_parameters = sealed
+            .seal_parameters(
+                tenant_id,
+                &connection_id,
+                &integration_id,
+                &connection_parameters,
+                None,
+            )
+            .await
+            .map_err(|error| ConnectionsError::Validation(error.to_string()))?
+            .unwrap_or(connection_parameters);
+        repo.update_parameters_and_status(
+            &connection_id,
+            tenant_id,
+            &sealed_parameters,
+            ConnectionStatus::Active.as_str(),
+        )
+        .await
+        .map_err(ConnectionsError::Database)?;
+        return Ok(connection_id);
+    }
+    let connection_id = uuid::Uuid::new_v4().to_string();
+    // As any save: a secret is stored sealed, or the connection is not
+    // made.
+    let connection_parameters = sealed
+        .seal_parameters(
+            tenant_id,
+            &connection_id,
+            &integration_id,
+            &connection_parameters,
+            None,
+        )
+        .await
+        .map_err(|error| ConnectionsError::Validation(error.to_string()))?
+        .unwrap_or(connection_parameters);
+    let request = CreateConnectionRequest {
+        title,
+        connection_subtype: None,
+        connection_parameters: Some(connection_parameters),
+        integration_id: Some(integration_id),
+        rate_limit_config: None,
+        valid_until: None,
+        is_default_file_storage: None,
+        default_for: None,
+    };
+    repo.create(
+        &request,
+        tenant_id,
+        &connection_id,
+        &ConnectionStatus::Active,
+        &[default_for.to_string()],
+    )
+    .await
+    .map_err(ConnectionsError::Database)?;
+
+    Ok(connection_id)
 }

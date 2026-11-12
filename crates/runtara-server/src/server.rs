@@ -8,7 +8,7 @@ use axum::{
 use rmcp::transport::streamable_http_server::session::SessionStore;
 use runtara_store_postgres::tenant_scope::scoped;
 use serde::Serialize;
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
@@ -639,22 +639,6 @@ async fn seal_readable_credentials(
         pool.clone(),
         cipher,
     );
-    // The platform's own database URL, which earlier releases copied into
-    // each tenant's default connection, is the operator's and no tenant
-    // secret: such a connection now stands for the platform database.
-    if let Some(platform_url) = crate::config::object_model_database_url() {
-        match repository.adopt_platform_database(&platform_url).await {
-            Ok(0) => {}
-            Ok(adopted) => tracing::info!(
-                adopted,
-                "Default object-model connections now stand for the platform database"
-            ),
-            Err(e) => tracing::error!(
-                error = %e,
-                "Could not convert default object-model connections holding the platform's URL"
-            ),
-        }
-    }
     match repository.seal_existing(sealed, None, false).await {
         Ok(stats) if stats.sealed + stats.unsealable + stats.failed == 0 => {}
         Ok(stats) => {
@@ -1539,48 +1523,16 @@ pub async fn start_with(
         }
     });
 
-    // The platform's object model database is optional. Without it there is
-    // no default database: the object model, SQL steps and database tools use
-    // the tenant's own Postgres connections, which the address guard admits.
-    let object_model_database_url = config::object_model_database_url();
     let object_model_pool_config = config::object_model_pool_config();
 
     // Run server migrations (workflows, api_keys, etc.) against the main pool
     run_server_migrations(&pool).await?;
 
-    let object_store_manager = match &object_model_database_url {
-        Some(object_model_database_url) => {
-            println!("Connecting to object model database...");
-            let object_model_pool = PgPoolOptions::new()
-                .max_connections(object_model_pool_config.max_connections)
-                .min_connections(object_model_pool_config.min_connections)
-                .acquire_timeout(object_model_pool_config.acquire_timeout)
-                .idle_timeout(object_model_pool_config.idle_timeout)
-                .max_lifetime(object_model_pool_config.max_lifetime)
-                .test_before_acquire(object_model_pool_config.test_before_acquire)
-                .connect(object_model_database_url)
-                .await
-                .expect("Failed to connect to object model database");
-
-            // Raw SQL runs as the object-model role: warn when that role is a
-            // superuser or the object-model database is the server's own.
-            crate::object_model_privileges::warn_if_overprivileged(&object_model_pool, &pool).await;
-
-            // Create ObjectStoreManager from the pool (single-database mode)
-            let manager = ObjectStoreManager::from_pool(object_model_pool)
-                .await
-                .expect("Failed to initialize ObjectStoreManager");
-            println!("✓ Object model database connected successfully");
-            manager
-        }
-        None => {
-            println!(
-                "✓ No platform object model database (OBJECT_MODEL_DATABASE_URL is not set): \
-                 the object model and SQL use the tenant's Postgres connections"
-            );
-            ObjectStoreManager::without_default_database()
-        }
-    };
+    // There is no database the platform supplies: the object model, SQL
+    // steps and database tools use each tenant's own Postgres connections,
+    // which seal logs in to. A tenant's default is set by an operator
+    // (`runtara-server object-model set`).
+    let object_store_manager = ObjectStoreManager::new();
     if config::database_connection_guard() {
         println!(
             "✓ Database connections must reach public addresses \
@@ -1655,45 +1607,6 @@ pub async fn start_with(
                     %error,
                     "Could not seal Channel triggers' webhook secrets"
                 ),
-            }
-        }
-    }
-
-    // Each served tenant gets the platform database as its default
-    // connection. The connection stands for that database and holds no URL:
-    // the URL is the operator's, and stays in the configuration.
-    for tenant_id in config::served_tenants() {
-        let default_connection = match &object_model_database_url {
-            Some(_) => Some(
-                connections_facade
-                    .ensure_default_connection(
-                        tenant_id,
-                        "object_model",
-                        format!("Default Object Model Database ({})", tenant_id),
-                        "postgres".to_string(),
-                        serde_json::json!({
-                            runtara_connections::repository::connections::PLATFORM_DATABASE_PARAM: true
-                        }),
-                    )
-                    .await,
-            ),
-            None => None,
-        };
-        match default_connection {
-            None => {}
-            Some(Ok(connection_id)) => {
-                tracing::info!(
-                    tenant_id = %tenant_id,
-                    connection_id = %connection_id,
-                    "Default object_model connection is configured"
-                );
-            }
-            Some(Err(error)) => {
-                tracing::warn!(
-                    tenant_id = %tenant_id,
-                    error = ?error,
-                    "Failed to auto-populate default object_model connection"
-                );
             }
         }
     }

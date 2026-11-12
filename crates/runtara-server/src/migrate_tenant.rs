@@ -30,9 +30,8 @@
 //! against this process's release), OAuth states, rate-limit telemetry, the
 //! live process registry and workflow-API receipts, and process bookkeeping.
 //!
-//! It refuses when the target already holds the tenant, and when the tenant
-//! keeps object-model data in its process's default database, which a shared
-//! process does not provide.
+//! It refuses when the target already holds the tenant. A tenant's object
+//! model database is a connection of the tenant's, and moves with it.
 //!
 //! When the source databases are the target's (the same host, port and
 //! database), as for a process that already shared them with others, the
@@ -248,7 +247,6 @@ pub async fn run(
         .map_err(|error| format!("migrating the target runtime database: {error}"))?;
     preconditions(
         tenant,
-        &from_server,
         &from_runtime,
         (!shared).then_some((&to_server, &to_runtime)),
     )
@@ -473,7 +471,6 @@ async fn copy_table(
 /// runtime databases when the rows are copied into them.
 async fn preconditions(
     tenant: &str,
-    from_server: &PgPool,
     from_runtime: &PgPool,
     targets: Option<(&PgPool, &PgPool)>,
 ) -> Result<(), String> {
@@ -529,33 +526,6 @@ async fn preconditions(
             if count(pool, sql).await? > 0 {
                 return Err(format!("the target already has {tenant}'s {what}"));
             }
-        }
-    }
-    // Object-model data in the process's own default database has nowhere
-    // to go: a shared process keeps none for its tenants.
-    let object_model = std::env::var("MIGRATE_FROM_OBJECT_MODEL_DATABASE_URL").ok();
-    let object_pool = match object_model {
-        Some(url) => Some(
-            sqlx::postgres::PgPoolOptions::new()
-                .max_connections(1)
-                .connect(&url)
-                .await
-                .map_err(|error| format!("MIGRATE_FROM_OBJECT_MODEL_DATABASE_URL: {error}"))?,
-        ),
-        None => None,
-    };
-    let object_pool = object_pool.as_ref().unwrap_or(from_server);
-    if table_exists(object_pool, "__schema").await? {
-        let schemas: i64 = sqlx::query_scalar("SELECT count(*) FROM \"__schema\"")
-            .fetch_one(object_pool)
-            .await
-            .map_err(|error| error.to_string())?;
-        if schemas > 0 {
-            return Err(format!(
-                "{tenant} keeps {schemas} object-model schemas in its process's default database, \
-                 which a shared process does not provide; move them to a database of its own \
-                 connection first"
-            ));
         }
     }
     Ok(())

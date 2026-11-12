@@ -22,7 +22,6 @@ use runtara_server::api::dto::object_model::{
 };
 use runtara_server::api::repositories::object_model::ObjectStoreManager;
 use runtara_server::api::services::object_model::{InstanceService, ServiceError};
-use runtara_server::object_model_privileges as privileges;
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -159,7 +158,9 @@ async fn teardown(admin: &PgPool, n: &Names) {
     }
 }
 
-fn service(admin: &PgPool) -> InstanceService {
+/// The service, for a tenant whose object model database is `objects_url`:
+/// a sealed Postgres connection that is the tenant's default.
+async fn service(admin: &PgPool, objects_url: &str) -> InstanceService {
     let connections = Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
         ConnectionsConfig {
             sealed: runtara_connections::sealed::SealedCredentials::for_tests(),
@@ -178,13 +179,17 @@ fn service(admin: &PgPool) -> InstanceService {
             oauth: Default::default(),
         },
     )));
-    InstanceService::new(
-        Arc::new(ObjectStoreManager::new(
-            runtara_server::config::object_model_database_url()
-                .expect("this test sets OBJECT_MODEL_DATABASE_URL"),
-        )),
-        connections,
-    )
+    connections
+        .set_default_connection(
+            TENANT,
+            "object_model",
+            "Object Model Database".to_string(),
+            "postgres".to_string(),
+            json!({ "database_url": objects_url }),
+        )
+        .await
+        .expect("the tenant's object model database is set");
+    InstanceService::new(Arc::new(ObjectStoreManager::new()), connections)
 }
 
 fn raw(sql: &str) -> SqlRawQueryRequest {
@@ -211,24 +216,11 @@ fn validation_message(result: Result<impl std::fmt::Debug, ServiceError>) -> Str
 }
 
 async fn assertions(admin: &PgPool, n: &Names) {
-    let svc = service(admin);
-    let objects_pool = PgPool::connect(
-        &runtara_server::config::object_model_database_url()
-            .expect("this test sets OBJECT_MODEL_DATABASE_URL"),
-    )
-    .await
-    .unwrap();
-
-    // The boot check sees a non-superuser role on its own database.
-    let facts = privileges::collect_facts(&objects_pool, admin)
-        .await
-        .unwrap();
-    assert!(
-        !facts.superuser,
-        "object-model login role is not a superuser"
-    );
-    assert!(!facts.shares_server_database);
-    assert!(privileges::privilege_warnings(facts).is_empty());
+    let mut objects_url = url::Url::parse(&url_as(&n.objects_role, &n.password, &n.objects_db))
+        .expect("the objects URL parses");
+    objects_url.set_query(Some("sslmode=disable"));
+    let svc = service(admin, objects_url.as_str()).await;
+    let objects_pool = PgPool::connect(objects_url.as_str()).await.unwrap();
 
     // sql/execute runs as the object-model role and manages its own tables.
     for sql in [
@@ -325,10 +317,8 @@ async fn object_model_role_bounds_raw_sql() {
     // SAFETY: the only test in this binary; set before the config is read.
     unsafe {
         std::env::set_var("TENANT_ID", TENANT);
-        std::env::set_var(
-            "OBJECT_MODEL_DATABASE_URL",
-            url_as(&names.objects_role, &names.password, &names.objects_db),
-        );
+        // The tenant's database is this test's own, on loopback.
+        std::env::set_var("RUNTARA_DATABASE_CONNECTION_GUARD", "off");
         std::env::set_var("RUNTARA_MCP_SESSION_STORE", "local");
     }
     runtara_server::config::init(

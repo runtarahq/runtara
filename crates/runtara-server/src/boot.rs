@@ -111,6 +111,15 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
         None => None,
     };
 
+    let object_model = match crate::object_model::parse_args(std::env::args_os()) {
+        Some(Ok(args)) => Some(args),
+        Some(Err(msg)) => {
+            eprintln!("{msg}");
+            std::process::exit(2);
+        }
+        None => None,
+    };
+
     // What to do with the platform's apps, if that is what was asked.
     let apps_command = match crate::oauth_apps::parse_args(std::env::args_os()) {
         Some(Ok(args)) => Some(args),
@@ -214,8 +223,19 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
         println!("Migrations completed");
     }
 
-    // Maintenance command: the platform's OAuth apps are kept in a table of
-    // this build's schema, so it runs once that is in place.
+    // Maintenance commands that write to this build's schema run once it is
+    // in place, so that one can be run against a new database before the
+    // server is first started.
+    if let Some(args) = object_model {
+        crate::observability::init_cli_logging();
+        if let Err(msg) =
+            crate::object_model::run(pool, args, options.credential_cipher.clone()).await
+        {
+            eprintln!("❌ {msg}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     if let Some(args) = apps_command {
         crate::observability::init_cli_logging();
         if let Err(msg) = crate::oauth_apps::run(pool, args).await {

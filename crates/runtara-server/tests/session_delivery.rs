@@ -240,7 +240,6 @@ fn init_config() {
             auto_retry_on_429_enabled: false,
             max_429_retries: 0,
             max_retry_delay_ms: 0,
-            object_model_database_url: Some("postgresql://unused/unused".into()),
             database_connection_guard: false,
             object_model_tenant_pool_max: 16,
             legacy_member_keys: true,

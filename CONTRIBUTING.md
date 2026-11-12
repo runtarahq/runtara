@@ -96,7 +96,6 @@ export TENANT_ID=local
 export AUTH_PROVIDER=local
 export RUNTARA_SERVER_DATABASE_URL=postgres://user:pass@localhost/runtara_server
 export RUNTARA_DATABASE_URL=postgres://user:pass@localhost/runtara
-export OBJECT_MODEL_DATABASE_URL=postgres://user:pass@localhost/runtara_objects
 export VALKEY_HOST=localhost
 cargo run -p runtara-server
 ```

@@ -103,7 +103,6 @@ Values are seeded from your environment at install time, so this works:
 
 ```bash
 export RUNTARA_SERVER_DATABASE_URL=postgres://runtara:secret@db/runtara_server
-export OBJECT_MODEL_DATABASE_URL=postgres://runtara_objects:secret@db/runtara_objects
 export RUNTARA_DATABASE_URL=postgres://runtara:secret@db/runtara
 export VALKEY_HOST=cache.internal
 export AUTH_PROVIDER=oidc OAUTH2_ISSUER=https://id.example.com/
@@ -198,55 +197,52 @@ ALTER FUNCTION pg_catalog.enum_eq(anyenum, anyenum) LEAKPROOF;
 
 The server logs a warning at startup while it is not done.
 
-### Object-model database role
+### A tenant's object model database
 
-Raw SQL (`sql/execute`, MCP `execute_sql`) runs as the role in
-`OBJECT_MODEL_DATABASE_URL`, so that role is the permission boundary for
-caller-supplied SQL. Give it a dedicated non-superuser role that owns only the
-object-model database and cannot connect to the server or runtime databases.
-The read-only SQL routes (`sql/query`, `sql/query-one`, `sql/query-raw` and
-their MCP tools) also run in a `READ ONLY` transaction under the raw SQL
-statement timeout and row/byte caps. The server logs a warning at boot when the
-role is a superuser or the object-model database is the server's own database.
+The platform supplies no object model database. A tenant's object model, SQL
+steps, CSV import/export and the MCP database tools use a Postgres connection
+of the tenant's, and a request that names none uses the tenant's default. An
+operator gives a tenant its default once, with the service's environment and
+the URL on standard input:
 
-The Docker Compose files and `bootstrap-install.sh` set this up for new
-installs as `runtara_objects`. For an existing install, run as a superuser,
-replacing `<password>` and the database names as needed:
-
-```sql
-CREATE ROLE runtara_objects LOGIN PASSWORD '<password>'
-  NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-ALTER DATABASE runtara_objects OWNER TO runtara_objects;
-REVOKE CONNECT, TEMPORARY ON DATABASE runtara_server, runtara FROM PUBLIC;
-
-\c runtara_objects
-ALTER SCHEMA public OWNER TO runtara_objects;
-REVOKE ALL ON SCHEMA public FROM PUBLIC;
-DO $$ DECLARE t record; BEGIN
-  FOR t IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
-    EXECUTE format('ALTER TABLE public.%I OWNER TO runtara_objects', t.tablename);
-  END LOOP;
-END $$;
+```sh
+runtara-server object-model set --tenant-id <id> < database-url.txt
 ```
 
-The loop hands the existing object tables to the new role; do not use
-`REASSIGN OWNED`, which would also move the other databases the old role owns.
-Then set `OBJECT_MODEL_DATABASE_URL` to log in as `runtara_objects` and restart.
-The extensions the object model needs (`pg_trgm`, `vector`, `fuzzystrmatch`)
-must already exist in `runtara_objects`; a non-superuser cannot create them.
+The URL is stored sealed: seal logs in with it, and nothing can read it back.
+It must say how its session is protected: `?sslmode=verify-full`,
+`?sslmode=require`, or `?sslmode=disable` for a host in
+`RUNTARA_PROXY_ALLOW_HTTP_HOSTS`. Run again for a tenant that has one, the
+command replaces the URL in that connection (a new password, another
+database), and a running server uses it within a minute; with `--if-unset`
+it leaves the tenant as it is. A tenant with no default is told that one is needed. The
+Docker Compose evaluation stack enters its own `runtara_objects` database for
+its one tenant at start.
 
-### Without an object-model database
+Raw SQL (`sql/execute`, MCP `execute_sql`) runs as the role the URL logs in
+as, so that role is the permission boundary for caller-supplied SQL. Give
+each tenant a dedicated non-superuser role that owns only that tenant's
+database and cannot connect to the server or runtime databases:
 
-`OBJECT_MODEL_DATABASE_URL` is optional. Without it the server has no default
-database: the object model, SQL steps, CSV import/export and the MCP database
-tools work only through a Postgres connection the tenant adds, and a request
-for the default answers that one is needed. Tenant database connections must
-then reach public addresses: loopback, private ranges, local sockets and the
-cloud metadata address are refused before anything connects, unless the host
-is listed in `RUNTARA_PROXY_ALLOWED_HOSTS`. `RUNTARA_DATABASE_CONNECTION_GUARD`
-(`enforce` or `off`) overrides that default either way; with a platform
-database it is `off`, as before. `OBJECT_MODEL_TENANT_POOL_MAX` (default 16)
-caps how many database pools one tenant's connections hold open at once.
+```sql
+CREATE ROLE tenant_objects LOGIN PASSWORD '<password>'
+  NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+CREATE DATABASE tenant_objects OWNER tenant_objects;
+REVOKE CONNECT, TEMPORARY ON DATABASE runtara_server, runtara FROM PUBLIC;
+```
+
+The read-only SQL routes (`sql/query`, `sql/query-one`, `sql/query-raw` and
+their MCP tools) also run in a `READ ONLY` transaction under the raw SQL
+statement timeout and row/byte caps. The extensions the object model needs
+(`pg_trgm`, `vector`, `fuzzystrmatch`) must already exist in the database; a
+non-superuser cannot create them.
+
+Tenant database connections must reach public addresses: loopback, private
+ranges, local sockets and the cloud metadata address are refused before
+anything connects, unless the host is listed in
+`RUNTARA_PROXY_ALLOWED_HOSTS`. `RUNTARA_DATABASE_CONNECTION_GUARD` (`enforce`
+or `off`) overrides that. `OBJECT_MODEL_TENANT_POOL_MAX` (default 16) caps
+how many database pools one tenant's connections hold open at once.
 
 ## Service management
 

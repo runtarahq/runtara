@@ -45,11 +45,7 @@ static CONFIG: std::sync::Once = std::sync::Once::new();
 fn init_config_with_no_agents_enabled() {
     CONFIG.call_once(|| {
         // Only what `Config::from_env` requires, and only when absent.
-        for (key, value) in [
-            ("TENANT_ID", "test-tenant"),
-            ("OBJECT_MODEL_DATABASE_URL", "postgres://unused/unused"),
-            ("VALKEY_HOST", "127.0.0.1"),
-        ] {
+        for (key, value) in [("TENANT_ID", "test-tenant"), ("VALKEY_HOST", "127.0.0.1")] {
             if std::env::var(key).is_err() {
                 unsafe { std::env::set_var(key, value) };
             }

@@ -50,7 +50,8 @@ fn init_config() {
     CONFIG.call_once(|| {
         unsafe {
             std::env::set_var("TENANT_ID", TENANT);
-            std::env::set_var("OBJECT_MODEL_DATABASE_URL", database_url());
+            // Databases a test reaches are its own, on loopback.
+            std::env::set_var("RUNTARA_DATABASE_CONNECTION_GUARD", "off");
             std::env::set_var("RUNTARA_MCP_SESSION_STORE", "local");
         }
         runtara_server::config::init(

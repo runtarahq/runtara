@@ -1408,9 +1408,6 @@ fn init_config() {
             if std::env::var("RUNTARA_MCP_SESSION_STORE").is_err() {
                 std::env::set_var("RUNTARA_MCP_SESSION_STORE", "local");
             }
-            if std::env::var("OBJECT_MODEL_DATABASE_URL").is_err() {
-                std::env::set_var("OBJECT_MODEL_DATABASE_URL", "postgres://unused/unused");
-            }
         }
         runtara_server::config::init(
             runtara_server::config::Config::from_env().expect("test configuration"),

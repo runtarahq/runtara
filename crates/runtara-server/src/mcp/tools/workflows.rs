@@ -2087,7 +2087,7 @@ mod tests {
             .unwrap();
         let server = SmoMcpServer::new(
             pool,
-            Arc::new(ObjectStoreManager::new(String::new())),
+            Arc::new(ObjectStoreManager::new()),
             None,
             "deploy-validation-tenant".into(),
             router,
@@ -2196,7 +2196,7 @@ mod tests {
             .unwrap();
         let server = SmoMcpServer::new(
             pool,
-            Arc::new(ObjectStoreManager::new(String::new())),
+            Arc::new(ObjectStoreManager::new()),
             None,
             "deploy-version-tenant".into(),
             router,

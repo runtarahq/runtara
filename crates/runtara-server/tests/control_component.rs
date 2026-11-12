@@ -780,9 +780,6 @@ fn init_config_once() {
             if std::env::var("TENANT_ID").is_err() {
                 std::env::set_var("TENANT_ID", "control-component-tests");
             }
-            if std::env::var("OBJECT_MODEL_DATABASE_URL").is_err() {
-                std::env::set_var("OBJECT_MODEL_DATABASE_URL", "postgres://unused/unused");
-            }
         }
         if runtara_server::config::try_get().is_none() {
             runtara_server::config::init(
