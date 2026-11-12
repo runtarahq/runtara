@@ -95,9 +95,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     holds: seal sends the secret with the authorization code, and the pair
     comes back already sealed. A refresh and a revocation go through seal
     too. A platform OAuth app's client secret is the deployment's own, not
-    a connection's: it is sealed for each exchange, refresh and revocation
-    as the connection's own would be, so that seal sends it and a connection
-    on the app gets its tokens sealed too. The HubSpot account is not named
+    a connection's: it is sealed once, as it is entered, to a key of the
+    platform's, to be sent only to the app's token endpoint for a code
+    exchange or a refresh (and to its revocation endpoint), with any
+    tenant's connection on the app; a connection on the app gets its tokens
+    sealed too, to its tenant's key. The apps are kept in the database
+    (`platform_oauth_app`), and `runtara-server oauth-apps put|list|remove`
+    manages them: `put` reads the client secret from standard input, and
+    nothing can read it back. `RUNTARA_OAUTH_APPS_FILE`, a file of apps with
+    readable secrets, is no longer read. An app for a type with several
+    token endpoints says which is its own in `--parameters` (a Zoho app's
+    `data_center`), and a connection elsewhere cannot use it. The HubSpot account is not named
     to whoever confirms a flow started without a browser, since a sealed
     token is shown to no one.
   - **A Postgres password** (`postgres`): seal logs in and relays the

@@ -157,6 +157,23 @@ one-way. When a tenant leaves, `runtara-server destroy-seal-keys --tenant-id
 <id> --confirm <id>` destroys its seal keys, after which nothing sealed for
 it can be opened; this cannot be undone.
 
+Platform OAuth apps (those you registered with a provider, for tenants to
+connect with instead of registering their own) are kept in the database, each
+with its client secret sealed, to be sent only to that app's token endpoint.
+Enter one with the service's environment, piping the secret in:
+
+```sh
+runtara-server oauth-apps put --id hubspot --integration hubspot_private_app \
+    --client-id <client id> --scopes "oauth crm.objects.contacts.read" \
+    --required-scopes oauth --display-name HubSpot < client-secret.txt
+```
+
+The secret cannot be read back; to change it, enter the app again.
+`oauth-apps list` names the stored apps and `oauth-apps remove --id <id>`
+deletes one. A running server sees a change within a minute. An app for a
+provider that runs a token endpoint per region names its own, for example
+`--parameters '{"data_center":"eu"}'` for Zoho.
+
 ### Authentication
 
 `AUTH_PROVIDER` is `oidc`, `trust_proxy`, or `local`; the installer rejects
