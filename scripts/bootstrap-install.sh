@@ -208,7 +208,6 @@ $([ -n "$vk_volume" ] && printf '        volumes:\n            - %s\n' "$vk_volu
         environment:
             RUNTARA_SERVER_DATABASE_URL: postgres://runtara:runtara@postgres/runtara_server
             RUNTARA_DATABASE_URL: postgres://runtara:runtara@postgres/runtara
-            OBJECT_MODEL_DATABASE_URL: postgres://runtara_objects:runtara_objects@postgres/runtara_objects
             DATA_DIR: /tmp/runtara-data
             VALKEY_HOST: valkey
             VALKEY_PORT: "6379"
@@ -242,6 +241,11 @@ COMPOSEEOF
         echo "    docker compose -f ${dir}/docker-compose.yml down -v   # stop & delete data"
     fi
     echo "    docker compose -f ${dir}/docker-compose.yml up -d     # start again"
+    echo ""
+    echo "  The tenant has no object model database yet. To give it one (the URL is"
+    echo "  read from standard input and stored sealed):"
+    echo "    docker compose -f ${dir}/docker-compose.yml exec -T runtara \\"
+    echo "        runtara-server object-model set --tenant-id ${tenant_id} < database-url.txt"
     echo ""
     exit 0
 fi

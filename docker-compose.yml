@@ -85,7 +85,13 @@ services:
       OTEL_SDK_DISABLED: "true"
       RUNTARA_SERVER_DATABASE_URL: postgres://runtara:runtara@postgres/runtara_server
       RUNTARA_DATABASE_URL: postgres://runtara:runtara@postgres/runtara
-      OBJECT_MODEL_DATABASE_URL: postgres://runtara_objects:runtara_objects@postgres/runtara_objects
+      # The evaluation tenant's object model database is the `runtara_objects`
+      # database of this stack's own Postgres. The entrypoint below enters it
+      # once (`runtara-server object-model set`), and it is stored sealed. It
+      # is on the stack's private network and reached with no TLS, which
+      # these two settings allow.
+      RUNTARA_DATABASE_CONNECTION_GUARD: "off"
+      RUNTARA_PROXY_ALLOW_HTTP_HOSTS: postgres
       VALKEY_HOST: valkey
       VALKEY_PORT: "6379"
       # Connection credentials are always encrypted at rest. Pass your own
@@ -137,6 +143,8 @@ services:
           RUNTARA_CONNECTIONS_ENCRYPTION_KEY="$$(cat "$$key_file")"
           export RUNTARA_CONNECTIONS_ENCRYPTION_KEY
         fi
+        printf '%s' 'postgres://runtara_objects:runtara_objects@postgres/runtara_objects?sslmode=disable' \
+          | runtara-server object-model set --tenant-id "$${TENANT_ID}" --if-unset || exit 1
         exec runtara-server
     # Publish the *proxy's* listen port (8080). Ports must be declared on the
     # network-namespace owner, which the sidecar joins via network_mode below.

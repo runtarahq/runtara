@@ -22,11 +22,11 @@ NC='\033[0m' # No Color
 DATA_DIR="${DATA_DIR:-.data}"
 TENANT_ID="${TENANT_ID:-local}"
 
-# Runtara keeps three databases: the server's own, the durable-runtime one
-# shared by core and environment, and the tenant object model.
+# Runtara keeps two databases: the server's own, and the durable-runtime one
+# shared by core and environment. A tenant's object model database is a
+# connection of the tenant's: `runtara-server object-model set`.
 SERVER_DATABASE_URL="${RUNTARA_SERVER_DATABASE_URL:-postgres://localhost/runtara_server}"
 DATABASE_URL="${RUNTARA_DATABASE_URL:-postgres://localhost/runtara}"
-OBJECT_MODEL_DATABASE_URL="${OBJECT_MODEL_DATABASE_URL:-postgres://localhost/runtara_objects}"
 
 # Valkey backs checkpoint storage; the server refuses to boot without it.
 VALKEY_HOST="${VALKEY_HOST:-127.0.0.1}"
@@ -90,7 +90,7 @@ check_database() {
     if ! command -v psql &> /dev/null; then
         return
     fi
-    for url in "${SERVER_DATABASE_URL}" "${DATABASE_URL}" "${OBJECT_MODEL_DATABASE_URL}"; do
+    for url in "${SERVER_DATABASE_URL}" "${DATABASE_URL}"; do
         if psql "${url}" -c "SELECT 1" &> /dev/null; then
             print_status "Database connection OK: ${url}"
         else
@@ -144,7 +144,6 @@ start_server() {
     SERVER_PORT="${SERVER_PORT}" \
     RUNTARA_SERVER_DATABASE_URL="${SERVER_DATABASE_URL}" \
     RUNTARA_DATABASE_URL="${DATABASE_URL}" \
-    OBJECT_MODEL_DATABASE_URL="${OBJECT_MODEL_DATABASE_URL}" \
     VALKEY_HOST="${VALKEY_HOST}" \
     VALKEY_PORT="${VALKEY_PORT}" \
     RUNTARA_CORE_HTTP_PORT="${CORE_PORT}" \
@@ -210,7 +209,6 @@ usage() {
     echo "  SERVER_PORT                  API + UI port (default: 7001)"
     echo "  RUNTARA_SERVER_DATABASE_URL  Server database (default: postgres://localhost/runtara_server)"
     echo "  RUNTARA_DATABASE_URL         Durable-runtime database (default: postgres://localhost/runtara)"
-    echo "  OBJECT_MODEL_DATABASE_URL    Object model database (default: postgres://localhost/runtara_objects)"
     echo "  VALKEY_HOST / VALKEY_PORT    Valkey for checkpoint storage (default: 127.0.0.1:6379)"
     echo "  DATA_DIR                     Data directory (default: .data)"
     echo "  RUNTARA_CONNECTIONS_ENCRYPTION_KEY"

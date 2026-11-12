@@ -396,9 +396,8 @@ write_config() {
     # but simplified: if RUNTARA_NONINTERACTIVE=1, use defaults/env vars
 
     local db_url="${RUNTARA_DATABASE_URL:-postgres://runtara:password@localhost/runtara}"
-    local obj_db_url="${OBJECT_MODEL_DATABASE_URL:-postgres://runtara_objects:password@localhost/runtara_objects}"
     # Server tables (workflows, connections, API keys) live in their own
-    # database, distinct from the object-model and environment databases.
+    # database, distinct from the environment database.
     local server_db_url="${RUNTARA_SERVER_DATABASE_URL:-postgres://runtara:password@localhost/runtara_server}"
     local valkey_host="${VALKEY_HOST:-127.0.0.1}"
     local valkey_port="${VALKEY_PORT:-6379}"
@@ -474,8 +473,11 @@ RUNTARA_MCP_SESSION_STORE=${mcp_session_store}
 RUNTARA_MCP_SESSION_TTL_SECONDS=${mcp_session_ttl_seconds}
 
 RUNTARA_SERVER_DATABASE_URL=${server_db_url}
-OBJECT_MODEL_DATABASE_URL=${obj_db_url}
 RUNTARA_DATABASE_URL=${db_url}
+
+# A tenant's object model database is not configured here: enter it once with
+#   runtara-server object-model set --tenant-id ${tenant_id}
+# (the URL is read from standard input and stored sealed).
 
 VALKEY_HOST=${valkey_host}
 VALKEY_PORT=${valkey_port}
