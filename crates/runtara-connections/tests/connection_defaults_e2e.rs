@@ -53,6 +53,7 @@ async fn create_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
             title VARCHAR(255) NOT NULL UNIQUE,
             connection_subtype VARCHAR(255) DEFAULT NULL,
             connection_parameters JSONB DEFAULT NULL,
+            credential_format TEXT NOT NULL DEFAULT 'cipher',
             integration_id VARCHAR(255) DEFAULT NULL,
             status VARCHAR(50) NOT NULL DEFAULT 'UNKNOWN',
             rate_limit_config JSONB DEFAULT NULL,
@@ -115,7 +116,11 @@ fn test_compatibility() -> Arc<IntegrationCompatibility> {
 
 fn service(pool: PgPool) -> (Arc<ConnectionRepository>, ConnectionService) {
     let repo = Arc::new(ConnectionRepository::new(pool, Arc::new(NoOpCipher)));
-    let service = ConnectionService::new(repo.clone(), test_compatibility());
+    let service = ConnectionService::new(
+        repo.clone(),
+        test_compatibility(),
+        runtara_connections::sealed::SealedCredentials::for_tests(),
+    );
     (repo, service)
 }
 
@@ -126,7 +131,10 @@ fn create_request(
 ) -> CreateConnectionRequest {
     let connection_parameters = match integration_id {
         "postgres" => json!({
-            "database_url": format!("postgres://example/{title}")
+            "database_url": format!(
+                "postgres://app:fixture-password@example/{}?sslmode=verify-full",
+                title.replace(' ', "_")
+            )
         }),
         "stripe_api_key" => json!({ "secret_key": "sk_test_fixture" }),
         "http_bearer" => json!({
@@ -209,9 +217,9 @@ async fn default_connection_moves_between_compatible_object_model_connections() 
         default
             .connection_parameters
             .as_ref()
-            .and_then(|value| value.get("database_url"))
+            .and_then(|value| value.get("database_target"))
             .and_then(|value| value.as_str()),
-        Some("postgres://example/Object Model Postgres B")
+        Some("postgres://app@example:5432/Object_Model_Postgres_B")
     );
 }
 

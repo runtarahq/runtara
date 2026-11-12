@@ -8,14 +8,13 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use reqwest::header::{ACCEPT, AUTHORIZATION};
+use reqwest::header::ACCEPT;
 use runtara_agents::extractors::connection_types::{
     AwsCredentialsExtractor, AwsCredentialsParams, GEMINI_API_BASE_URL, GeminiApiKeyParams,
     GeminiExtractor, OpenAiApiKeyParams, OpenAiExtractor,
 };
 use serde_json::{Map, Value, json};
 
-use crate::auth::aws_signing::sign_request_v4;
 use crate::error::ConnectionsError;
 use crate::resolution::{
     ConnectionResourceDefinition, ConnectionResourceItem, ConnectionResourcePage,
@@ -23,6 +22,75 @@ use crate::resolution::{
 };
 
 const MAX_RESOURCE_LIMIT: usize = 1_000;
+
+/// The largest discovery response read from a provider through seal.
+const MAX_DISCOVERY_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+/// How discovery requests are sent: through seal, which attaches the
+/// connection's sealed secret. An extractor names the request, and leaves
+/// the credential to seal.
+pub struct Fetcher<'a> {
+    route: SealedRoute<'a>,
+}
+
+/// A connection, and seal.
+pub struct SealedRoute<'a> {
+    pub sealed: &'a crate::sealed::SealedCredentials,
+    pub tenant_id: &'a str,
+    pub connection_id: &'a str,
+}
+
+impl<'a> Fetcher<'a> {
+    /// seal attaches the connection's secrets, which it holds sealed.
+    pub fn sealed(route: SealedRoute<'a>) -> Self {
+        Self { route }
+    }
+
+    /// A GET for JSON, authorized as the connection.
+    async fn get_json(
+        &self,
+        integration_id: &str,
+        parameters: &Value,
+        url: reqwest::Url,
+        headers: &[(&str, &str)],
+        provider: &str,
+    ) -> Result<Value, ConnectionsError> {
+        let route = &self.route;
+        let headers = headers
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .chain([(ACCEPT.as_str().to_owned(), "application/json".to_owned())]);
+        let response = route
+            .sealed
+            .send_bounded(
+                route.tenant_id,
+                route.connection_id,
+                integration_id,
+                parameters,
+                "GET",
+                url.as_str(),
+                headers,
+                None,
+                MAX_DISCOVERY_RESPONSE_BYTES,
+            )
+            .await
+            .map_err(|error| {
+                // seal's detail has identifiers and static text only.
+                let reason = match &error {
+                    crate::sealed::SendError::Seal(seal) => {
+                        format!("{}: {}", seal.code.as_str(), seal.detail)
+                    }
+                    crate::sealed::SendError::InvalidRequest => "the request is not valid".into(),
+                    crate::sealed::SendError::TooLarge => "the response is too large".into(),
+                    crate::sealed::SendError::BodyFailed => "the response failed".into(),
+                };
+                ConnectionsError::AuthResolution(
+                    format!("{provider} model discovery failed: {reason}").into(),
+                )
+            })?;
+        json_body(response.status, &response.body, provider)
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct ResourceSpec {
@@ -74,7 +142,7 @@ trait ConnectionResourceExtractor: Send + Sync {
 
     async fn resolve(
         &self,
-        client: &reqwest::Client,
+        fetcher: &Fetcher<'_>,
         parameters: &Value,
         request: &ConnectionResourceRequest,
     ) -> Result<ConnectionResourcePage, ConnectionsError>;
@@ -110,7 +178,7 @@ pub fn resources_for_integration(integration_id: &str) -> Vec<ConnectionResource
 
 /// Resolve one resource through the owning connection-specific extractor.
 pub async fn resolve_resource(
-    client: &reqwest::Client,
+    fetcher: &Fetcher<'_>,
     integration_id: &str,
     parameters: &Value,
     request: &ConnectionResourceRequest,
@@ -130,14 +198,27 @@ pub async fn resolve_resource(
             request.resource_name
         )));
     }
-    extractor.resolve(client, parameters, request).await
+    extractor.resolve(fetcher, parameters, request).await
 }
 
+/// A connection's typed parameters. A sealed secret reads as empty: the
+/// extractor names where it goes, and seal supplies it.
 fn parse_parameters<T: serde::de::DeserializeOwned>(
     integration_id: &str,
     parameters: &Value,
 ) -> Result<T, ConnectionsError> {
-    serde_json::from_value(parameters.clone()).map_err(|error| {
+    let mut readable = parameters.clone();
+    for value in readable
+        .as_object_mut()
+        .into_iter()
+        .flatten()
+        .map(|(_, v)| v)
+    {
+        if crate::sealed::is_sealed(value) {
+            *value = Value::String(String::new());
+        }
+    }
+    serde_json::from_value(readable).map_err(|error| {
         ConnectionsError::AuthResolution(
             format!("Invalid {integration_id} connection parameters: {error}").into(),
         )
@@ -188,24 +269,15 @@ fn append_path(base_url: &str, segment: &str) -> Result<reqwest::Url, Connection
     Ok(url)
 }
 
-async fn response_json(
-    response: reqwest::Response,
-    provider: &str,
-) -> Result<Value, ConnectionsError> {
-    let status = response.status();
-    let bytes = response.bytes().await.map_err(|error| {
-        ConnectionsError::AuthResolution(
-            format!("Failed to read {provider} response: {error}").into(),
-        )
-    })?;
-    if !status.is_success() {
-        let detail = String::from_utf8_lossy(&bytes);
+fn json_body(status: u16, bytes: &[u8], provider: &str) -> Result<Value, ConnectionsError> {
+    if !(200..300).contains(&status) {
+        let detail = String::from_utf8_lossy(bytes);
         let detail: String = detail.chars().take(512).collect();
         return Err(ConnectionsError::AuthResolution(
             format!("{provider} resource discovery failed with HTTP {status}: {detail}").into(),
         ));
     }
-    serde_json::from_slice(&bytes).map_err(|error| {
+    serde_json::from_slice(bytes).map_err(|error| {
         ConnectionsError::AuthResolution(
             format!("{provider} resource discovery returned invalid JSON: {error}").into(),
         )
@@ -224,40 +296,37 @@ impl ConnectionResourceExtractor for OpenAiExtractor {
 
     async fn resolve(
         &self,
-        client: &reqwest::Client,
+        fetcher: &Fetcher<'_>,
         parameters: &Value,
         request: &ConnectionResourceRequest,
     ) -> Result<ConnectionResourcePage, ConnectionsError> {
-        let parameters: OpenAiApiKeyParams = parse_parameters(self.integration_id(), parameters)?;
+        let typed: OpenAiApiKeyParams = parse_parameters(self.integration_id(), parameters)?;
         match request.resource_name.as_str() {
-            "models" => resolve_openai_models(client, &parameters, request).await,
+            "models" => resolve_openai_models(fetcher, parameters, &typed, request).await,
             _ => unreachable!("resource name was validated against OpenAI extractor metadata"),
         }
     }
 }
 
 async fn resolve_openai_models(
-    client: &reqwest::Client,
+    fetcher: &Fetcher<'_>,
+    stored: &Value,
     parameters: &OpenAiApiKeyParams,
     request: &ConnectionResourceRequest,
 ) -> Result<ConnectionResourcePage, ConnectionsError> {
     let url = append_path(&parameters.base_url, "models")?;
-    let mut builder = client
-        .get(url)
-        .header(AUTHORIZATION, format!("Bearer {}", parameters.api_key))
-        .header(ACCEPT, "application/json");
-    if let Some(organization_id) = parameters
+    let organization_id = parameters
         .organization_id
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        builder = builder.header("OpenAI-Organization", organization_id);
-    }
-    let response = builder.send().await.map_err(|error| {
-        ConnectionsError::AuthResolution(format!("OpenAI model discovery failed: {error}").into())
-    })?;
-    let body = response_json(response, "OpenAI").await?;
+        .filter(|value| !value.is_empty());
+    let headers: Vec<(&str, &str)> = organization_id
+        .map(|id| ("OpenAI-Organization", id))
+        .into_iter()
+        .collect();
+    let body = fetcher
+        .get_json("openai_api_key", stored, url, &headers, "OpenAI")
+        .await?;
     let mut models: Vec<&Value> = body
         .get("data")
         .and_then(Value::as_array)
@@ -308,15 +377,14 @@ impl ConnectionResourceExtractor for GeminiExtractor {
 
     async fn resolve(
         &self,
-        client: &reqwest::Client,
+        fetcher: &Fetcher<'_>,
         parameters: &Value,
         request: &ConnectionResourceRequest,
     ) -> Result<ConnectionResourcePage, ConnectionsError> {
-        let parameters: GeminiApiKeyParams = parse_parameters(self.integration_id(), parameters)?;
+        let _: GeminiApiKeyParams = parse_parameters(self.integration_id(), parameters)?;
         match request.resource_name.as_str() {
             "models" => {
-                resolve_gemini_models(client, GEMINI_API_BASE_URL, &parameters.api_key, request)
-                    .await
+                resolve_gemini_models(fetcher, parameters, GEMINI_API_BASE_URL, request).await
             }
             _ => unreachable!("resource name was validated against Gemini extractor metadata"),
         }
@@ -324,9 +392,9 @@ impl ConnectionResourceExtractor for GeminiExtractor {
 }
 
 async fn resolve_gemini_models(
-    client: &reqwest::Client,
+    fetcher: &Fetcher<'_>,
+    stored: &Value,
     base_url: &str,
-    api_key: &str,
     request: &ConnectionResourceRequest,
 ) -> Result<ConnectionResourcePage, ConnectionsError> {
     let mut url = append_path(base_url, "models")?;
@@ -335,18 +403,9 @@ async fn resolve_gemini_models(
     if let Some(cursor) = request.cursor.as_deref() {
         url.query_pairs_mut().append_pair("pageToken", cursor);
     }
-    let response = client
-        .get(url)
-        .header("x-goog-api-key", api_key)
-        .header(ACCEPT, "application/json")
-        .send()
-        .await
-        .map_err(|error| {
-            ConnectionsError::AuthResolution(
-                format!("Gemini model discovery failed: {error}").into(),
-            )
-        })?;
-    let body = response_json(response, "Gemini").await?;
+    let body = fetcher
+        .get_json("gemini_api_key", stored, url, &[], "Gemini")
+        .await?;
     let models = body
         .get("models")
         .and_then(Value::as_array)
@@ -405,25 +464,37 @@ impl ConnectionResourceExtractor for AwsCredentialsExtractor {
 
     async fn resolve(
         &self,
-        client: &reqwest::Client,
+        fetcher: &Fetcher<'_>,
         parameters: &Value,
         request: &ConnectionResourceRequest,
     ) -> Result<ConnectionResourcePage, ConnectionsError> {
+        // The key is seal's to sign with, for the service each request
+        // names.
+        let via = AwsVia {
+            route: &fetcher.route,
+            parameters,
+        };
         let parameters: AwsCredentialsParams = parse_parameters(self.integration_id(), parameters)?;
         match request.resource_name.as_str() {
-            "bedrock.models" => resolve_bedrock_models(client, &parameters, request).await,
-            "sqs.queues" => resolve_sqs_queues(client, &parameters, request).await,
+            "bedrock.models" => resolve_bedrock_models(&via, &parameters, request).await,
+            "sqs.queues" => resolve_sqs_queues(&via, &parameters, request).await,
             _ => unreachable!("resource name was validated against AWS extractor metadata"),
         }
     }
 }
 
+/// How AWS discovery requests are signed: by seal, with the connection's
+/// sealed parameters.
+struct AwsVia<'a> {
+    route: &'a SealedRoute<'a>,
+    parameters: &'a Value,
+}
+
 async fn signed_aws_json(
-    client: &reqwest::Client,
+    via: &AwsVia<'_>,
     method: reqwest::Method,
     url: reqwest::Url,
     service: &str,
-    credentials: &AwsCredentialsParams,
     body: &[u8],
     additional_headers: &[(&str, &str)],
 ) -> Result<Value, ConnectionsError> {
@@ -432,30 +503,41 @@ async fn signed_aws_json(
     for (name, value) in additional_headers {
         headers.insert((*name).to_string(), (*value).to_string());
     }
-    sign_request_v4(
-        method.as_str(),
-        &url,
-        &mut headers,
-        body,
-        &credentials.aws_access_key_id,
-        &credentials.aws_secret_access_key,
-        &credentials.aws_region,
-        service,
-        credentials.aws_session_token.as_deref(),
-    );
-
-    let mut builder = client.request(method, url).body(body.to_vec());
-    for (name, value) in headers {
-        builder = builder.header(name, value);
-    }
-    let response = builder.send().await.map_err(|error| {
-        ConnectionsError::AuthResolution(format!("AWS resource discovery failed: {error}").into())
-    })?;
-    response_json(response, "AWS").await
+    // seal signs for the service the request names.
+    let (route, parameters) = (via.route, via.parameters);
+    let mut presenting = parameters.clone();
+    presenting[crate::sealed::policy::AWS_SERVICE_FIELD] = Value::String(service.to_owned());
+    let response = route
+        .sealed
+        .send_bounded(
+            route.tenant_id,
+            route.connection_id,
+            "aws_credentials",
+            &presenting,
+            method.as_str(),
+            url.as_str(),
+            headers,
+            (!body.is_empty()).then(|| body.to_vec()),
+            MAX_DISCOVERY_RESPONSE_BYTES,
+        )
+        .await
+        .map_err(|error| {
+            // seal's detail has identifiers and static text only.
+            let reason = match &error {
+                crate::sealed::SendError::Seal(seal) => {
+                    format!("{}: {}", seal.code.as_str(), seal.detail)
+                }
+                other => format!("{other:?}"),
+            };
+            ConnectionsError::AuthResolution(
+                format!("AWS resource discovery failed: {reason}").into(),
+            )
+        })?;
+    json_body(response.status, &response.body, "AWS")
 }
 
 async fn resolve_bedrock_models(
-    client: &reqwest::Client,
+    client: &AwsVia<'_>,
     credentials: &AwsCredentialsParams,
     request: &ConnectionResourceRequest,
 ) -> Result<ConnectionResourcePage, ConnectionsError> {
@@ -467,16 +549,7 @@ async fn resolve_bedrock_models(
         .map(str::to_string)
         .unwrap_or_else(|| format!("https://bedrock.{}.amazonaws.com", credentials.aws_region));
     let url = append_path(&base_url, "foundation-models")?;
-    let body = signed_aws_json(
-        client,
-        reqwest::Method::GET,
-        url,
-        "bedrock",
-        credentials,
-        &[],
-        &[],
-    )
-    .await?;
+    let body = signed_aws_json(client, reqwest::Method::GET, url, "bedrock", &[], &[]).await?;
     let mut models: Vec<&Value> = body
         .get("modelSummaries")
         .and_then(Value::as_array)
@@ -534,7 +607,7 @@ async fn resolve_bedrock_models(
 }
 
 async fn resolve_sqs_queues(
-    client: &reqwest::Client,
+    client: &AwsVia<'_>,
     credentials: &AwsCredentialsParams,
     request: &ConnectionResourceRequest,
 ) -> Result<ConnectionResourcePage, ConnectionsError> {
@@ -564,7 +637,6 @@ async fn resolve_sqs_queues(
         reqwest::Method::POST,
         url,
         "sqs",
-        credentials,
         &payload,
         &[
             ("Content-Type", "application/x-amz-json-1.0"),
@@ -603,6 +675,7 @@ async fn resolve_sqs_queues(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sealed::{Allowances, MemoryKeySource, SealedCredentials, is_sealed};
     use wiremock::matchers::{body_json, header, header_exists, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -641,6 +714,47 @@ mod tests {
         assert!(resources_for_integration("custom").is_empty());
     }
 
+    /// seal reaching `server`, and `params` as a save stores them for the
+    /// connection `c-1` of `acme`. `api_base`, if given, has `server` stand
+    /// in for a provider whose API is otherwise fixed.
+    async fn stored(
+        server: &MockServer,
+        integration_id: &str,
+        api_base: Option<String>,
+        params: Value,
+    ) -> (SealedCredentials, Value) {
+        let address = server.address();
+        let sealed = SealedCredentials::in_process(
+            std::sync::Arc::new(MemoryKeySource::default()),
+            &[7_u8; 32],
+            Allowances {
+                private_hosts: vec![format!("{}:{}", address.ip(), address.port())],
+                plain_http_hosts: vec![address.ip().to_string()],
+                api_bases: api_base
+                    .map(|base| (integration_id.to_owned(), base))
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let stored = sealed
+            .seal_parameters("acme", "c-1", integration_id, &params, None)
+            .await
+            .unwrap()
+            .expect("the connection holds a secret");
+        (sealed, stored)
+    }
+
+    /// seal's route for the connection [`stored`] made.
+    fn route(sealed: &SealedCredentials) -> Fetcher<'_> {
+        Fetcher::sealed(SealedRoute {
+            sealed,
+            tenant_id: "acme",
+            connection_id: "c-1",
+        })
+    }
+
     #[tokio::test]
     async fn openai_models_are_normalized_and_searched() {
         let server = MockServer::start().await;
@@ -658,19 +772,95 @@ mod tests {
         let mut request = request("models");
         request.search = Some("gpt".into());
 
-        let page = resolve_resource(
-            &reqwest::Client::new(),
+        let (sealed, parameters) = stored(
+            &server,
             "openai_api_key",
-            &json!({"api_key": "secret", "base_url": format!("{}/v1", server.uri())}),
-            &request,
+            None,
+            json!({"api_key": "secret", "base_url": format!("{}/v1", server.uri())}),
         )
-        .await
-        .unwrap();
+        .await;
+        let page = resolve_resource(&route(&sealed), "openai_api_key", &parameters, &request)
+            .await
+            .unwrap();
 
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].value, "gpt-4o-mini");
         assert_eq!(page.items[0].label, "gpt-4o-mini");
         assert!(!page.stale);
+    }
+
+    /// A sealed connection's key is not readable here: seal attaches it, and
+    /// the listing is the same.
+    #[tokio::test]
+    async fn openai_models_of_a_sealed_connection_are_listed_through_seal() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("authorization", "Bearer sealed-CANARY"))
+            .and(header("openai-organization", "org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{"id": "gpt-4o-mini", "owned_by": "openai"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let address = server.address();
+        let sealed = SealedCredentials::in_process(
+            std::sync::Arc::new(MemoryKeySource::default()),
+            &[7_u8; 32],
+            Allowances {
+                private_hosts: vec![format!("{}:{}", address.ip(), address.port())],
+                plain_http_hosts: vec![address.ip().to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let stored = sealed
+            .seal_parameters(
+                "acme",
+                "c-1",
+                "openai_api_key",
+                &json!({
+                    "api_key": "sealed-CANARY",
+                    "base_url": format!("{}/v1", server.uri()),
+                    "organization_id": "org-1",
+                }),
+                None,
+            )
+            .await
+            .unwrap()
+            .expect("openai_api_key is sealed");
+        assert!(is_sealed(&stored["api_key"]));
+        let route = |connection_id| SealedRoute {
+            sealed: &sealed,
+            tenant_id: "acme",
+            connection_id,
+        };
+
+        let page = resolve_resource(
+            &Fetcher::sealed(route("c-1")),
+            "openai_api_key",
+            &stored,
+            &request("models"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].value, "gpt-4o-mini");
+
+        // The sealed key is this connection's: another cannot list with it,
+        // and the failure says why without a value.
+        let error = resolve_resource(
+            &Fetcher::sealed(route("c-2")),
+            "openai_api_key",
+            &stored,
+            &request("models"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("OPEN_FAILED"), "{error}");
+        assert!(!error.contains("CANARY"));
     }
 
     #[tokio::test]
@@ -709,14 +899,17 @@ mod tests {
             .mount(&server)
             .await;
 
-        let page = resolve_gemini_models(
-            &reqwest::Client::new(),
-            &format!("{}/v1beta", server.uri()),
-            "secret",
-            &request("models"),
+        let base = format!("{}/v1beta", server.uri());
+        let (sealed, parameters) = stored(
+            &server,
+            "gemini_api_key",
+            Some(base.clone()),
+            json!({"api_key": "secret"}),
         )
-        .await
-        .unwrap();
+        .await;
+        let page = resolve_gemini_models(&route(&sealed), &parameters, &base, &request("models"))
+            .await
+            .unwrap();
 
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].value, "gemini-3.8-flash");
@@ -751,14 +944,17 @@ mod tests {
         request.cursor = Some("page-2".into());
         request.search = Some("LITE".into());
 
-        let page = resolve_gemini_models(
-            &reqwest::Client::new(),
-            &format!("{}/v1beta", server.uri()),
-            "secret",
-            &request,
+        let base = format!("{}/v1beta", server.uri());
+        let (sealed, parameters) = stored(
+            &server,
+            "gemini_api_key",
+            Some(base.clone()),
+            json!({"api_key": "secret"}),
         )
-        .await
-        .unwrap();
+        .await;
+        let page = resolve_gemini_models(&route(&sealed), &parameters, &base, &request)
+            .await
+            .unwrap();
 
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].value, "gemini-3.5-flash-lite");
@@ -790,19 +986,21 @@ mod tests {
         let mut request = request("bedrock.models");
         request.search = Some("anthropic".into());
 
-        let page = resolve_resource(
-            &reqwest::Client::new(),
+        let (sealed, parameters) = stored(
+            &server,
             "aws_credentials",
-            &json!({
+            None,
+            json!({
                 "aws_access_key_id": "key",
                 "aws_secret_access_key": "secret",
                 "aws_region": "us-east-1",
                 "endpoint": server.uri()
             }),
-            &request,
         )
-        .await
-        .unwrap();
+        .await;
+        let page = resolve_resource(&route(&sealed), "aws_credentials", &parameters, &request)
+            .await
+            .unwrap();
 
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].value, "anthropic.claude-3-haiku");
@@ -832,19 +1030,21 @@ mod tests {
         request.cursor = Some("cursor-1".into());
         request.limit = Some(20);
 
-        let page = resolve_resource(
-            &reqwest::Client::new(),
+        let (sealed, parameters) = stored(
+            &server,
             "aws_credentials",
-            &json!({
+            None,
+            json!({
                 "access_key_id": "key",
                 "secret_access_key": "secret",
                 "region": "us-east-1",
                 "endpoint": server.uri()
             }),
-            &request,
         )
-        .await
-        .unwrap();
+        .await;
+        let page = resolve_resource(&route(&sealed), "aws_credentials", &parameters, &request)
+            .await
+            .unwrap();
 
         assert_eq!(page.items[0].label, "orders-created");
         assert_eq!(page.next_cursor.as_deref(), Some("cursor-2"));
@@ -852,8 +1052,9 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_resource_not_advertised_by_the_connection() {
+        let sealed = SealedCredentials::for_tests();
         let error = resolve_resource(
-            &reqwest::Client::new(),
+            &route(&sealed),
             "openai_api_key",
             &json!({"api_key": "secret"}),
             &request("sqs.queues"),

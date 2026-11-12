@@ -137,7 +137,25 @@ earlier release stored as plaintext (`runtara-server reencrypt-connections`,
 run with the service's environment, does the same by hand). To rotate,
 set the new key (and `RUNTARA_CONNECTIONS_ENCRYPTION_KEY_ID`), list the old one
 in `RUNTARA_CONNECTIONS_RETIRED_KEYS` (`kid:base64,…`), re-encrypt, then drop
-it.
+it. Tenants' seal keys are wrapped by a key derived from the encryption key
+(unless `RUNTARA_SEAL_WRAPPING_KEY` is set): the server on start, and
+`reencrypt-connections`, wrap them again under the new one, so do not drop the
+old key before one of them has run with it listed as retired. A
+`RUNTARA_SEAL_WRAPPING_KEY` of your own is not rotated by this; back it up as
+you do the encryption key.
+
+Each connection secret is stored sealed, with the one place it may go; the
+[changelog](../CHANGELOG.md) lists what is sealed and how. A secret that
+cannot be sealed is refused when the connection is saved. On start the server
+seals the connections an earlier release stored readable; `runtara-server
+seal-connections --dry-run`, run with the service's environment, shows how
+many it would seal and names the ones it cannot (`unsealable`), which must be
+entered again before they can be used. A Postgres connection's URL must say
+how its session is protected: `?sslmode=verify-full`, `?sslmode=require`, or
+`?sslmode=disable` for a host in `RUNTARA_PROXY_ALLOW_HTTP_HOSTS`. Sealing is
+one-way. When a tenant leaves, `runtara-server destroy-seal-keys --tenant-id
+<id> --confirm <id>` destroys its seal keys, after which nothing sealed for
+it can be opened; this cannot be undone.
 
 ### Authentication
 

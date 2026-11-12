@@ -285,6 +285,29 @@ impl TriggerRepository {
         Ok(result.rows_affected() > 0)
     }
 
+    /// The Channel triggers of `tenant_id` whose webhook secret is stored
+    /// readable: each trigger's id, its connection and the secret.
+    pub async fn readable_webhook_secrets(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<(String, String, String)>, sqlx::Error> {
+        sqlx::query_as(
+            r#"
+            SELECT id, configuration->>'connection_id', configuration->>'webhook_secret'
+            FROM public.invocation_trigger
+            WHERE trigger_type = 'CHANNEL'
+              AND tenant_id = $1
+              AND configuration->>'connection_id' IS NOT NULL
+              AND COALESCE(configuration->>'webhook_secret', '') <> ''
+              AND left(configuration->>'webhook_secret', 8) <> '$sealed:'
+            ORDER BY id
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await
+    }
+
     /// The newest active Channel trigger visible to `tenant_id` that is bound
     /// to `connection_id` and whose workflow is still live, or `None`.
     ///

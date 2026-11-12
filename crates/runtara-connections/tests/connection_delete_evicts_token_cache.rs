@@ -59,6 +59,7 @@ impl PgFixture {
                 integration_id VARCHAR(255) DEFAULT NULL,
                 connection_subtype VARCHAR(255) DEFAULT NULL,
                 connection_parameters JSONB DEFAULT NULL,
+                credential_format TEXT NOT NULL DEFAULT 'cipher',
                 rate_limit_config JSONB DEFAULT NULL
             )
             "#,
@@ -85,6 +86,7 @@ impl PgFixture {
                 Arc::new(NoOpCipher),
             )),
             Arc::new(IntegrationCompatibility::new(HashMap::new())),
+            runtara_connections::sealed::SealedCredentials::for_tests(),
         )
     }
 }
@@ -118,28 +120,60 @@ fn client_credentials_params(server: &MockServer) -> Value {
         "client_id": "cid",
         "client_secret": "csec",
         "scope": "read",
-        "base_url": "https://api.example.com",
+        "base_url": server.uri(),
         "token_auth": "form_body"
     })
 }
 
-/// Resolve the connection's auth and return the minted `Authorization` header value.
-async fn resolve_bearer(connection_id: &str, params: &Value) -> String {
+/// The token a request with the connection carries, as the provider's API
+/// (the token endpoint's own server) receives it: seal mints it with the
+/// sealed client secret, and attaches it sealed.
+async fn resolve_bearer(connection_id: &str, params: &Value, api: &MockServer) -> String {
+    const TYPE: &str = "http_oauth2_client_credentials";
+    let sealed = runtara_connections::sealed::SealedCredentials::for_tests();
+    let stored = sealed
+        .seal_parameters("tenant-1", connection_id, TYPE, params, None)
+        .await
+        .expect("the client secret is sealed")
+        .expect("the connection holds a secret");
     let mut headers = HashMap::new();
-    runtara_connections::auth::provider_auth::resolve_connection_auth(
-        &reqwest::Client::new(),
+    let resolved = runtara_connections::auth::provider_auth::resolve_connection_auth(
         "tenant-1",
         connection_id,
-        "http_oauth2_client_credentials",
-        params,
+        TYPE,
+        &stored,
         &mut headers,
         &runtara_connections::events::ConnectionEvents::default(),
+        &sealed,
     )
     .await
     .expect("mint should succeed");
-    headers
-        .remove("Authorization")
-        .expect("an Authorization header must be injected")
+    assert!(!headers.contains_key("Authorization"));
+    let presenting = resolved
+        .sealed_parameters
+        .expect("a sealed client secret gets a sealed token");
+    Mock::given(method("GET"))
+        .and(path("/whoami"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(api)
+        .await;
+    let request = http::Request::get(format!("{}/whoami", api.uri()))
+        .body(None)
+        .unwrap();
+    sealed
+        .send("tenant-1", connection_id, TYPE, &presenting, request)
+        .await
+        .expect("seal sends the request");
+    let requests = api.received_requests().await.unwrap();
+    requests
+        .iter()
+        .rev()
+        .find(|request| request.url.path() == "/whoami")
+        .expect("the API was called")
+        .headers["authorization"]
+        .to_str()
+        .unwrap()
+        .to_owned()
 }
 
 #[tokio::test]
@@ -151,14 +185,14 @@ async fn deleting_a_connection_evicts_its_cached_access_token() {
     let fixture = PgFixture::start(connection_id).await;
 
     assert_eq!(
-        resolve_bearer(connection_id, &params).await,
+        resolve_bearer(connection_id, &params, &server).await,
         "Bearer token-before",
         "the first resolution mints from the provider"
     );
     // Proves the cache is actually in play — without a hit here the assertion after the
     // delete would pass for the wrong reason.
     assert_eq!(
-        resolve_bearer(connection_id, &params).await,
+        resolve_bearer(connection_id, &params, &server).await,
         "Bearer token-before",
         "the second resolution must be served from cache, not re-minted"
     );
@@ -170,7 +204,7 @@ async fn deleting_a_connection_evicts_its_cached_access_token() {
         .expect("delete should succeed");
 
     assert_eq!(
-        resolve_bearer(connection_id, &params).await,
+        resolve_bearer(connection_id, &params, &server).await,
         "Bearer token-after",
         "the deleted connection's cached token must not outlive its row"
     );
@@ -201,24 +235,24 @@ async fn one_connection_still_caches_its_grants_separately() {
             "client_id": "cid",
             "client_secret": "csec",
             "scope": scope,
-            "base_url": "https://api.example.com",
+            "base_url": server.uri(),
             "token_auth": "form_body"
         })
     };
 
     assert_eq!(
-        resolve_bearer(connection_id, &params_for("read")).await,
+        resolve_bearer(connection_id, &params_for("read"), &server).await,
         "Bearer token-read"
     );
     assert_eq!(
-        resolve_bearer(connection_id, &params_for("write")).await,
+        resolve_bearer(connection_id, &params_for("write"), &server).await,
         "Bearer token-write",
         "a second scope on the same connection must not collide with the first"
     );
     // And the first entry is still there afterwards — the two coexist rather than
     // evicting each other.
     assert_eq!(
-        resolve_bearer(connection_id, &params_for("read")).await,
+        resolve_bearer(connection_id, &params_for("read"), &server).await,
         "Bearer token-read"
     );
 }
@@ -235,7 +269,7 @@ async fn a_delete_that_matches_no_row_leaves_the_cache_alone() {
     let fixture = PgFixture::start(connection_id).await;
 
     assert_eq!(
-        resolve_bearer(connection_id, &params).await,
+        resolve_bearer(connection_id, &params, &server).await,
         "Bearer token-before"
     );
 
@@ -250,7 +284,7 @@ async fn a_delete_that_matches_no_row_leaves_the_cache_alone() {
     );
 
     assert_eq!(
-        resolve_bearer(connection_id, &params).await,
+        resolve_bearer(connection_id, &params, &server).await,
         "Bearer token-before",
         "a delete that removed nothing must leave the cached token in place"
     );

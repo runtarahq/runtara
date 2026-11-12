@@ -6,11 +6,10 @@ use std::collections::{BTreeMap, HashMap};
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Azure Storage Shared Key signing parameters.
+/// The Azure Storage account a request is signed for. The account key is
+/// sealed, and seal signs with it.
 pub struct AzureSigningParams {
     pub account_name: String,
-    /// Base64-encoded account key (primary or secondary).
-    pub account_key: String,
 }
 
 /// Azure Storage REST API version sent via `x-ms-version`.
@@ -41,7 +40,7 @@ pub fn sign_request_shared_key(
     apply_shared_key_signature(method, url, headers, body, account_name, &key_bytes)
 }
 
-fn apply_shared_key_signature(
+pub(crate) fn apply_shared_key_signature(
     method: &str,
     url: &url::Url,
     headers: &mut HashMap<String, String>,

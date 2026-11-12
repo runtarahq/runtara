@@ -1,8 +1,7 @@
 //! Native outbound HTTP service shared by host invocations.
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use runtara_connections::{
-    AwsSigningParams, AzureSigningParams, ConnectionsFacade, RateLimitEventType,
-    ResolvedConnectionAuth,
+    AzureSigningParams, ConnectionsFacade, RateLimitEventType, ResolvedConnectionAuth,
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -539,12 +538,11 @@ async fn execute_request(
     let response_limit = proxy_response_limit(request.max_response_bytes)?;
     let mut final_headers = request.headers.clone();
     let mut final_url = request.url.clone();
-    let mut aws_signing: Option<AwsSigningParams> = None;
     let mut azure_signing: Option<AzureSigningParams> = None;
-    // A client-specific mTLS identity must live on the reqwest client, not on
-    // an individual request. It remains opaque here; auth resolution parsed
-    // the write-only PEM fields and built a hardened Rustls client.
-    let mut mtls_client: Option<reqwest::Client> = None;
+    // A connection's type and parameters, where a request presents a
+    // credential. Its secrets are markers, not values: seal attaches them
+    // (a token, a signature, a client certificate) and sends the request.
+    let mut sealed_connection: Option<(String, Value)> = None;
 
     // ── Connection credential injection ──────────────────────────────────
     if let Some(ref connection_id) = request.connection_id {
@@ -616,9 +614,9 @@ async fn execute_request(
 
         // Unlike generic HTTP connections, mTLS has no development HTTP
         // escape hatch. A manually-created or legacy record must not gain a
-        // warn/off-mode path around that invariant; the Rustls client also
-        // refuses HTTP as a second line of defense.
-        let uses_mtls = resolved.mtls_client.is_some();
+        // warn/off-mode path around that invariant. seal presents the
+        // certificate on the connection it opens, over TLS only.
+        let uses_mtls = integration_id == "http_mtls";
 
         // Record analytics off the request path. This can hit Redis and
         // PostgreSQL, and should not delay the upstream call.
@@ -668,9 +666,24 @@ async fn execute_request(
             },
         }
 
-        aws_signing = resolved.aws_signing;
+        let aws_signing = resolved.aws_signing;
         azure_signing = resolved.azure_signing;
-        mtls_client = resolved.mtls_client;
+        // What the request presents to seal: the connection's parameters,
+        // with the access token got for it if its OAuth secrets are sealed.
+        let mut presenting = resolved.sealed_parameters.unwrap_or_else(|| params.clone());
+        // A sealed AWS key signs for the service this request is for: the
+        // one the agent named, or the connection's own.
+        if let Some(aws) = &aws_signing {
+            presenting[runtara_connections::sealed::policy::AWS_SERVICE_FIELD] =
+                Value::String(aws.service.clone());
+        }
+        // A sealed connection whose settings use no credential (an MCP server
+        // with no auth) presents nothing, and is sent like any other.
+        if conn.sealed
+            && !runtara_connections::sealed::request_fields(integration_id, &presenting).is_empty()
+        {
+            sealed_connection = Some((integration_id.to_string(), presenting));
+        }
 
         // ── Pre-flight rate limit check ────────────────────────────────────
         // If adaptive rate limiting is enabled, check the token bucket before
@@ -737,43 +750,12 @@ async fn execute_request(
         )
     })?;
 
-    // Resolve body bytes for SigV4 signing (we need them before building the request)
     let body_bytes = request.body;
 
-    // ── AWS SigV4 signing (if needed) ───────────────────────────────────
-    if let Some(ref aws) = aws_signing {
-        let parsed_url = url::Url::parse(&final_url).map_err(|e| {
-            (
-                400,
-                json!({"error": format!("Invalid URL for SigV4 signing: {}", e)}),
-            )
-        })?;
-        let payload = body_bytes.as_deref().unwrap_or(b"");
-        remove_headers(
-            &mut final_headers,
-            &[
-                "authorization",
-                "host",
-                "x-amz-date",
-                "x-amz-content-sha256",
-                "x-amz-security-token",
-            ],
-        );
-        runtara_connections::auth::aws_signing::sign_request_v4(
-            &method,
-            &parsed_url,
-            &mut final_headers,
-            payload,
-            &aws.access_key_id,
-            &aws.secret_access_key,
-            &aws.region,
-            &aws.service,
-            aws.session_token.as_deref(),
-        );
-    }
-
-    // ── Azure Storage Shared Key signing (if needed) ────────────────────
-    if let Some(ref azure) = azure_signing {
+    // A key that signs requests signs nothing here: seal signs the request
+    // it sends, with the body's hash.
+    // ── Azure Storage: what a Shared Key signature covers ────────────────
+    if azure_signing.is_some() {
         let parsed_url = url::Url::parse(&final_url).map_err(|e| {
             (
                 400,
@@ -800,27 +782,51 @@ async fn execute_request(
             };
             final_headers.insert(key, absolute);
         }
-
-        let payload = body_bytes.as_deref().unwrap_or(b"");
-        remove_headers(&mut final_headers, &["authorization", "x-ms-date"]);
-        runtara_connections::auth::azure_signing::sign_request_shared_key(
-            &method,
-            &parsed_url,
-            &mut final_headers,
-            payload,
-            &azure.account_name,
-            &azure.account_key,
-        )
-        .map_err(|e| {
-            (
-                400,
-                json!({"error": format!("Azure Shared Key signing failed: {}", e)}),
-            )
-        })?;
     }
 
-    let outbound_client = mtls_client.as_ref().unwrap_or(client);
-    let mut req_builder = outbound_client.request(reqwest_method, &final_url);
+    // ── Sealed credentials: seal sends the request ───────────────────────
+    // Everything above still applies: the URL is pinned to the connection's
+    // base, rate limits are checked, and headers the connection type adds are
+    // set. seal then attaches the secret, and refuses any destination the
+    // secret's own policy does not allow.
+    if let (Some((integration_id, params)), Some(connection_id)) =
+        (&sealed_connection, request.connection_id.as_deref())
+    {
+        let sealed = facade.sealed();
+        let upstream = sealed
+            .send_bounded(
+                tenant_id,
+                connection_id,
+                integration_id,
+                params,
+                &method,
+                &final_url,
+                final_headers,
+                body_bytes,
+                response_limit,
+            )
+            .await
+            .map_err(|error| map_sealed_send_error(&error, connection_id))?;
+        track_upstream_429(
+            facade,
+            tenant_id,
+            Some(connection_id),
+            upstream.status,
+            upstream
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+                .map(|(_, value)| value.as_str()),
+        );
+        return Ok(Response {
+            status: upstream.status,
+            headers: upstream.headers,
+            body: upstream.body,
+        });
+    }
+
+    // A request that presents no credential is this process's to send.
+    let mut req_builder = client.request(reqwest_method, &final_url);
 
     // Set headers
     let mut header_map = HeaderMap::new();
@@ -862,33 +868,16 @@ async fn execute_request(
         (413, json!({"error": "Upstream response headers exceed byte limit", "code": "RESPONSE_TOO_LARGE"})))?;
     let resp_body_bytes = read_bounded_response(response, body_limit).await?;
 
-    // Track upstream 429 responses for analytics
-    if status == 429
-        && let Some(ref connection_id) = request.connection_id
-    {
-        let retry_after = resp_headers
+    track_upstream_429(
+        facade,
+        tenant_id,
+        request.connection_id.as_deref(),
+        status,
+        resp_headers
             .get("retry-after")
             .or_else(|| resp_headers.get("Retry-After"))
-            .and_then(|v| v.parse::<u64>().ok());
-
-        record_credential_request_async(
-            facade,
-            connection_id,
-            tenant_id,
-            RateLimitEventType::RateLimited,
-            Some(json!({
-                "source": "upstream_429",
-                "retry_after_secs": retry_after
-            })),
-        );
-
-        tracing::warn!(
-            target: "proxy",
-            connection_id = connection_id.as_str(),
-            retry_after_secs = ?retry_after,
-            "Upstream returned 429 — rate limited"
-        );
-    }
+            .map(String::as_str),
+    );
 
     Ok(Response {
         status,
@@ -900,6 +889,83 @@ async fn execute_request(
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// Record an upstream 429 on a connection's request, for analytics.
+fn track_upstream_429(
+    facade: &ConnectionsFacade,
+    tenant_id: &str,
+    connection_id: Option<&str>,
+    status: u16,
+    retry_after: Option<&str>,
+) {
+    let Some(connection_id) = connection_id.filter(|_| status == 429) else {
+        return;
+    };
+    let retry_after = retry_after.and_then(|v| v.parse::<u64>().ok());
+
+    record_credential_request_async(
+        facade,
+        connection_id,
+        tenant_id,
+        RateLimitEventType::RateLimited,
+        Some(json!({
+            "source": "upstream_429",
+            "retry_after_secs": retry_after
+        })),
+    );
+
+    tracing::warn!(
+        target: "proxy",
+        connection_id,
+        retry_after_secs = ?retry_after,
+        "Upstream returned 429 — rate limited"
+    );
+}
+
+/// What the agent is told when a request with sealed credentials got no
+/// response. seal's detail has identifiers and static text only; it is logged,
+/// and the agent gets seal's code.
+fn map_sealed_send_error(
+    error: &runtara_connections::sealed::SendError,
+    connection_id: &str,
+) -> (u16, Value) {
+    use runtara_connections::sealed::{SealErrorCode, SendError};
+    match error {
+        SendError::InvalidRequest => (400, json!({"error": "Invalid outbound request"})),
+        SendError::TooLarge => (
+            413,
+            json!({"error": "Upstream response exceeds byte limit", "code": "RESPONSE_TOO_LARGE"}),
+        ),
+        SendError::BodyFailed => (
+            502,
+            json!({"error": "Failed to read upstream response body"}),
+        ),
+        SendError::Seal(error) => {
+            tracing::warn!(
+                target: "proxy",
+                connection_id,
+                code = error.code.as_str(),
+                detail = %error.detail,
+                "seal did not send the request"
+            );
+            let status = match error.code {
+                // The destination is not one the credential may go to.
+                SealErrorCode::PolicyDenied | SealErrorCode::DestinationRefused => 403,
+                SealErrorCode::BadRequest | SealErrorCode::Conflict => 400,
+                SealErrorCode::BodyTooLarge => 413,
+                _ => 502,
+            };
+            (
+                status,
+                json!({
+                    "error": "The request was not sent with the connection's credentials",
+                    "code": format!("SEAL_{}", error.code.as_str()),
+                    "connection_id": connection_id,
+                }),
+            )
+        }
+    }
+}
 
 fn remove_headers(headers: &mut HashMap<String, String>, names: &[&str]) {
     headers.retain(|key, _| !names.iter().any(|name| key.eq_ignore_ascii_case(name)));
@@ -1137,6 +1203,7 @@ fn is_explicitly_allowed_host(url: &url::Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use runtara_connections::AwsSigningParams;
 
     #[test]
     fn a_write_without_content_says_its_length_is_zero() {
@@ -1428,15 +1495,12 @@ mod tests {
         ResolvedConnectionAuth {
             base_url: base_url.map(str::to_string),
             aws_signing: Some(AwsSigningParams {
-                access_key_id: "AKIA".into(),
-                secret_access_key: "secret".into(),
                 region: region.into(),
                 service: service.into(),
-                session_token: None,
             }),
             azure_signing: None,
-            mtls_client: None,
-            rotated_credentials: None,
+            sealed_parameters: None,
+            rotated_sealed: None,
         }
     }
 
@@ -1497,8 +1561,8 @@ mod tests {
             base_url: Some("https://api.example.com".into()),
             aws_signing: None,
             azure_signing: None,
-            mtls_client: None,
-            rotated_credentials: None,
+            sealed_parameters: None,
+            rotated_sealed: None,
         };
         apply_aws_service_override(Some("sqs"), &mut resolved);
 
@@ -1522,8 +1586,8 @@ mod tests {
             base_url: Some(QBO_BASE.into()),
             aws_signing: None,
             azure_signing: None,
-            mtls_client: None,
-            rotated_credentials: None,
+            sealed_parameters: None,
+            rotated_sealed: None,
         }
     }
 
@@ -1727,8 +1791,8 @@ mod tests {
             base_url: None,
             aws_signing: None,
             azure_signing: None,
-            mtls_client: None,
-            rotated_credentials: None,
+            sealed_parameters: None,
+            rotated_sealed: None,
         }
     }
 

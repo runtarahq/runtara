@@ -113,6 +113,8 @@ start_server() {
     DATA_DIR="${TEST_DATA_DIR}" \
     RUST_LOG="warn,runtara_server=info,runtara_object_store=warn" \
     AUTH_PROVIDER=local \
+    RUNTARA_PROXY_ALLOWED_HOSTS="${POSTGRES_HOST}" \
+    RUNTARA_PROXY_ALLOW_HTTP_HOSTS="${POSTGRES_HOST}" \
     VALKEY_HOST=127.0.0.1 \
     VALKEY_PORT="${TEST_VALKEY_PORT}" \
     OTEL_SDK_DISABLED=true \
@@ -221,7 +223,7 @@ print_step "Creating postgres connection..."
 RESP=$(api_post /connections "{
   \"title\": \"obm-sql-e2e store\",
   \"integrationId\": \"postgres\",
-  \"connectionParameters\": {\"database_url\": \"${SERVER_DB_URL}\"}
+  \"connectionParameters\": {\"database_url\": \"${SERVER_DB_URL}?sslmode=disable\"}
 }")
 CONN_ID=$(echo "${RESP}" | jq -r '.connection_id // .connectionId // empty')
 if [ -z "${CONN_ID}" ]; then

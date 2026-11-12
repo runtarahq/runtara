@@ -9,19 +9,134 @@ pub trait Channel: Send + Sync + 'static {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>>;
 }
 
+/// How a channel's replies carry the connection's credential: seal attaches
+/// it and sends the reply, and refuses any destination the credential's
+/// policy does not allow. This process holds the credential sealed only.
+pub struct ReplyAuth {
+    connections: std::sync::Arc<runtara_connections::ConnectionsFacade>,
+    tenant_id: String,
+    connection_id: String,
+    integration_id: String,
+    parameters: serde_json::Value,
+}
+
+/// The largest reply acknowledgement read from a provider through seal.
+const MAX_REPLY_RESPONSE_BYTES: usize = 1024 * 1024;
+
+impl ReplyAuth {
+    /// The credential for a connection's replies, which it holds sealed in
+    /// `field`.
+    pub fn of(
+        connections: &std::sync::Arc<runtara_connections::ConnectionsFacade>,
+        tenant_id: &str,
+        connection_id: &str,
+        integration_id: &str,
+        parameters: &serde_json::Value,
+        field: &str,
+    ) -> anyhow::Result<Self> {
+        if !runtara_connections::sealed::is_sealed(&parameters[field]) {
+            anyhow::bail!("Missing {field} in connection");
+        }
+        Ok(Self::presenting(
+            connections,
+            tenant_id,
+            connection_id,
+            integration_id,
+            parameters.clone(),
+        ))
+    }
+
+    /// The credential of `parameters`, which present what the connection's
+    /// requests carry: its own sealed secret, or a sealed token got with it.
+    pub fn presenting(
+        connections: &std::sync::Arc<runtara_connections::ConnectionsFacade>,
+        tenant_id: &str,
+        connection_id: &str,
+        integration_id: &str,
+        parameters: serde_json::Value,
+    ) -> Self {
+        Self {
+            connections: connections.clone(),
+            tenant_id: tenant_id.to_string(),
+            connection_id: connection_id.to_string(),
+            integration_id: integration_id.to_string(),
+            parameters,
+        }
+    }
+
+    /// POSTs `body` and returns the response's status and JSON.
+    async fn post_json(
+        &self,
+        url: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> anyhow::Result<(u16, serde_json::Value)> {
+        let (status, bytes) = self.post(url, content_type, body).await?;
+        Ok((status, serde_json::from_slice(&bytes)?))
+    }
+
+    /// POSTs `body` and returns the response's status and body.
+    async fn post(
+        &self,
+        url: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> anyhow::Result<(u16, Vec<u8>)> {
+        let response = self
+            .connections
+            .sealed()
+            .send_bounded(
+                &self.tenant_id,
+                &self.connection_id,
+                &self.integration_id,
+                &self.parameters,
+                "POST",
+                url,
+                [("content-type".to_string(), content_type.to_string())],
+                Some(body),
+                MAX_REPLY_RESPONSE_BYTES,
+            )
+            .await
+            .map_err(|error| match error {
+                // seal's detail has identifiers and static text only.
+                runtara_connections::sealed::SendError::Seal(seal) => anyhow::anyhow!(
+                    "seal did not send the reply: {}: {}",
+                    seal.code.as_str(),
+                    seal.detail
+                ),
+                other => anyhow::anyhow!("the reply was not sent: {other:?}"),
+            })?;
+        Ok((response.status, response.body))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Telegram
 // ---------------------------------------------------------------------------
 
 pub struct TelegramChannel {
-    token: String,
-    client: reqwest::Client,
+    auth: ReplyAuth,
+    api_base: String,
 }
 
 impl TelegramChannel {
-    pub fn new(token: String, client: reqwest::Client) -> Self {
-        Self { token, client }
+    pub fn new(auth: ReplyAuth) -> Self {
+        Self::with_api_base(
+            auth,
+            runtara_connections::sealed::policy::TELEGRAM_API_BASE.to_string(),
+        )
     }
+
+    /// A channel whose Bot API is at `api_base`.
+    pub fn with_api_base(auth: ReplyAuth, api_base: String) -> Self {
+        Self { auth, api_base }
+    }
+}
+
+/// The URL of a Bot API method. Telegram takes the token in the path, and
+/// seal puts it there: the URL names the method only.
+pub fn telegram_method_url(api_base: &str, method: &str) -> String {
+    format!("{}/{method}", api_base.trim_end_matches('/'))
 }
 
 impl Channel for TelegramChannel {
@@ -37,22 +152,20 @@ impl Channel for TelegramChannel {
                 return Ok(());
             }
 
-            let url = format!("https://api.telegram.org/bot{}/sendMessage", self.token);
+            let url = telegram_method_url(&self.api_base, "sendMessage");
 
             // Telegram has a 4096 char limit per message. Split if needed.
             for chunk in split_message(&text, 4096) {
-                let resp = self
-                    .client
-                    .post(&url)
-                    .json(&json!({
-                        "chat_id": conversation_id,
-                        "text": chunk,
-                    }))
-                    .send()
+                let request = json!({
+                    "chat_id": conversation_id,
+                    "text": chunk,
+                });
+                let (status, body) = self
+                    .auth
+                    .post_json(&url, "application/json", serde_json::to_vec(&request)?)
                     .await?;
 
-                if !resp.status().is_success() {
-                    let body = resp.text().await.unwrap_or_default();
+                if !(200..300).contains(&status) {
                     tracing::warn!(
                         chat_id = %conversation_id,
                         status = %body,
@@ -71,13 +184,12 @@ impl Channel for TelegramChannel {
 // ---------------------------------------------------------------------------
 
 pub struct SlackChannel {
-    token: String,
-    client: reqwest::Client,
+    auth: ReplyAuth,
 }
 
 impl SlackChannel {
-    pub fn new(token: String, client: reqwest::Client) -> Self {
-        Self { token, client }
+    pub fn new(auth: ReplyAuth) -> Self {
+        Self { auth }
     }
 }
 
@@ -109,15 +221,14 @@ impl Channel for SlackChannel {
                     request["thread_ts"] = json!(thread_ts);
                 }
 
-                let resp = self
-                    .client
-                    .post("https://slack.com/api/chat.postMessage")
-                    .header("Authorization", format!("Bearer {}", self.token))
-                    .json(&request)
-                    .send()
+                let (_, body) = self
+                    .auth
+                    .post_json(
+                        "https://slack.com/api/chat.postMessage",
+                        "application/json",
+                        serde_json::to_vec(&request)?,
+                    )
                     .await?;
-
-                let body: serde_json::Value = resp.json().await?;
                 if body["ok"].as_bool() != Some(true) {
                     tracing::warn!(
                         channel = %channel_id,
@@ -162,8 +273,6 @@ pub struct TeamsChannel {
     /// consumed by the facade to mint the Bot Connector token.
     params: serde_json::Value,
     facade: std::sync::Arc<runtara_connections::ConnectionsFacade>,
-    /// Hardened egress client (no redirects + DNS guard).
-    client: reqwest::Client,
     /// SHARED, live `(connection_id, conversation_id) → serviceUrl` map owned by
     /// the router. Sharing (not snapshotting) closes the reply-loss window where
     /// a serviceUrl arrives — or a new conversation appears — after the session
@@ -178,7 +287,6 @@ impl TeamsChannel {
         connection_id: String,
         params: serde_json::Value,
         facade: std::sync::Arc<runtara_connections::ConnectionsFacade>,
-        client: reqwest::Client,
         service_urls: std::sync::Arc<dashmap::DashMap<(String, String), String>>,
     ) -> Self {
         Self {
@@ -186,7 +294,6 @@ impl TeamsChannel {
             connection_id,
             params,
             facade,
-            client,
             service_urls,
         }
     }
@@ -224,7 +331,8 @@ impl Channel for TeamsChannel {
             // Mint the Bot Connector token through the shared connection-auth
             // path (correct single-tenant authority + process token cache).
             let mut headers = std::collections::HashMap::new();
-            self.facade
+            let resolved = self
+                .facade
                 .resolve_connection_auth(
                     &self.connection_id,
                     &self.tenant_id,
@@ -234,10 +342,17 @@ impl Channel for TeamsChannel {
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("Teams auth resolution failed: {e}"))?;
-            let authorization = headers
-                .get("Authorization")
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("Teams auth did not yield a bearer token"))?;
+            // The sealed app password gets a sealed token: seal attaches it
+            // and sends the reply.
+            let auth = ReplyAuth::presenting(
+                &self.facade,
+                &self.tenant_id,
+                &self.connection_id,
+                "teams_bot",
+                resolved
+                    .sealed_parameters
+                    .ok_or_else(|| anyhow::anyhow!("Teams auth did not yield a token"))?,
+            );
 
             let url = format!(
                 "{}/v3/conversations/{}/activities",
@@ -247,22 +362,18 @@ impl Channel for TeamsChannel {
 
             // Teams has a ~28KB message limit. Split at 4000 chars for safety.
             for chunk in split_message(&text, 4000) {
-                let resp = self
-                    .client
-                    .post(&url)
-                    .header("Authorization", &authorization)
-                    .json(&json!({
-                        "type": "message",
-                        "text": chunk,
-                        // Keep the Teams compose box enabled after replies.
-                        "inputHint": "acceptingInput",
-                    }))
-                    .send()
+                let activity = json!({
+                    "type": "message",
+                    "text": chunk,
+                    // Keep the Teams compose box enabled after replies.
+                    "inputHint": "acceptingInput",
+                });
+                let (status, body) = auth
+                    .post(&url, "application/json", serde_json::to_vec(&activity)?)
                     .await?;
 
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let body = resp.text().await.unwrap_or_default();
+                if !(200..300).contains(&status) {
+                    let body = String::from_utf8_lossy(&body).into_owned();
                     tracing::warn!(
                         conversation = %conversation_id,
                         status = %status,
@@ -290,19 +401,17 @@ impl Channel for TeamsChannel {
 /// Sends reply emails via the Mailgun REST API. The `conv_id` is the
 /// recipient's email address (the original sender of the inbound email).
 pub struct MailgunChannel {
-    api_key: String,
+    auth: ReplyAuth,
     domain: String,
     region: String,
-    client: reqwest::Client,
 }
 
 impl MailgunChannel {
-    pub fn new(api_key: String, domain: String, region: String, client: reqwest::Client) -> Self {
+    pub fn new(auth: ReplyAuth, domain: String, region: String) -> Self {
         Self {
-            api_key,
+            auth,
             domain,
             region,
-            client,
         }
     }
 }
@@ -327,20 +436,20 @@ impl Channel for MailgunChannel {
 
             let from = format!("noreply@{}", self.domain);
 
-            let resp = self
-                .client
-                .post(&base_url)
-                .basic_auth("api", Some(&self.api_key))
-                .form(&[
-                    ("from", from.as_str()),
-                    ("to", &recipient),
-                    ("subject", "Re: Your message"),
-                    ("text", &text),
-                ])
-                .send()
+            let form = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("from", &from)
+                .append_pair("to", &recipient)
+                .append_pair("subject", "Re: Your message")
+                .append_pair("text", &text)
+                .finish();
+            let (_, body) = self
+                .auth
+                .post_json(
+                    &base_url,
+                    "application/x-www-form-urlencoded",
+                    form.into_bytes(),
+                )
                 .await?;
-
-            let body: serde_json::Value = resp.json().await?;
             if body["id"].is_null() {
                 tracing::warn!(
                     recipient = %recipient,
@@ -410,5 +519,188 @@ mod tests {
     #[test]
     fn split_message_respects_utf8_boundaries() {
         assert_eq!(split_message("a😀b", 5), vec!["a😀", "b"]);
+    }
+
+    use std::sync::Arc;
+
+    use runtara_connections::sealed::{Allowances, MemoryKeySource, SealedCredentials};
+    use runtara_connections::{ConnectionsConfig, ConnectionsFacade, ConnectionsState};
+    use wiremock::matchers::{body_string, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A facade over a database it never reaches: a reply reads only the
+    /// parameters it was given.
+    fn facade(sealed: Option<Arc<SealedCredentials>>) -> Arc<ConnectionsFacade> {
+        Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
+            ConnectionsConfig {
+                sealed: sealed.unwrap_or_else(SealedCredentials::for_tests),
+                agent_access: Arc::new(runtara_connections::EveryAgent),
+                db_pool: sqlx::PgPool::connect_lazy("postgres://unused@127.0.0.1:1/unused")
+                    .unwrap(),
+                redis_manager: None,
+                public_base_url: "http://localhost".into(),
+                oauth_complete_url: None,
+                http_client: reqwest::Client::new(),
+                cipher: Arc::new(runtara_connections::crypto::noop::NoOpCipher),
+                compatibility: Arc::new(runtara_connections::IntegrationCompatibility::new(
+                    Default::default(),
+                )),
+                agent_catalog: Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                    Vec::new(),
+                )),
+                connection_events: None,
+                oauth: Default::default(),
+            },
+        )))
+    }
+
+    async fn provider(authorization: &str) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/reply"))
+            .and(header("authorization", authorization))
+            .and(header("content-type", "application/json"))
+            .and(body_string("{\"text\":\"hi\"}"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn reply(auth: &ReplyAuth, server: &MockServer) -> anyhow::Result<(u16, Value)> {
+        auth.post_json(
+            &format!("{}/api/reply", server.uri()),
+            "application/json",
+            b"{\"text\":\"hi\"}".to_vec(),
+        )
+        .await
+    }
+
+    use serde_json::Value;
+
+    #[tokio::test]
+    async fn a_reply_with_a_sealed_credential_is_sent_by_seal() {
+        let server = provider("Bearer sealed-CANARY").await;
+        let address = server.address();
+        let sealed = Arc::new(
+            SealedCredentials::in_process(
+                Arc::new(MemoryKeySource::default()),
+                &[7_u8; 32],
+                Allowances {
+                    private_hosts: vec![format!("{}:{}", address.ip(), address.port())],
+                    plain_http_hosts: vec![address.ip().to_string()],
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        // A type whose destination a test can point at a local server; the
+        // channels' own are fixed to their providers.
+        let parameters = sealed
+            .seal_parameters(
+                "acme",
+                "c-1",
+                "http_bearer",
+                &json!({"token": "sealed-CANARY", "base_url": format!("{}/api", server.uri())}),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let of = |connections: &Arc<ConnectionsFacade>| {
+            ReplyAuth::of(
+                connections,
+                "acme",
+                "c-1",
+                "http_bearer",
+                &parameters,
+                "token",
+            )
+            .unwrap()
+        };
+
+        let auth = of(&facade(Some(sealed)));
+        let (status, body) = reply(&auth, &server).await.unwrap();
+        assert_eq!((status, body["ok"].as_bool()), (200, Some(true)));
+
+        // A seal without this tenant's keys cannot send it.
+        let error = reply(&of(&facade(None)), &server).await.unwrap_err();
+        assert!(error.to_string().contains("KEYSET_UNKNOWN"), "{error}");
+    }
+
+    /// A Bot API that takes `sendMessage` for one bot only.
+    async fn telegram(token: &str) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{token}/sendMessage")))
+            .and(body_string("{\"chat_id\":\"42\",\"text\":\"hi\"}"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn a_telegram_reply_with_a_sealed_token_is_sent_by_seal() {
+        let server = telegram("1:sealed-CANARY").await;
+        let address = server.address();
+        let sealed = Arc::new(
+            SealedCredentials::in_process(
+                Arc::new(MemoryKeySource::default()),
+                &[7_u8; 32],
+                Allowances {
+                    private_hosts: vec![format!("{}:{}", address.ip(), address.port())],
+                    plain_http_hosts: vec![address.ip().to_string()],
+                    api_bases: [("telegram_bot".to_string(), server.uri())].into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        let parameters = sealed
+            .seal_parameters(
+                "acme",
+                "c-1",
+                "telegram_bot",
+                &json!({"bot_token": "1:sealed-CANARY"}),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let auth = ReplyAuth::of(
+            &facade(Some(sealed)),
+            "acme",
+            "c-1",
+            "telegram_bot",
+            &parameters,
+            "bot_token",
+        )
+        .unwrap();
+        // The channel writes no token: the URL names the method only.
+        assert_eq!(
+            telegram_method_url(&server.uri(), "sendMessage"),
+            format!("{}/sendMessage", server.uri())
+        );
+        let channel = TelegramChannel::with_api_base(auth, server.uri());
+        channel.send_text("42", "hi").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_connection_without_a_sealed_credential_has_no_reply_auth() {
+        // None entered, or one this process could read: neither is sent.
+        for parameters in [json!({}), json!({"bot_token": "xoxb"})] {
+            let auth = ReplyAuth::of(
+                &facade(None),
+                "acme",
+                "c-1",
+                "slack_bot",
+                &parameters,
+                "bot_token",
+            );
+            assert!(auth.is_err(), "{parameters}");
+        }
     }
 }

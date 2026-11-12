@@ -49,6 +49,7 @@ impl PgFixture {
                 integration_id VARCHAR(255),
                 connection_subtype VARCHAR(255),
                 connection_parameters JSONB,
+                credential_format TEXT NOT NULL DEFAULT 'cipher',
                 rate_limit_config JSONB,
                 status VARCHAR(64) DEFAULT 'UNKNOWN',
                 refresh_token_hash TEXT DEFAULT NULL,
@@ -150,9 +151,23 @@ async fn generic_authcode_full_flow_from_params() {
         "base_url": "https://api.example.com",
         "token_auth": "basic"
     });
+    // As a save stores it: the client secret sealed.
+    let sealed = runtara_connections::sealed::SealedCredentials::for_tests();
+    let params = sealed
+        .seal_parameters(
+            "tenant_gen",
+            "conn_gen",
+            "http_oauth2_authorization_code",
+            &params,
+            None,
+        )
+        .await
+        .expect("the client secret is sealed")
+        .expect("the connection holds a secret");
     sqlx::query(
-        "INSERT INTO connection_data_entity (id, tenant_id, integration_id, connection_parameters) \
-         VALUES ($1, $2, $3, $4)",
+        "INSERT INTO connection_data_entity \
+         (id, tenant_id, integration_id, connection_parameters, credential_format) \
+         VALUES ($1, $2, $3, $4, 'seal')",
     )
     .bind("conn_gen")
     .bind("tenant_gen")
@@ -167,6 +182,7 @@ async fn generic_authcode_full_flow_from_params() {
         fixture.pool.clone(),
         Arc::new(NoOpCipher),
         "https://platform.example.com".to_string(),
+        sealed,
     )
     .with_flows(valkey.manager.clone());
 
@@ -230,60 +246,17 @@ async fn generic_authcode_full_flow_from_params() {
     .expect("read back");
     let stored: serde_json::Value = row.get("connection_parameters");
     let status: String = row.get("status");
-    assert_eq!(stored["access_token"], "at-1");
-    assert_eq!(stored["refresh_token"], "rt-1");
+    // The pair is the connection's, sealed: refreshing and using it is seal's
+    // (see `sealed_authorization_code.rs`).
+    for token in ["access_token", "refresh_token"] {
+        assert!(
+            runtara_connections::sealed::is_sealed(&stored[token]),
+            "{token}"
+        );
+    }
+    assert!(!stored.to_string().contains("at-1"), "{stored}");
     assert!(stored["token_expires_at"].is_string());
     assert_eq!(status, "ACTIVE");
-
-    // 3. Refresh: with the access token expired, resolving auth must hit the PARAM
-    //    token_url with grant_type=refresh_token (Basic style again) and inject the
-    //    fresh Bearer; the rotated refresh token is surfaced for persistence.
-    Mock::given(method("POST"))
-        .and(path("/oauth/token"))
-        .and(header("Authorization", "Basic Y2lkOmNzZWM="))
-        .and(body_string_contains("grant_type=refresh_token"))
-        .and(body_string_contains("refresh_token=rt-1"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "access_token": "at-2",
-            "refresh_token": "rt-2",
-            "token_type": "Bearer",
-            "expires_in": 3600
-        })))
-        .expect(1)
-        .mount(&provider)
-        .await;
-
-    let mut expired = stored.clone();
-    expired["token_expires_at"] = json!("2020-01-01T00:00:00Z");
-
-    let client = reqwest::Client::new();
-    let mut headers = std::collections::HashMap::new();
-    let resolved = runtara_connections::auth::provider_auth::resolve_connection_auth(
-        &client,
-        "tenant-1",
-        "conn_gen",
-        "http_oauth2_authorization_code",
-        &expired,
-        &mut headers,
-        &runtara_connections::events::ConnectionEvents::default(),
-    )
-    .await
-    .expect("refresh should succeed");
-
-    assert_eq!(
-        headers.get("Authorization").map(String::as_str),
-        Some("Bearer at-2"),
-        "fresh Bearer from the param token endpoint must be injected"
-    );
-    assert_eq!(
-        resolved.base_url.as_deref(),
-        Some("https://api.example.com"),
-        "base_url pins to the connection's declared host"
-    );
-    let rotated = resolved
-        .rotated_credentials
-        .expect("rotated credentials must surface for persistence");
-    assert_eq!(rotated.refresh_token.as_deref(), Some("rt-2"));
 }
 
 #[tokio::test]
@@ -314,6 +287,7 @@ async fn generic_authcode_pkce_can_be_disabled() {
         fixture.pool.clone(),
         Arc::new(NoOpCipher),
         "https://platform.example.com".to_string(),
+        runtara_connections::sealed::SealedCredentials::for_tests(),
     )
     .with_flows(valkey.manager.clone());
     let url = service
@@ -353,9 +327,23 @@ async fn rule_e_endpoint_edit_clears_tokens_and_evicts_cache() {
         "refresh_token": "rt-1",
         "token_expires_at": "2020-01-01T00:00:00Z"
     });
+    // As an authorization leaves it: its secrets sealed.
+    let sealed = runtara_connections::sealed::SealedCredentials::for_tests();
+    let params = sealed
+        .seal_parameters(
+            "tenant_gen",
+            "conn_rule_e",
+            "http_oauth2_authorization_code",
+            &params,
+            None,
+        )
+        .await
+        .expect("the secrets are sealed")
+        .expect("the connection holds secrets");
     sqlx::query(
-        "INSERT INTO connection_data_entity (id, tenant_id, title, integration_id, connection_parameters, status) \
-         VALUES ($1, $2, 'rule-e', $3, $4, 'ACTIVE')",
+        "INSERT INTO connection_data_entity \
+         (id, tenant_id, title, integration_id, connection_parameters, status, credential_format) \
+         VALUES ($1, $2, 'rule-e', $3, $4, 'ACTIVE', 'seal')",
     )
     .bind("conn_rule_e")
     .bind("tenant_gen")
@@ -366,23 +354,21 @@ async fn rule_e_endpoint_edit_clears_tokens_and_evicts_cache() {
     .expect("insert connection");
 
     // Warm the in-memory cache: expired stored token forces a mint (wiremock hit #1).
-    let client = reqwest::Client::new();
     let mut headers = std::collections::HashMap::new();
-    runtara_connections::auth::provider_auth::resolve_connection_auth(
-        &client,
-        "tenant-1",
+    let warmed = runtara_connections::auth::provider_auth::resolve_connection_auth(
+        "tenant_gen",
         "conn_rule_e",
         "http_oauth2_authorization_code",
         &params,
         &mut headers,
         &runtara_connections::events::ConnectionEvents::default(),
+        &sealed,
     )
     .await
     .expect("warm mint");
-    assert_eq!(
-        headers.get("Authorization").map(String::as_str),
-        Some("Bearer fresh")
-    );
+    assert!(warmed.rotated_sealed.is_some(), "a refresh was made");
+    // The token is seal's to attach.
+    assert!(!headers.contains_key("Authorization"));
 
     // PATCH an endpoint param through the SERVICE (rule E path).
     let repo = Arc::new(
@@ -396,8 +382,11 @@ async fn rule_e_endpoint_edit_clears_tokens_and_evicts_cache() {
             Default::default(),
         ),
     );
-    let service =
-        runtara_connections::service::connections::ConnectionService::new(repo, compatibility);
+    let service = runtara_connections::service::connections::ConnectionService::new(
+        repo,
+        compatibility,
+        sealed.clone(),
+    );
 
     let version = service
         .get_connection("conn_rule_e", "tenant_gen")
@@ -412,7 +401,9 @@ async fn rule_e_endpoint_edit_clears_tokens_and_evicts_cache() {
                 "base_url".to_string(),
                 json!("https://api.other-host.example"),
             )]),
-            write: Default::default(),
+            // Where the secret is sent with the tokens changes: it is
+            // entered again.
+            write: std::collections::HashMap::from([("client_secret".to_string(), json!("csec"))]),
             clear: Vec::new(),
         }),
         rate_limit_config: None,
@@ -453,13 +444,13 @@ async fn rule_e_endpoint_edit_clears_tokens_and_evicts_cache() {
     // must MISS the cache and re-mint (wiremock hit #2), not serve the stale token.
     let mut headers2 = std::collections::HashMap::new();
     runtara_connections::auth::provider_auth::resolve_connection_auth(
-        &client,
-        "tenant-1",
+        "tenant_gen",
         "conn_rule_e",
         "http_oauth2_authorization_code",
         &params,
         &mut headers2,
         &runtara_connections::events::ConnectionEvents::default(),
+        &sealed,
     )
     .await
     .expect("post-evict mint");

@@ -85,6 +85,7 @@ async fn ebay_sends_its_runame_as_the_redirect_uri_and_comes_back_to_runtara() {
         fixture.pool.clone(),
         Arc::new(NoOpCipher),
         "https://platform.example.com".to_string(),
+        runtara_connections::sealed::SealedCredentials::for_tests(),
     )
     .with_flows(valkey.manager.clone());
 

@@ -45,6 +45,7 @@ impl PgFixture {
                 integration_id VARCHAR(255),
                 connection_subtype VARCHAR(255),
                 connection_parameters JSONB,
+                credential_format TEXT NOT NULL DEFAULT 'cipher',
                 rate_limit_config JSONB
             )
             "#,
@@ -80,6 +81,7 @@ async fn quickbooks_authorize_url_is_descriptor_driven() {
         fixture.pool.clone(),
         Arc::new(NoOpCipher),
         "https://platform.example.com".to_string(),
+        runtara_connections::sealed::SealedCredentials::for_tests(),
     )
     .with_flows(valkey.manager.clone());
 

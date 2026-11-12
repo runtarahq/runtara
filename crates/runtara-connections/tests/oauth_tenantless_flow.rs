@@ -108,8 +108,8 @@ async fn a_flows_record_is_under_its_tenant_and_redeems_once() {
         .await
         .expect("complete");
     assert_eq!(completed.connection_id, "c1");
-    let (stored, status) = fixture.stored("c1").await;
-    assert_eq!(stored["access_token"], "at-1");
+    let (_, status) = fixture.stored("c1").await;
+    assert_eq!(fixture.access_token("acme", "c1", &provider).await, "at-1");
     assert_eq!(status, "ACTIVE");
 
     // Redeemed once: both keys are gone and a replay is refused.
@@ -247,7 +247,10 @@ async fn a_flow_left_in_the_old_table_still_completes() {
         .complete("acme", "legacy-2", "code-legacy", &HashMap::new(), None)
         .await
         .expect("a flow from the old table completes");
-    assert_eq!(fixture.stored("c1").await.0["access_token"], "at-legacy");
+    assert_eq!(
+        fixture.access_token("acme", "c1", &provider).await,
+        "at-legacy"
+    );
 }
 
 #[tokio::test]
@@ -310,11 +313,11 @@ async fn two_tenants_flows_through_one_tenantless_callback() {
         assert!(cleared.contains("Max-Age=0"), "{cleared}");
     }
     assert_eq!(
-        fixture.stored("acme-conn").await.0["access_token"],
+        fixture.access_token("acme", "acme-conn", &provider).await,
         "at-acme"
     );
     assert_eq!(
-        fixture.stored("beta-conn").await.0["access_token"],
+        fixture.access_token("beta", "beta-conn", &provider).await,
         "at-beta"
     );
 }
@@ -455,7 +458,7 @@ async fn the_tenant_path_callback_completes_a_flow_with_its_cookie() {
         response.headers()[header::LOCATION],
         "https://app.example.com/ui/oauth-complete.html?result=ok&connection=old"
     );
-    assert_eq!(fixture.stored("old").await.0["access_token"], "at-1");
+    assert_eq!(fixture.access_token("acme", "old", &provider).await, "at-1");
 }
 
 #[tokio::test]

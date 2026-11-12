@@ -249,6 +249,14 @@ impl Harness {
 
     /// A fresh router over the same database, as after a process restart.
     async fn router(&self) -> Arc<ChannelRouter> {
+        self.router_with(None).await
+    }
+
+    /// A router whose connections have `sealed` as their seal, or none.
+    async fn router_with(
+        &self,
+        sealed: Option<Arc<runtara_connections::sealed::SealedCredentials>>,
+    ) -> Arc<ChannelRouter> {
         let persistence = self.runtime.clone();
         let client = Arc::new(RuntimeClient::new(
             Arc::new(EnvironmentHandlerState::new(
@@ -271,6 +279,8 @@ impl Harness {
         ));
         let connections = Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
             ConnectionsConfig {
+                sealed: sealed
+                    .unwrap_or_else(runtara_connections::sealed::SealedCredentials::for_tests),
                 agent_access: std::sync::Arc::new(runtara_connections::EveryAgent),
                 db_pool: self.pool.clone(),
                 redis_manager: None,
@@ -302,23 +312,74 @@ impl Harness {
     /// A connection with an active Channel trigger for the harness workflow.
     async fn connection(&self, provider: Provider) -> String {
         let id = Uuid::new_v4().to_string();
+        // As a save stores it: its secrets sealed.
+        let parameters = runtara_connections::sealed::SealedCredentials::for_tests()
+            .seal_parameters(
+                &self.tenant,
+                &id,
+                provider.integration_id(),
+                &provider.parameters(),
+                None,
+            )
+            .await
+            .unwrap()
+            .expect("a channel's connection holds a secret");
         sqlx::query(
-            "INSERT INTO connection_data_entity (id, tenant_id, title, integration_id, connection_parameters, status)
-             VALUES ($1, $2, $3, $4, $5, 'ACTIVE')",
+            "INSERT INTO connection_data_entity
+                 (id, tenant_id, title, integration_id, connection_parameters, status, credential_format)
+             VALUES ($1, $2, $3, $4, $5, 'ACTIVE', 'seal')",
         )
         .bind(&id)
         .bind(&self.tenant)
         .bind(format!("{provider:?} intake {id}"))
         .bind(provider.integration_id())
-        .bind(provider.parameters())
+        .bind(parameters)
         .execute(&self.pool)
         .await
         .unwrap();
         let mut configuration = json!({"connection_id": id});
         if matches!(provider, Provider::Telegram) {
-            configuration["webhook_secret"] = json!(TELEGRAM_SECRET);
+            // As registration stores it: sealed.
+            let marker = runtara_connections::sealed::SealedCredentials::for_tests()
+                .seal_webhook_secret(&self.tenant, &id, None, TELEGRAM_SECRET)
+                .await
+                .unwrap();
+            configuration["webhook_secret"] = json!(format!("$sealed:{marker}"));
         }
         self.channel_trigger(&self.workflow_id, configuration).await;
+        self.connections.lock().unwrap().push(id.clone());
+        id
+    }
+
+    /// A connection as [`Self::connection`] makes one, saved with its secrets
+    /// sealed: the row holds no secret this process can read.
+    async fn sealed_connection(
+        &self,
+        sealed: &runtara_connections::sealed::SealedCredentials,
+        integration_id: &str,
+        parameters: Value,
+    ) -> String {
+        let id = Uuid::new_v4().to_string();
+        let stored = sealed
+            .seal_parameters(&self.tenant, &id, integration_id, &parameters, None)
+            .await
+            .unwrap()
+            .expect("the type is sealed");
+        sqlx::query(
+            "INSERT INTO connection_data_entity
+                 (id, tenant_id, title, integration_id, connection_parameters, status, credential_format)
+             VALUES ($1, $2, $3, $4, $5, 'ACTIVE', 'seal')",
+        )
+        .bind(&id)
+        .bind(&self.tenant)
+        .bind(format!("{integration_id} sealed intake {id}"))
+        .bind(integration_id)
+        .bind(&stored)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        self.channel_trigger(&self.workflow_id, json!({"connection_id": id}))
+            .await;
         self.connections.lock().unwrap().push(id.clone());
         id
     }
@@ -979,6 +1040,69 @@ async fn a_telegram_call_is_rejected_when_the_trigger_holds_no_secret() {
     harness.cleanup().await;
 }
 
+/// A secret an earlier release stored readable authenticates nothing as it
+/// is. The server seals it when it starts, as the same token: the platform
+/// that holds it still agrees, and its calls are accepted again.
+#[tokio::test]
+async fn a_readable_webhook_secret_is_refused_until_it_is_sealed() {
+    use crate::api::services::webhook_manager::{
+        WebhookManager, seal_stored_webhook_secrets, sealed_webhook_secret,
+    };
+    let harness = Harness::new().await;
+    let router = harness.router().await;
+    let connection = harness.connection(Provider::Telegram).await;
+    sqlx::query(
+        "UPDATE invocation_trigger
+         SET configuration = configuration || jsonb_build_object('webhook_secret', $2::text)
+         WHERE configuration->>'connection_id' = $1",
+    )
+    .bind(&connection)
+    .bind(TELEGRAM_SECRET)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    let call = || telegram_request(&connection, 1, Some(TELEGRAM_SECRET));
+    assert_eq!(post(&router, call()).await, StatusCode::UNAUTHORIZED);
+    assert!(harness.intake(&connection).await.is_empty());
+
+    let manager = WebhookManager::new(router.connections().clone());
+    let count = seal_stored_webhook_secrets(&harness.pool, &manager, &harness.tenant)
+        .await
+        .unwrap();
+    // This trigger's, and any other of the tenant's left readable.
+    assert!(count >= 1);
+    let stored: String = sqlx::query_scalar(
+        "SELECT configuration->>'webhook_secret' FROM invocation_trigger
+         WHERE configuration->>'connection_id' = $1",
+    )
+    .bind(&connection)
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+    assert!(sealed_webhook_secret(&stored).is_some());
+    assert!(!stored.contains(TELEGRAM_SECRET));
+    // Nothing is left to seal.
+    assert_eq!(
+        seal_stored_webhook_secrets(&harness.pool, &manager, &harness.tenant)
+            .await
+            .unwrap(),
+        0
+    );
+
+    assert_eq!(post(&router, call()).await, StatusCode::OK);
+    // Another token is still refused.
+    assert_eq!(
+        post(
+            &router,
+            telegram_request(&connection, 2, Some("another-token"))
+        )
+        .await,
+        StatusCode::UNAUTHORIZED
+    );
+    harness.cleanup().await;
+}
+
 #[tokio::test]
 async fn a_newer_trigger_of_a_deleted_workflow_does_not_take_the_bot() {
     let harness = Harness::new().await;
@@ -1051,4 +1175,208 @@ async fn a_newer_trigger_of_a_deleted_workflow_does_not_take_the_bot() {
         .await
         .unwrap();
     harness.cleanup().await;
+}
+
+/// A Mailgun delivery signed with `key`, as Mailgun signs one: HMAC-SHA256 of
+/// the timestamp and token.
+fn signed_mailgun_request(connection_id: &str, delivery: u32, key: &str) -> Request<Body> {
+    let timestamp = chrono::Utc::now().timestamp().to_string();
+    let token = format!("token{delivery}");
+    let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes()).unwrap();
+    mac.update(format!("{timestamp}{token}").as_bytes());
+    let signature = hex::encode(mac.finalize().into_bytes());
+    Request::post(format!(
+        "/api/runtime/events/webhook/mailgun/{connection_id}"
+    ))
+    .header("content-type", "application/x-www-form-urlencoded")
+    .body(Body::from(format!(
+        "sender=user%40example.test&body-plain=hello&Message-Id=%3Cs{delivery}%40example.test%3E\
+             &timestamp={timestamp}&token={token}&signature={signature}"
+    )))
+    .unwrap()
+}
+
+/// Slack and Mailgun connections whose secrets are sealed: the webhook's
+/// signature is checked by seal, a forged call is refused, and a deployment
+/// without seal refuses rather than accept unchecked.
+#[tokio::test]
+async fn a_sealed_channel_connections_webhook_is_checked_by_seal() {
+    use runtara_connections::sealed::keys::PgKeySource;
+    use runtara_connections::sealed::{Allowances, SealedCredentials, is_sealed};
+    const MAILGUN_KEY: &str = "intake-harness-mailgun-signing-key";
+    let harness = Harness::new().await;
+    let sealed = Arc::new(
+        SealedCredentials::in_process(
+            Arc::new(PgKeySource::new(harness.pool.clone())),
+            &[7_u8; 32],
+            Allowances::default(),
+        )
+        .unwrap(),
+    );
+    let router = harness.router_with(Some(sealed.clone())).await;
+    let without_seal = harness.router().await;
+
+    // Slack: the harness's own request, signed with SLACK_SECRET.
+    let slack = harness
+        .sealed_connection(&sealed, "slack_bot", Provider::Slack.parameters())
+        .await;
+    let stored: Value = sqlx::query_scalar(
+        "SELECT connection_parameters FROM connection_data_entity WHERE id = $1",
+    )
+    .bind(&slack)
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+    assert!(is_sealed(&stored["signing_secret"]) && is_sealed(&stored["bot_token"]));
+    assert!(!stored.to_string().contains(SLACK_SECRET));
+
+    let mut forged = Provider::Slack.request(&slack, 1);
+    forged.headers_mut().insert(
+        "x-slack-signature",
+        format!("v0={}", "0".repeat(64)).parse().unwrap(),
+    );
+    assert_eq!(post(&router, forged).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        post(&without_seal, Provider::Slack.request(&slack, 1)).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(harness.intake(&slack).await.is_empty());
+
+    assert_eq!(
+        post(&router, Provider::Slack.request(&slack, 1)).await,
+        StatusCode::OK
+    );
+    harness.processed(&slack).await;
+
+    // Mailgun, with a signing key.
+    let mailgun = harness
+        .sealed_connection(
+            &sealed,
+            "mailgun",
+            json!({
+                "api_key": "test-key",
+                "domain": "mail.example.test",
+                "webhook_signing_key": MAILGUN_KEY,
+            }),
+        )
+        .await;
+    assert_eq!(
+        post(&router, signed_mailgun_request(&mailgun, 1, "another key")).await,
+        StatusCode::UNAUTHORIZED
+    );
+    // The harness's unsigned delivery carries no signature at all.
+    assert_eq!(
+        post(&router, Provider::Mailgun.request(&mailgun, 1)).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        post(
+            &without_seal,
+            signed_mailgun_request(&mailgun, 1, MAILGUN_KEY)
+        )
+        .await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(harness.intake(&mailgun).await.is_empty());
+
+    assert_eq!(
+        post(&router, signed_mailgun_request(&mailgun, 1, MAILGUN_KEY)).await,
+        StatusCode::OK
+    );
+    harness.processed(&mailgun).await;
+
+    // Sealed, but with no signing key: accepted unchecked, as before.
+    let unsigned = harness
+        .sealed_connection(
+            &sealed,
+            "mailgun",
+            json!({"api_key": "test-key", "domain": "mail.example.test"}),
+        )
+        .await;
+    assert_eq!(
+        post(&router, Provider::Mailgun.request(&unsigned, 1)).await,
+        StatusCode::OK
+    );
+    harness.processed(&unsigned).await;
+
+    sqlx::query("DELETE FROM seal_wrapped_key WHERE tenant_id = $1")
+        .bind(&harness.tenant)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+    harness.cleanup().await;
+}
+
+/// A Telegram connection whose bot token is sealed has its webhook's secret
+/// sealed too: a call's token is checked by seal, a wrong or missing one is
+/// refused, and a deployment without seal refuses rather than accept
+/// unchecked.
+#[tokio::test]
+async fn a_sealed_telegram_webhooks_secret_is_checked_by_seal() {
+    use runtara_connections::sealed::keys::PgKeySource;
+    use runtara_connections::sealed::{Allowances, SealedCredentials};
+    let harness = Harness::new().await;
+    let sealed = Arc::new(
+        SealedCredentials::in_process(
+            Arc::new(PgKeySource::new(harness.pool.clone())),
+            &[7_u8; 32],
+            Allowances::default(),
+        )
+        .unwrap(),
+    );
+    let router = harness.router_with(Some(sealed.clone())).await;
+    let without_seal = harness.router().await;
+
+    let connection = harness
+        .sealed_connection(&sealed, "telegram_bot", Provider::Telegram.parameters())
+        .await;
+    // As registration stores it: sealed for this connection's webhook.
+    let marker = sealed
+        .seal_webhook_secret(
+            &harness.tenant,
+            &connection,
+            Some("https://runtime.example.test/hook"),
+            TELEGRAM_SECRET,
+        )
+        .await
+        .unwrap();
+    let stored = format!("$sealed:{marker}");
+    assert!(!stored.contains(TELEGRAM_SECRET));
+    sqlx::query(
+        "UPDATE invocation_trigger
+         SET configuration = configuration || jsonb_build_object('webhook_secret', $2::text)
+         WHERE configuration->>'connection_id' = $1",
+    )
+    .bind(&connection)
+    .bind(&stored)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    for wrong in [Some("not-the-secret"), None] {
+        assert_eq!(
+            post(&router, telegram_request(&connection, 1, wrong)).await,
+            StatusCode::UNAUTHORIZED,
+            "{wrong:?}"
+        );
+    }
+    assert_eq!(
+        post(
+            &without_seal,
+            telegram_request(&connection, 1, Some(TELEGRAM_SECRET))
+        )
+        .await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(harness.intake(&connection).await.is_empty());
+
+    assert_eq!(
+        post(
+            &router,
+            telegram_request(&connection, 1, Some(TELEGRAM_SECRET))
+        )
+        .await,
+        StatusCode::OK
+    );
+    harness.processed(&connection).await;
 }

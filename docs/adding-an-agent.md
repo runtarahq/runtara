@@ -177,25 +177,38 @@ existing connection type (`http_bearer`, `http_api_key`,
    connection.
 3. `crates/runtara-agents/src/static_registry.rs`: add the
    `__CONNECTION_META_<Struct>` entry.
-4. `crates/runtara-connections/src/auth/provider_auth.rs`: a match arm that
-   injects the credential and sets the base URL.
+4. Where requests go, and where each secret goes. A connection's secrets are
+   stored and used sealed only: seal attaches them, and nothing else reads
+   them.
+   - `crates/runtara-connections/src/auth/provider_auth.rs`: a match arm that
+     sets the base URL and any header that is no secret (an API version, an
+     account id). It never puts a secret in a header.
+   - `crates/runtara-connections/src/sealed/policy.rs`: the type in
+     `SEALABLE_TYPES`, and in `secrets()` each secret parameter with the one
+     place it may go and how it is sent there (a header, basic auth, a path,
+     a signature). A test fails if a parameter the type marks secret has no
+     policy. What seal cannot hold is refused when the connection is saved.
    - OAuth2 authorization-code types are descriptor-driven: add the
      `integration_id` to the existing `hubspot_private_app | quickbooks_online
      | …` arm instead. A value the provider returns in the callback (Intuit's
      `realmId`) is an `oauth_extra_callback_params` entry. One it names only
      through its API, as Xero names the organisation, is looked up after the
-     code exchange in `add_provider_account_fields` (`service/oauth.rs`), and
-     the auth arm sends it (`xero_oauth`).
+     code exchange in `add_provider_account_fields_through_seal`
+     (`service/oauth.rs`), and the auth arm sends it (`xero_oauth`).
    - A provider that runs its login server and API per region names one
      function that resolves all three URLs from the connection's region
      fields, with `oauth_hosts` (`zoho_hosts`, from `data_center` and
      `environment`, the second looked up after the code exchange in
-     `add_provider_account_fields`). The function picks from a table in code, so parameters
-     still cannot name a host; a value it does not know resolves to nothing,
-     and the flow and every request fail closed. `oauth_authorize_params`
-     appends fixed query parameters to the authorize URL (Zoho's
-     `access_type=offline&prompt=consent`), and `oauth_token_header_prefix`
-     replaces `Bearer` before the access token (`Zoho-oauthtoken`).
+     `add_provider_account_fields_through_seal`). The function picks from a
+     table in code, so parameters still cannot name a host; a value it does
+     not know resolves to nothing, and the flow and every request fail
+     closed. `oauth_authorize_params` appends fixed query parameters to the
+     authorize URL (Zoho's `access_type=offline&prompt=consent`), and
+     `oauth_token_header_prefix` replaces `Bearer` before the access token
+     (`Zoho-oauthtoken`); seal attaches the token after it. Where a lookup
+     after the exchange decides which host the token is for, the token's
+     policy names every host it may turn out to be (`authorized_tokens` in
+     `sealed/policy.rs`).
    - A provider that takes a name for the redirect as `redirect_uri` rather
      than the URL, as eBay takes the application's RuName, names the
      connection field that holds it with `oauth_redirect_uri_param`
@@ -205,10 +218,11 @@ existing connection type (`http_bearer`, `http_api_key`,
      `redirectUri` names.
    - OAuth2 client credentials against the vendor's own token endpoint get a
      `describe_<vendor>_client_credentials_auth` returning
-     `DeferredAuth::OAuth2ClientCredentials` (Shopify, Zendesk): the token is
-     minted, cached and injected at request time. Send the body the vendor
-     documents (`TokenRequestBody::Json` or `FormUrlEncoded`), and ask for a
-     token lifetime when the vendor's default is a token that never expires.
+     `DeferredAuth::OAuth2ClientCredentials` (Shopify, Zendesk): the shape of
+     the token request. seal sends it with the sealed client secret, and the
+     token comes back sealed for the API. Send the body the vendor documents
+     (`TokenRequestBody::Json` or `FormUrlEncoded`), and ask for a token
+     lifetime when the vendor's default is a token that never expires.
 5. `crates/runtara-connections/src/util/rate_limit_defaults.rs`: a default
    rate limit from the vendor's documented limits, or, only when they are
    genuinely unknowable, an entry in `RATE_LIMIT_OPT_OUT`. Required: a test
@@ -216,7 +230,8 @@ existing connection type (`http_bearer`, `http_api_key`,
    API share one default.
 6. Tests: the extractor in `runtara-agents/src/agents/extractors/tests.rs`
    (headers, base URL, registration, a rejected host), the match arm in
-   `provider_auth.rs`, and the default in `rate_limit_defaults.rs`.
+   `provider_auth.rs`, the policy in `sealed/policy.rs`, and the default in
+   `rate_limit_defaults.rs`.
 7. Optional: an icon in
    runtara-frontend's `src/shared/components/service-icon.tsx`,
    keyed by the connection type's `integration_id` (it falls back to the

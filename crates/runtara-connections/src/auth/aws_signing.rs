@@ -5,12 +5,11 @@ use std::collections::{BTreeMap, HashMap};
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// What a request to AWS is signed for. The key that signs is sealed, and
+/// seal signs with it: nothing here is a secret.
 pub struct AwsSigningParams {
-    pub access_key_id: String,
-    pub secret_access_key: String,
     pub region: String,
     pub service: String,
-    pub session_token: Option<String>,
 }
 
 /// Sign an HTTP request using AWS Signature V4.
