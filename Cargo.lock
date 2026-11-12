@@ -4173,6 +4173,7 @@ dependencies = [
  "runtara-agent-crypto",
  "runtara-agent-csv",
  "runtara-agent-datetime",
+ "runtara-agent-ebay",
  "runtara-agent-http",
  "runtara-agent-hubspot",
  "runtara-agent-jira",
@@ -4274,6 +4275,18 @@ dependencies = [
  "serde",
  "serde_json",
  "strum",
+ "wit-bindgen 0.58.0",
+]
+
+[[package]]
+name = "runtara-agent-ebay"
+version = "10.0.0"
+dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
+ "runtara-http",
+ "serde",
+ "serde_json",
  "wit-bindgen 0.58.0",
 ]
 

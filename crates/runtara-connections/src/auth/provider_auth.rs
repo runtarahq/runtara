@@ -226,6 +226,7 @@ fn describe_connection_auth(
         "hubspot_private_app"
         | "quickbooks_online"
         | "zoho_crm_oauth"
+        | "ebay_oauth"
         | "http_oauth2_authorization_code" => {
             describe_oauth_authcode_auth(connection_id, integration_id, params, headers)
         }
@@ -1334,6 +1335,7 @@ mod tests {
             hosts: None,
             authorize_params: "",
             token_header_prefix: "",
+            redirect_uri_param: "",
         }
     }
 
@@ -1664,6 +1666,63 @@ mod tests {
             assert!(descriptor.deferred_auth.is_none(), "{region}");
             assert!(headers.is_empty(), "{region}: {headers:?}");
         }
+    }
+
+    #[test]
+    fn ebay_refreshes_and_calls_on_its_environments_hosts_with_basic_client_auth() {
+        for (environment, token_url, base_url) in [
+            (
+                "production",
+                "https://api.ebay.com/identity/v1/oauth2/token",
+                "https://api.ebay.com",
+            ),
+            (
+                "sandbox",
+                "https://api.sandbox.ebay.com/identity/v1/oauth2/token",
+                "https://api.sandbox.ebay.com",
+            ),
+        ] {
+            let params = json!({
+                "client_id": "App-1",
+                "client_secret": "Cert-1",
+                "ru_name": "App-RuName",
+                "environment": environment,
+                "refresh_token": "v^1.1#refresh",
+            });
+            let mut headers = HashMap::new();
+            let descriptor =
+                describe_connection_auth("conn-1", "ebay_oauth", &params, &mut headers);
+            assert_eq!(
+                descriptor.base_url.as_deref(),
+                Some(base_url),
+                "{environment}"
+            );
+            match descriptor.deferred_auth {
+                Some(DeferredAuth::OAuth2RefreshToken {
+                    token_url: url,
+                    header_scheme,
+                    token_endpoint_auth,
+                    ..
+                }) => {
+                    assert_eq!(url, token_url, "{environment}");
+                    assert_eq!(header_scheme, "Bearer");
+                    assert!(matches!(token_endpoint_auth, TokenEndpointAuth::HttpBasic));
+                }
+                _ => panic!("a refresh token means a deferred refresh"),
+            }
+        }
+        // An environment eBay does not run: no destination, no credentials.
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "ebay_oauth",
+            &json!({ "client_id": "App-1", "environment": "staging",
+                     "access_token": "v^1.1#access", "refresh_token": "v^1.1#refresh" }),
+            &mut headers,
+        );
+        assert_eq!(descriptor.base_url, None);
+        assert!(descriptor.deferred_auth.is_none());
+        assert!(headers.is_empty(), "{headers:?}");
     }
 
     #[test]
@@ -2057,6 +2116,7 @@ mod tests {
             hosts: None,
             authorize_params: "",
             token_header_prefix: "",
+            redirect_uri_param: "",
         }
     }
 
@@ -2224,6 +2284,7 @@ mod tests {
             hosts: None,
             authorize_params: "",
             token_header_prefix: "",
+            redirect_uri_param: "",
         };
         let hostile = json!({
             "auth_url": "https://attacker.example/authorize",
@@ -2274,6 +2335,7 @@ mod tests {
             hosts: None,
             authorize_params: "",
             token_header_prefix: "",
+            redirect_uri_param: "",
         };
         let params = json!({
             "auth_url": "https://auth.example.com/authorize",

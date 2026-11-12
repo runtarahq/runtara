@@ -25,6 +25,7 @@ pub static CONNECTION_TYPES: &[&ConnectionTypeMeta] = &[
     &crate::extractors::connection_types::__CONNECTION_META_QuickBooksOnlineParams,
     &crate::extractors::connection_types::__CONNECTION_META_XeroOAuthParams,
     &crate::extractors::connection_types::__CONNECTION_META_ZohoCrmOAuthParams,
+    &crate::extractors::connection_types::__CONNECTION_META_EbayOAuthParams,
     &crate::extractors::connection_types::__CONNECTION_META_PostgresDatabaseParams,
     &crate::extractors::connection_types::__CONNECTION_META_S3CompatibleParams,
     &crate::extractors::connection_types::__CONNECTION_META_AzureBlobStorageParams,

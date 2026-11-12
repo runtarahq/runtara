@@ -196,6 +196,13 @@ existing connection type (`http_bearer`, `http_api_key`,
      appends fixed query parameters to the authorize URL (Zoho's
      `access_type=offline&prompt=consent`), and `oauth_token_header_prefix`
      replaces `Bearer` before the access token (`Zoho-oauthtoken`).
+   - A provider that takes a name for the redirect as `redirect_uri` rather
+     than the URL, as eBay takes the application's RuName, names the
+     connection field that holds it with `oauth_redirect_uri_param`
+     (`ru_name`). It is sent in the authorize URL and the code exchange; the
+     user still comes back to runtara's callback URL, the one registered with
+     the provider under that name, which the authorize response's
+     `redirectUri` names.
    - OAuth2 client credentials against the vendor's own token endpoint get a
      `describe_<vendor>_client_credentials_auth` returning
      `DeferredAuth::OAuth2ClientCredentials` (Shopify, Zendesk): the token is

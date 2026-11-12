@@ -201,8 +201,12 @@ specs:
 
 `fetch` slices each spec and merges the slices into one `spec.slice.json`.
 The specs must list the same `servers` (URLs and variable values; their
-descriptions may differ, as Zoho's do), and no path and method may be in two
-of them. A schema that two specs define differently under one generated name
+descriptions may differ, as Zoho's do), or first servers on one host whose
+paths differ, as eBay's `https://api.ebay.com{basePath}` do with a base path
+per API. Then each spec's path (its variables at their defaults) goes in front
+of its own paths (`/sell/inventory/v1/offer`), and the merged server is the
+host alone; a spec's other servers are dropped. No path and method may be in
+two of the specs. A schema that two specs define differently under one generated name
 gets the spec's name in front in each of them (`ErrorResponse` becomes
 `TrackingErrorResponse` and `ShippingErrorResponse`); one they define the same
 way is kept once. So does any other component, such as a shared parameter
@@ -320,6 +324,17 @@ field_types:
       additionalProperties: {type: boolean}
 ```
 
+**The descriptions are HTML**, as eBay's are (`<br>`, `<strong>`, links to
+its own site). With `html_descriptions`, `fetch` writes every description and
+summary as the plain text the step editor shows: line breaks for `<br>`,
+paragraphs and list items (`- `), backticks for `<code>`, a link's text
+without its URL, entities decoded. Examples, defaults and enums keep their
+text.
+
+```yaml
+html_descriptions: true
+```
+
 **No step input can carry a parameter**, such as Zoho's `filters`, a nested
 filter object `fetch` refuses. List it, and the operations that take it are
 generated without it; another operation (a search, a query) covers the need:
@@ -402,8 +417,10 @@ crates/agents/runtara-agent-<id>/
   only adds the connection.
 - The capability returns the full response type: `Vec<T>` for an array,
   `HashMap<String, T>` for a map, the primitive or model otherwise, and `Value`
-  when the operation declares no JSON response. At runtime an empty success
-  body (e.g. 204) decodes as `null`, and a non-JSON one as its text.
+  when the operation declares no JSON response. A 204 (No Content) declares
+  none, whatever schema the spec gives it: eBay's give theirs the error
+  schema. At runtime an empty success body (e.g. 204) decodes as `null`, and a
+  non-JSON one as its text.
 - Enums keep their wire type (`String`, `i64`) in inputs and outputs, so a value
   the spec does not list passes through unchanged; the allowed values are listed
   in the field's description. A `$ref` to an enum schema is inlined by `fetch`.

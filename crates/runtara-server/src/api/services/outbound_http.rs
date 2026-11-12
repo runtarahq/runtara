@@ -508,6 +508,26 @@ fn path_targets_conversation(agent_url: &str, conversation_id: &str) -> bool {
     false
 }
 
+/// The request's content. A POST, PUT or PATCH with none still says so with
+/// `Content-Length: 0`: hyper writes no length for an empty body, and some
+/// servers refuse such a request with 411 Length Required (eBay's edge, for
+/// `publishOffer`). The guest cannot set the header itself; framing headers
+/// are the host's (see [`guest_headers`]).
+fn with_content(
+    builder: reqwest::RequestBuilder,
+    method: &str,
+    body: Option<Vec<u8>>,
+) -> reqwest::RequestBuilder {
+    let has_content = body.as_ref().is_some_and(|bytes| !bytes.is_empty());
+    match body {
+        Some(bytes) if has_content => builder.body(bytes),
+        _ if matches!(method, "POST" | "PUT" | "PATCH") => {
+            builder.header(reqwest::header::CONTENT_LENGTH, "0")
+        }
+        _ => builder,
+    }
+}
+
 /// Native outbound execution, shared by all injected component hosts.
 async fn execute_request(
     tenant_id: &str,
@@ -814,10 +834,7 @@ async fn execute_request(
     }
     req_builder = req_builder.headers(header_map);
 
-    // Set body
-    if let Some(bytes) = body_bytes {
-        req_builder = req_builder.body(bytes);
-    }
+    req_builder = with_content(req_builder, &method, body_bytes);
 
     // ── Execute request ──────────────────────────────────────────────────
     let response = req_builder
@@ -1120,6 +1137,43 @@ fn is_explicitly_allowed_host(url: &url::Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_write_without_content_says_its_length_is_zero() {
+        let client = reqwest::Client::new();
+        let build = |method: &str, body: Option<Vec<u8>>| {
+            with_content(
+                client.request(method.parse().unwrap(), "https://api.example.com/x"),
+                method,
+                body,
+            )
+            .build()
+            .unwrap()
+        };
+        let length = |request: &reqwest::Request| {
+            request
+                .headers()
+                .get(reqwest::header::CONTENT_LENGTH)
+                .map(|value| value.to_str().unwrap().to_string())
+        };
+        for method in ["POST", "PUT", "PATCH"] {
+            for body in [None, Some(Vec::new())] {
+                let request = build(method, body.clone());
+                assert_eq!(length(&request).as_deref(), Some("0"), "{method} {body:?}");
+                assert!(request.body().is_none(), "{method} {body:?}");
+            }
+        }
+        // A read sends no content and no length; content goes as it is.
+        let read = build("GET", None);
+        assert_eq!(length(&read), None);
+        assert!(read.body().is_none());
+        let posted = build("POST", Some(b"{}".to_vec()));
+        assert_eq!(
+            posted.body().and_then(|body| body.as_bytes()),
+            Some(&b"{}"[..])
+        );
+        assert_eq!(length(&posted), None, "hyper sets it from the body");
+    }
 
     #[test]
     fn a_guest_sets_neither_the_host_nor_the_framing() {

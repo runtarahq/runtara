@@ -989,6 +989,12 @@ pub struct OAuthConfig {
     /// The word before the access token in the `Authorization` header
     /// (Zoho's `Zoho-oauthtoken`). Empty = `Bearer`.
     pub token_header_prefix: &'static str,
+    /// The connection field whose value is sent as `redirect_uri`, in the
+    /// authorize URL and the code exchange, instead of runtara's callback URL:
+    /// eBay takes the name it gave the app's redirect (its RuName) there, and
+    /// sends the user on to the URL registered under that name, runtara's
+    /// callback. Empty = runtara's callback URL.
+    pub redirect_uri_param: &'static str,
 }
 
 /// See [`OAuthConfig::hosts`].
