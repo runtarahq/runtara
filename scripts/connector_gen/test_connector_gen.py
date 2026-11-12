@@ -711,6 +711,80 @@ class ConnectionPartsTest(unittest.TestCase):
             cg.slice_spec(self.spec(), ["void"], connection_headers=["id"])
 
 
+class HtmlDescriptionsTest(unittest.TestCase):
+    """`html_descriptions` turns a vendor's HTML descriptions (eBay's) into the
+    plain text the step editor shows."""
+
+    def test_html_becomes_plain_text(self):
+        cases = (
+            ("The <strong>SKU</strong> of the item.", "The SKU of the item."),
+            ("One.<br>Two.<br/>Three.", "One.\nTwo.\nThree."),
+            ("<p>First.</p><p>Second.</p>", "First.\n\nSecond."),
+            ("Values: <ul><li>A</li><li>B</li></ul>Then.", "Values:\n\n- A\n- B\n\nThen."),
+            ("Set <code>en-US</code>.", "Set `en-US`."),
+            ('See <a href="/api-docs/sell/static/x.html" target="_blank">Publishing offers</a>.',
+             "See Publishing offers."),
+            ("A &amp; B &lt;5&gt; &quot;x&quot;", 'A & B <5> "x"'),
+            ("Spread\n   over\tlines", "Spread over lines"),
+            # A `<` that starts no HTML element is text: a placeholder, a typo.
+            ("filter=creationdate:[<start>..<end>]", "filter=creationdate:[<start>..<end>]"),
+            ("<This type is used by <b>updateOffer</b>.", "<This type is used by updateOffer."),
+            ("x < 5 and y<3", "x < 5 and y<3"),
+            # A `<pre>` block keeps its lines and indentation.
+            ('<p>Example:</p><pre>{\n  "Brand": ["GoPro"],\n  "Type": ["Camera"]\n}</pre>Done.',
+             'Example:\n\n{\n  "Brand": ["GoPro"],\n  "Type": ["Camera"]\n}\n\nDone.'),
+            ("<pre>a <b>b</b>\n  c</pre>", "a b\n  c"),
+            # eBay closes the block before its `<code>`.
+            ("As follows: <br> <pre><code>{<br> \"a\": 1<br> } </pre></code>Then.",
+             'As follows:\n\n{\n "a": 1\n }\n\nThen.'),
+        )
+        for html_text, plain in cases:
+            with self.subTest(html_text):
+                self.assertEqual(cg.plain_text(html_text), plain)
+
+    def test_descriptions_and_summaries_change_and_data_keeps_its_text(self):
+        body = json_body({"type": "object", "properties": {
+            "default": {"type": "string", "description": "A <b>default</b> field."},
+            "note": {"type": "string", "description": "<i>Note</i>.", "example": "<b>kept</b>",
+                     "enum": ["<b>kept</b>"], "default": "<b>kept</b>"},
+        }})
+        spec = {"openapi": "3.0.1", "info": {"title": "t", "version": "1"}, "paths": {"/items": {"post": {
+            "operationId": "create", "summary": "Create <code>items</code>", "description": "Creates.<br>Then.",
+            "parameters": [{"in": "query", "name": "q", "description": "A <b>query</b>.", "schema": {"type": "string"}}],
+            **body, "responses": {"200": {"description": "<p>Created.</p>"}}}}}}
+        sliced = cg.slice_specs([({"operations": ["create"]}, spec)], {"html_descriptions": True})
+        op = operation(sliced, "create")
+        self.assertEqual((op["summary"], op["description"]), ("Create `items`", "Creates.\nThen."))
+        self.assertEqual(op["parameters"][0]["description"], "A query.")
+        self.assertEqual(op["responses"]["200"]["description"], "Created.")
+        properties = op["requestBody"]["content"]["application/json"]["schema"]["properties"]
+        self.assertEqual(properties["default"]["description"], "A default field.")
+        self.assertEqual(properties["note"], {"type": "string", "description": "Note.", "example": "<b>kept</b>",
+                                              "enum": ["<b>kept</b>"], "default": "<b>kept</b>"})
+        # Off unless asked for.
+        plain = cg.slice_specs([({"operations": ["create"]}, copy.deepcopy(spec))], {})
+        self.assertEqual(operation(plain, "create")["description"], "Creates.<br>Then.")
+
+
+class NoContentTest(unittest.TestCase):
+    """A 204 (No Content) has no body, whatever the spec gives it."""
+
+    def test_a_204_declares_no_output(self):
+        error = {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+        spec = {"openapi": "3.0.1", "info": {"title": "t", "version": "1"}, "paths": {"/items/{id}": {
+            "delete": {"operationId": "remove", "parameters": [
+                {"in": "path", "name": "id", "required": True, "schema": {"type": "string"}}],
+                "responses": {"204": {"description": "Deleted", **error},
+                              "404": {"$ref": "#/components/responses/NotFound"}}}}},
+            "components": {"schemas": {"Error": {"type": "object", "properties": {"code": {"type": "string"}}}},
+                           "responses": {"NotFound": {"description": "Not found", **error}}}}
+        sliced = cg.slice_specs([({"operations": ["remove"]}, spec)], {})
+        responses = operation(sliced, "remove")["responses"]
+        self.assertEqual(responses["204"], {"description": "Deleted"})
+        # Error answers keep their schema.
+        self.assertIn("Error", sliced["components"]["schemas"])
+
+
 class InputTypesTest(unittest.TestCase):
     """`input_types` retypes the inputs a vendor's spec types wrongly."""
 
@@ -987,6 +1061,32 @@ class MergeTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as raised:
             merge(("Track", "track", merge_spec("/track", "track", {"Reply": reply})), optional_fields={"Reply": ["note"]})
         self.assertIn("['note']", str(raised.exception))
+
+    @staticmethod
+    def based(path: str, op_id: str, base: str, *more_servers) -> dict:
+        """A spec served, like eBay's, from `https://api.example.com{basePath}`."""
+        spec = merge_spec(path, op_id, MergeTest.schemas("e"))
+        spec["servers"] = [{"url": "https://api.example.com{basePath}",
+                            "variables": {"basePath": {"default": base}}}, *more_servers]
+        return spec
+
+    def test_base_paths_on_one_host_move_into_the_paths(self):
+        merged = merge(("Orders", "orders", self.based("/order/{id}", "orders", "/sell/fulfillment/v1",
+                                                       {"url": "https://apiz.example.com/sell/fulfillment/v1"})),
+                       ("Items", "items", self.based("/inventory_item", "items", "/sell/inventory/v1/")),
+                       ("Root", "root", merge_spec("/privilege", "root", self.schemas("e"),
+                                                   servers=("https://api.example.com",))))
+        self.assertEqual(merged["servers"], [{"url": "https://api.example.com"}])
+        self.assertEqual(sorted(merged["paths"]), ["/privilege", "/sell/fulfillment/v1/order/{id}",
+                                                   "/sell/inventory/v1/inventory_item"])
+
+    def test_servers_that_name_no_host_and_path_are_refused(self):
+        for server in ({"url": "/api"}, {"url": "https://api.example.com/{version}", "variables": {"version": {}}}):
+            unhosted = merge_spec("/ship", "ship", self.schemas("e"))
+            unhosted["servers"] = [server]
+            with self.subTest(server), self.assertRaises(SystemExit) as raised:
+                merge(("Track", "track", merge_spec("/track", "track", self.schemas("e"))), ("Ship", "ship", unhosted))
+            self.assertIn("`Ship`'s first one is no URL of a host and a path", str(raised.exception))
 
     def test_refusals(self):
         track = ("Track", "track", merge_spec("/track", "track", self.schemas("e")))
@@ -1380,6 +1480,22 @@ class MergeRenderTest(unittest.TestCase):
         self.assertIn("pub error: Option<TrackError>,", text)
         self.assertIn("pub async fn ship(input: ShipInput) -> Result<ShipReply, AgentError>", text)
 
+    def test_folded_base_paths_are_in_the_request_paths(self):
+        specs = [("Orders", "orders", MergeTest.based("/order", "orders", "/sell/fulfillment/v1")),
+                 ("Items", "items", MergeTest.based("/inventory_item", "items", "/sell/inventory/v1"))]
+        with tempfile.TemporaryDirectory() as tmp:
+            crate = Path(tmp)
+            (crate / "connector.yaml").write_text(yaml.safe_dump({
+                "agent": {"id": "sample", "name": "Sample", "description": "Sample.",
+                          "integration_id": "sample_token", "error_prefix": "SAMPLE"},
+                "specs": [{"name": name, "url": "unused", "sha256": "unused", "operations": [op_id]}
+                          for name, op_id, _ in specs],
+            }))
+            cg.write_json(crate / "spec.slice.json", merge(*specs))
+            text = cg.render(crate)
+        self.assertIn('String::from("/sell/fulfillment/v1/order")', text)
+        self.assertIn('String::from("/sell/inventory/v1/inventory_item")', text)
+
 
 @unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
 class DriftTest(unittest.TestCase):
@@ -1567,12 +1683,22 @@ class MergeComponentsTest(unittest.TestCase):
         merged = merge(("Records", "records", spec("/records", "records", "Records server")),
                        ("Users", "users", spec("/users", "users", "API Server URL")))
         self.assertEqual(merged["servers"][0]["url"], "https://zohoapis.{dc}/crm/{version}")
-        # A variable's value still has to agree.
+        # A variable naming the host still has to agree.
         other = spec("/users", "users", "x")
-        other["servers"][0]["variables"]["version"]["default"] = "v7"
+        other["servers"][0]["variables"]["dc"]["default"] = "eu"
         with self.assertRaises(SystemExit) as raised:
             merge(("Records", "records", spec("/records", "records", "y")), ("Users", "users", other))
-        self.assertIn("servers", str(raised.exception))
+        self.assertIn("different hosts (https://zohoapis.com, https://zohoapis.eu)", str(raised.exception))
+        # A variable in the path may differ: each spec's requests keep the
+        # path its own server names.
+        older = spec("/users", "users", "x")
+        older["servers"][0]["variables"]["version"]["default"] = "v7"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            merged = merge(("Records", "records", spec("/records", "records", "y")), ("Users", "users", older))
+        self.assertEqual(merged["servers"], [{"url": "https://zohoapis.com"}])
+        self.assertEqual(sorted(merged["paths"]), ["/crm/v7/users", "/crm/v8/records"])
+        self.assertIn("note: Users: its paths go under https://zohoapis.com/crm/v7", out.getvalue())
 
     def test_a_parameter_the_specs_define_differently_gets_the_spec_name(self):
         def spec(path, op_id, description):

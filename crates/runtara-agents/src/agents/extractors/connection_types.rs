@@ -1348,6 +1348,146 @@ impl HttpConnectionExtractor for ZohoCrmOAuthExtractor {
     }
 }
 
+/// eBay's Sell APIs, authorized as an eBay seller through the tenant's own
+/// eBay Developer Program application (its App ID, Cert ID and RuName).
+///
+/// eBay takes the application's RuName (the name it gave the application's
+/// redirect), not a URL, as `redirect_uri`, in the authorize URL and the code
+/// exchange; the RuName's "Auth Accepted URL" in the developer portal is
+/// runtara's callback. Its sandbox and production run their login and API on
+/// different hosts, which [`ebay_hosts`] resolves from `environment`, each
+/// with its own keyset and RuName. The token endpoint takes the client
+/// credentials as HTTP Basic; an access token lasts two hours and the refresh
+/// token, which does not rotate, 18 months.
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "ebay_oauth",
+    display_name = "eBay",
+    description = "Connect to eBay's Sell APIs as a seller, with OAuth 2.0 authorization",
+    category = "ecommerce",
+    auth_type = "oauth2_authorization_code",
+    oauth_auth_url = "https://auth.ebay.com/oauth2/authorize",
+    oauth_token_url = "https://api.ebay.com/identity/v1/oauth2/token",
+    oauth_default_scopes = "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.fulfillment https://api.ebay.com/oauth/api_scope/sell.finances https://api.ebay.com/oauth/api_scope/sell.account.readonly",
+    oauth_token_auth = "basic",
+    oauth_hosts = "ebay_hosts",
+    oauth_redirect_uri_param = "ru_name",
+    oauth_reauth_on_error_codes = "invalid_grant"
+)]
+pub struct EbayOAuthParams {
+    /// eBay application's App ID (Client ID)
+    #[field(
+        display_name = "App ID (Client ID)",
+        description = "App ID of your application's keyset for this environment, from Application \
+                       Keys in the eBay Developer Program",
+        requires_reauthorization
+    )]
+    pub client_id: String,
+
+    /// eBay application's Cert ID (Client Secret)
+    #[field(
+        display_name = "Cert ID (Client Secret)",
+        description = "Cert ID of your application's keyset for this environment",
+        secret,
+        requires_reauthorization
+    )]
+    pub client_secret: String,
+
+    /// eBay application's RuName, sent as `redirect_uri`
+    #[field(
+        display_name = "RuName",
+        description = "The RuName (eBay Redirect URL name) of this keyset, under User Tokens in \
+                       Application Keys. Set its Auth Accepted URL to this connection's callback URL",
+        requires_reauthorization
+    )]
+    pub ru_name: String,
+
+    /// eBay environment: production or sandbox
+    #[serde(default = "default_ebay_environment")]
+    #[field(
+        display_name = "Environment",
+        description = "production, or sandbox for eBay's Sandbox with a Sandbox keyset and test user",
+        default = "production",
+        enum_values = "production,sandbox",
+        requires_reauthorization
+    )]
+    pub environment: String,
+
+    /// OAuth2 scopes (space-separated)
+    #[serde(default = "default_ebay_scopes")]
+    #[field(
+        display_name = "Scopes",
+        description = "Space-separated OAuth2 scopes. The default manages inventory, offers and \
+                       orders, issues refunds (sell.finances), and reads the seller's business \
+                       policies.",
+        default = "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.fulfillment https://api.ebay.com/oauth/api_scope/sell.finances https://api.ebay.com/oauth/api_scope/sell.account.readonly",
+        requires_reauthorization
+    )]
+    pub scopes: String,
+}
+
+fn default_ebay_environment() -> String {
+    "production".to_string()
+}
+
+fn default_ebay_scopes() -> String {
+    "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.inventory \
+     https://api.ebay.com/oauth/api_scope/sell.fulfillment \
+     https://api.ebay.com/oauth/api_scope/sell.finances \
+     https://api.ebay.com/oauth/api_scope/sell.account.readonly"
+        .to_string()
+}
+
+/// The OAuth endpoints and API host of an eBay connection's `environment`;
+/// `None` for one eBay does not run, which sends nothing.
+pub fn ebay_hosts(params: &Value) -> Option<OAuthHosts> {
+    let (auth, api) = match params["environment"].as_str().unwrap_or("production") {
+        "production" => ("auth.ebay.com", "api.ebay.com"),
+        "sandbox" => ("auth.sandbox.ebay.com", "api.sandbox.ebay.com"),
+        _ => return None,
+    };
+    Some(OAuthHosts {
+        auth_url: format!("https://{auth}/oauth2/authorize"),
+        token_url: format!("https://{api}/identity/v1/oauth2/token"),
+        base_url: format!("https://{api}"),
+    })
+}
+
+/// HTTP extractor for eBay connections. The proxy resolves the token and the
+/// environment's API host from the connection, so the values here only serve
+/// the extractor contract and let the generic `http` agent bind an
+/// `ebay_oauth` connection.
+pub struct EbayOAuthExtractor;
+
+impl HttpConnectionExtractor for EbayOAuthExtractor {
+    fn integration_id(&self) -> &'static str {
+        "ebay_oauth"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        if params.get("client_id").and_then(|v| v.as_str()).is_none() {
+            return Err("Invalid ebay_oauth connection: missing client_id".to_string());
+        }
+        if ebay_hosts(params).is_none() {
+            return Err(format!(
+                "Invalid ebay_oauth connection: no eBay environment `{}`",
+                params["environment"].as_str().unwrap_or("production"),
+            ));
+        }
+
+        let mut headers = HashMap::new();
+        headers.insert("Accept".to_string(), "application/json".to_string());
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+
+        Ok(HttpConnectionConfig {
+            headers,
+            query_parameters: HashMap::new(),
+            url_prefix: String::new(),
+            rate_limit_config: None,
+        })
+    }
+}
+
 /// HTTP extractor for HubSpot connections.
 ///
 /// Note: the `Authorization` header is NOT set here because the access token
@@ -2622,6 +2762,16 @@ mod form_condition_tests {
             (
                 &__CONNECTION_META_ZohoCrmOAuthParams,
                 &["client_id", "client_secret", "data_center", "scopes"][..],
+            ),
+            (
+                &__CONNECTION_META_EbayOAuthParams,
+                &[
+                    "client_id",
+                    "client_secret",
+                    "ru_name",
+                    "environment",
+                    "scopes",
+                ][..],
             ),
             (
                 &__CONNECTION_META_HttpOAuth2AuthorizationCodeParams,

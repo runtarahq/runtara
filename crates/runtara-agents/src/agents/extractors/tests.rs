@@ -207,6 +207,76 @@ fn zoho_crm_descriptor_resolves_its_hosts_and_asks_for_offline_access() {
 }
 
 #[test]
+fn ebay_is_reachable_from_the_http_agent_and_needs_a_client_and_an_environment() {
+    assert!(get_http_extractor_ids().contains(&"ebay_oauth"));
+    let extractor = connection_types::EbayOAuthExtractor;
+    assert_eq!(extractor.integration_id(), "ebay_oauth");
+    for params in [
+        json!({ "client_id": "App-PRD-1", "client_secret": "shh" }),
+        json!({ "client_id": "App-SBX-1", "environment": "sandbox" }),
+    ] {
+        let config = extractor.extract(&params).expect("a client is enough");
+        assert!(config.url_prefix.is_empty(), "got {:?}", config.url_prefix);
+    }
+    assert!(extractor.extract(&json!({})).is_err());
+    let err = extractor
+        .extract(&json!({ "client_id": "App-1", "environment": "staging" }))
+        .unwrap_err();
+    assert!(err.contains("`staging`"), "{err}");
+}
+
+#[test]
+fn ebay_hosts_follow_the_environment() {
+    use connection_types::ebay_hosts;
+    let hosts = |params| ebay_hosts(&params).map(|h| (h.auth_url, h.token_url, h.base_url));
+    let expected = |auth: &str, api: &str| {
+        Some((
+            format!("https://{auth}/oauth2/authorize"),
+            format!("https://{api}/identity/v1/oauth2/token"),
+            format!("https://{api}"),
+        ))
+    };
+    assert_eq!(hosts(json!({})), expected("auth.ebay.com", "api.ebay.com"));
+    assert_eq!(
+        hosts(json!({ "environment": "production" })),
+        expected("auth.ebay.com", "api.ebay.com")
+    );
+    assert_eq!(
+        hosts(json!({ "environment": "sandbox" })),
+        expected("auth.sandbox.ebay.com", "api.sandbox.ebay.com")
+    );
+    for unknown in ["Sandbox", "staging", ""] {
+        assert_eq!(hosts(json!({ "environment": unknown })), None, "{unknown}");
+    }
+}
+
+#[test]
+fn ebay_descriptor_sends_its_runame_as_the_redirect_uri() {
+    let meta = crate::registry::find_connection_type("ebay_oauth").expect("registered");
+    let oauth = meta.oauth_config.expect("an OAuth descriptor");
+    assert!(oauth.hosts.is_some());
+    assert_eq!(oauth.redirect_uri_param, "ru_name");
+    assert!(matches!(
+        oauth.token_endpoint_auth,
+        runtara_dsl::agent_meta::TokenEndpointAuth::HttpBasic
+    ));
+    assert!(!oauth.refresh_token_rotates);
+    assert_eq!(oauth.reauth_on_error_codes, ["invalid_grant"]);
+    assert_eq!(oauth.token_header_prefix, "");
+    let ru_name = meta.fields.iter().find(|f| f.name == "ru_name").unwrap();
+    assert!(!ru_name.is_optional, "the authorize URL needs it");
+    let environment = meta
+        .fields
+        .iter()
+        .find(|f| f.name == "environment")
+        .unwrap();
+    assert_eq!(
+        environment.enum_values.unwrap_or_default().join(","),
+        "production,sandbox"
+    );
+}
+
+#[test]
 fn xero_descriptor_rotates_and_reads_the_organisation_back() {
     let meta = crate::registry::find_connection_type("xero_oauth").expect("registered");
     let oauth = meta.oauth_config.expect("an OAuth descriptor");

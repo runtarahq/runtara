@@ -13,6 +13,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **eBay agent, generated from eBay's Sell API OpenAPI files.** Twenty-five
+  capabilities for a seller: list and read orders, ship them (with tracking)
+  and refund them; create, replace, list and delete inventory items, update
+  prices and quantities in bulk; create, update, publish, withdraw and delete
+  offers; manage inventory locations; and read the business policies and
+  selling privileges. A bulk update eBay carries out only in part fails with
+  `EBAY_VALIDATION_FAILED`, naming the entries it carried out (`saved`) and
+  each one it refused, and eBay's error envelope gives a failed step its
+  message and `errors`. The new `ebay_oauth` connection type authorizes the
+  tenant's own eBay application (App ID, Cert ID and RuName) in production or
+  the Sandbox. Production keysets also need eBay's Marketplace Account
+  Deletion notifications handled, which this does not do.
+
+- **An OAuth descriptor can send a connection field as `redirect_uri`.**
+  `oauth_redirect_uri_param` names it (eBay's `ru_name`): it goes in the
+  authorize URL and the code exchange, while the user still comes back to
+  runtara's callback URL, registered with the provider under that name.
+
+- **`connector_gen` merges specs served from one host under different base
+  paths** (eBay's `https://api.ebay.com{basePath}`, one per API): each spec's
+  path goes in front of its own paths. `html_descriptions` turns a spec's HTML
+  descriptions into plain text, and a 204 answer no longer makes the schema a
+  spec wrongly gives it the operation's output.
+
 - **Sealed credentials.** A connection's secrets are sealed by
   [seal](https://github.com/runtarahq/seal) when the connection is saved, and
   seal is the only thing that uses them. A sealed secret is stored with the
@@ -1402,6 +1426,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is off or any row fails.
 
 ### Fixed
+
+- **A POST, PUT or PATCH without content now says `Content-Length: 0`.** The
+  host's outbound HTTP sent such a request (an agent's bodyless POST, such as
+  eBay's `publishOffer`) with no length at all, and some servers refuse that
+  with 411 Length Required, as eBay's edge does. Agents cannot set the header
+  themselves; framing headers are the host's.
 
 - **A token endpoint that refuses a refresh with 200 no longer looks like an
   outage.** Some providers (Zoho) answer a dead refresh token or a bad code with

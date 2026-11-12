@@ -998,6 +998,10 @@ struct ConnectionContainerArgs {
     /// The word before the access token in the Authorization header (default "Bearer")
     #[darling(default)]
     oauth_token_header_prefix: Option<String>,
+    /// The connection field sent as `redirect_uri` instead of runtara's
+    /// callback URL (eBay's RuName)
+    #[darling(default)]
+    oauth_redirect_uri_param: Option<String>,
     /// Additional descriptor-declared endpoints this connection may egress to,
     /// selectable per request. Repeat the attribute once per endpoint.
     #[darling(multiple)]
@@ -1376,6 +1380,7 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
             };
             let authorize_params = args.oauth_authorize_params.as_deref().unwrap_or("");
             let token_header_prefix = args.oauth_token_header_prefix.as_deref().unwrap_or("");
+            let redirect_uri_param = args.oauth_redirect_uri_param.as_deref().unwrap_or("");
             quote! {
                 Some({
                     static OAUTH_CFG: runtara_dsl::agent_meta::OAuthConfig = runtara_dsl::agent_meta::OAuthConfig {
@@ -1395,6 +1400,7 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
                         hosts: #hosts,
                         authorize_params: #authorize_params,
                         token_header_prefix: #token_header_prefix,
+                        redirect_uri_param: #redirect_uri_param,
                     };
                     &OAUTH_CFG
                 })

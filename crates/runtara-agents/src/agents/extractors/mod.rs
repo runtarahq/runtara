@@ -65,6 +65,7 @@ static HTTP_EXTRACTORS: &[&dyn HttpConnectionExtractor] = &[
     &connection_types::QuickBooksOnlineExtractor,
     &connection_types::XeroOAuthExtractor,
     &connection_types::ZohoCrmOAuthExtractor,
+    &connection_types::EbayOAuthExtractor,
     &connection_types::StripeExtractor,
     &connection_types::PipedriveExtractor,
     &connection_types::ShippoExtractor,

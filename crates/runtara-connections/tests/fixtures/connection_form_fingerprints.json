@@ -12,6 +12,12 @@
     "fnv1a64": "b8f430a26d056579"
   },
   {
+    "integrationId": "ebay_oauth",
+    "fieldCount": 5,
+    "serializedBytes": 2283,
+    "fnv1a64": "4ec425223ddae38b"
+  },
+  {
     "integrationId": "gemini_api_key",
     "fieldCount": 1,
     "serializedBytes": 536,

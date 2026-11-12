@@ -32,6 +32,7 @@ fn agents() -> Vec<(&'static str, AgentInfo)> {
         ("crypto", runtara_agent_crypto::agent_info()),
         ("csv", runtara_agent_csv::agent_info()),
         ("datetime", runtara_agent_datetime::agent_info()),
+        ("ebay", runtara_agent_ebay::agent_info()),
         ("http", runtara_agent_http::agent_info()),
         ("hubspot", runtara_agent_hubspot::agent_info()),
         ("quickbooks", runtara_agent_quickbooks::agent_info()),

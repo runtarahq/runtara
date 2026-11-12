@@ -16,6 +16,7 @@ import argparse
 import copy
 import difflib
 import hashlib
+import html.parser
 import json
 import os
 import re
@@ -416,6 +417,114 @@ def clean_text(text: str) -> str:
     return text.replace('"#', '" #')
 
 
+class PlainText(html.parser.HTMLParser):
+    """The text of an HTML description as the step editor shows it: line
+    breaks for `<br>`, paragraphs and list items, backticks for `<code>`, a
+    link's text without its (often site-relative) URL, entities decoded, and
+    a `<pre>` block as it is laid out."""
+
+    BREAKS = {"br": "\n", "p": "\n\n", "div": "\n\n", "ul": "\n\n", "ol": "\n\n", "table": "\n\n", "tr": "\n"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        # Text, and whether it is laid out already (inside a `<pre>`).
+        self.parts = []
+        self.pre = 0
+        # `<code>` opened inside a `<pre>`, whose end tag may come after the
+        # block's (eBay writes `<pre><code>…</pre></code>`).
+        self.pre_code = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "pre":
+            self.pre += 1
+            self.parts.append(("\n\n", False))
+        elif self.pre:
+            if tag == "br":
+                self.parts.append(("\n", True))
+            elif tag == "code":
+                self.pre_code += 1
+        elif tag == "li":
+            self.parts.append(("\n- ", False))
+        elif tag == "code":
+            self.parts.append(("`", False))
+        elif tag in ("td", "th"):
+            self.parts.append((" ", False))
+        else:
+            self.parts.append((self.BREAKS.get(tag, ""), False))
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag):
+        if tag == "pre":
+            self.pre = max(0, self.pre - 1)
+            self.parts.append(("\n\n", False))
+        elif tag == "code" and self.pre_code:
+            self.pre_code -= 1
+        elif self.pre:
+            pass
+        elif tag == "code":
+            self.parts.append(("`", False))
+        elif tag in ("p", "div", "ul", "ol", "table"):
+            self.parts.append(("\n\n", False))
+
+    def handle_data(self, data):
+        if self.pre:
+            self.parts.append((data, True))
+        else:
+            self.parts.append((re.sub(r"\s+", " ", data), False))
+
+    def text(self) -> str:
+        # A `<pre>` block keeps its lines and indentation: it stands in as a
+        # token while the rest is tidied, then goes back.
+        blocks, flowing = [], []
+        for text, laid_out in self.parts:
+            if laid_out:
+                if flowing and flowing[-1].startswith("\0"):
+                    blocks[-1] += text
+                    continue
+                blocks.append(text)
+                flowing.append(f"\0{len(blocks) - 1}\0")
+            else:
+                flowing.append(text)
+        lines = [line.strip() for line in "".join(flowing).split("\n")]
+        text = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+        return re.sub(r"\0(\d+)\0", lambda m: blocks[int(m.group(1))].strip("\n").rstrip(), text)
+
+
+# What `<` may start in a description: an HTML element. Anything else (eBay's
+# `<start>` placeholder, a description that begins `<This type…`) is text.
+HTML_TAGS = ("a", "abbr", "b", "blockquote", "br", "code", "dd", "div", "dl", "dt", "em", "h1",
+             "h2", "h3", "h4", "h5", "h6", "hr", "i", "img", "li", "ol", "p", "pre", "small",
+             "span", "strong", "sub", "sup", "table", "tbody", "td", "th", "thead", "tr", "u", "ul")
+NOT_A_TAG = re.compile(r"<(?!/?(?:%s)\b)(?!!--)" % "|".join(HTML_TAGS), re.IGNORECASE)
+
+
+def plain_text(text: str) -> str:
+    parser = PlainText()
+    parser.feed(NOT_A_TAG.sub("&lt;", text))
+    parser.close()
+    return parser.text()
+
+
+def plain_descriptions(node) -> None:
+    """`html_descriptions`: every description and summary in the slice, which
+    the vendor writes in HTML (eBay's), as plain text. Examples, defaults and
+    enums are data and keep their text."""
+    if isinstance(node, list):
+        for value in node:
+            plain_descriptions(value)
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            if key in ("description", "summary") and isinstance(value, str):
+                node[key] = plain_text(value)
+            elif key == "properties" and isinstance(value, dict):
+                # Names of fields, which may be `default` or `example` themselves.
+                plain_descriptions(list(value.values()))
+            elif key not in DATA_KEYS:
+                plain_descriptions(value)
+
+
 def is_scalar(schema: dict) -> bool:
     return schema.get("type") not in ("object", "array") and "properties" not in schema
 
@@ -749,6 +858,16 @@ def drop_connection_parameters(spec: dict, op: dict, item: dict, names: list, lo
                 kept.append(parameter)
         owner["parameters"] = kept
     return dropped
+
+
+def drop_no_content_body(spec: dict, op: dict) -> None:
+    """A 204 (No Content) answer has no body, though a spec may give it one:
+    eBay's give theirs the error schema, which would make a successful delete
+    return an "error". Only its description stays."""
+    responses = op.get("responses") or {}
+    if "204" in responses:
+        responses["204"] = {key: value for key, value in deref(spec, responses["204"]).items()
+                            if key != "content"}
 
 
 def is_pinned(spec: dict, parameter: dict, names: set) -> bool:
@@ -1102,6 +1221,8 @@ def slice_specs(specs: list, config: dict) -> dict:
     make_optional(sliced, config.get("optional_fields") or {})
     retype_fields(sliced, config.get("field_types") or {})
     retype_inputs(sliced, config.get("input_types") or {})
+    if config.get("html_descriptions"):
+        plain_descriptions(sliced)
     return sliced
 
 
@@ -1209,6 +1330,7 @@ def slice_one(spec: dict, operation_ids: list, first: str, model_names: dict, bo
             if method not in HTTP_METHODS:
                 continue
             found.add(op["operationId"])
+            drop_no_content_body(spec, op)
             used["connection_headers"] |= drop_connection_parameters(
                 spec, op, item, connection_headers, ("header",))
             used["connection_parameters"] |= drop_connection_parameters(
@@ -1286,6 +1408,43 @@ def server_urls(servers) -> str:
     ])
 
 
+def resolved_url(server: dict) -> str:
+    """A server's URL with each variable at its default (one without stays
+    `{name}`)."""
+    url = server.get("url") or ""
+    for name, variable in (server.get("variables") or {}).items():
+        if "default" in (variable or {}):
+            url = url.replace("{" + name + "}", str(variable["default"]))
+    return url
+
+
+def fold_base_paths(slices: list) -> None:
+    """Specs of one API whose servers differ only in the path after one origin
+    (eBay's `https://api.ebay.com{basePath}`, a base path per API) become one
+    server, the origin, each spec's path moving into its own paths. The
+    generated requests share the first server's base path, so a spec's other
+    servers are dropped. Specs whose servers already match are left alone."""
+    if len({server_urls(sliced.get("servers")) for _, sliced in slices}) <= 1:
+        return
+    split = []
+    for name, sliced in slices:
+        servers = sliced.get("servers") or [{}]
+        url = urllib.parse.urlsplit(resolved_url(servers[0]))
+        if not url.scheme or not url.netloc or url.query or url.fragment or "{" in url.geturl():
+            sys.exit(f"the specs list different `servers`, and `{name}`'s first one is no URL of a host "
+                     "and a path; the generated requests share one base path")
+        split.append((f"{url.scheme}://{url.netloc}", url.path.rstrip("/")))
+    origins = sorted({origin for origin, _ in split})
+    if len(origins) > 1:
+        sys.exit(f"the specs list `servers` on different hosts ({', '.join(origins)}); "
+                 "the generated requests share one base path")
+    for (name, sliced), (origin, base) in zip(slices, split):
+        print(f"note: {name}: its paths go under {origin}{base or '/'}, as its `servers` say; "
+              "the specs share the host")
+        sliced["paths"] = {base + path: item for path, item in sliced["paths"].items()}
+        sliced["servers"] = [{"url": origin}]
+
+
 def rename_components(sliced: dict, kind: str, renames: dict) -> None:
     """Rename `#/components/<kind>` entries other than schemas, and every
     `$ref` to them."""
@@ -1321,8 +1480,7 @@ def merge_slices(slices: list) -> dict:
     if not all(prefixes) or len(set(prefixes)) != len(prefixes):
         sys.exit("each entry of `specs` needs a `name` of its own, "
                  "not one that differs from another only in case or punctuation")
-    if len({server_urls(sliced.get("servers")) for _, sliced in slices}) > 1:
-        sys.exit("the specs list different `servers`; the generated requests share one base path")
+    fold_base_paths(slices)
 
     # Until no generated name clashes: renaming a schema changes the schemas
     # that refer to it, which may then differ between the specs too.

@@ -1,0 +1,40 @@
+# eBay Sell APIs, generated from eBay's own OpenAPI files (one per API). Their
+# URLs carry no version, so each file is pinned by its sha256: when eBay
+# publishes a new version, `fetch` stops; review the change and update it.
+agent:
+  id: ebay
+  name: eBay
+  description: eBay Sell APIs — orders and their shipments and refunds, inventory items, offers and listings, inventory locations, and the seller's business policies.
+  integration_id: ebay_oauth
+  error_prefix: EBAY
+# The descriptions are HTML.
+html_descriptions: true
+# Every write declares the header; the agent sends it with each JSON body.
+omit_parameters: [Content-Type]
+# The spec types a product's item specifics as a string; the API takes and
+# returns an object of aspect names, each with its values.
+field_types:
+  Product:
+    aspects:
+      type: object
+      additionalProperties:
+        type: array
+        items: {type: string}
+      description: >-
+        The product's item specifics: each aspect's name with its values, such as
+        {"Brand": ["GoPro"], "Features": ["Waterproof", "Wi-Fi"]}. The Taxonomy
+        API's getItemAspectsForCategory lists those an eBay category requires or
+        recommends.
+specs:
+  - name: fulfillment
+    url: https://developer.ebay.com/api-docs/master/sell/fulfillment/openapi/3/sell_fulfillment_v1_oas3.json
+    sha256: db06cfec913918dc675c19f36efcc8c5d8ae57231463a7e322b4c43b30c16eb9
+    operations: [getOrders, getOrder, getShippingFulfillments, getShippingFulfillment, createShippingFulfillment, issueRefund]
+  - name: inventory
+    url: https://developer.ebay.com/api-docs/master/sell/inventory/openapi/3/sell_inventory_v1_oas3.json
+    sha256: 070e35efbc1e6b0c67c702d3bd9d8a4fb5046bcd948dca7170f1bc33d5a36a46
+    operations: [getInventoryItems, getInventoryItem, createOrReplaceInventoryItem, deleteInventoryItem, bulkUpdatePriceQuantity, getOffers, getOffer, createOffer, updateOffer, deleteOffer, publishOffer, withdrawOffer, getInventoryLocations, getInventoryLocation, createInventoryLocation]
+  - name: account
+    url: https://developer.ebay.com/api-docs/master/sell/account/openapi/3/sell_account_v1_oas3.json
+    sha256: 3f04cf1fd7c80160312d68be5afd7d0de00eb57fd32d508cbb5eeec526b8bfbb
+    operations: [getFulfillmentPolicies, getPaymentPolicies, getReturnPolicies, getPrivileges]

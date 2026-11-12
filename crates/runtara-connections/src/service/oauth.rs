@@ -139,7 +139,9 @@ pub struct StartedFlow {
     pub authorization_url: String,
     /// The flow's state, as in the authorization URL.
     pub state: String,
-    /// The redirect URI the provider will send the user to.
+    /// The redirect URI the provider will send the user to: runtara's
+    /// callback, also when the provider takes a name for it as `redirect_uri`
+    /// (see `OAuthConfig::redirect_uri_param`).
     pub redirect_uri: String,
     /// For a browser flow, the nonce its cookie must carry.
     pub browser_nonce: Option<String>,
@@ -373,6 +375,27 @@ impl OAuthService {
         // Generate a cryptographically random state token
         let state = generate_state();
         let redirect_uri = self.redirect_uri(tenant_id, &params);
+        // What the provider takes as `redirect_uri`, in the authorize URL and
+        // the code exchange: runtara's callback URL, or the connection field
+        // the descriptor names (eBay's RuName, the name under which the
+        // callback URL is registered with eBay).
+        let provider_redirect_uri = match oauth_config.redirect_uri_param {
+            "" => redirect_uri.clone(),
+            field => {
+                if app.is_some() {
+                    return Err(OAuthError::App(format!(
+                        "platform OAuth apps do not carry the `{field}` a {integration_id} \
+                         connection sends as its redirect_uri"
+                    )));
+                }
+                params[field]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| OAuthError::MissingParameter(field.to_string()))?
+                    .to_string()
+            }
+        };
 
         // PKCE (RFC 7636) when the provider descriptor requires it: attach an S256
         // code_challenge to the authorize URL and keep the verifier in the flow.
@@ -406,7 +429,8 @@ impl OAuthService {
                     tenant_id: tenant_id.to_string(),
                     connection_id: connection_id.to_string(),
                     integration_id: integration_id.to_string(),
-                    redirect_uri: redirect_uri.clone(),
+                    // The code exchange sends what the authorize URL sent.
+                    redirect_uri: provider_redirect_uri.clone(),
                     code_verifier,
                     binding,
                 },
@@ -427,7 +451,7 @@ impl OAuthService {
             "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}{}{}",
             effective.auth_url,
             urlencoding::encode(&client_id),
-            urlencoding::encode(&redirect_uri),
+            urlencoding::encode(&provider_redirect_uri),
             urlencoding::encode(&scopes),
             urlencoding::encode(&state),
             pkce_query,
@@ -1379,6 +1403,7 @@ mod tests {
             hosts: None,
             authorize_params: "",
             token_header_prefix: "",
+            redirect_uri_param: "",
         }
     }
 

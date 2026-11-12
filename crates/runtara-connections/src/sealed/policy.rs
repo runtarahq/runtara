@@ -1521,6 +1521,7 @@ pub const SEALABLE_TYPES: &[&str] = &[
     "quickbooks_online",
     "xero_oauth",
     "zoho_crm_oauth",
+    "ebay_oauth",
     "http_oauth2_authorization_code",
     "postgres",
     "http_bearer",
@@ -2333,6 +2334,63 @@ mod tests {
             policies(
                 "zoho_crm_oauth",
                 &json!({"client_id": "c", "client_secret": "s", "data_center": "mars"}),
+                &Allowances::default()
+            )
+            .is_none()
+        );
+    }
+
+    /// An eBay connection's tokens go to its environment's API host, and its
+    /// Cert ID to that environment's token endpoint as HTTP Basic.
+    #[test]
+    fn ebay_tokens_and_cert_id_go_to_their_environments_hosts() {
+        let hosts_of = |policy: &Value| -> Vec<String> {
+            policy["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|rule| rule["destination"]["host"].as_str().map(str::to_owned))
+                .collect()
+        };
+        let of = |environment: &str| {
+            let params = json!({
+                "client_id": "App-SBX-1", "client_secret": "s", "ru_name": "App-RuName",
+                "environment": environment,
+            });
+            policies("ebay_oauth", &params, &Allowances::default()).expect("ebay is sealed")
+        };
+        for (environment, api) in [
+            ("sandbox", "api.sandbox.ebay.com"),
+            ("production", "api.ebay.com"),
+        ] {
+            let policies = of(environment);
+            assert_eq!(
+                policies.keys().collect::<Vec<_>>(),
+                ["access_token", "client_secret", "refresh_token"]
+            );
+            let access = canonical(&policies["access_token"]);
+            assert!(hosts_of(&access).contains(&api.to_owned()), "{environment}");
+            assert!(
+                access["rules"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|rule| rule["inject"]
+                        == json!({"header": {"name": "Authorization", "format": "Bearer {}"}})),
+                "{environment}: {access}"
+            );
+            let client = canonical(&policies["client_secret"]);
+            assert_eq!(hosts_of(&client), [api.to_owned()], "{environment}");
+        }
+        assert_ne!(
+            canonical(&of("sandbox")["access_token"]),
+            canonical(&of("production")["access_token"])
+        );
+        // An environment eBay does not run is no destination.
+        assert!(
+            policies(
+                "ebay_oauth",
+                &json!({"client_id": "c", "client_secret": "s", "environment": "staging"}),
                 &Allowances::default()
             )
             .is_none()

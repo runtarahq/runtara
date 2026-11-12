@@ -148,6 +148,19 @@ pub fn get_default_rate_limit_config(integration_id: &str) -> Option<RateLimitCo
             max_retries: 3,
             max_wait_ms: 60000,
         }),
+        // eBay: each Sell API has a daily call limit per application (Inventory
+        // 2,000,000, Fulfillment's orders 100,000, Account 25,000), and eBay
+        // publishes no per-second one. A per-second limiter cannot enforce a
+        // daily quota: 5 req/s with a burst of 10 only spaces one connection's
+        // calls out, so that at full rate it takes more than an hour to use up
+        // the smallest quota. A 429 is retried after its wait, a few times.
+        "ebay_oauth" => Some(RateLimitConfigDto {
+            requests_per_second: 5,
+            burst_size: 10,
+            retry_on_limit: true,
+            max_retries: 3,
+            max_wait_ms: 60000,
+        }),
         // Pipedrive: API-token requests are limited per token over a 2-second
         // window, from 20 per window on the Essential plan up to 120 on Enterprise.
         // 5 req/s with burst 10 can never exceed 20 in any 2-second window.
@@ -304,6 +317,16 @@ mod tests {
         // at most 5 starts no more than that together.
         assert!(config.burst_size <= 5);
         assert!(config.requests_per_second <= 5);
+        assert!(config.retry_on_limit);
+    }
+
+    #[test]
+    fn test_ebay_defaults_take_over_an_hour_to_use_up_the_smallest_daily_quota() {
+        let config = get_default_rate_limit_config("ebay_oauth").unwrap();
+        // At its full rate, one connection needs more than an hour to use up
+        // the smallest Sell API quota (Account, 25,000 calls a day); the
+        // limiter does not count calls per day.
+        assert!(config.requests_per_second * 3600 <= 25_000);
         assert!(config.retry_on_limit);
     }
 

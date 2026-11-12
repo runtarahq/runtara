@@ -187,6 +187,7 @@ pub(crate) fn describe_connection_auth(
         "hubspot_private_app"
         | "quickbooks_online"
         | "zoho_crm_oauth"
+        | "ebay_oauth"
         | "http_oauth2_authorization_code" => describe_oauth_authcode_auth(integration_id, params),
         // One Xero token reaches every organisation its user authorized; each
         // request names the one this connection was authorized for. Without it
@@ -1064,6 +1065,7 @@ mod tests {
             hosts: None,
             authorize_params: "",
             token_header_prefix: "",
+            redirect_uri_param: "",
         }
     }
 
@@ -1334,6 +1336,62 @@ mod tests {
             assert!(descriptor.deferred_auth.is_none(), "{region}");
             assert!(headers.is_empty(), "{region}: {headers:?}");
         }
+    }
+
+    #[test]
+    fn ebay_requests_go_to_its_environments_hosts_with_basic_client_auth() {
+        let cfg = find_connection_type("ebay_oauth")
+            .and_then(|meta| meta.oauth_config)
+            .unwrap();
+        for (environment, token_url, base_url) in [
+            (
+                "production",
+                "https://api.ebay.com/identity/v1/oauth2/token",
+                "https://api.ebay.com",
+            ),
+            (
+                "sandbox",
+                "https://api.sandbox.ebay.com/identity/v1/oauth2/token",
+                "https://api.sandbox.ebay.com",
+            ),
+        ] {
+            let params = json!({
+                "client_id": "App-1",
+                "client_secret": {"$sealed": {}},
+                "ru_name": "App-RuName",
+                "environment": environment,
+                "refresh_token": {"$sealed": {}},
+            });
+            let mut headers = HashMap::new();
+            let descriptor =
+                describe_connection_auth("conn-1", "ebay_oauth", &params, &mut headers);
+            assert_eq!(
+                descriptor.base_url.as_deref(),
+                Some(base_url),
+                "{environment}"
+            );
+            // The tokens are seal's to refresh and to attach.
+            assert!(headers.is_empty(), "{environment}: {headers:?}");
+            let effective = resolve_effective_oauth_config(cfg, &params);
+            assert_eq!(effective.token_url, token_url, "{environment}");
+            assert!(matches!(
+                effective.token_endpoint_auth,
+                TokenEndpointAuth::HttpBasic
+            ));
+        }
+        assert_eq!(token_header_scheme(cfg), "Bearer");
+        // An environment eBay does not run: no destination.
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "ebay_oauth",
+            &json!({ "client_id": "App-1", "environment": "staging",
+                     "access_token": {"$sealed": {}}, "refresh_token": {"$sealed": {}} }),
+            &mut headers,
+        );
+        assert_eq!(descriptor.base_url, None);
+        assert!(descriptor.deferred_auth.is_none());
+        assert!(headers.is_empty(), "{headers:?}");
     }
 
     #[test]
@@ -1844,6 +1902,7 @@ mod tests {
             hosts: None,
             authorize_params: "",
             token_header_prefix: "",
+            redirect_uri_param: "",
         };
         let hostile = json!({
             "auth_url": "https://attacker.example/authorize",
@@ -1890,6 +1949,7 @@ mod tests {
             hosts: None,
             authorize_params: "",
             token_header_prefix: "",
+            redirect_uri_param: "",
         };
         let params = json!({
             "auth_url": "https://auth.example.com/authorize",
