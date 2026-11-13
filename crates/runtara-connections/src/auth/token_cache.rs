@@ -183,22 +183,25 @@ where
     }
 }
 
+/// The token kept under `cache_key` while it is fresh, or the one `fetch` gets,
+/// which is then kept. The flag is `true` when `fetch` ran: the token endpoint
+/// issued this token now.
 pub(crate) async fn resolve_cached_token<F, Fut>(
     cache_key: &TokenCacheKey,
     fetch: F,
-) -> Result<String, AuthResolutionError>
+) -> Result<(String, bool), AuthResolutionError>
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<CachedAccessToken, AuthResolutionError>>,
 {
     if let Some(token) = get_fresh_cached_token(cache_key) {
-        return Ok(token);
+        return Ok((token, false));
     }
 
     let cached = fetch().await?;
     let access_token = cached.access_token.clone();
     cache_token(cache_key, cached);
-    Ok(access_token)
+    Ok((access_token, true))
 }
 
 /// Re-check a token endpoint immediately before credentials are sent to it
@@ -483,7 +486,7 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(first, "token-123");
+        assert_eq!(first, ("token-123".to_string(), true));
 
         let second_counter = Arc::clone(&call_count);
         let second = resolve_cached_token(&key("conn-cached", "cache-key"), move || async move {
@@ -494,7 +497,7 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(second, "token-123");
+        assert_eq!(second, ("token-123".to_string(), false));
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 

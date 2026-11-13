@@ -143,13 +143,15 @@ impl SealedCredentials {
     /// The access token of a connection whose client secret is sealed
     /// (client-credentials grant), as the marker a request presents: got from
     /// the token endpoint through seal, and kept until it nears its expiry.
+    /// The flag is `true` when the token endpoint issued it now, not when it
+    /// is one kept from an earlier request.
     pub(crate) async fn minted_access_token(
         &self,
         tenant_id: &str,
         connection_id: &str,
         integration_id: &str,
         parameters: &Value,
-    ) -> Result<Value, AuthResolutionError> {
+    ) -> Result<(Value, bool), AuthResolutionError> {
         let unsupported =
             || AuthResolutionError::permanent("The connection's token request cannot be formed");
         let secret_field = policy::client_secret_field(integration_id).ok_or_else(unsupported)?;
@@ -163,7 +165,7 @@ impl SealedCredentials {
             default_ttl_seconds,
             ..
         } = request;
-        let envelope = token_cache::resolve_cached_token(&cache_key.sealed(), || async {
+        let (envelope, minted) = token_cache::resolve_cached_token(&cache_key.sealed(), || async {
             // The request as the type builds it, without the secret: seal
             // puts that where the secret's policy says.
             let (content_type, body) = match request_body {
@@ -202,7 +204,7 @@ impl SealedCredentials {
             })
         })
         .await?;
-        marker_of(&envelope)
+        Ok((marker_of(&envelope)?, minted))
     }
 }
 

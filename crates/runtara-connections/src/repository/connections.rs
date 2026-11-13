@@ -1115,6 +1115,61 @@ impl ConnectionRepository {
         Ok(result.rows_affected())
     }
 
+    /// Move a connection from `REQUIRES_RECONNECTION` back to `ACTIVE`, only
+    /// while it still holds `parameters` (as read, decrypted): the ones whose
+    /// credentials were just accepted. A row whose parameters were edited
+    /// since stays as it is, and so does a row in any other status.
+    ///
+    /// The stored parameters are encrypted, and an encryption of the same
+    /// parameters differs each time, so the row is read and compared first;
+    /// the update then lands only on the row as it was read, so an edit or a
+    /// flip meanwhile wins.
+    ///
+    /// Returns the number of rows updated (`0` == nothing to restore).
+    pub async fn restore_active_status(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        parameters: &serde_json::Value,
+    ) -> Result<u64, sqlx::Error> {
+        let flagged = ConnectionStatus::RequiresReconnection.as_str();
+        let row: Option<(Option<serde_json::Value>, chrono::DateTime<chrono::Utc>)> =
+            sqlx::query_as(
+                r#"
+                SELECT connection_parameters, updated_at FROM connection_data_entity
+                WHERE id = $1 AND tenant_id = $2 AND status = $3
+                "#,
+            )
+            .bind(id)
+            .bind(tenant_id)
+            .bind(flagged)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some((Some(stored), version)) = row else {
+            return Ok(0);
+        };
+        if self.unseal(tenant_id, id, Some(stored.clone()))?.as_ref() != Some(parameters) {
+            return Ok(0);
+        }
+        let result = sqlx::query(
+            r#"
+            UPDATE connection_data_entity
+            SET status = $4, updated_at = NOW()
+            WHERE id = $1 AND tenant_id = $2 AND status = $3
+              AND connection_parameters = $5 AND updated_at = $6
+            "#,
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .bind(flagged)
+        .bind(ConnectionStatus::Active.as_str())
+        .bind(&stored)
+        .bind(version)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Persist tokens produced by an OAuth *refresh* (rotating providers), sealing
     /// the merged parameters. Unlike [`Self::update_parameters_and_status`] this
     /// leaves `status` untouched — a refresh is not a re-authorization.

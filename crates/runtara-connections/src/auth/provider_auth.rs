@@ -24,6 +24,10 @@ pub struct ResolvedConnectionAuth {
     /// The sealed tokens a refresh through seal brought back, to be stored
     /// with the connection. `None` unless a refresh was made now.
     pub rotated_sealed: Option<crate::sealed::RotatedSealed>,
+    /// Whether the token endpoint issued a client-credentials access token
+    /// now: the connection's credentials were just accepted. `false` for a
+    /// token kept from an earlier request, and for every other grant.
+    pub token_minted: bool,
 }
 
 pub(crate) struct ConnectionAuthDescriptor {
@@ -76,13 +80,15 @@ pub async fn resolve_connection_auth(
     // A client secret gets the access token through seal, already sealed
     // for the connection's API.
     let mut sealed_parameters = None;
+    let mut token_minted = false;
     if crate::sealed::policy::sealed_token_grant(integration_id, params).is_some() {
-        let token = sealed
+        let (token, minted) = sealed
             .minted_access_token(tenant_id, connection_id, integration_id, params)
             .await?;
         let mut presenting = params.clone();
         presenting[crate::sealed::policy::ACCESS_TOKEN_FIELD] = token;
         sealed_parameters = Some(presenting);
+        token_minted = minted;
     }
     // A refresh token gets the next pair through seal, sealed too.
     let mut rotated_sealed = None;
@@ -102,6 +108,7 @@ pub async fn resolve_connection_auth(
         azure_signing: descriptor.azure_signing,
         sealed_parameters,
         rotated_sealed,
+        token_minted,
     })
 }
 

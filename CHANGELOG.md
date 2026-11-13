@@ -1442,6 +1442,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A client-credentials connection is active again once its credentials
+  work.** A token endpoint that refuses the stored credentials (a wrong
+  secret: `401 invalid_client`) flags the connection
+  `REQUIRES_RECONNECTION`, and nothing cleared the flag: there is no consent
+  to go through again, and a later successful token request left it, so the
+  console kept asking for a reconnect after the credentials were corrected
+  and every call worked. A token minted for the parameters the connection
+  holds now makes it `ACTIVE` again, on the first request after the fix (not
+  when the edit is saved). A token kept from an earlier request changes
+  nothing, and an authorization-code connection is still cleared only by
+  authorizing it again.
+
 - **A POST, PUT or PATCH without content now says `Content-Length: 0`.** The
   host's outbound HTTP sent such a request (an agent's bodyless POST, such as
   eBay's `publishOffer`) with no length at all, and some servers refuse that
