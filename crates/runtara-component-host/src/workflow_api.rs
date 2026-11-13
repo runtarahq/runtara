@@ -104,12 +104,12 @@ fn is_workflow_api(uri: &http::Uri) -> bool {
     let Some(authority) = uri.authority() else {
         return false;
     };
-    uri.scheme_str() == Some(runtara_workflow_api::SCHEME)
-        && !authority.as_str().contains('@')
-        && authority
-            .host()
-            .eq_ignore_ascii_case(runtara_workflow_api::HOST)
-        && authority.port_u16().is_none_or(|port| port == 80)
+    runtara_workflow_api::is_api_origin(
+        uri.scheme_str(),
+        authority.as_str(),
+        authority.host(),
+        authority.port_u16(),
+    )
 }
 
 /// Strip reserved headers and attach the binding. The path and query are kept;

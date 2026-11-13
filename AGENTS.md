@@ -14,6 +14,12 @@ scoped README files, examples.
   signals, events, and sleep.
 - `crates/runtara-environment` owns image and instance lifecycle, runners, and
   wake scheduling. It is embedded by the server.
+- `crates/runtara-run`, `crates/runtara-executor` and
+  `crates/runtara-runner-executor` run workflows outside the server
+  (`RUNTARA_RUNNER=executor`, `docs/executor.md`): one sandboxed process per
+  run, the executor service that starts them, and the server's side of it.
+  `runtara-run` holds a guest and nothing else: give it no credential, no
+  address and no dependency it does not need.
 - `crates/runtara-dsl` defines workflow schemas and static step metadata.
 - `crates/runtara-workflows` validates and compiles workflow graphs.
 - `crates/runtara-workflow-stdlib` provides guest-side workflow execution.

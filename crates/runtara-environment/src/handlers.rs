@@ -1637,6 +1637,8 @@ pub fn spawn_container_monitor(
     let lease_pool = pool.clone();
     let lease_gate = start_gate.as_ref().map(|(gate, _)| gate.clone());
     let monitoring = async move {
+        // Why the runner lost the run before its guest started, when it did.
+        let mut lost_before_start = None;
         if let Some((gate, attempt_count)) = start_gate {
             // Matched exhaustively rather than tested for `Opened`: a variant
             // added later must not silently join the failure set.
@@ -1645,15 +1647,26 @@ pub fn spawn_container_monitor(
                 StartGateOutcome::Cancelled
                 | StartGateOutcome::TimedOut
                 | StartGateOutcome::ConfirmationFailed => {
-                    settle_failed_start_gate(
-                        &pool,
-                        &runner,
-                        &handle,
-                        &lifecycle_observers,
-                        &instance_id,
-                        attempt_count,
-                    )
-                    .await
+                    // A run its runner could not place (where it runs
+                    // refused it for now, or was lost) never started, and is
+                    // not a failed start: it is recovered like any lost run.
+                    match runner.take_exit_report(&handle).await {
+                        Some(crate::runner::RunExitReport::Lost { reason }) => {
+                            lost_before_start = Some(reason);
+                            AfterFailedGate::Watch
+                        }
+                        _ => {
+                            settle_failed_start_gate(
+                                &pool,
+                                &runner,
+                                &handle,
+                                &lifecycle_observers,
+                                &instance_id,
+                                attempt_count,
+                            )
+                            .await
+                        }
+                    }
                 }
             };
             if matches!(next, AfterFailedGate::Done) {
@@ -1687,7 +1700,11 @@ pub fn spawn_container_monitor(
 
                 // A run that exited to suspend but could not commit its park
                 // is resumable, not crashed. A drain suspends it anyway.
-                let intent = match runner.take_exit_report(&handle).await {
+                let report = match lost_before_start.take() {
+                    Some(reason) => Some(crate::runner::RunExitReport::Lost { reason }),
+                    None => runner.take_exit_report(&handle).await,
+                };
+                let intent = match report {
                     Some(crate::runner::RunExitReport::SuspendNotParked { error })
                         if !drain.is_draining() =>
                     {
