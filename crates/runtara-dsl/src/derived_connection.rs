@@ -27,7 +27,8 @@
 //! - `fields` relabel fields of the base type. Base fields that are not
 //!   relabelled keep their base labels; secrecy is always the base's.
 //! - `fixed` gives base fields a value the user cannot change (an
-//!   `http_api_key` base's `header_name`, say).
+//!   `http_api_key` base's `header_name`, say, or its `value_format`:
+//!   `"Token {}"` where the service wants text around the key).
 //! - The base type's `base_url` is never a user field: it is `baseUrl`
 //!   with the params substituted.
 //!
@@ -59,6 +60,48 @@ pub const DERIVABLE_BASES: &[&str] = &["http_basic", "http_api_key", "http_beare
 
 /// The base field that a derived type always computes from `baseUrl`.
 pub const BASE_URL_FIELD: &str = "base_url";
+
+/// The `http_api_key` field that says what the key's header holds: the key
+/// alone (`{}`, the default) or with text around it (`Token {}`).
+pub const VALUE_FORMAT_FIELD: &str = "value_format";
+
+/// What an absent or empty [`VALUE_FORMAT_FIELD`] means: the key alone.
+pub const DEFAULT_VALUE_FORMAT: &str = "{}";
+
+/// Longest [`VALUE_FORMAT_FIELD`] accepted.
+pub const MAX_VALUE_FORMAT_LEN: usize = 256;
+
+/// Check a header value format: printable ASCII with `{}`, where the secret
+/// goes, exactly once and no other brace.
+pub fn check_header_value_format(format: &str) -> Result<(), String> {
+    if format.len() > MAX_VALUE_FORMAT_LEN {
+        return Err(format!("is longer than {MAX_VALUE_FORMAT_LEN} characters"));
+    }
+    if !format.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+        return Err("may hold printable ASCII characters only".into());
+    }
+    let Some((before, after)) = format.split_once("{}") else {
+        return Err("must contain `{}`, where the key goes".into());
+    };
+    if before.contains(['{', '}']) || after.contains(['{', '}']) {
+        return Err("must contain `{}` once, and no other brace".into());
+    }
+    if before.starts_with(' ') || after.ends_with(' ') {
+        return Err("must not start or end with a space".into());
+    }
+    Ok(())
+}
+
+/// The header value format of `http_api_key` parameters: the stored one,
+/// checked, or the default when none is stored.
+pub fn header_value_format(params: &Value) -> Result<&str, String> {
+    match params.get(VALUE_FORMAT_FIELD) {
+        None | Some(Value::Null) => Ok(DEFAULT_VALUE_FORMAT),
+        Some(Value::String(format)) if format.trim().is_empty() => Ok(DEFAULT_VALUE_FORMAT),
+        Some(Value::String(format)) => check_header_value_format(format).map(|()| format.as_str()),
+        Some(_) => Err("must be text".into()),
+    }
+}
 
 /// Longest `iconUrl` accepted.
 pub const MAX_ICON_URL_LEN: usize = 2048;
@@ -180,6 +223,14 @@ impl DerivedConnectionType {
                 .map_err(|e| format!("connection type `{id}`: param `{}`: {e}", param.name))?;
         }
         self.check_template()?;
+        // A format the base would refuse fails the declaration, not every
+        // connection made with it.
+        if self.based_on == "http_api_key"
+            && let Some(format) = self.fixed.get(VALUE_FORMAT_FIELD)
+            && let Err(problem) = check_header_value_format(format)
+        {
+            return fail(format!("fixed `{VALUE_FORMAT_FIELD}` {problem}"));
+        }
 
         if let Some(url) = &self.icon_url {
             check_icon_url(url).map_err(|e| format!("connection type `{id}`: iconUrl {e}"))?;
@@ -557,6 +608,55 @@ mod tests {
         .check_against_base(&base)
         .unwrap_err();
         assert!(error.contains("shadows"), "{error}");
+    }
+
+    #[test]
+    fn a_header_value_format_holds_the_key_once() {
+        for format in ["{}", "Token {}", "Device {}:project", "{}:suffix"] {
+            assert_eq!(check_header_value_format(format), Ok(()), "{format}");
+        }
+        for format in [
+            "",
+            "Token",
+            "{} {}",
+            "Token {name}",
+            "a}{}",
+            " {}",
+            "{} ",
+            "Token\t{}",
+            "Tok\u{e9}n {}",
+        ] {
+            assert!(check_header_value_format(format).is_err(), "{format:?}");
+        }
+        let long = format!("{}{{}}", "a".repeat(MAX_VALUE_FORMAT_LEN));
+        assert!(check_header_value_format(&long).is_err());
+
+        assert_eq!(header_value_format(&json!({})), Ok("{}"));
+        assert_eq!(header_value_format(&json!({"value_format": " "})), Ok("{}"));
+        assert_eq!(
+            header_value_format(&json!({"value_format": "Token {}"})),
+            Ok("Token {}")
+        );
+        assert!(header_value_format(&json!({"value_format": "Token"})).is_err());
+        assert!(header_value_format(&json!({"value_format": 1})).is_err());
+    }
+
+    #[test]
+    fn a_fixed_value_format_is_checked_with_the_declaration() {
+        let api_key = |format: &str| {
+            with(|d| {
+                d.based_on = "http_api_key".into();
+                d.fields.clear();
+                d.fixed.insert("header_name".into(), "Authorization".into());
+                d.fixed.insert(VALUE_FORMAT_FIELD.into(), format.into());
+            })
+        };
+        assert_eq!(api_key("Device {}:project").validate_shape(), Ok(()));
+        let error = shape_error(api_key("Device"));
+        assert!(
+            error.contains("fixed `value_format` must contain"),
+            "{error}"
+        );
     }
 
     #[test]

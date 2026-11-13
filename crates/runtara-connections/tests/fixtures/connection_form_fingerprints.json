@@ -25,9 +25,9 @@
   },
   {
     "integrationId": "http_api_key",
-    "fieldCount": 3,
-    "serializedBytes": 1029,
-    "fnv1a64": "ba67ec945a80eac6"
+    "fieldCount": 4,
+    "serializedBytes": 1354,
+    "fnv1a64": "634e01c8f3b50799"
   },
   {
     "integrationId": "http_basic",

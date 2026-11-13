@@ -278,6 +278,10 @@ declared type's id in its `integration_ids`.
   host.
 - `fields` relabel the base type's fields. `fixed` gives base fields a
   value the user cannot change, such as `header_name` for `http_api_key`.
+- Where the service wants text around the key, fix `http_api_key`'s
+  `value_format` too: `{}` stands for the key, exactly once.
+  `"fixed": { "header_name": "Authorization", "value_format": "Token {}" }`
+  sends `Authorization: Token <key>`, and the user enters the key alone.
   The base's `base_url` is never a user field, and secrecy is always the
   base's.
 - `iconUrl` is an `https://` URL, served by the CDN rather than by runtara.
