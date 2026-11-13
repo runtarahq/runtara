@@ -1314,7 +1314,11 @@ fn secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
         "http_api_key" => one(
             "api_key",
             filled(params, "base_url")?,
-            header(filled(params, "header_name").unwrap_or("X-API-Key"), "{}"),
+            header(
+                filled(params, "header_name").unwrap_or("X-API-Key"),
+                // A format that is not one names no header to seal the key for.
+                runtara_dsl::derived_connection::header_value_format(params).ok()?,
+            ),
         ),
         _ => None,
     }
@@ -1521,6 +1525,14 @@ pub fn why_unsealable(integration_id: &str, params: &Value, allowances: &Allowan
              database, and nothing in its query but `sslmode=verify-full`, \
              `sslmode=require`, or `sslmode=disable` for a host this deployment lets be \
              reached without TLS"
+        );
+    }
+    if integration_id == "http_api_key"
+        && let Err(problem) = runtara_dsl::derived_connection::header_value_format(params)
+    {
+        return format!(
+            "`{}` {problem}",
+            runtara_dsl::derived_connection::VALUE_FORMAT_FIELD
         );
     }
     if let Some(fields) = params.as_object() {
@@ -1892,6 +1904,24 @@ mod tests {
                 json!({"scheme": "https", "host": "api.example.com"}),
                 json!({"header": {"name": "X-Token", "format": "{}"}}),
             ),
+            (
+                "http_api_key",
+                json!({
+                    "api_key": "s", "header_name": "Authorization",
+                    "value_format": "Device {}:project", "base_url": "https://api.example.com",
+                }),
+                "api_key",
+                json!({"scheme": "https", "host": "api.example.com"}),
+                json!({"header": {"name": "Authorization", "format": "Device {}:project"}}),
+            ),
+            // An empty format is the default: the key alone.
+            (
+                "http_api_key",
+                json!({"api_key": "s", "value_format": "", "base_url": "https://api.example.com"}),
+                "api_key",
+                json!({"scheme": "https", "host": "api.example.com"}),
+                json!({"header": {"name": "X-API-Key", "format": "{}"}}),
+            ),
         ];
         for (integration_id, params, field, destination, inject) in cases {
             let (sealed_field, policy) = only(integration_id, params);
@@ -1902,6 +1932,19 @@ mod tests {
                 "{integration_id}"
             );
         }
+    }
+
+    #[test]
+    fn an_api_key_whose_format_has_no_place_for_it_is_not_sealed() {
+        let params = json!({
+            "api_key": "s", "value_format": "Token", "base_url": "https://api.example.com",
+        });
+        assert_eq!(
+            policies("http_api_key", &params, &Allowances::default()),
+            None
+        );
+        let why = why_unsealable("http_api_key", &params, &Allowances::default());
+        assert!(why.starts_with("`value_format` must contain `{}`"), "{why}");
     }
 
     #[test]

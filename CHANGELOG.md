@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An API key sent with text around it.** `http_api_key` connections take
+  a `value_format`, with `{}` where the key goes: `Token {}` sends
+  `Authorization: Token <key>`. Empty means the key alone, as before, and
+  existing connections are unchanged. A connection type an agent declares on
+  `http_api_key` can fix the format, so its users enter the key alone
+  (`docs/adding-an-agent.md`).
+
 - **eBay agent, generated from eBay's Sell API OpenAPI files.** Twenty-five
   capabilities for a seller: list and read orders, ship them (with tracking)
   and refund them; create, replace, list and delete inventory items, update

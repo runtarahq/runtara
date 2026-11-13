@@ -97,6 +97,46 @@ fn parameters_become_the_base_types_and_authenticate_as_it() {
     register(vec![]).unwrap();
 }
 
+/// A service that wants text around the key: the declaration fixes the
+/// format, and the user enters the key alone.
+#[test]
+fn a_fixed_value_format_wraps_the_key_the_user_enters() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let declared: DerivedConnectionType = serde_json::from_value(json!({
+        "integrationId": "example_billing",
+        "displayName": "Example Billing",
+        "basedOn": "http_api_key",
+        "baseUrl": "https://api.vendor.example",
+        "fields": [{"name": "api_key", "displayName": "Connection key"}],
+        "fixed": {"header_name": "Authorization", "value_format": "Device {}:project"}
+    }))
+    .unwrap();
+    register(vec![("example-billing".into(), declared.clone())]).unwrap();
+
+    let meta = runtara_agents::registry::find_connection_type("example_billing").unwrap();
+    let fields: Vec<&str> = meta.fields.iter().map(|f| f.name).collect();
+    assert_eq!(
+        fields,
+        vec!["api_key"],
+        "the fixed fields are not asked for"
+    );
+
+    let stored = json!({"api_key": "k-1"});
+    let (base, params) = to_base("example_billing", &stored).unwrap().unwrap();
+    assert_eq!(base, "http_api_key");
+    assert_eq!(params["value_format"], "Device {}:project");
+    let config =
+        runtara_agents::extractors::extract_http_config("example_billing", &stored, None).unwrap();
+    assert_eq!(config.headers["Authorization"], "Device k-1:project");
+
+    // A format with no place for the key is refused with the declaration.
+    let mut bad = declared;
+    bad.fixed.insert("value_format".into(), "Device".into());
+    let error = register(vec![("example-billing".into(), bad)]).unwrap_err();
+    assert!(error.contains("value_format"), "{error}");
+    register(vec![]).unwrap();
+}
+
 #[test]
 fn invalid_registrations_change_nothing() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
