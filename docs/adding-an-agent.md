@@ -218,7 +218,7 @@ existing connection type (`http_bearer`, `http_api_key`,
      `redirectUri` names.
    - OAuth2 client credentials against the vendor's own token endpoint get a
      `describe_<vendor>_client_credentials_auth` returning
-     `DeferredAuth::OAuth2ClientCredentials` (Shopify, Zendesk): the shape of
+     `DeferredAuth::OAuth2ClientCredentials` (Shopify, Zendesk, UPS, PayPal): the shape of
      the token request. seal sends it with the sealed client secret, and the
      token comes back sealed for the API. Send the body the vendor documents
      (`TokenRequestBody::Json` or `FormUrlEncoded`), and ask for a token

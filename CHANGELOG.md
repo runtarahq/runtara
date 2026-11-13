@@ -13,6 +13,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **PayPal agent, generated from PayPal's REST API OpenAPI files.** Twenty-one
+  capabilities: create, read, update, authorize and capture orders and add or
+  update their shipment tracking; read, capture, reauthorize and void
+  authorizations; read and refund captures, and read refunds; add trackers in
+  a batch, read and update them; search transactions and read balances; and
+  list and read disputes. A failed step carries PayPal's `issue` and
+  `debug_id`, a POST sent with a `PayPal-Request-Id` is retried after a timeout
+  (PayPal carries it out once) while any other is not, and a tracker batch
+  PayPal adds only in part fails with `PAYPAL_VALIDATION_FAILED`, naming the
+  trackers it added. A capture PayPal declines or a refund that fails is an
+  error, though PayPal answers it with 201; an order capture always asks for
+  the whole order (`Prefer: return=representation`), as only that shows its
+  captures. The new `paypal_client_credentials` connection type
+  takes a REST app's Client ID and Secret, in production or the sandbox.
+
+- **`connector_gen` takes PayPal's specs.** `server` gives specs that list
+  different servers the one their paths are relative to. A field that is an
+  `allOf` of a scalar schema and parts that only describe it is that scalar,
+  schema keywords written on a parameter go into its schema, and an array body
+  of models is a `Vec` of their structs (a template change).
+
 - **eBay agent, generated from eBay's Sell API OpenAPI files.** Twenty-five
   capabilities for a seller: list and read orders, ship them (with tracking)
   and refund them; create, replace, list and delete inventory items, update

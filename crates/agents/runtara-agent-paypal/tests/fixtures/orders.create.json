@@ -1,0 +1,18 @@
+{
+  "id": "5O190127TN364715T",
+  "links": [
+    {
+      "href": "https://api-m.paypal.com/v2/checkout/orders/5O190127TN364715T",
+      "method": "GET",
+      "rel": "self"
+    },
+    {
+      "href": "https://www.paypal.com/checkoutnow?token=5O190127TN364715T",
+      "method": "GET",
+      "rel": "payer-action"
+    }
+  ],
+  "payment_source": {
+    "paypal": {}
+  }
+}

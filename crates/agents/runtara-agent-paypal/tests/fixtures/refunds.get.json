@@ -1,0 +1,53 @@
+{
+  "amount": {
+    "currency_code": "USD",
+    "value": "10.99"
+  },
+  "create_time": "2018-09-11T23:24:19Z",
+  "id": "1JU08902781691411",
+  "invoice_id": "INVOICE-123",
+  "links": [
+    {
+      "href": "https://api-m.paypal.com/v2/payments/refunds/1JU08902781691411",
+      "method": "GET",
+      "rel": "self"
+    },
+    {
+      "href": "https://api-m.paypal.com/v2/payments/captures/2GG279541U471931P",
+      "method": "GET",
+      "rel": "up"
+    }
+  ],
+  "note": "Defective product",
+  "seller_payable_breakdown": {
+    "gross_amount": {
+      "currency_code": "USD",
+      "value": "10.99"
+    },
+    "net_amount": {
+      "currency_code": "USD",
+      "value": "9.66"
+    },
+    "paypal_fee": {
+      "currency_code": "USD",
+      "value": "0.33"
+    },
+    "platform_fees": [
+      {
+        "amount": {
+          "currency_code": "USD",
+          "value": "1.00"
+        },
+        "payee": {
+          "email_address": "fee@example.com"
+        }
+      }
+    ],
+    "total_refunded_amount": {
+      "currency_code": "USD",
+      "value": "10.99"
+    }
+  },
+  "status": "COMPLETED",
+  "update_time": "2018-09-11T23:24:19Z"
+}

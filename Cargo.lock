@@ -4593,6 +4593,7 @@ dependencies = [
  "runtara-agent-mcp",
  "runtara-agent-object-model",
  "runtara-agent-openai",
+ "runtara-agent-paypal",
  "runtara-agent-pipedrive",
  "runtara-agent-quickbooks",
  "runtara-agent-s3-storage",
@@ -4820,6 +4821,18 @@ version = "10.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-ai",
+ "runtara-dsl",
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.58.0",
+]
+
+[[package]]
+name = "runtara-agent-paypal"
+version = "10.0.0"
+dependencies = [
+ "runtara-agent-macro",
  "runtara-dsl",
  "runtara-http",
  "serde",

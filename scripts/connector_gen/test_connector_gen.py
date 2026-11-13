@@ -766,6 +766,94 @@ class HtmlDescriptionsTest(unittest.TestCase):
         self.assertEqual(operation(plain, "create")["description"], "Creates.<br>Then.")
 
 
+class ScalarAllOfTest(unittest.TestCase):
+    """An `allOf` of a scalar `$ref` and fragments that only describe it is
+    that scalar (PayPal's `cancel_url`), which openapi-generator otherwise
+    types as a bare `Option`."""
+
+    @staticmethod
+    def sliced(field: dict, extra_schemas: dict = ()) -> dict:
+        spec = {"openapi": "3.0.1", "info": {"title": "t", "version": "1"}, "paths": {"/x": {"get": {
+            "operationId": "x", **ok_json({"$ref": "#/components/schemas/Context"})}}},
+            "components": {"schemas": {
+                "url": {"type": "string", "format": "uri", "maxLength": 2000, "description": "Describes the URL."},
+                "Address": {"type": "object", "properties": {"line": {"type": "string"}}},
+                "Context": {"type": "object", "properties": {"cancel_url": field}},
+                **dict(extra_schemas),
+            }}}
+        return cg.slice_spec(spec, ["x"])
+
+    def field(self, sliced: dict) -> dict:
+        return sliced["components"]["schemas"]["Context"]["properties"]["cancel_url"]
+
+    def test_the_scalar_takes_the_fragments_and_the_fields_own_words(self):
+        sliced = self.sliced({"allOf": [{"$ref": "#/components/schemas/url"},
+                                        {"description": "Where the customer goes back.", "format": "uri"}]})
+        self.assertEqual(self.field(sliced), {"type": "string", "format": "uri", "maxLength": 2000,
+                                              "description": "Where the customer goes back."})
+        # The scalar's own schema is used nowhere else now.
+        self.assertNotIn("url", sliced["components"]["schemas"])
+        # A description beside the `allOf` is the field's.
+        sliced = self.sliced({"description": "Beside.", "allOf": [{"$ref": "#/components/schemas/url"},
+                                                                  {"description": "Inside."}]})
+        self.assertEqual(self.field(sliced)["description"], "Beside.")
+
+    def test_an_allof_with_a_shape_of_its_own_stays(self):
+        for field in (
+            {"allOf": [{"$ref": "#/components/schemas/Address"}, {"description": "Billing."}]},
+            {"allOf": [{"$ref": "#/components/schemas/url"}, {"properties": {"a": {"type": "string"}}}]},
+            {"allOf": [{"$ref": "#/components/schemas/url"}, {"type": "integer"}]},
+        ):
+            with self.subTest(field):
+                self.assertIn("allOf", self.field(self.sliced(copy.deepcopy(field))))
+
+
+class ParameterKeywordsTest(unittest.TestCase):
+    """Schema keywords written on a parameter go in its schema (PayPal's
+    disputes spec puts `enum` beside `schema`, which fails validation)."""
+
+    def test_keywords_move_into_the_schema_and_the_schema_wins(self):
+        state = {"in": "query", "name": "dispute_state", "enum": ["OPEN", "RESOLVED"], "format": "x",
+                 "schema": {"type": "string", "format": "kept"}}
+        spec = {"openapi": "3.0.1", "info": {"title": "t", "version": "1"}, "paths": {"/d": {"get": {
+            "operationId": "list", "parameters": [state], "responses": {"200": {"description": "ok"}}}}}}
+        parameter = operation(cg.slice_spec(spec, ["list"]), "list")["parameters"][0]
+        self.assertEqual(parameter, {"in": "query", "name": "dispute_state",
+                                     "schema": {"type": "string", "format": "kept", "enum": ["OPEN", "RESOLVED"]}})
+
+
+class ServerTest(unittest.TestCase):
+    """`server` gives specs that list different servers (PayPal's) one."""
+
+    def test_the_server_replaces_each_specs_servers(self):
+        specs = (("Orders", "orders", merge_spec("/v2/orders", "orders", MergeTest.schemas("e"),
+                                                 servers=("https://api-m.paypal.com",))),
+                 ("Tracking", "tracking", merge_spec("/v1/trackers", "tracking", MergeTest.schemas("e"),
+                                                     servers=("https://api-m.sandbox.paypal.com",
+                                                              "https://api-m.paypal.com"))))
+        with self.assertRaises(SystemExit):
+            merge(*specs)
+        merged = merge(*specs, server="https://api-m.paypal.com/")
+        self.assertEqual(merged["servers"], [{"url": "https://api-m.paypal.com"}])
+        self.assertEqual(sorted(merged["paths"]), ["/v1/trackers", "/v2/orders"])
+        for server in ("http://api-m.paypal.com", "api-m.paypal.com", "https://{env}.paypal.com"):
+            with self.subTest(server), self.assertRaises(SystemExit):
+                merge(*specs, server=server)
+
+    def test_a_spec_whose_paths_are_relative_to_another_path_is_refused(self):
+        # `/orders` under `https://api.example.com/v2` is `/v2/orders`: a
+        # `server` without the `/v2` would send it to `/orders`.
+        specs = (("Orders", "orders", merge_spec("/orders", "orders", MergeTest.schemas("e"),
+                                                 servers=("https://api.example.com/v2",))),
+                 ("Items", "items", merge_spec("/items", "items", MergeTest.schemas("e"),
+                                               servers=("https://sandbox.example.com/v2",))))
+        with self.assertRaises(SystemExit) as raised:
+            merge(*specs, server="https://api.example.com")
+        self.assertIn("lists `https://api.example.com/v2`", str(raised.exception))
+        merged = merge(*specs, server="https://api.example.com/v2/")
+        self.assertEqual(merged["servers"], [{"url": "https://api.example.com/v2"}])
+
+
 class NoContentTest(unittest.TestCase):
     """A 204 (No Content) has no body, whatever the spec gives it."""
 
@@ -1495,6 +1583,29 @@ class MergeRenderTest(unittest.TestCase):
             text = cg.render(crate)
         self.assertIn('String::from("/sell/fulfillment/v1/order")', text)
         self.assertIn('String::from("/sell/inventory/v1/inventory_item")', text)
+
+
+@unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
+class ArrayBodyRenderTest(unittest.TestCase):
+    """An array body of models (PayPal's JSON Patch list) names its items as
+    every other model reference does, not `models::Patch`."""
+
+    def test_an_array_body_of_models_is_a_vec_of_the_struct(self):
+        patch = {"type": "object", "properties": {"op": {"type": "string"}, "path": {"type": "string"},
+                                                  "value": {}}}
+        spec = {"openapi": "3.0.1", "info": {"title": "t", "version": "1"},
+                "servers": [{"url": "https://api.example.com"}], "paths": {"/orders/{id}": {"patch": {
+                    "operationId": "patchOrder",
+                    "parameters": [{"in": "path", "name": "id", "required": True, "schema": {"type": "string"}}],
+                    **json_body({"type": "array", "items": {"$ref": "#/components/schemas/Patch"}}),
+                    "responses": {"204": {"description": "Patched"}}}}},
+                "components": {"schemas": {"Patch": patch}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            crate = Path(tmp)
+            write_crate(crate, spec, ["patchOrder"])
+            text = cg.render(crate)
+        self.assertIn("pub body: Option<Vec<Patch>>,", text)
+        self.assertNotIn("models::", text)
 
 
 @unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
