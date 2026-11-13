@@ -30,6 +30,11 @@ const ERROR_BODY_LIMIT: usize = 512;
 /// PayPal's idempotency key: a POST sent again with the same one is carried
 /// out once.
 pub const REQUEST_ID_HEADER: &str = "PayPal-Request-Id";
+/// How much of the resource PayPal answers a write with.
+const PREFER_HEADER: &str = "Prefer";
+/// The whole resource, which an order capture always asks for: see
+/// [`is_order_capture`].
+const WHOLE_ANSWER: &str = "return=representation";
 
 /// The JSON envelope the `#[capability]` macro passes back to the host.
 #[derive(Debug, Clone, Serialize)]
@@ -238,11 +243,15 @@ pub struct Request {
 impl Request {
     /// `path` is relative to the connection's base URL.
     pub fn new(method: &'static str, path: String) -> Self {
+        let mut headers = Vec::new();
+        if is_order_capture(method, &path) {
+            headers.push((PREFER_HEADER.to_string(), WHOLE_ANSWER.to_string()));
+        }
         Self {
             method,
             path,
             query: Vec::new(),
-            headers: Vec::new(),
+            headers,
             body: None,
         }
     }
@@ -259,7 +268,8 @@ impl Request {
         &self.query
     }
 
-    /// The headers the step sets (`Content-Language`), not those `send` adds.
+    /// The headers the request carries (an order capture's `Prefer` among
+    /// them), not those `send` adds (`Accept`, `Content-Type`).
     pub fn header_pairs(&self) -> &[(String, String)] {
         &self.headers
     }
@@ -299,6 +309,10 @@ impl Request {
     }
 
     pub fn header<T: ParamValue>(mut self, name: &str, value: &T) -> Self {
+        // An order capture keeps the `Prefer` that `new` gave it.
+        if name.eq_ignore_ascii_case(PREFER_HEADER) && is_order_capture(self.method, &self.path) {
+            return self;
+        }
         self.headers.push((name.to_string(), value.to_param()));
         self
     }
@@ -375,6 +389,23 @@ impl Request {
                     name.eq_ignore_ascii_case(REQUEST_ID_HEADER) && !value.trim().is_empty()
                 }))
     }
+}
+
+/// Whether this is an order's capture, `POST /v2/checkout/orders/{id}/capture`,
+/// which is always sent with `Prefer: return=representation`, whatever the
+/// step asks for. The shorter answer PayPal gives otherwise (`return=minimal`,
+/// its default) carries only the order's ID, status and links, and an order
+/// whose capture PayPal declined can still be `COMPLETED`: a declined capture
+/// would pass as a success (see [`declined_captures`]). An authorization's
+/// capture and a refund need no such header, because their shorter answer
+/// still has their own status.
+fn is_order_capture(method: &str, path: &str) -> bool {
+    let segments: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+    method.eq_ignore_ascii_case("POST")
+        && matches!(
+            segments.as_slice(),
+            ["", "v2", "checkout", "orders", id, "capture"] if !id.is_empty()
+        )
 }
 
 /// Refuses a path with an empty segment, which an empty path parameter
@@ -646,7 +677,9 @@ fn paypal_error(body: &Value) -> Option<PayPalError> {
 /// Reported as a success, that would let a workflow mark the order paid, or
 /// ship it, though no money moved. The error is permanent, as sending the
 /// capture again would be declined again; `captures` names each capture, its
-/// status and PayPal's `status_details.reason`.
+/// status and PayPal's `status_details.reason`. An order's captures are in
+/// its whole answer only, which is why an order capture asks for that one
+/// (see [`is_order_capture`]).
 fn declined_captures(body: &Value, method: &str, path: &str, prefix: &str) -> Option<AgentError> {
     if !method.eq_ignore_ascii_case("POST") || !path.trim_end_matches('/').ends_with("/capture") {
         return None;

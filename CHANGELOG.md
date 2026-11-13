@@ -22,7 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `debug_id`, a POST sent with a `PayPal-Request-Id` is retried after a timeout
   (PayPal carries it out once) while any other is not, and a tracker batch
   PayPal adds only in part fails with `PAYPAL_VALIDATION_FAILED`, naming the
-  trackers it added. The new `paypal_client_credentials` connection type
+  trackers it added. A capture PayPal declines or a refund that fails is an
+  error, though PayPal answers it with 201; an order capture always asks for
+  the whole order (`Prefer: return=representation`), as only that shows its
+  captures. The new `paypal_client_credentials` connection type
   takes a REST app's Client ID and Secret, in production or the sandbox.
 
 - **`connector_gen` takes PayPal's specs.** `server` gives specs that list

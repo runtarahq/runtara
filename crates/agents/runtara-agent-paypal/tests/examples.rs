@@ -8,9 +8,10 @@
 //! request the capability sends.
 
 use runtara_agent_paypal::{
-    CapturesRefundInput, Order, OrderAuthorizeResponse, OrdersCaptureInput, OrdersCreateInput,
-    OrdersGetInput, OrdersTrackCreateInput, OrdersTrackersPatchInput, PaymentAuthorization,
-    PaymentCapture, PaymentsRefund, SearchGetInput, TrackersBatchPostInput,
+    AuthorizationsCaptureInput, CapturesRefundInput, Order, OrderAuthorizeResponse,
+    OrdersAuthorizeInput, OrdersCaptureInput, OrdersCreateInput, OrdersGetInput,
+    OrdersTrackCreateInput, OrdersTrackersPatchInput, PaymentAuthorization, PaymentCapture,
+    PaymentsRefund, SearchGetInput, TrackersBatchPostInput,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -205,6 +206,50 @@ fn a_capture_names_its_order_and_without_a_request_id_is_not_resent() {
     let read: OrdersGetInput =
         serde_json::from_value(json!({ "id": "5O190127TN364715T" })).unwrap();
     assert!(read.request().unwrap().resendable());
+}
+
+#[test]
+fn an_order_capture_asks_for_the_whole_order_whatever_the_step_prefers() {
+    // PayPal's shorter answer to an order capture has no captures in it, so a
+    // declined one would pass as a success.
+    for prefer in [None, Some("return=minimal"), Some("return=representation")] {
+        let mut input = json!({ "id": "5O190127TN364715T", "PayPal-Request-Id": "capture-1" });
+        if let Some(prefer) = prefer {
+            input["Prefer"] = json!(prefer);
+        }
+        let input: OrdersCaptureInput = serde_json::from_value(input).unwrap();
+        assert_eq!(
+            input.request().unwrap().header_pairs(),
+            [
+                ("Prefer".to_string(), "return=representation".to_string()),
+                ("PayPal-Request-Id".to_string(), "capture-1".to_string()),
+            ],
+            "{prefer:?}"
+        );
+    }
+    // An authorization's capture, a refund and an order's authorization send
+    // what the step asks for, and nothing when it asks for nothing.
+    let capture: AuthorizationsCaptureInput = serde_json::from_value(json!({
+        "authorization_id": "0VF52814937998046",
+        "Prefer": "return=minimal",
+    }))
+    .unwrap();
+    assert_eq!(
+        capture.request().unwrap().header_pairs(),
+        [("Prefer".to_string(), "return=minimal".to_string())]
+    );
+    let refund: CapturesRefundInput = serde_json::from_value(json!({
+        "capture_id": "2GG279541U471931P",
+        "Prefer": "return=minimal",
+    }))
+    .unwrap();
+    assert_eq!(
+        refund.request().unwrap().header_pairs(),
+        [("Prefer".to_string(), "return=minimal".to_string())]
+    );
+    let authorize: OrdersAuthorizeInput =
+        serde_json::from_value(json!({ "id": "5O190127TN364715T" })).unwrap();
+    assert!(authorize.request().unwrap().header_pairs().is_empty());
 }
 
 #[test]

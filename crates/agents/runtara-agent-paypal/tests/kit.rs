@@ -460,3 +460,32 @@ fn an_empty_or_dot_id_is_refused_before_sending() {
     assert!(kit::check_path("GET", "/v2/payments/captures/%2e%2E", "PAYPAL").is_err());
     assert!(kit::check_path("GET", "/v2/checkout/orders/5O190127TN364715T", "PAYPAL").is_ok());
 }
+
+#[test]
+fn only_an_order_capture_has_its_prefer_fixed() {
+    let capture = kit::Request::new(
+        "POST",
+        "/v2/checkout/orders/5O190127TN364715T/capture/".to_string(),
+    )
+    .header("prefer", &"return=minimal".to_string());
+    assert_eq!(
+        capture.header_pairs(),
+        [("Prefer".to_string(), "return=representation".to_string())]
+    );
+    for (method, path) in [
+        ("POST", "/v2/checkout/orders/5O190127TN364715T/authorize"),
+        (
+            "POST",
+            "/v2/payments/authorizations/0VF52814937998046/capture",
+        ),
+        ("GET", "/v2/checkout/orders/5O190127TN364715T/capture"),
+    ] {
+        let request = kit::Request::new(method, path.to_string())
+            .header("Prefer", &"return=minimal".to_string());
+        assert_eq!(
+            request.header_pairs(),
+            [("Prefer".to_string(), "return=minimal".to_string())],
+            "{method} {path}"
+        );
+    }
+}
