@@ -473,7 +473,9 @@ pub fn decode<T: DeserializeOwned>(
 /// - A 2xx body that is not JSON (text, binary) decodes as a JSON string of its
 ///   text, which suits operations whose output is `Value`.
 /// - A 2xx answer to a tracker batch that lists errors is an error: see
-///   [`refused_trackers`].
+///   [`refused_trackers`]. So is a 2xx answer to a capture whose capture PayPal
+///   declined, or to a refund that failed: see [`declined_captures`] and
+///   [`failed_refund`].
 pub fn decode_of<T: DeserializeOwned>(
     response: &runtara_http::HttpResponse,
     method: &str,
@@ -534,6 +536,8 @@ pub fn decode_of<T: DeserializeOwned>(
     if !method.eq_ignore_ascii_case("GET")
         && let Ok(body) = serde_json::from_slice::<Value>(&response.body)
         && let Some(err) = refused_trackers(&body, method, path, prefix)
+            .or_else(|| declined_captures(&body, method, path, prefix))
+            .or_else(|| failed_refund(&body, method, path, prefix))
     {
         return Err(err.with_attr("status_code", status.to_string()));
     }
@@ -632,6 +636,103 @@ fn paypal_error(body: &Value) -> Option<PayPalError> {
         debug_id: text(body, "debug_id"),
         details: details.map(|details| Value::Array(details.clone())),
     })
+}
+
+/// The captures a capture's answer marks as declined or failed, as an error;
+/// `None` when it marks none.
+///
+/// PayPal can answer an order's or an authorization's capture with 201 while
+/// the capture in it is `DECLINED` (the card issuer refused it) or `FAILED`.
+/// Reported as a success, that would let a workflow mark the order paid, or
+/// ship it, though no money moved. The error is permanent, as sending the
+/// capture again would be declined again; `captures` names each capture, its
+/// status and PayPal's `status_details.reason`.
+fn declined_captures(body: &Value, method: &str, path: &str, prefix: &str) -> Option<AgentError> {
+    if !method.eq_ignore_ascii_case("POST") || !path.trim_end_matches('/').ends_with("/capture") {
+        return None;
+    }
+    // An order's captures are in its purchase units; an authorization's
+    // capture is the answer itself.
+    let captures: Vec<&Value> = match body.get("purchase_units").and_then(Value::as_array) {
+        Some(units) => units
+            .iter()
+            .filter_map(|unit| unit.pointer("/payments/captures")?.as_array())
+            .flatten()
+            .collect(),
+        None => vec![body],
+    };
+    let declined: Vec<Value> = captures
+        .into_iter()
+        .filter_map(|capture| {
+            let status = capture.get("status")?.as_str()?;
+            if !matches!(status, "DECLINED" | "FAILED") {
+                return None;
+            }
+            let mut entry = serde_json::json!({ "status": status });
+            if let Some(id) = capture.get("id") {
+                entry["id"] = id.clone();
+            }
+            if let Some(reason) = capture.pointer("/status_details/reason") {
+                entry["reason"] = reason.clone();
+            }
+            Some(entry)
+        })
+        .collect();
+    let first = declined.first()?;
+    let mut message = format!(
+        "{prefix} {method} {path}: PayPal answered the capture, but its capture {} is {}",
+        first["id"].as_str().unwrap_or("(no id)"),
+        first["status"].as_str().unwrap_or_default()
+    );
+    if let Some(reason) = first["reason"].as_str() {
+        message.push_str(&format!(" ({reason})"));
+    }
+    message.push_str("; no money moved for it");
+    let mut err = AgentError::permanent(format!("{prefix}_PAYMENT_DECLINED"), message)
+        .with_attr("path", path)
+        .with_attr_value("captures", Value::Array(declined));
+    if let Some(order) = body
+        .get("purchase_units")
+        .and(body.get("id"))
+        .and_then(Value::as_str)
+    {
+        err = err.with_attr("order_id", order);
+    }
+    Some(err)
+}
+
+/// A refund PayPal answered with 201 but did not carry out (`FAILED`, or
+/// `CANCELLED`), as an error; `None` for any other answer. Reported as a
+/// success, it would let a workflow tell the buyer the money is on its way.
+fn failed_refund(body: &Value, method: &str, path: &str, prefix: &str) -> Option<AgentError> {
+    if !method.eq_ignore_ascii_case("POST") || !path.trim_end_matches('/').ends_with("/refund") {
+        return None;
+    }
+    let status = body.get("status")?.as_str()?;
+    if !matches!(status, "FAILED" | "CANCELLED") {
+        return None;
+    }
+    let id = body.get("id").and_then(Value::as_str).unwrap_or("(no id)");
+    let mut message = format!(
+        "{prefix} {method} {path}: PayPal answered the refund, but refund {id} is {status}"
+    );
+    let reason = body
+        .pointer("/status_details/reason")
+        .and_then(Value::as_str);
+    if let Some(reason) = reason {
+        message.push_str(&format!(" ({reason})"));
+    }
+    message.push_str("; no money went back for it");
+    let mut err = AgentError::permanent(format!("{prefix}_REFUND_FAILED"), message)
+        .with_attr("path", path)
+        .with_attr("refund_status", status);
+    if let Some(id) = body.get("id").and_then(Value::as_str) {
+        err = err.with_attr("refund_id", id);
+    }
+    if let Some(reason) = reason {
+        err = err.with_attr("reason", reason);
+    }
+    Some(err)
 }
 
 /// The trackers a batch's answer marks as refused, as an error; `None` when

@@ -1216,6 +1216,37 @@ fn test_paypal_extractor_pins_the_environment_and_refuses_another() {
 }
 
 #[test]
+fn test_a_null_environment_is_production_and_another_type_is_refused() {
+    // As the token request reads it: a null environment is the default one.
+    for (integration_id, host) in [
+        ("paypal_client_credentials", "https://api-m.paypal.com"),
+        ("ups_client_credentials", "https://onlinetools.ups.com"),
+    ] {
+        let config = extract_http_config(
+            integration_id,
+            &json!({ "environment": null, "client_id": "c", "client_secret": "s" }),
+            None,
+        )
+        .expect("a null environment is production");
+        assert_eq!(config.url_prefix, host, "{integration_id}");
+        assert!(
+            extract_http_config(
+                integration_id,
+                &json!({ "environment": 1, "client_id": "c", "client_secret": "s" }),
+                None,
+            )
+            .is_err(),
+            "{integration_id}"
+        );
+    }
+    assert_eq!(
+        connection_types::connection_environment(&json!({ "environment": null })),
+        Ok("production")
+    );
+    assert!(connection_types::connection_environment(&json!({ "environment": true })).is_err());
+}
+
+#[test]
 fn test_paypal_connection_type_is_registered() {
     assert!(get_http_extractor_ids().contains(&"paypal_client_credentials"));
     let meta = crate::registry::find_connection_type("paypal_client_credentials")

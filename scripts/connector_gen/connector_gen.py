@@ -1532,7 +1532,15 @@ def set_server(slices: list, server) -> None:
     url = urllib.parse.urlsplit(server if isinstance(server, str) else "")
     if url.scheme != "https" or not url.netloc or url.query or url.fragment or "{" in server:
         sys.exit(f"server `{server}` is no https URL of a host (and a path)")
-    for _, sliced in slices:
+    base = url.path.rstrip("/")
+    for name, sliced in slices:
+        # Only the host may differ: a spec whose paths are relative to another
+        # path (`/v2`) would lose it, and its requests would miss.
+        for listed in sliced.get("servers") or []:
+            own = urllib.parse.urlsplit(resolved_url(listed)).path.rstrip("/")
+            if own != base:
+                sys.exit(f"server `{server}`: {name or 'the spec'} lists `{listed.get('url')}`, whose "
+                         f"path `{own or '/'}` its paths are relative to; give `server` that path")
         sliced["servers"] = [{"url": server.rstrip("/")}]
 
 

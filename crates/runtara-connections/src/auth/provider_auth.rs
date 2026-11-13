@@ -1,6 +1,6 @@
 use runtara_agents::extractors::connection_types::{
     GEMINI_API_BASE_URL, SHIPPO_API_BASE_URL, SHIPPO_API_VERSION, ZENDESK_DEFAULT_SCOPE,
-    jira_base_url, paypal_base_url, ups_base_url, zendesk_base_url,
+    connection_environment, jira_base_url, paypal_base_url, ups_base_url, zendesk_base_url,
 };
 use runtara_agents::registry::find_connection_type;
 use runtara_dsl::agent_meta::{OAuthConfig, TokenEndpointAuth};
@@ -500,7 +500,7 @@ fn describe_zendesk_client_credentials_auth(
 const UPS_TRANSACTION_SRC: &str = "runtara";
 
 fn ups_environment_url(params: &Value) -> Option<String> {
-    let environment = params["environment"].as_str().unwrap_or("production");
+    let environment = connection_environment(params).ok()?;
     ups_base_url(environment).ok().map(str::to_string)
 }
 
@@ -532,7 +532,7 @@ fn describe_ups_client_credentials_auth(
 }
 
 fn paypal_environment_url(params: &Value) -> Option<String> {
-    let environment = params["environment"].as_str().unwrap_or("production");
+    let environment = connection_environment(params).ok()?;
     paypal_base_url(environment).ok().map(str::to_string)
 }
 
@@ -1650,16 +1650,31 @@ mod tests {
                 _ => panic!("expected a form client-credentials token request"),
             }
         }
-        // An environment PayPal does not run: no destination, no token.
+        // An environment PayPal does not run, or one that is no string: no
+        // destination, no token. A null one is production, as the extractor
+        // reads it.
+        for environment in [json!("evil.com"), json!(1)] {
+            let mut headers = HashMap::new();
+            let descriptor = describe_connection_auth(
+                "conn-1",
+                "paypal_client_credentials",
+                &json!({ "environment": environment, "client_id": "c", "client_secret": "s" }),
+                &mut headers,
+            );
+            assert_eq!(descriptor.base_url, None, "{environment}");
+            assert!(descriptor.deferred_auth.is_none(), "{environment}");
+        }
         let mut headers = HashMap::new();
         let descriptor = describe_connection_auth(
             "conn-1",
             "paypal_client_credentials",
-            &json!({ "environment": "evil.com", "client_id": "c", "client_secret": "s" }),
+            &json!({ "environment": null, "client_id": "c", "client_secret": "s" }),
             &mut headers,
         );
-        assert_eq!(descriptor.base_url, None);
-        assert!(descriptor.deferred_auth.is_none());
+        assert_eq!(
+            descriptor.base_url.as_deref(),
+            Some("https://api-m.paypal.com")
+        );
     }
 
     #[test]

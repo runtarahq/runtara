@@ -2130,6 +2130,31 @@ impl HttpConnectionExtractor for JiraExtractor {
 // UPS Connection Types
 // ============================================================================
 
+/// The `environment` a UPS or PayPal connection names: `production` when the
+/// parameter is missing or null, as both the token request and the extractor
+/// read it; an error for any other value that is not a string.
+pub fn connection_environment(params: &Value) -> Result<&str, String> {
+    match params.get("environment") {
+        None | Some(Value::Null) => Ok("production"),
+        Some(Value::String(environment)) => Ok(environment),
+        Some(other) => Err(format!(
+            "Invalid environment `{other}`: use `production` or `sandbox`"
+        )),
+    }
+}
+
+/// `params` with a null `environment` left out, so that it takes its default
+/// as a missing one does.
+fn without_null_environment(params: &Value) -> Value {
+    let mut params = params.clone();
+    if let Some(fields) = params.as_object_mut()
+        && fields.get("environment").is_some_and(Value::is_null)
+    {
+        fields.remove("environment");
+    }
+    params
+}
+
 /// The UPS API origin for an environment: `production`, or `sandbox` (UPS's
 /// Customer Integration Environment, which takes the same credentials and
 /// returns test data). Anything else is an error, so credentialed requests can
@@ -2198,7 +2223,7 @@ impl HttpConnectionExtractor for UpsClientCredentialsExtractor {
 
     fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
         let p: UpsClientCredentialsParams =
-            serde_json::from_value(params.clone()).map_err(|e| {
+            serde_json::from_value(without_null_environment(params)).map_err(|e| {
                 format!(
                     "Invalid ups_client_credentials connection parameters: {}",
                     e
@@ -2286,8 +2311,10 @@ impl HttpConnectionExtractor for PaypalClientCredentialsExtractor {
     }
 
     fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
-        let p: PaypalClientCredentialsParams = serde_json::from_value(params.clone())
-            .map_err(|e| format!("Invalid paypal_client_credentials connection parameters: {e}"))?;
+        let p: PaypalClientCredentialsParams =
+            serde_json::from_value(without_null_environment(params)).map_err(|e| {
+                format!("Invalid paypal_client_credentials connection parameters: {e}")
+            })?;
 
         Ok(HttpConnectionConfig {
             headers: HashMap::new(),

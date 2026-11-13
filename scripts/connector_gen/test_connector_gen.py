@@ -840,6 +840,19 @@ class ServerTest(unittest.TestCase):
             with self.subTest(server), self.assertRaises(SystemExit):
                 merge(*specs, server=server)
 
+    def test_a_spec_whose_paths_are_relative_to_another_path_is_refused(self):
+        # `/orders` under `https://api.example.com/v2` is `/v2/orders`: a
+        # `server` without the `/v2` would send it to `/orders`.
+        specs = (("Orders", "orders", merge_spec("/orders", "orders", MergeTest.schemas("e"),
+                                                 servers=("https://api.example.com/v2",))),
+                 ("Items", "items", merge_spec("/items", "items", MergeTest.schemas("e"),
+                                               servers=("https://sandbox.example.com/v2",))))
+        with self.assertRaises(SystemExit) as raised:
+            merge(*specs, server="https://api.example.com")
+        self.assertIn("lists `https://api.example.com/v2`", str(raised.exception))
+        merged = merge(*specs, server="https://api.example.com/v2/")
+        self.assertEqual(merged["servers"], [{"url": "https://api.example.com/v2"}])
+
 
 class NoContentTest(unittest.TestCase):
     """A 204 (No Content) has no body, whatever the spec gives it."""

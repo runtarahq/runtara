@@ -231,6 +231,126 @@ fn a_write_whose_answer_cannot_be_read_may_have_been_carried_out() {
     }
 }
 
+#[test]
+fn a_declined_capture_is_an_error_though_paypal_answered_201() {
+    // An order's capture: the declined capture is in its purchase unit.
+    let order = json!({
+        "id": "5O190127TN364715T",
+        "status": "COMPLETED",
+        "purchase_units": [{
+            "reference_id": "default",
+            "payments": { "captures": [{
+                "id": "3C679366HH908993F",
+                "status": "DECLINED",
+                "status_details": { "reason": "DECLINED_BY_RISK_FRAUD_FILTERS" },
+                "amount": { "currency_code": "USD", "value": "20.00" },
+            }]},
+        }],
+    });
+    let err = kit::decode::<Order>(
+        &response(201, &order.to_string(), &[]),
+        "POST",
+        &format!("{ORDER}/capture"),
+        "PAYPAL",
+    )
+    .unwrap_err();
+    assert_eq!(
+        (err.code.as_str(), err.category),
+        ("PAYPAL_PAYMENT_DECLINED", "permanent")
+    );
+    assert!(
+        err.message.ends_with(
+            "PayPal answered the capture, but its capture 3C679366HH908993F is DECLINED \
+             (DECLINED_BY_RISK_FRAUD_FILTERS); no money moved for it"
+        ),
+        "{}",
+        err.message
+    );
+    assert_eq!(err.attributes["order_id"], json!("5O190127TN364715T"));
+    assert_eq!(
+        err.attributes["captures"],
+        json!([{ "id": "3C679366HH908993F", "status": "DECLINED",
+                 "reason": "DECLINED_BY_RISK_FRAUD_FILTERS" }])
+    );
+
+    // An authorization's capture: the answer is the capture.
+    let failed = json!({ "id": "7TK53561YB803214S", "status": "FAILED" });
+    let err = kit::decode::<Value>(
+        &response(201, &failed.to_string(), &[]),
+        "POST",
+        "/v2/payments/authorizations/0VF52814937998046/capture",
+        "PAYPAL",
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "PAYPAL_PAYMENT_DECLINED");
+    assert!(!err.attributes.contains_key("order_id"));
+}
+
+#[test]
+fn a_completed_or_pending_capture_and_other_answers_are_their_output() {
+    for status in ["COMPLETED", "PENDING"] {
+        let capture = json!({ "id": "3C679366HH908993F", "status": status });
+        let output: Value = kit::decode(
+            &response(201, &capture.to_string(), &[]),
+            "POST",
+            "/v2/payments/authorizations/0VF52814937998046/capture",
+            "PAYPAL",
+        )
+        .unwrap();
+        assert_eq!(output, capture, "{status}");
+    }
+    // A completed or pending refund is its output; a read is data.
+    for status in ["COMPLETED", "PENDING"] {
+        let refund = json!({ "id": "1JU08902781691411", "status": status });
+        let output: Value = kit::decode(
+            &response(201, &refund.to_string(), &[]),
+            "POST",
+            "/v2/payments/captures/3C679366HH908993F/refund",
+            "PAYPAL",
+        )
+        .unwrap();
+        assert_eq!(output, refund, "{status}");
+    }
+    let read: Value = decode(response(
+        200,
+        &json!({ "status": "DECLINED" }).to_string(),
+        &[],
+    ))
+    .unwrap();
+    assert_eq!(read, json!({ "status": "DECLINED" }));
+}
+
+#[test]
+fn a_failed_refund_is_an_error_though_paypal_answered_201() {
+    for status in ["FAILED", "CANCELLED"] {
+        let refund = json!({
+            "id": "1JU08902781691411", "status": status,
+            "status_details": { "reason": "ECHECK" },
+        });
+        let err = kit::decode::<Value>(
+            &response(201, &refund.to_string(), &[]),
+            "POST",
+            "/v2/payments/captures/3C679366HH908993F/refund",
+            "PAYPAL",
+        )
+        .unwrap_err();
+        assert_eq!(
+            (err.code.as_str(), err.category),
+            ("PAYPAL_REFUND_FAILED", "permanent"),
+            "{status}"
+        );
+        assert!(
+            err.message.ends_with(&format!(
+                "PayPal answered the refund, but refund 1JU08902781691411 is {status} (ECHECK); \
+                 no money went back for it"
+            )),
+            "{}",
+            err.message
+        );
+        assert_eq!(err.attributes["refund_id"], json!("1JU08902781691411"));
+    }
+}
+
 const BATCH: &str = "/v1/shipping/trackers-batch";
 
 #[test]
