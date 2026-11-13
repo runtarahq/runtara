@@ -205,8 +205,16 @@ descriptions may differ, as Zoho's do), or first servers on one host whose
 paths differ, as eBay's `https://api.ebay.com{basePath}` do with a base path
 per API. Then each spec's path (its variables at their defaults) goes in front
 of its own paths (`/sell/inventory/v1/offer`), and the merged server is the
-host alone; a spec's other servers are dropped. No path and method may be in
-two of the specs. A schema that two specs define differently under one generated name
+host alone; a spec's other servers are dropped. Specs that list servers on
+different hosts (PayPal's name the sandbox first in some, only production in
+others) take `server`, the one URL their paths are relative to; the host a
+request goes to is the connection's either way:
+
+```yaml
+server: https://api-m.paypal.com
+```
+
+No path and method may be in two of the specs. A schema that two specs define differently under one generated name
 gets the spec's name in front in each of them (`ErrorResponse` becomes
 `TrackingErrorResponse` and `ShippingErrorResponse`); one they define the same
 way is kept once. So does any other component, such as a shared parameter
@@ -391,8 +399,13 @@ crates/agents/runtara-agent-<id>/
   `fetch` warns when shapes disagree on a field. Shapes beside declared fields
   add theirs to those, and leave the declared ones as they are. A body that is
   not an object, is composed of anything but objects, or requires a field it
-  does not declare stays a single `body` input. Non-GET operations are marked
+  does not declare stays a single `body` input; an array of models (PayPal's
+  JSON Patch list) is a `Vec` of their structs. Non-GET operations are marked
   `side_effects`, except those listed in `read_operations`.
+- A field that is an `allOf` of a scalar schema and parts that only describe
+  or constrain it (PayPal's `cancel_url`: a `url` string plus `format: uri`)
+  is that scalar. Schema keywords a spec writes on a parameter beside its
+  `schema` (`enum`, `format`, …) go into the schema.
 - A model is a struct named after its schema in PascalCase; an inline schema is
   named after its operation, acronyms kept (`executeCOQLQuery`'s response is
   `ExecuteCOQLQuery200Response`). A field takes its property's name in snake

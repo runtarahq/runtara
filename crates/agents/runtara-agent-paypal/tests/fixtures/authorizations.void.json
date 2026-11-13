@@ -1,0 +1,26 @@
+{
+  "amount": {
+    "currency_code": "USD",
+    "value": "100.00"
+  },
+  "create_time": "2024-10-10T10:06:03-07:00",
+  "expiration_time": "2024-11-08T09:06:03-08:00",
+  "id": "5C908745JK343851U",
+  "invoice_id": "OrderInvoice-10_10_2024_12_06_00_pm",
+  "links": [
+    {
+      "href": "https://api.paypal.com/v2/payments/authorizations/5C908745JK343851U",
+      "method": "GET",
+      "rel": "self"
+    }
+  ],
+  "seller_protection": {
+    "dispute_categories": [
+      "ITEM_NOT_RECEIVED",
+      "UNAUTHORIZED_TRANSACTION"
+    ],
+    "status": "ELIGIBLE"
+  },
+  "status": "VOIDED",
+  "update_time": "2024-10-10T10:06:19-07:00"
+}

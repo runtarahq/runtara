@@ -1,0 +1,45 @@
+{
+  "amount": {
+    "currency_code": "USD",
+    "value": "10.99"
+  },
+  "create_time": "2017-09-11T23:23:45Z",
+  "expiration_time": "2017-10-10T23:23:45Z",
+  "id": "0VF52814937998046",
+  "invoice_id": "INVOICE-123",
+  "links": [
+    {
+      "href": "https://api-m.paypal.com/v2/payments/authorizations/0VF52814937998046",
+      "method": "GET",
+      "rel": "self"
+    },
+    {
+      "href": "https://api-m.paypal.com/v2/payments/authorizations/0VF52814937998046/capture",
+      "method": "POST",
+      "rel": "capture"
+    },
+    {
+      "href": "https://api-m.paypal.com/v2/payments/authorizations/0VF52814937998046/void",
+      "method": "POST",
+      "rel": "void"
+    },
+    {
+      "href": "https://api-m.paypal.com/v2/payments/authorizations/0VF52814937998046/reauthorize",
+      "method": "POST",
+      "rel": "reauthorize"
+    }
+  ],
+  "payee": {
+    "email_address": "merchant@example.com",
+    "merchant_id": "7KNGBPH2U58GQ"
+  },
+  "seller_protection": {
+    "dispute_categories": [
+      "ITEM_NOT_RECEIVED",
+      "UNAUTHORIZED_TRANSACTION"
+    ],
+    "status": "ELIGIBLE"
+  },
+  "status": "CREATED",
+  "update_time": "2017-09-11T23:23:45Z"
+}

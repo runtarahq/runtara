@@ -1190,6 +1190,55 @@ fn test_ups_extractor_rejects_an_unknown_environment() {
 }
 
 #[test]
+fn test_paypal_extractor_pins_the_environment_and_refuses_another() {
+    for (environment, host) in [
+        (json!("sandbox"), "https://api-m.sandbox.paypal.com"),
+        (json!("production"), "https://api-m.paypal.com"),
+        (Value::Null, "https://api-m.paypal.com"),
+    ] {
+        let mut params = json!({ "client_id": "cid", "client_secret": "secret" });
+        if !environment.is_null() {
+            params["environment"] = environment;
+        }
+        let config = extract_http_config("paypal_client_credentials", &params, None)
+            .expect("Should extract config");
+        // The Bearer token is added at request time.
+        assert!(config.headers.is_empty());
+        assert_eq!(config.url_prefix, host);
+    }
+    let err = extract_http_config(
+        "paypal_client_credentials",
+        &json!({ "environment": "evil.com", "client_id": "c", "client_secret": "s" }),
+        None,
+    )
+    .expect_err("an unknown environment must be rejected");
+    assert!(err.contains("Invalid PayPal environment"), "{err}");
+}
+
+#[test]
+fn test_paypal_connection_type_is_registered() {
+    assert!(get_http_extractor_ids().contains(&"paypal_client_credentials"));
+    let meta = crate::registry::find_connection_type("paypal_client_credentials")
+        .expect("paypal_client_credentials is in the static registry");
+    let secret = meta
+        .fields
+        .iter()
+        .find(|f| f.name == "client_secret")
+        .unwrap();
+    assert!(secret.is_secret);
+    let environment = meta
+        .fields
+        .iter()
+        .find(|f| f.name == "environment")
+        .unwrap();
+    assert_eq!(environment.default_value, Some("production"));
+    assert_eq!(
+        environment.enum_values,
+        Some(&["production", "sandbox"][..])
+    );
+}
+
+#[test]
 fn test_ups_connection_type_is_registered() {
     assert!(get_http_extractor_ids().contains(&"ups_client_credentials"));
     let meta = crate::registry::find_connection_type("ups_client_credentials")

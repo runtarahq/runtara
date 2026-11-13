@@ -93,7 +93,7 @@ pub struct {{operationIdCamelCase}}Input {
 {{#vars.isEmpty}}
     #[field(display_name = "body"{{>field_description}})]
     #[serde(rename = "body"{{^required}}, default, skip_serializing_if = "Option::is_none"{{/required}})]
-    pub body: {{^required}}Option<{{/required}}{{#isModel}}{{#lambda.pascalcase}}{{baseType}}{{/lambda.pascalcase}}{{/isModel}}{{^isModel}}{{{dataType}}}{{/isModel}}{{^required}}>{{/required}},
+    pub body: {{^required}}Option<{{/required}}{{#isArray}}Vec<{{#items}}{{>rt_type}}{{/items}}>{{/isArray}}{{^isArray}}{{#isModel}}{{#lambda.pascalcase}}{{baseType}}{{/lambda.pascalcase}}{{/isModel}}{{^isModel}}{{{dataType}}}{{/isModel}}{{/isArray}}{{^required}}>{{/required}},
 {{/vars.isEmpty}}
 {{/bodyParam}}
 }

@@ -985,8 +985,59 @@ TYPE_KEYWORDS = {
 }
 
 
+# Schema keywords a parameter may carry by mistake, written beside its
+# `schema` instead of in it (PayPal's disputes: `enum` on `dispute_state`).
+PARAMETER_SCHEMA_KEYWORDS = ("type", "format", "enum", "default", "items", "minimum", "maximum",
+                             "minLength", "maxLength", "pattern", "maxItems", "minItems")
+SCALAR_TYPES = ("string", "number", "integer", "boolean")
+# What a fragment of a scalar `allOf` may say: how the value reads or what it
+# may be, never a shape of its own.
+SCALAR_FRAGMENT_KEYS = set(ANNOTATIONS) | {"type", "format", "enum", "minimum", "maximum",
+                                           "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+                                           "minLength", "maxLength", "pattern", "nullable",
+                                           "readOnly", "writeOnly"}
+
+
+def scalar_all_of(sliced: dict, node: dict):
+    """The scalar an `allOf` stands for, if it is a `$ref` to a scalar schema
+    plus fragments that only describe or constrain it: PayPal's
+    `cancel_url` is `allOf: [$ref url, {format: uri, description}]`, which
+    openapi-generator types as a bare `Option`. `None` for any other `allOf`."""
+    parts = node.get("allOf")
+    if not isinstance(parts, list) or not all(isinstance(part, dict) for part in parts):
+        return None
+    refs = [part for part in parts if "$ref" in part]
+    if len(refs) != 1 or not str(refs[0]["$ref"]).startswith("#/components/schemas/"):
+        return None
+    target = resolve(sliced, refs[0]["$ref"])
+    if not isinstance(target, dict) or target.get("type") not in SCALAR_TYPES \
+            or not set(target) <= SCALAR_FRAGMENT_KEYS:
+        return None
+    merged = copy.deepcopy(target)
+    for part in parts:
+        if part is refs[0]:
+            continue
+        if not set(part) <= SCALAR_FRAGMENT_KEYS or part.get("type", target["type"]) != target["type"]:
+            return None
+        merged.update(copy.deepcopy(part))
+    return merged
+
+
 def normalize_schemas(sliced: dict) -> None:
     def visit(node):
+        # A parameter's schema keywords go in its schema.
+        if node.get("in") in ("path", "query", "header", "cookie") and isinstance(node.get("schema"), dict):
+            for key in PARAMETER_SCHEMA_KEYWORDS:
+                if key in node:
+                    value = node.pop(key)
+                    node["schema"].setdefault(key, value)
+        # A scalar described in parts is that scalar; the node's own keywords
+        # (a label, a description beside the `allOf`) win.
+        scalar = scalar_all_of(sliced, node)
+        if scalar is not None:
+            del node["allOf"]
+            for key, value in scalar.items():
+                node.setdefault(key, value)
         # JSON Schema's list forms, which OpenAPI 3.0 does not have: Slack's
         # `type: [string, "null"]` means a nullable string, and `items: [A, B]`
         # one of A or B. The type list goes first, so that the `items` of an
@@ -1213,6 +1264,7 @@ def slice_specs(specs: list, config: dict) -> dict:
         slices.append((source.get("name"), sliced))
     # A name only needs to match in one of the specs.
     check_used(options, used)
+    set_server(slices, config.get("server"))
     if len(slices) == 1:
         sliced = slices[0][1]
     else:
@@ -1382,6 +1434,8 @@ def slice_one(spec: dict, operation_ids: list, first: str, model_names: dict, bo
     inline_example_refs(sliced, spec)
     inline_refs(sliced, spec)
     normalize_schemas(sliced)
+    # A scalar `allOf` no longer refers to its schema.
+    prune_components(sliced)
     rename_schemas(sliced, model_names)
     check_names(sliced, operation_ids, model_names)
     check_input_names(sliced)
@@ -1466,6 +1520,20 @@ def rename_components(sliced: dict, kind: str, renames: dict) -> None:
     visit(sliced)
     entries = sliced["components"].get(kind, {})
     sliced["components"][kind] = {renames.get(name, name): value for name, value in entries.items()}
+
+
+def set_server(slices: list, server) -> None:
+    """`server`: the one URL the specs' paths are relative to, for an API whose
+    specs list different servers. PayPal's name the sandbox first in some and
+    only production in others; the host a request goes to is the connection's
+    anyway, so the generated paths only need the server's own path."""
+    if server is None:
+        return
+    url = urllib.parse.urlsplit(server if isinstance(server, str) else "")
+    if url.scheme != "https" or not url.netloc or url.query or url.fragment or "{" in server:
+        sys.exit(f"server `{server}` is no https URL of a host (and a path)")
+    for _, sliced in slices:
+        sliced["servers"] = [{"url": server.rstrip("/")}]
 
 
 def merge_slices(slices: list) -> dict:

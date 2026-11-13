@@ -686,6 +686,7 @@ const CLIENT_CREDENTIALS_TYPES: &[(&str, &str)] = &[
     ("http_oauth2_client_credentials", "client_secret"),
     ("zendesk_client_credentials", "client_secret"),
     ("ups_client_credentials", "client_secret"),
+    ("paypal_client_credentials", "client_secret"),
     ("teams_bot", "app_password"),
 ];
 
@@ -1602,6 +1603,7 @@ pub const SEALABLE_TYPES: &[&str] = &[
     "http_oauth2_client_credentials",
     "zendesk_client_credentials",
     "ups_client_credentials",
+    "paypal_client_credentials",
     "teams_bot",
     "hubspot_private_app",
     "quickbooks_online",
@@ -2264,6 +2266,48 @@ mod tests {
         assert_eq!(
             request_fields("http_oauth2_client_credentials", &params),
             ["access_token"]
+        );
+    }
+
+    /// A PayPal app's Secret goes to its environment's token endpoint as HTTP
+    /// Basic, and the token it mints to that environment's API only.
+    #[test]
+    fn a_paypal_secret_and_token_stay_on_their_environments_host() {
+        for (environment, host) in [
+            ("sandbox", "api-m.sandbox.paypal.com"),
+            ("production", "api-m.paypal.com"),
+        ] {
+            let (field, policy) = client_secret(
+                "paypal_client_credentials",
+                json!({"environment": environment, "client_id": "cid", "client_secret": "s"}),
+            );
+            assert_eq!(field, "client_secret");
+            assert_eq!(
+                policy,
+                json!({
+                    "rules": [{
+                        "destination": {
+                            "scheme": "https", "host": host, "path_prefix": "/v1/oauth2/token",
+                        },
+                        "inject": {"basic": {"username": {"literal": "cid"}}},
+                        "seal_response": sealed_access_token(),
+                    }],
+                    "definitions": {"api": {"rules": [{
+                        "destination": {"scheme": "https", "host": host},
+                        "inject": {"header": {"name": "Authorization", "format": "Bearer {}"}},
+                    }]}},
+                }),
+                "{environment}"
+            );
+        }
+        // An environment PayPal does not run is no destination.
+        assert!(
+            policies(
+                "paypal_client_credentials",
+                &json!({"environment": "evil.com", "client_id": "c", "client_secret": "s"}),
+                &Allowances::default()
+            )
+            .is_none()
         );
     }
 

@@ -2215,6 +2215,90 @@ impl HttpConnectionExtractor for UpsClientCredentialsExtractor {
 }
 
 // ============================================================================
+// PayPal Connection Type
+// ============================================================================
+
+/// The PayPal REST API origin for an environment: `production`, or `sandbox`
+/// (PayPal's test environment, with its own app credentials and test
+/// accounts). Anything else is an error, so credentialed requests can only ever
+/// go to one of the two PayPal hosts.
+pub fn paypal_base_url(environment: &str) -> Result<&'static str, String> {
+    match environment.trim().to_ascii_lowercase().as_str() {
+        "production" => Ok("https://api-m.paypal.com"),
+        "sandbox" => Ok("https://api-m.sandbox.paypal.com"),
+        _ => Err(format!(
+            "Invalid PayPal environment `{}`: use `production` or `sandbox`",
+            environment.trim()
+        )),
+    }
+}
+
+/// PayPal, authorized as the merchant's own REST app: OAuth2 client
+/// credentials, minted at the environment's `/v1/oauth2/token` with the app's
+/// Client ID and Secret as HTTP Basic. A token lasts about nine hours.
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "paypal_client_credentials",
+    display_name = "PayPal",
+    description = "Connect to the PayPal REST APIs with the Client ID and Secret of a REST app on developer.paypal.com",
+    category = "payment",
+    auth_type = "oauth2_client_credentials"
+)]
+pub struct PaypalClientCredentialsParams {
+    /// PayPal environment
+    #[serde(default = "default_paypal_environment")]
+    #[field(
+        display_name = "Environment",
+        description = "production, or sandbox for PayPal's test environment (each has its own app credentials)",
+        default = "production",
+        enum_values = "production,sandbox"
+    )]
+    pub environment: String,
+
+    /// OAuth client identifier
+    #[field(
+        display_name = "Client ID",
+        description = "The Client ID of your REST app: developer.paypal.com → Apps & Credentials → your app, in the same environment"
+    )]
+    pub client_id: String,
+
+    /// OAuth client secret
+    #[field(
+        display_name = "Secret",
+        description = "The Secret of the same app",
+        secret
+    )]
+    pub client_secret: String,
+}
+
+fn default_paypal_environment() -> String {
+    "production".to_string()
+}
+
+/// HTTP extractor for PayPal connections. The Bearer token is added at
+/// request time by the connection subsystem (`describe_connection_auth`); this
+/// extractor only pins the environment's host.
+pub struct PaypalClientCredentialsExtractor;
+
+impl HttpConnectionExtractor for PaypalClientCredentialsExtractor {
+    fn integration_id(&self) -> &'static str {
+        "paypal_client_credentials"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        let p: PaypalClientCredentialsParams = serde_json::from_value(params.clone())
+            .map_err(|e| format!("Invalid paypal_client_credentials connection parameters: {e}"))?;
+
+        Ok(HttpConnectionConfig {
+            headers: HashMap::new(),
+            query_parameters: HashMap::new(),
+            url_prefix: paypal_base_url(&p.environment)?.to_string(),
+            rate_limit_config: None,
+        })
+    }
+}
+
+// ============================================================================
 // MCP (Model Context Protocol) Connection Type
 // ============================================================================
 
