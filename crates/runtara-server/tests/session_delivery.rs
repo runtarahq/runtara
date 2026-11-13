@@ -261,7 +261,6 @@ fn init_config() {
             object_model_pool_cache_ttl_secs: 60,
             agent_components_dir: None,
             direct_wasm_components_dir: None,
-            isolation_policy: None,
             mcp_allowed_hosts: vec!["localhost".into()],
             mcp_session_store: runtara_server::config::McpSessionStore::Local,
             mcp_session_ttl_seconds: 60,

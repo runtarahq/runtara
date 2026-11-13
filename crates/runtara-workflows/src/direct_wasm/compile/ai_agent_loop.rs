@@ -811,7 +811,6 @@ pub(super) fn emit_ai_agent_loop_plan(
     );
 
     // Dispatch by tool index: `if match == i { run tools[i] }`.
-    let caller_agent_id = agent_id;
     for (tool_index, tool) in tools.iter().enumerate() {
         body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_MATCH_LOCAL));
         body.instruction(&Instruction::I32Const(tool_index as i32));
@@ -894,7 +893,7 @@ pub(super) fn emit_ai_agent_loop_plan(
                     DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
                     source_ptr_local,
                     source_len_local,
-                    super::agent_invoke::AgentInvocationSite::AiTool(caller_agent_id),
+                    super::agent_invoke::AgentInvocationSite::AiTool,
                 );
                 super::deadline_scope::propagate(
                     body,

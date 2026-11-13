@@ -28,7 +28,7 @@ const STATE: &[u8] = b"\"paused\"";
 fn components() -> PathBuf {
     std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
         .map(PathBuf::from)
-        .expect("scoped-workflow-integration-tests requires RUNTARA_AGENT_COMPONENTS_DIR")
+        .expect("composed-workflow-integration-tests requires RUNTARA_AGENT_COMPONENTS_DIR")
 }
 
 /// An ordinary suspending agent `suspend-fixture`. `capabilities.invoke`

@@ -5230,7 +5230,6 @@ dependencies = [
  "runtara-control-contract",
  "runtara-database-contract",
  "runtara-dsl",
- "runtara-invocation-contract",
  "runtara-object-store",
  "runtara-wit",
  "runtara-workflow-api",
@@ -5366,7 +5365,6 @@ dependencies = [
  "runtara-core",
  "runtara-database-contract",
  "runtara-dsl",
- "runtara-invocation-contract",
  "runtara-store-postgres",
  "runtara-workflow-api",
  "runtara-workflows",
@@ -5425,15 +5423,6 @@ dependencies = [
  "thiserror 2.0.18",
  "ureq 2.12.1",
  "wit-bindgen 0.58.0",
-]
-
-[[package]]
-name = "runtara-invocation-contract"
-version = "10.0.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2 0.10.9",
 ]
 
 [[package]]
@@ -5719,7 +5708,6 @@ dependencies = [
  "runtara-core",
  "runtara-database-contract",
  "runtara-dsl",
- "runtara-invocation-contract",
  "runtara-wit",
  "runtara-workflow-stdlib",
  "serde",

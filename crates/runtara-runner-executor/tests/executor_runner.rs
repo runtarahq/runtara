@@ -109,7 +109,6 @@ async fn deployment() -> Deployment {
     let runner = factory(RunnerParts {
         persistence: persistence.clone(),
         event_observer: None,
-        scoped_agents: None,
         services: HostServices::default(),
         artifacts,
     })

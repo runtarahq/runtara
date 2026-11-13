@@ -1116,8 +1116,8 @@ mod parent_tests {
         // Open inputs of the parent's children.
         sqlx::query(
             "INSERT INTO instance_input_requests \
-             (request_id, instance_id, tenant_id, signal_id, invocation_path, spec, state) \
-             VALUES ($1, $2, $3, 'sig', 'root', '{}'::jsonb, 'open')",
+             (request_id, instance_id, tenant_id, signal_id, spec, state) \
+             VALUES ($1, $2, $3, 'sig', '{}'::jsonb, 'open')",
         )
         .bind("a".repeat(64))
         .bind(id("child-b"))

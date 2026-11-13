@@ -34,17 +34,7 @@ use wasmtime_wasi_http::{
     WasiHttpView,
 };
 
-#[path = "workflow/prepared_catalog.rs"]
-mod prepared_catalog;
-pub use prepared_catalog::PreparedChildCatalog;
-#[path = "workflow/prepared_launcher.rs"]
-mod prepared_launcher;
-pub use prepared_launcher::{
-    ChildInvocationScope, ChildInvocationSpec, InvocationScopeFactory, PreparedInvocationLauncher,
-};
-
 use crate::engine::EPOCH_TICK;
-use crate::execution_host::ExecutionContext;
 
 /// Outgoing-body stream tuning, kept identical to the flags `WasmRunner`
 /// passes the wasmtime CLI (`--wasi http-outgoing-body-buffer-chunks=4096`,
@@ -193,39 +183,12 @@ fn posted_outcome(
     }
 }
 
-/// One isolated Agent invocation. Connection identity and materialized input
-/// belong to the caller's scope and must already be encoded in `input`.
-pub struct CapabilityInvocation<'a> {
-    pub interface: &'a str,
-    pub capability: &'a str,
-    pub input: Vec<u8>,
-}
-
 /// Every entry, a workflow's or an agent's: `invoke(capability-id, input) ->
 /// result<outcome, error-info>`.
 type InvokeFunc = wasmtime::component::TypedFunc<
     (String, Vec<u8>),
     (Result<crate::lifecycle::WorkflowOutcome, crate::lifecycle::WorkflowErrorInfo>,),
 >;
-
-enum InvocationEntry<'a> {
-    Lifecycle {
-        interface: Option<&'a str>,
-    },
-    Capability {
-        interface: &'a str,
-        capability: &'a str,
-    },
-}
-
-#[derive(Default)]
-struct InvocationControl {
-    trusted_pins: Option<Arc<std::collections::HashSet<String>>>,
-    deadline: Option<Instant>,
-    task_cancel: Option<crate::isolated_tasks::TaskCancellation>,
-    abandoned: Option<Arc<AtomicBool>>,
-    execution: Option<Arc<ExecutionContext>>,
-}
 
 /// One final durable handoff confirmation immediately before guest
 /// instantiation.
@@ -340,7 +303,6 @@ pub struct WorkflowState {
     limiter: WorkflowLimiter,
     termination: Option<Termination>,
     pub(crate) cleanup_alarm: crate::cleanup_alarm::CleanupAlarmState,
-    execution: Option<Arc<ExecutionContext>>,
     /// The run's linked stdlib instance, when its workflow imports one.
     pub(crate) stdlib: Option<crate::stdlib_link::LinkedStdlib>,
 }
@@ -395,7 +357,6 @@ struct CachedComponent {
     source_digest: Option<[u8; 32]>,
     /// The linked component, export-shape-agnostic.
     instance_pre: Arc<wasmtime::component::InstancePre<WorkflowState>>,
-    child_catalog: Option<Arc<PreparedChildCatalog>>,
 }
 
 /// A linked workflow artifact prepared from an exact, verified child result.
@@ -411,37 +372,9 @@ struct CachedComponent {
 #[derive(Clone)]
 pub struct PreparedWorkflow {
     instance_pre: Arc<wasmtime::component::InstancePre<WorkflowState>>,
-    child_catalog: Option<Arc<PreparedChildCatalog>>,
 }
 
 impl PreparedWorkflow {
-    /// Immutable dependencies compiled from the same verified source as the root.
-    pub fn child_catalog(&self) -> Option<&Arc<PreparedChildCatalog>> {
-        self.child_catalog.as_ref()
-    }
-
-    /// Whether lifecycle persistence can be supervised through the native host:
-    /// the old runtime import, or the workflow API, which reaches the same host
-    /// in process. Internally composed HTTP runtimes cannot defer their
-    /// terminal writes.
-    pub fn supports_scoped_runtime(&self, engine: &Arc<Engine>) -> bool {
-        if !Engine::same(self.instance_pre.component().engine(), engine) {
-            return false;
-        }
-        let ty = self.instance_pre.component().component_type();
-        let imports: Vec<_> = ty.imports(engine).map(|(name, _)| name).collect();
-        // The workflow API (`wasi:http@0.3`) reaches the run's own runtime
-        // host in process, fenced like a native import; an older internally
-        // composed HTTP runtime (`wasi:http@0.2`) would bypass it.
-        let workflow_api = imports
-            .iter()
-            .any(|name| name.starts_with("wasi:http/client@0.3"));
-        let embedded_http_runtime = imports
-            .iter()
-            .any(|name| name.starts_with("wasi:http/") && !name.contains("@0.3"));
-        workflow_api && !embedded_http_runtime
-    }
-
     /// The linked component; it exports the workflow entry.
     pub fn instance_pre(&self) -> &Arc<wasmtime::component::InstancePre<WorkflowState>> {
         &self.instance_pre
@@ -709,7 +642,7 @@ impl WorkflowExecutor {
     /// Register the run of `store` with the workflow API, under its runtime
     /// host's binding, or a local one for a host without a root lease (a
     /// test host): such a run is still served, but never fenced. A store
-    /// without a runtime host (an isolated child) gets a standalone launch:
+    /// without a runtime host gets a standalone launch:
     /// its agents reach connections, and nothing that needs a run.
     fn begin_workflow_api(
         &self,
@@ -744,14 +677,9 @@ impl WorkflowExecutor {
             // A run without a host was never granted control.
             let control = crate::api_launches::StandaloneControl::Denied;
             let alarm = Some(store.data().cleanup_alarm.clone());
-            let execution = store.data().execution.clone();
-            if let Err(error) = launches.begin_standalone_with_alarm(
-                binding.clone(),
-                trust,
-                control,
-                alarm,
-                execution,
-            ) {
+            if let Err(error) =
+                launches.begin_standalone_with_alarm(binding.clone(), trust, control, alarm)
+            {
                 tracing::warn!(%error, "the store is not served the workflow API");
                 return None;
             }
@@ -787,7 +715,6 @@ impl WorkflowExecutor {
             shorten_deadline: Arc::new(move |after| deadline.shorten(after)),
             trusted_pins: store.data().trusted_pins.clone().unwrap_or_default(),
             cleanup_alarm: Some(store.data().cleanup_alarm.clone()),
-            execution: store.data().execution.clone(),
             alarm_shortens_deadline: false,
         };
         let launches = Arc::clone(self.workflow_api());
@@ -861,7 +788,6 @@ impl WorkflowExecutor {
                 last_used: Instant::now(),
                 source_digest: None,
                 instance_pre: Arc::clone(&instance_pre),
-                child_catalog: None,
             },
         );
         if cache.len() > COMPONENT_CACHE_MAX {
@@ -921,80 +847,7 @@ impl WorkflowExecutor {
                 })?,
         );
 
-        Ok(PreparedWorkflow {
-            instance_pre,
-            child_catalog: None,
-        })
-    }
-
-    /// Link all members from one trusted worker response, retaining them with
-    /// the root through queueing and optional prepared-cache reuse. This method
-    /// does not read artifacts, compile code or execute guest initializers.
-    pub async fn prepare_precompiled_package(
-        &self,
-        package: crate::precompile::CompiledWorkflowPackage,
-    ) -> Result<PreparedWorkflow> {
-        // Child bytes were verified by the precompile worker against these
-        // digests. Bare built-ins have no workflow pin import, so bind each to
-        // the root's pin for exactly those bytes. When that version is no
-        // longer installed, the child still links and its trusted calls fail
-        // with TRUSTED_VERSION_REQUIRED, as they do for the root.
-        let root_pins = self.trusted_pins(&package.root);
-        // A trusted caller is a child bound as a trusted built-in this host
-        // runs (it calls `/v1/trusted`), or one importing the old executor.
-        let trusted_callers: std::collections::HashSet<&str> = match self.trusted.get() {
-            Some(executor) => package
-                .bindings
-                .iter()
-                .filter(|binding| {
-                    binding
-                        .interface
-                        .strip_prefix("runtara:agent-")
-                        .and_then(|rest| rest.split_once('/'))
-                        .is_some_and(|(agent, _)| executor.runs_agent(agent))
-                })
-                .map(|binding| binding.artifact.as_str())
-                .collect(),
-            None => Default::default(),
-        };
-        let mut child_pins = std::collections::BTreeMap::new();
-        let linker = self.linker_with_trusted_pins(&package.root)?;
-        for (digest, component) in &package.artifacts {
-            crate::removed_abi::refuse(&self.engine, component)
-                .with_context(|| format!("isolated child {digest}"))?;
-            let mut pins = (*self.trusted_pins(component)).clone();
-            pins.extend(
-                root_pins
-                    .iter()
-                    .filter(|pin| {
-                        runtara_dsl::agent_meta::trusted_artifact_import_wasm_sha256(pin)
-                            == Some(digest.as_str())
-                    })
-                    .cloned(),
-            );
-            for pin in &pins {
-                anyhow::ensure!(
-                    root_pins.contains(pin),
-                    "isolated trusted dependency is not pinned by root"
-                );
-            }
-            if trusted_callers.contains(digest.as_str()) {
-                anyhow::ensure!(
-                    !pins.is_empty(),
-                    "isolated trusted caller has no approved artifact pin"
-                );
-            }
-            child_pins.insert(digest.clone(), Arc::new(pins));
-        }
-        let mut catalog =
-            PreparedChildCatalog::prepare(&linker, package.artifacts, package.bindings)?;
-        catalog.trusted_pins = child_pins;
-        catalog.set_invocations(package.invocations)?;
-        let mut root = self.prepare_component(package.root).await?;
-        if catalog.binding_count() != 0 {
-            root.child_catalog = Some(Arc::new(catalog));
-        }
-        Ok(root)
+        Ok(PreparedWorkflow { instance_pre })
     }
 
     /// Look up a previously prepared artifact for `wasm_path`.
@@ -1025,7 +878,6 @@ impl WorkflowExecutor {
         Some((
             PreparedWorkflow {
                 instance_pre: Arc::clone(&entry.instance_pre),
-                child_catalog: entry.child_catalog.clone(),
             },
             digest,
         ))
@@ -1057,7 +909,6 @@ impl WorkflowExecutor {
                 last_used: Instant::now(),
                 source_digest: Some(source_digest),
                 instance_pre: Arc::clone(&prepared.instance_pre),
-                child_catalog: prepared.child_catalog.clone(),
             },
         );
         if cache.len() > COMPONENT_CACHE_MAX {
@@ -1098,15 +949,8 @@ impl WorkflowExecutor {
         input: Vec<u8>,
         start_confirmation: Option<Arc<dyn WorkflowStartConfirmation>>,
     ) -> InvokeRunResult {
-        self.execute_entry(
-            &prepared.instance_pre,
-            spec,
-            input,
-            start_confirmation,
-            InvocationEntry::Lifecycle { interface: None },
-            InvocationControl::default(),
-        )
-        .await
+        self.execute_entry(&prepared.instance_pre, spec, input, start_confirmation)
+            .await
     }
 
     /// Execute one invoke-shaped workflow after an optional durable handoff
@@ -1120,86 +964,8 @@ impl WorkflowExecutor {
         input: Vec<u8>,
         start_confirmation: Option<Arc<dyn WorkflowStartConfirmation>>,
     ) -> InvokeRunResult {
-        self.execute_entry(
-            pre,
-            spec,
-            input,
-            start_confirmation,
-            InvocationEntry::Lifecycle { interface: None },
-            InvocationControl::default(),
-        )
-        .await
-    }
-
-    /// Run a capability in a fresh guarded Store owned by an isolated task.
-    /// Both the task token and the root's `spec.cancel` interrupt execution;
-    /// neither disables the other. The caller must supply a scoped runtime
-    /// adapter and explicitly join/reap its task registry before root teardown.
-    /// This method does not choose graph successors, retries or error handlers.
-    pub async fn execute_isolated_capability(
-        &self,
-        pre: &wasmtime::component::InstancePre<WorkflowState>,
-        spec: WorkflowRunSpec,
-        call: CapabilityInvocation<'_>,
-        cancellation: crate::isolated_tasks::TaskCancellation,
-    ) -> InvokeRunResult {
-        self.execute_isolated_capability_with_context(pre, spec, call, cancellation, None)
+        self.execute_entry(pre, spec, input, start_confirmation)
             .await
-    }
-
-    /// Capability entry with its own descendant scope. The owning task must
-    /// retain `execution.into_cleanup()` outside this cancellable future.
-    pub async fn execute_isolated_capability_with_context(
-        &self,
-        pre: &wasmtime::component::InstancePre<WorkflowState>,
-        spec: WorkflowRunSpec,
-        call: CapabilityInvocation<'_>,
-        cancellation: crate::isolated_tasks::TaskCancellation,
-        execution: Option<Arc<ExecutionContext>>,
-    ) -> InvokeRunResult {
-        self.execute_entry(
-            pre,
-            spec,
-            call.input,
-            None,
-            InvocationEntry::Capability {
-                interface: call.interface,
-                capability: call.capability,
-            },
-            InvocationControl {
-                task_cancel: Some(cancellation),
-                execution,
-                ..Default::default()
-            },
-        )
-        .await
-    }
-
-    /// Lifecycle entry for an isolated child graph. Root cancellation and the
-    /// task token both apply before initialization and throughout execution.
-    /// The caller supplies scoped runtime authority and separately owns cleanup
-    /// of `execution`; dropping this future alone cannot await descendants.
-    pub async fn execute_isolated_workflow(
-        &self,
-        pre: &wasmtime::component::InstancePre<WorkflowState>,
-        spec: WorkflowRunSpec,
-        input: Vec<u8>,
-        cancellation: crate::isolated_tasks::TaskCancellation,
-        execution: Option<Arc<ExecutionContext>>,
-    ) -> InvokeRunResult {
-        self.execute_entry(
-            pre,
-            spec,
-            input,
-            None,
-            InvocationEntry::Lifecycle { interface: None },
-            InvocationControl {
-                task_cancel: Some(cancellation),
-                execution,
-                ..Default::default()
-            },
-        )
-        .await
     }
 
     async fn execute_entry(
@@ -1208,8 +974,6 @@ impl WorkflowExecutor {
         spec: WorkflowRunSpec,
         input: Vec<u8>,
         start_confirmation: Option<Arc<dyn WorkflowStartConfirmation>>,
-        entry: InvocationEntry<'_>,
-        control: InvocationControl,
     ) -> InvokeRunResult {
         // Keep the externally reported duration, but do not begin the active
         // guest timeout until the runner has durably crossed its start gate.
@@ -1239,18 +1003,13 @@ impl WorkflowExecutor {
             None => None,
         };
 
-        let inherited_deadline = control.deadline.map(tokio::time::Instant::from_std);
         let initial_deadline = tokio::time::Instant::now() + spec.timeout;
-        let initial_deadline =
-            inherited_deadline.map_or(initial_deadline, |deadline| deadline.min(initial_deadline));
         let api_binding = Arc::new(std::sync::OnceLock::new());
         let state = WorkflowState {
-            trusted_pins: self.trusted.get().map(|_| {
-                control
-                    .trusted_pins
-                    .clone()
-                    .unwrap_or_else(|| self.trusted_pins(pre.component()))
-            }),
+            trusted_pins: self
+                .trusted
+                .get()
+                .map(|_| self.trusted_pins(pre.component())),
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
@@ -1275,7 +1034,6 @@ impl WorkflowExecutor {
             termination: None,
             cleanup_alarm: Default::default(),
             api_deadline: crate::workflow_api::ApiDeadline::new(),
-            execution: control.execution,
             stdlib: None,
         };
 
@@ -1283,10 +1041,6 @@ impl WorkflowExecutor {
         store.limiter(|s| &mut s.limiter);
 
         let timeout = spec.timeout;
-        let task_cancel = control.task_cancel;
-        let abandoned = control.abandoned;
-        let epoch_abandoned = abandoned.clone();
-        let epoch_task_cancel = task_cancel.clone();
         let cancel = spec.cancel.clone();
         store.epoch_deadline_callback(move |mut ctx| {
             if ctx.data().cleanup_alarm.expired() {
@@ -1296,12 +1050,6 @@ impl WorkflowExecutor {
             if cancel
                 .as_ref()
                 .is_some_and(|flag| flag.load(Ordering::Relaxed))
-                || epoch_abandoned
-                    .as_ref()
-                    .is_some_and(|flag| flag.load(Ordering::Acquire))
-                || epoch_task_cancel
-                    .as_ref()
-                    .is_some_and(|token| token.is_requested())
             {
                 ctx.data_mut().termination = Some(Termination::Cancelled);
                 return Ok(UpdateDeadline::Interrupt);
@@ -1335,11 +1083,6 @@ impl WorkflowExecutor {
                 Ok(Err(error))
             } else {
                 store.data_mut().begin_active_execution(timeout);
-                if let Some(inherited) = inherited_deadline {
-                    let state = store.data_mut();
-                    state.active_deadline = state.active_deadline.min(inherited);
-                    state.http_deadline = state.active_deadline;
-                }
                 let active_deadline = store.data().active_deadline;
                 let run = async {
                     // Check before entering any guest initializer, including
@@ -1348,12 +1091,6 @@ impl WorkflowExecutor {
                         .cancel
                         .as_ref()
                         .is_some_and(|flag| flag.load(Ordering::Relaxed))
-                        || abandoned
-                            .as_ref()
-                            .is_some_and(|flag| flag.load(Ordering::Acquire))
-                        || task_cancel
-                            .as_ref()
-                            .is_some_and(|token| token.is_requested())
                     {
                         store.data_mut().termination = Some(Termination::Cancelled);
                         anyhow::bail!("execution cancelled before instantiation");
@@ -1374,40 +1111,12 @@ impl WorkflowExecutor {
                         spec.trusted_instance.as_deref(),
                         &input,
                     );
-                    if let InvocationEntry::Capability {
-                        interface,
-                        capability,
-                        ..
-                    } = &entry
-                    {
-                        let interface_index = instance
-                            .get_export_index(&mut store, None, interface)
-                            .ok_or_else(|| {
-                                anyhow::anyhow!("missing capability interface `{interface}`")
-                            })?;
-                        let invoke_index = instance
-                            .get_export_index(&mut store, Some(&interface_index), "invoke")
-                            .ok_or_else(|| {
-                                anyhow::anyhow!("capability interface has no `invoke` export")
-                            })?;
-                        let invoke: InvokeFunc =
-                            instance.get_typed_func(&mut store, invoke_index)?;
-                        let (result,) = invoke
-                            .call_async(&mut store, ((*capability).to_owned(), input))
-                            .await?;
-                        return Ok(result);
-                    }
                     // A workflow on the workflow API ABI exports `wasi:cli/run`
                     // instead of the lifecycle entry: its input and outcome
                     // travel over the API, through the run's runtime host.
-                    if matches!(entry, InvocationEntry::Lifecycle { interface: None })
-                        && instance
-                            .get_export_index(
-                                &mut store,
-                                None,
-                                crate::lifecycle::ENTRY_INTERFACE_NAME,
-                            )
-                            .is_none()
+                    if instance
+                        .get_export_index(&mut store, None, crate::lifecycle::ENTRY_INTERFACE_NAME)
+                        .is_none()
                         && let Some(cli_idx) = instance.get_export_index(
                             &mut store,
                             None,
@@ -1448,29 +1157,14 @@ impl WorkflowExecutor {
                             )),
                         };
                     }
-                    let iface_idx = if let InvocationEntry::Lifecycle {
-                        interface: Some(interface),
-                    } = &entry
-                    {
-                        instance
-                            .get_export_index(&mut store, None, interface)
-                            .ok_or_else(|| {
-                                anyhow::anyhow!("missing workflow entry interface `{interface}`")
-                            })?
-                    } else {
-                        instance
-                            .get_export_index(
-                                &mut store,
-                                None,
-                                crate::lifecycle::ENTRY_INTERFACE_NAME,
+                    let iface_idx = instance
+                        .get_export_index(&mut store, None, crate::lifecycle::ENTRY_INTERFACE_NAME)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "workflow component does not export the workflow entry `{}`",
+                                crate::lifecycle::ENTRY_INTERFACE_NAME
                             )
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "workflow component does not export the workflow entry `{}`",
-                                    crate::lifecycle::ENTRY_INTERFACE_NAME
-                                )
-                            })?
-                    };
+                        })?;
                     let invoke_idx = instance
                         .get_export_index(&mut store, Some(&iface_idx), "invoke")
                         .ok_or_else(|| {
@@ -1494,12 +1188,6 @@ impl WorkflowExecutor {
                         if watchdog_cancel
                             .as_ref()
                             .is_some_and(|flag| flag.load(Ordering::Relaxed))
-                            || abandoned
-                                .as_ref()
-                                .is_some_and(|flag| flag.load(Ordering::Acquire))
-                            || task_cancel
-                                .as_ref()
-                                .is_some_and(|token| token.is_requested())
                         {
                             return Termination::Cancelled;
                         }
@@ -1605,7 +1293,6 @@ impl WorkflowExecutor {
             termination: None,
             cleanup_alarm: Default::default(),
             api_deadline: crate::workflow_api::ApiDeadline::new(),
-            execution: None,
             stdlib: None,
         };
         let mut store = Store::new(&self.engine, state);
@@ -1968,14 +1655,6 @@ mod tests {
         assert!(result.duration < Duration::from_secs(5), "cancel ignored");
     }
 }
-
-#[cfg(test)]
-#[path = "workflow/isolated_capability_tests.rs"]
-mod isolated_capability_tests;
-
-#[path = "workflow/scoped_execution.rs"]
-mod scoped_execution;
-pub use scoped_execution::{RootExecutionCoordinator, RootLifecycleDecision};
 
 #[cfg(test)]
 #[path = "workflow/test_support.rs"]

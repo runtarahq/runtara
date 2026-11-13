@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::invocations::{AttemptFence, InvocationLease};
+use super::invocations::InvocationLease;
 
 /// Host-derived authority; guest code never selects its tenant or fence.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,8 +23,6 @@ pub enum InputAuthority {
     },
     /// Root IO under an exact active execution lease.
     LeasedRoot(InvocationLease),
-    /// Child IO under an exact active attempt fence.
-    Invocation(AttemptFence),
 }
 
 impl InputAuthority {
@@ -33,7 +31,6 @@ impl InputAuthority {
         match self {
             Self::Root { tenant_id, .. } => tenant_id,
             Self::LeasedRoot(lease) => &lease.tenant_id,
-            Self::Invocation(fence) => &fence.lease.tenant_id,
         }
     }
 
@@ -42,15 +39,6 @@ impl InputAuthority {
         match self {
             Self::Root { instance_id, .. } => instance_id,
             Self::LeasedRoot(lease) => &lease.instance_id,
-            Self::Invocation(fence) => &fence.lease.instance_id,
-        }
-    }
-
-    /// Logical owner; root ownership is represented by the empty path.
-    pub fn invocation_path(&self) -> &str {
-        match self {
-            Self::Invocation(fence) => &fence.path,
-            _ => "",
         }
     }
 }
@@ -153,10 +141,6 @@ pub enum InputClosure {
     Expired,
     /// Its owner left the wait without a response.
     Abandoned,
-    /// Its logical invocation was cancelled.
-    InvocationCancelled,
-    /// Its logical invocation finished.
-    InvocationSettled,
     /// Its root execution became terminal.
     InstanceTerminated,
 }
@@ -167,8 +151,6 @@ impl InputClosure {
         match self {
             Self::Expired => "expired",
             Self::Abandoned => "abandoned",
-            Self::InvocationCancelled => "invocation_cancelled",
-            Self::InvocationSettled => "invocation_settled",
             Self::InstanceTerminated => "instance_terminated",
         }
     }
@@ -290,10 +272,6 @@ pub struct InputRequest {
     pub instance_id: String,
     /// Bounded index key for the full signal identity.
     pub request_id: String,
-    /// Logical invocation path; empty for a root-owned wait.
-    pub invocation_path: String,
-    /// Current child write fence, rebound only by legitimate replay registration.
-    pub fence: Option<AttemptFence>,
     /// Immutable registration facts.
     pub spec: InputRequestSpec,
     /// Persistence registration timestamp, retained on replay.

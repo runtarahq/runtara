@@ -44,8 +44,6 @@ pub struct EmbeddedRuntaraConfig {
     /// Bounded active-execution timeout policy shared with the server runtime
     /// client and Environment lifecycle handlers.
     pub execution_timeout_policy: ExecutionTimeoutPolicy,
-    /// Runtime approvals for previously compiled isolation artifacts.
-    pub isolation_policy: Option<Arc<crate::config::isolation::IsolationPolicy>>,
     /// Builds the workflow runner; `None` is the embedded engine.
     pub runner_factory: Option<runtara_environment::runner::RunnerFactory>,
     /// Where workflow artifacts are kept, shared by the image registry and
@@ -136,10 +134,6 @@ impl EmbeddedRuntara {
         let parts = runtara_environment::runner::RunnerParts {
             persistence: persistence.clone(),
             event_observer,
-            scoped_agents: config
-                .isolation_policy
-                .as_ref()
-                .map(|policy| policy.runner_config()),
             services: runtara_environment::runner::HostServices {
                 trusted,
                 control_host,
@@ -432,7 +426,6 @@ pub async fn maybe_start_embedded(
             .then(|| SocketAddr::from(([127, 0, 0, 1], core_http_port))),
         core_overrides,
         execution_timeout_policy,
-        isolation_policy: crate::config::isolation_policy(),
         artifacts: options.artifacts.unwrap_or_else(|| {
             Arc::new(runtara_environment::image_registry::default_artifact_store(
                 &data_dir,

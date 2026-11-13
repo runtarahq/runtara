@@ -99,44 +99,42 @@ fn stdlib_link_mirrors_the_stdlib() {
 /// interface.
 #[test]
 fn agent_package_resolves_for_every_shape() {
-    for scoped in [false, true] {
-        for trusted in [false, true] {
-            let shape = AgentShape { scoped, trusted };
-            let mut resolve = resolve();
-            let wit = agent_package("probe-agent", shape);
-            let id = resolve
-                .push_str("probe.wit", &wit)
-                .unwrap_or_else(|error| panic!("{shape:?}: {error:#}\n{wit}"));
-            let package = &resolve.packages[id];
-            assert_eq!(
-                package.name.to_string(),
-                format!("runtara:agent-probe-agent@{}", crate::VERSION)
-            );
-            let capabilities = crate::capabilities_interface(shape);
-            assert!(package.interfaces.contains_key(capabilities));
-            let world = &resolve.worlds[package.worlds["agent"]];
-            // Agents reach the host over the workflow API: they import only
-            // the shared types their `invoke` uses.
-            let imports: Vec<String> = world
-                .imports
-                .keys()
-                .map(|key| resolve.name_world_key(key))
-                .collect();
-            assert!(
-                imports.iter().all(|name| name == crate::agent::TYPES),
-                "{shape:?}: {imports:?}"
-            );
-            let exports: Vec<String> = world
-                .exports
-                .keys()
-                .map(|key| resolve.name_world_key(key))
-                .collect();
-            assert_eq!(
-                exports.iter().any(|name| name == crate::trusted::EXECUTION),
-                trusted
-            );
-            assert_eq!(exports.len(), 1 + usize::from(trusted), "{exports:?}");
-        }
+    for trusted in [false, true] {
+        let shape = AgentShape { trusted };
+        let mut resolve = resolve();
+        let wit = agent_package("probe-agent", shape);
+        let id = resolve
+            .push_str("probe.wit", &wit)
+            .unwrap_or_else(|error| panic!("{shape:?}: {error:#}\n{wit}"));
+        let package = &resolve.packages[id];
+        assert_eq!(
+            package.name.to_string(),
+            format!("runtara:agent-probe-agent@{}", crate::VERSION)
+        );
+        let capabilities = crate::CAPABILITIES_INTERFACE;
+        assert!(package.interfaces.contains_key(capabilities));
+        let world = &resolve.worlds[package.worlds["agent"]];
+        // Agents reach the host over the workflow API: they import only
+        // the shared types their `invoke` uses.
+        let imports: Vec<String> = world
+            .imports
+            .keys()
+            .map(|key| resolve.name_world_key(key))
+            .collect();
+        assert!(
+            imports.iter().all(|name| name == crate::agent::TYPES),
+            "{shape:?}: {imports:?}"
+        );
+        let exports: Vec<String> = world
+            .exports
+            .keys()
+            .map(|key| resolve.name_world_key(key))
+            .collect();
+        assert_eq!(
+            exports.iter().any(|name| name == crate::trusted::EXECUTION),
+            trusted
+        );
+        assert_eq!(exports.len(), 1 + usize::from(trusted), "{exports:?}");
     }
 }
 

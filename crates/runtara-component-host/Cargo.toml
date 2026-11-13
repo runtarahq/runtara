@@ -16,7 +16,6 @@ db-integration-tests = []
 # that compose many workflows around the same stdlib/agent code compile it
 # once per process (`EngineConfig::incremental_cache`).
 test-incremental-cache = ["wasmtime/incremental-cache"]
-# Test-only experiment: guest-owned orchestration across disposable Stores.
 
 [[test]]
 name = "workflow_api_entry"
@@ -87,7 +86,6 @@ runtara-dsl = { path = "../runtara-dsl" }
 # Canonical LIFECYCLE_INTERFACE_NAME — one source of truth for the invoke
 # export name shared with the compiler.
 runtara-wit = { path = "../runtara-wit" }
-runtara-invocation-contract = { path = "../runtara-invocation-contract" }
 
 # Embedded wasmtime engine + WASI Preview 2 support.
 wasmtime = { version = "50", default-features = false, features = [

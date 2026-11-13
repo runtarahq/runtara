@@ -3,7 +3,6 @@
 //! transaction (see `docs/checkpoint-scope-collapse.md`).
 use crate::domain::InstanceStatus;
 use crate::persistence::checkpoint_scope::SharedChildSteps;
-use crate::persistence::invocations::{InvocationCheckpoint, InvocationFences, InvocationLease};
 use crate::persistence::{CheckpointWrite, Persistence};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -308,131 +307,6 @@ pub async fn a_result_found_stored_collapses_nothing(p: &dyn Persistence) {
     p.delete_instances_batch(&[id]).await.unwrap();
 }
 
-fn fences(p: &dyn Persistence) -> &dyn InvocationFences {
-    p.invocation_fences()
-        .expect("a durable backend provides invocation fences")
-}
-
-async fn claim(p: &dyn Persistence, id: &str) -> InvocationLease {
-    fences(p)
-        .claim_invocation_lease(TENANT, id, "runner", None)
-        .await
-        .unwrap()
-}
-
-/// A Split inside an isolated child invocation records its result through
-/// the fenced path, which collapses the child's iterations and leaves the
-/// parent's rows, including a parent Split with the same step id.
-pub async fn a_fenced_split_result_collapses_its_iterations(p: &dyn Persistence) {
-    let id = running(p, "fenced").await;
-    let lease = claim(p, &id).await;
-    let attempt = fences(p)
-        .begin_invocation_attempt(&lease, "child", "start")
-        .await
-        .unwrap()
-        .fence;
-    let frame = json!([["child", "wf", [], ["call"]]]);
-    let child_items: Vec<String> = (0..3)
-        .map(|i| {
-            key(
-                "agent",
-                frame.clone(),
-                json!([["Split", "items", i]]),
-                json!(["utils", "random-double", "each"]),
-            )
-        })
-        .collect();
-    let child_result = key("split", frame, json!([]), json!(["items"]));
-    let parent_items: Vec<String> = (0..2).map(|i| item("items", i, "each")).collect();
-    save_all(p, &id, &parent_items).await;
-    for key in &child_items {
-        fences(p)
-            .invocation_checkpoint(
-                &attempt,
-                &InvocationCheckpoint {
-                    checkpoint_id: key.clone(),
-                    state: b"x".to_vec(),
-                },
-            )
-            .await
-            .unwrap();
-    }
-
-    fences(p)
-        .invocation_checkpoint(
-            &attempt,
-            &InvocationCheckpoint {
-                checkpoint_id: child_result.clone(),
-                state: b"all".to_vec(),
-            },
-        )
-        .await
-        .unwrap();
-
-    let mut expected = set(&parent_items);
-    expected.insert(child_result);
-    assert_eq!(stored(p, &id).await, expected);
-    p.delete_instances_batch(&[id]).await.unwrap();
-}
-
-/// A While inside an isolated child records its result through the fenced
-/// path: it collapses the child's iterations of that loop and nothing of the
-/// parent's.
-pub async fn a_fenced_while_result_collapses_its_iterations(p: &dyn Persistence) {
-    let id = running(p, "fenced-while").await;
-    let lease = claim(p, &id).await;
-    let attempt = fences(p)
-        .begin_invocation_attempt(&lease, "child", "start")
-        .await
-        .unwrap()
-        .fence;
-    let frame = json!([["child", "wf", [], ["call"]]]);
-    let checkpoint = |key: &String, state: &[u8]| {
-        let key = key.clone();
-        let state = state.to_vec();
-        let attempt = &attempt;
-        async move {
-            fences(p)
-                .invocation_checkpoint(
-                    attempt,
-                    &InvocationCheckpoint {
-                        checkpoint_id: key,
-                        state,
-                    },
-                )
-                .await
-                .unwrap();
-        }
-    };
-    let passes: Vec<String> = (0..3)
-        .map(|i| {
-            key(
-                "agent",
-                frame.clone(),
-                json!([["While", "poll", i]]),
-                json!(["utils", "random-double", "check"]),
-            )
-        })
-        .collect();
-    let result = key("while", frame, json!([]), json!(["poll"]));
-    let parent = vec![key(
-        "agent",
-        json!([]),
-        json!([["While", "poll", 0]]),
-        json!(["utils", "random-double", "check"]),
-    )];
-    save_all(p, &id, &parent).await;
-    for pass in &passes {
-        checkpoint(pass, b"x").await;
-    }
-    checkpoint(&result, b"{}").await;
-
-    let mut expected = set(&parent);
-    expected.insert(result);
-    assert_eq!(stored(p, &id).await, expected);
-    p.delete_instances_batch(&[id]).await.unwrap();
-}
-
 /// The frame a child invoked by step `step` at loop path `loops` (an
 /// EmbedWorkflow's, or a workflow-agent's called from an Agent) writes under.
 fn child(loops: Value, step: &str) -> Value {
@@ -669,68 +543,6 @@ pub async fn an_embed_in_a_split_iteration_collapses_into_the_split(p: &dyn Pers
     p.delete_instances_batch(&[id]).await.unwrap();
 }
 
-/// A workflow-agent child running as an isolated invocation writes through
-/// the fenced path; the caller's Agent result, recorded by the root
-/// execution, deletes those rows and keeps the caller's own.
-pub async fn a_fenced_workflow_agent_child_collapses_into_its_callers_result(p: &dyn Persistence) {
-    let id = running(p, "fenced-agent").await;
-    let lease = claim(p, &id).await;
-    let attempt = fences(p)
-        .begin_invocation_attempt(&lease, "call", "start")
-        .await
-        .unwrap()
-        .fence;
-    let frame = json!([child(json!([]), "call")]);
-    let child_rows: Vec<String> = ["c1", "c2", "c3"]
-        .into_iter()
-        .map(|step| {
-            key_in(
-                "orders-sync",
-                "agent",
-                frame.clone(),
-                json!([]),
-                json!(["utils", "random-double", step]),
-            )
-        })
-        .collect();
-    for key in &child_rows {
-        fences(p)
-            .invocation_checkpoint(
-                &attempt,
-                &InvocationCheckpoint {
-                    checkpoint_id: key.clone(),
-                    state: b"x".to_vec(),
-                },
-            )
-            .await
-            .unwrap();
-    }
-    let before = agent_in(json!([]), json!([]), "before");
-    p.record_checkpoint(&id, &before, b"x", Some(&lease))
-        .await
-        .unwrap();
-    assert_eq!(
-        stored(p, &id).await.len(),
-        child_rows.len() + 1,
-        "the child's rows reached the caller's store"
-    );
-
-    let result = key(
-        "agent",
-        json!([]),
-        json!([]),
-        json!(["orders-sync", "run", "call"]),
-    );
-    assert_eq!(
-        p.record_checkpoint(&id, &result, b"child output", Some(&lease))
-            .await
-            .unwrap(),
-        CheckpointWrite::Recorded
-    );
-    assert_eq!(stored(p, &id).await, set([&before, &result]));
-    p.delete_instances_batch(&[id]).await.unwrap();
-}
-
 /// A run that does not know which steps share a child namespace keeps every
 /// child namespace: an Embed's and an Agent's results delete only their own
 /// retry rows.
@@ -809,56 +621,6 @@ pub async fn a_split_collapse_ignores_shared_steps(p: &dyn Persistence) {
         .unwrap();
 
     assert_eq!(stored(p, &id).await, set([&result]));
-    p.delete_instances_batch(&[id]).await.unwrap();
-}
-
-/// The fenced path keeps a listed step's child namespace too.
-pub async fn a_fenced_child_keeps_a_listed_namespace(p: &dyn Persistence) {
-    let id = running_with(p, "fenced-listed", Some(SharedChildSteps::known(["call"]))).await;
-    let lease = claim(p, &id).await;
-    let attempt = fences(p)
-        .begin_invocation_attempt(&lease, "call", "start")
-        .await
-        .unwrap()
-        .fence;
-    let call = key(
-        "agent",
-        json!([]),
-        json!([]),
-        json!(["orders-sync", "run", "call"]),
-    );
-    let frame = json!([child(json!([]), "call")]);
-    let nested_result = key("embed_workflow", frame.clone(), json!([]), json!(["call"]));
-    let nested_child = agent_in(
-        json!([child(json!([]), "call"), child(json!([]), "call")]),
-        json!([]),
-        "c1",
-    );
-    // The child writes a nested Embed `call` through the fenced path; its own
-    // child namespace is listed too, so the nested result keeps it.
-    for (key, state) in [
-        (&nested_child, b"x".to_vec()),
-        (&nested_result, b"r".to_vec()),
-    ] {
-        fences(p)
-            .invocation_checkpoint(
-                &attempt,
-                &InvocationCheckpoint {
-                    checkpoint_id: key.clone(),
-                    state,
-                },
-            )
-            .await
-            .unwrap();
-    }
-    p.record_checkpoint(&id, &call, b"done", Some(&lease))
-        .await
-        .unwrap();
-
-    assert_eq!(
-        stored(p, &id).await,
-        set([&nested_child, &nested_result, &call])
-    );
     p.delete_instances_batch(&[id]).await.unwrap();
 }
 
@@ -1002,61 +764,6 @@ pub async fn an_unknown_run_keeps_an_ai_agents_calls(p: &dyn Persistence) {
     p.delete_instances_batch(&[id]).await.unwrap();
 }
 
-/// An AiAgent inside an isolated child records its slot through the fenced
-/// path: the child's other slot, response and tool calls go, and the
-/// parent's AiAgent with the same step id keeps its rows.
-pub async fn a_fenced_ai_agent_slot_replaces_the_previous_turn(p: &dyn Persistence) {
-    let id = running(p, "fenced-ai").await;
-    let lease = claim(p, &id).await;
-    let attempt = fences(p)
-        .begin_invocation_attempt(&lease, "child", "start")
-        .await
-        .unwrap()
-        .fence;
-    let frame = json!([["child", "wf", [], ["call"]]]);
-    let child_row = |kind: &str, parts: Value| key(kind, frame.clone(), json!([]), parts);
-    let child_tool = key(
-        "agent",
-        json!([
-            ["child", "wf", [], ["call"]],
-            ["tool-child", "wf", [], ["ai", "lookup", 0]]
-        ]),
-        json!([]),
-        json!(["utils", "random-double", "lookup"]),
-    );
-    let parent = vec![
-        ai_row("ai_turn_slot", json!(["ai", 0])),
-        ai_row("ai_turn_response", json!(["ai", 1])),
-    ];
-    save_all(p, &id, &parent).await;
-    let slot = child_row("ai_turn_slot", json!(["ai", 1]));
-    for (key, state) in [
-        (child_row("ai_turn_slot", json!(["ai", 0])), b"old".to_vec()),
-        (
-            child_row("ai_turn_response", json!(["ai", 1])),
-            b"r".to_vec(),
-        ),
-        (child_tool, b"t".to_vec()),
-        (slot.clone(), b"snapshot".to_vec()),
-    ] {
-        fences(p)
-            .invocation_checkpoint(
-                &attempt,
-                &InvocationCheckpoint {
-                    checkpoint_id: key,
-                    state,
-                },
-            )
-            .await
-            .unwrap();
-    }
-
-    let mut expected = set(&parent);
-    expected.insert(slot);
-    assert_eq!(stored(p, &id).await, expected);
-    p.delete_instances_batch(&[id]).await.unwrap();
-}
-
 /// Every case in this module.
 pub async fn run_all(p: &dyn Persistence) {
     recording_a_split_result_collapses_its_iterations(p).await;
@@ -1064,18 +771,13 @@ pub async fn run_all(p: &dyn Persistence) {
     a_failed_split_attempt_collapses_nothing(p).await;
     nested_splits_collapse_level_by_level(p).await;
     a_result_found_stored_collapses_nothing(p).await;
-    a_fenced_split_result_collapses_its_iterations(p).await;
-    a_fenced_while_result_collapses_its_iterations(p).await;
     recording_an_embed_result_collapses_its_child(p).await;
     recording_an_agent_result_collapses_its_child_and_retries(p).await;
     nested_child_scopes_collapse_level_by_level(p).await;
     an_embed_in_a_split_iteration_collapses_into_the_split(p).await;
-    a_fenced_workflow_agent_child_collapses_into_its_callers_result(p).await;
     an_unknown_run_keeps_every_child_namespace(p).await;
     a_listed_step_keeps_its_child_namespace(p).await;
     a_split_collapse_ignores_shared_steps(p).await;
-    a_fenced_child_keeps_a_listed_namespace(p).await;
     an_ai_agent_keeps_its_latest_turn_then_one_row(p).await;
     an_unknown_run_keeps_an_ai_agents_calls(p).await;
-    a_fenced_ai_agent_slot_replaces_the_previous_turn(p).await;
 }

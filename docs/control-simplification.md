@@ -520,7 +520,7 @@ By boundary:
 - **Environment.**
   - `cargo test -p runtara-environment --features db-integration-tests -- --test-threads=1`
     (`approved_builtins`, trusted half);
-  - `cargo test -p runtara-environment --features scoped-workflow-integration-tests --test wait_for_instances_runner_test --test agent_suspension_runner_test --test scoped_runner_test -- --test-threads=1`.
+  - `cargo test -p runtara-environment --features composed-workflow-integration-tests --test wait_for_instances_runner_test --test agent_suspension_runner_test --test scoped_runner_test -- --test-threads=1`.
 - **E2E**, on an isolated live server (own databases, Valkey, `TENANT_ID` and
   ports, never :7001):
   - `STAGES=1,2,3,4,5,6 e2e/test_control_agent.sh`;

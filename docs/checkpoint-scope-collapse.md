@@ -85,8 +85,8 @@ embedded children and the workflow-agents it calls. A child namespace whose
 step is listed is kept; the step's own attempt and retry rows still go, since
 their tag carries the whole result key. Environment reads the list when it
 starts the run, from the manifests the compiler writes into every
-workflow-logic component (a composed artifact keeps each workflow-agent's,
-an isolated package holds them as artifacts), and stores it in
+workflow-logic component (a composed artifact keeps each workflow-agent's),
+and stores it in
 `instances.shared_child_steps` (migration 051). When the list is unknown (no
 manifest, one that does not parse, a called workflow-agent whose manifest is
 missing, or a run started before migration 051) the column is NULL and the
@@ -98,8 +98,7 @@ Only an unsuffixed result key
 has a closure, so a failed attempt never deletes work a retry will reuse. The
 store applies the closure in the transaction that stores the result (a writer
 that finds the key already stored writes and deletes nothing):
-`checkpoints::record` on the root path, and the fenced `checkpoint` on the
-isolated child path. In Postgres the delete rides in the statement that
+`checkpoints::record`. In Postgres the delete rides in the statement that
 points the instance at its new result (a data-modifying `WITH`), so a closure
 costs no extra round trip; that matters because every durable Agent result
 has one and most delete nothing. The in-memory backend does the same.
@@ -126,9 +125,7 @@ after a finished AiAgent calls no model.
 A composite step inside another one collapses first, and the outer step's
 range then covers its result: a Split inside an Embed's child, an Embed inside
 a Split's iteration or inside another Embed. A run parked or killed inside a
-step keeps that step's rows until the step finishes, and a child that runs as
-an isolated invocation writes through the fenced path into the same instance,
-so its caller's result collapses it the same way. Not collapsed: a
+step keeps that step's rows until the step finishes. Not collapsed: a
 `durable: false` step, which saves no result, and rows written before
 migration 049.
 

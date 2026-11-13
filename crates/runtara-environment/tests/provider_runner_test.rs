@@ -177,7 +177,6 @@ async fn setup_on(
         RunnerParts {
             persistence: persistence.clone(),
             event_observer: None,
-            scoped_agents: None,
             services: HostServices::default(),
             artifacts: artifacts.clone(),
         },

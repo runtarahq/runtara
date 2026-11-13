@@ -159,7 +159,6 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
         WorkflowRole::Root,
         false,
     )?;
-    anyhow::ensure!(compiled.scoped_agents.is_empty() && compiled.invocation_manifest.is_none());
     let runner = Arc::new(
         EmbeddedWasmRunner::new(
             WorkflowRunnerConfig {
