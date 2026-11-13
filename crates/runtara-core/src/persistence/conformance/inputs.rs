@@ -379,29 +379,12 @@ pub async fn batched_discovery(p: &dyn Persistence) {
         "expired",
         "terminal",
         "empty",
-        "cancelled-child",
     ] {
         let (id, owner, mut spec) = fixture(p).await;
         if scenario == "expired" {
             spec.deadline = Some(Utc::now() - Duration::seconds(1));
         }
-        if scenario == "cancelled-child" {
-            let fences = p.invocation_fences().unwrap();
-            let lease = fences
-                .claim_invocation_lease("input-tenant", &id, "batch-owner", None)
-                .await
-                .unwrap();
-            let fence = fences
-                .begin_invocation_attempt(&lease, "child", "start")
-                .await
-                .unwrap()
-                .fence;
-            inputs
-                .register_input(&InputAuthority::Invocation(fence.clone()), &spec)
-                .await
-                .unwrap();
-            fences.cancel_invocation_attempt(&fence).await.unwrap();
-        } else if scenario != "empty" {
+        if scenario != "empty" {
             inputs.register_input(&owner, &spec).await.unwrap();
         }
         match scenario {
@@ -482,117 +465,6 @@ pub async fn batched_discovery(p: &dyn Persistence) {
             .await,
         Err(InputError::NotFound)
     );
-}
-
-/// Invocation closure is local, and a revoked execution cannot mutate replay.
-pub async fn invocation_ownership(p: &dyn Persistence) {
-    let (id, root, mut spec) = fixture(p).await;
-    let inputs = p.input_requests().unwrap();
-    let fences = p.invocation_fences().unwrap();
-    let lease = fences
-        .claim_invocation_lease("input-tenant", &id, "owner-1", None)
-        .await
-        .unwrap();
-    assert_eq!(
-        inputs.register_input(&root, &spec).await,
-        Err(InputError::FenceRejected)
-    );
-    let first = fences
-        .begin_invocation_attempt(&lease, "child-one", "start-one")
-        .await
-        .unwrap()
-        .fence;
-    let sibling = fences
-        .begin_invocation_attempt(&lease, "child-two", "start-two")
-        .await
-        .unwrap()
-        .fence;
-    let first_owner = InputAuthority::Invocation(first.clone());
-    let sibling_owner = InputAuthority::Invocation(sibling.clone());
-    let first_request = inputs.register_input(&first_owner, &spec).await.unwrap();
-    assert_eq!(
-        inputs
-            .close_input(
-                &sibling_owner,
-                &first_request.request_id,
-                InputClosure::Abandoned
-            )
-            .await,
-        Err(InputError::FenceRejected)
-    );
-    spec.signal_id.push_str("/sibling");
-    inputs.register_input(&sibling_owner, &spec).await.unwrap();
-    fences.cancel_invocation_attempt(&first).await.unwrap();
-    assert!(matches!(
-        inputs
-            .get_input("input-tenant", &id, &first_request.request_id)
-            .await
-            .unwrap()
-            .state,
-        InputState::Closed {
-            reason: InputClosure::InvocationCancelled,
-            ..
-        }
-    ));
-    assert_eq!(
-        inputs
-            .list_inputs("input-tenant", std::slice::from_ref(&id), 0, 10)
-            .await
-            .unwrap()
-            .total_count,
-        1
-    );
-    // A lease gap is not logical cancellation: a parked request remains visible.
-    fences.revoke_invocation_lease(&lease).await.unwrap();
-    p.update_instance_status(&id, InstanceStatus::Suspended, None)
-        .await
-        .unwrap();
-    assert_eq!(
-        inputs
-            .list_inputs("input-tenant", std::slice::from_ref(&id), 0, 10)
-            .await
-            .unwrap()
-            .total_count,
-        1
-    );
-    p.update_instance_status(&id, InstanceStatus::Running, None)
-        .await
-        .unwrap();
-    let next_lease = fences
-        .claim_invocation_lease("input-tenant", &id, "owner-2", Some(lease.epoch))
-        .await
-        .unwrap();
-    let replay = fences
-        .begin_invocation_attempt(&next_lease, "child-two", "replay-two")
-        .await
-        .unwrap()
-        .fence;
-    let rebound = inputs
-        .register_input(&InputAuthority::Invocation(replay.clone()), &spec)
-        .await
-        .unwrap();
-    assert_eq!(rebound.fence, Some(replay.clone()));
-    assert_eq!(
-        inputs
-            .close_input(&sibling_owner, &spec.request_id(), InputClosure::Abandoned)
-            .await,
-        Err(InputError::FenceRejected)
-    );
-    fences
-        .settle_invocation_attempt(&replay, None)
-        .await
-        .unwrap();
-    assert!(matches!(
-        inputs
-            .get_input("input-tenant", &id, &spec.request_id())
-            .await
-            .unwrap()
-            .state,
-        InputState::Closed {
-            reason: InputClosure::InvocationSettled,
-            ..
-        }
-    ));
 }
 
 /// Both serializations of response arrival and durable parking must make the
@@ -949,180 +821,6 @@ pub async fn conditional_wake_retry(p: &dyn Persistence) {
     );
 }
 
-/// Trusted parent links, rather than similar textual names, define which waits
-/// an ancestor invalidates. This also fences descendants without an open input.
-pub async fn descendant_ownership(p: &dyn Persistence) {
-    use crate::persistence::invocations::*;
-    for settle in [false, true] {
-        let (id, _, mut spec) = fixture(p).await;
-        let fences = p.invocation_fences().unwrap();
-        let inputs = p.input_requests().unwrap();
-        let lease = fences
-            .claim_invocation_lease("input-tenant", &id, "tree", None)
-            .await
-            .unwrap();
-        let parent = fences
-            .begin_invocation_attempt(&lease, "parent", "p")
-            .await
-            .unwrap()
-            .fence;
-        let child = fences
-            .begin_invocation_attempt_with_parent(
-                &lease,
-                "unrelated-looking-child",
-                "c",
-                Some(&parent),
-            )
-            .await
-            .unwrap()
-            .fence;
-        let grandchild = fences
-            .begin_invocation_attempt_with_parent(&lease, "grandchild", "g", Some(&child))
-            .await
-            .unwrap()
-            .fence;
-        let sibling = fences
-            .begin_invocation_attempt(&lease, "parent-similar-name", "s")
-            .await
-            .unwrap()
-            .fence;
-        assert!(
-            fences
-                .begin_invocation_attempt(&lease, &child.path, "c")
-                .await
-                .is_err(),
-            "ancestry cannot be dropped on an idempotent admission"
-        );
-        assert!(
-            fences
-                .begin_invocation_attempt_with_parent(&lease, &child.path, "c", Some(&sibling))
-                .await
-                .is_err(),
-            "ancestry cannot be reassigned"
-        );
-        assert!(
-            fences
-                .begin_invocation_attempt_with_parent(
-                    &lease,
-                    &parent.path,
-                    "cycle",
-                    Some(&grandchild)
-                )
-                .await
-                .is_err(),
-            "ancestry must stay acyclic"
-        );
-        assert_eq!(
-            fences.inspect_invocation_attempt(&child).await.unwrap(),
-            AttemptState::Active
-        );
-        let mut registered = Vec::new();
-        for token in [&child, &grandchild, &sibling] {
-            spec.signal_id = format!("{}/wait", token.path);
-            registered.push(
-                inputs
-                    .register_input(&InputAuthority::Invocation(token.clone()), &spec)
-                    .await
-                    .unwrap(),
-            );
-        }
-        let response =
-            ValidatedInputResponse::new(&registered[1].spec, "answer", &json!({"answer":"yes"}))
-                .unwrap();
-        let receipt = inputs
-            .accept_input("input-tenant", &id, &response)
-            .await
-            .unwrap();
-        let reason = if settle {
-            assert_eq!(
-                fences
-                    .settle_invocation_attempt(&parent, None)
-                    .await
-                    .unwrap()
-                    .state,
-                AttemptState::Settled
-            );
-            InputClosure::InvocationSettled
-        } else {
-            assert_eq!(
-                fences.cancel_invocation_attempt(&parent).await.unwrap(),
-                AttemptState::Cancelled
-            );
-            InputClosure::InvocationCancelled
-        };
-        assert_eq!(
-            fences.inspect_invocation_attempt(&child).await.unwrap(),
-            AttemptState::Cancelled
-        );
-        assert_eq!(
-            fences
-                .inspect_invocation_attempt(&grandchild)
-                .await
-                .unwrap(),
-            AttemptState::Cancelled
-        );
-        assert_eq!(
-            fences.inspect_invocation_attempt(&sibling).await.unwrap(),
-            AttemptState::Active
-        );
-        let closed = inputs
-            .get_input("input-tenant", &id, &registered[0].request_id)
-            .await
-            .unwrap();
-        assert!(
-            matches!(closed.state, InputState::Closed { reason: found, .. } if found == reason)
-        );
-        let answered = inputs
-            .get_input("input-tenant", &id, &registered[1].request_id)
-            .await
-            .unwrap();
-        assert!(matches!(answered.state, InputState::Accepted { .. }));
-        assert!(!answered.wake_pending);
-        assert_eq!(
-            inputs
-                .accept_input("input-tenant", &id, &response)
-                .await
-                .unwrap(),
-            receipt
-        );
-        let actionable = inputs
-            .list_inputs("input-tenant", std::slice::from_ref(&id), 0, 10)
-            .await
-            .unwrap();
-        assert_eq!(actionable.total_count, 1);
-        assert_eq!(actionable.requests[0].request_id, registered[2].request_id);
-        spec.signal_id = "late-descendant-wait".into();
-        assert!(
-            inputs
-                .register_input(&InputAuthority::Invocation(child.clone()), &spec)
-                .await
-                .is_err()
-        );
-        assert!(
-            fences
-                .begin_invocation_attempt_with_parent(&lease, "late-child", "late", Some(&parent))
-                .await
-                .is_err()
-        );
-        assert!(
-            fences
-                .invocation_checkpoint(
-                    &child,
-                    &InvocationCheckpoint {
-                        checkpoint_id: "late".into(),
-                        state: b"no".to_vec()
-                    }
-                )
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            p.get_instance(&id).await.unwrap().unwrap().status,
-            InstanceStatus::Running
-        );
-    }
-}
-
 /// Enriching adapters freeze the first effective response while comparing the
 /// original caller intent, and cannot replay across a principal/source boundary.
 pub async fn contextual_receipt_replay(p: &dyn Persistence) {
@@ -1305,10 +1003,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_descendant_ownership() {
-        descendant_ownership(&InMemoryPersistence::new()).await;
-    }
-    #[tokio::test]
     async fn memory_conditional_wake_retry() {
         conditional_wake_retry(&InMemoryPersistence::new()).await;
     }
@@ -1347,9 +1041,5 @@ mod tests {
     #[tokio::test]
     async fn memory_discovery() {
         discovery(&InMemoryPersistence::new()).await;
-    }
-    #[tokio::test]
-    async fn memory_invocation_ownership() {
-        invocation_ownership(&InMemoryPersistence::new()).await;
     }
 }

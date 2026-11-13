@@ -180,18 +180,14 @@ pub struct WorkflowApiControls {
     /// The run's whole-execution cleanup alarm (`POST /v1/run/alarm`);
     /// none outside a run.
     pub(crate) cleanup_alarm: Option<crate::cleanup_alarm::CleanupAlarmState>,
-    /// The run's child-run context (`/v1/tasks`); none for a run that
-    /// cannot start children.
-    pub(crate) execution: Option<Arc<crate::execution_host::ExecutionContext>>,
     /// An expired cleanup alarm ends the run through `shorten_deadline`: the
     /// guest runs elsewhere, so no executor here watches the alarm.
     pub(crate) alarm_shortens_deadline: bool,
 }
 
 impl WorkflowApiControls {
-    /// Controls for a launch whose guest runs outside this process. It has no
-    /// in-process child runs, so those calls are answered as for a run
-    /// without them. Its cleanup alarm ends the run when it expires, through
+    /// Controls for a launch whose guest runs outside this process. Its
+    /// cleanup alarm ends the run when it expires, through
     /// `shorten_deadline`, which is how the runner ends it.
     pub fn remote(
         shorten_deadline: Arc<dyn Fn(Duration) + Send + Sync>,
@@ -201,7 +197,6 @@ impl WorkflowApiControls {
             shorten_deadline,
             trusted_pins,
             cleanup_alarm: Some(crate::cleanup_alarm::CleanupAlarmState::default()),
-            execution: None,
             alarm_shortens_deadline: true,
         }
     }

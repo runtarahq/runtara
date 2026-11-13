@@ -205,12 +205,12 @@ seed_event() {
 # signal id, and its spec carries the step presentation the API shows.
 seed_request() {
     local instance_id="$1" signal_id="$2" state="$3" metadata="$4" closure="NULL" closed="NULL"
-    if [ "${state}" = closed ]; then closure="'invocation_settled'"; closed="now()"; fi
+    if [ "${state}" = closed ]; then closure="'abandoned'"; closed="now()"; fi
     psql_quiet -d "${TEST_DB_RUNTIME}" -c "
         INSERT INTO instance_input_requests
-            (instance_id, tenant_id, request_id, signal_id, invocation_path, spec, state, closure_reason, closed_at)
+            (instance_id, tenant_id, request_id, signal_id, spec, state, closure_reason, closed_at)
         VALUES ('${instance_id}', '${TENANT}', encode(sha256(convert_to('${signal_id}', 'UTF8')), 'hex'),
-                '${signal_id}', '',
+                '${signal_id}',
                 \$json\${\"signal_id\":\"${signal_id}\",\"response_schema\":null,\"metadata\":${metadata},\"deadline\":null}\$json\$::jsonb,
                 '${state}', ${closure}, ${closed});
     " >/dev/null

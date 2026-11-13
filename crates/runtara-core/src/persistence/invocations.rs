@@ -1,62 +1,11 @@
-//! Optional atomic persistence for isolated invocation ownership.
+//! Atomic persistence of a root execution's lease: which host launch owns a
+//! running instance, and at which epoch.
 //!
-//! The invocation ledger stores control state, never a result cache. Fenced IO
-//! writes use the existing checkpoint/event storage. Callers keep compiler
-//! checkpoint keys unchanged and authorize those keys before entry.
-//! It is not used by ordinary non-durable calls: those arbitrate in memory until
-//! a durable control command requires a tombstone. A backend must provide every
-//! operation atomically; checking a token and later issuing an unfenced write
-//! does not implement this contract.
+//! A backend must provide every operation atomically; checking a token and
+//! later issuing an unfenced write does not implement this contract.
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 
-/// Child telemetry cannot encode root completion, failure or suspension.
-#[derive(Clone, Debug)]
-pub enum InvocationEventKind {
-    /// Proof of life, including while an invocation sleeps in process.
-    Heartbeat,
-    /// Guest telemetry with its existing subtype.
-    Custom(String),
-}
-
-/// Timeline append addressed by the trusted attempt, never a caller-supplied root.
-#[derive(Clone, Debug)]
-pub struct InvocationEvent {
-    /// Restricted child event kind.
-    pub kind: InvocationEventKind,
-    /// Empty bytes are stored as no payload, as in ordinary runtime events.
-    pub payload: Vec<u8>,
-    /// Emitter timestamp, retained verbatim.
-    pub created_at: DateTime<Utc>,
-}
-
-/// Retry audit record, separate from both result checkpoints and attempt fencing.
-#[derive(Clone, Debug)]
-pub struct InvocationRetry {
-    /// Already-authorized compiler checkpoint key.
-    pub checkpoint_id: String,
-    /// One-based retry counter, representable by existing retry storage.
-    pub attempt_number: u32,
-    /// Optional audit detail; never interpreted as control state.
-    pub error_message: Option<String>,
-}
-
-impl InvocationRetry {
-    /// Validate before writing; do not narrow an overflowing guest counter.
-    pub fn storage_key(&self) -> FenceResult<String> {
-        validate_identity(&self.checkpoint_id)?;
-        if self.attempt_number == 0 || self.attempt_number > i32::MAX as u32 {
-            return Err(InvocationFenceError::Rejected(
-                FenceRejection::InvalidIdentity,
-            ));
-        }
-        let key = format!("{}::retry::{}", self.checkpoint_id, self.attempt_number);
-        validate_identity(&key)?;
-        Ok(key)
-    }
-}
-
-/// Current host owner of an isolated root execution.
+/// Current host owner of a root execution.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InvocationLease {
     /// Tenant resolved by trusted execution admission.
@@ -78,68 +27,7 @@ pub struct InvocationLeaseState {
     pub active: bool,
 }
 
-/// Exact execution attempt; neither a bare step ID nor guest-selected authority.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct AttemptFence {
-    /// Lease under which the attempt was admitted.
-    pub lease: InvocationLease,
-    /// Compiler-qualified logical address, stable across root replay.
-    pub path: String,
-    /// Store-allocated generation, independent of the guest's retry counter.
-    pub generation: i64,
-    /// Host start-request identity, retained for idempotent admission.
-    pub start_id: String,
-}
-
-/// Arbitration state. Settled does not mean success and contains no result cache.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum AttemptState {
-    /// Writes and settlement may still win.
-    Active,
-    /// An invocation outcome was committed; late cancellation is a no-op.
-    Settled,
-    /// Cancellation won; replay must observe this tombstone before starting IO.
-    Cancelled,
-}
-
-/// Stored attempt and its arbitration state.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct InvocationAttempt {
-    /// Exact authority to pass to subsequent operations.
-    pub fence: AttemptFence,
-    /// Current state, including a cancellation retained across replay.
-    pub state: AttemptState,
-}
-
-/// Existing logical checkpoint bytes, optionally committed with settlement.
-#[derive(Clone, Debug)]
-pub struct InvocationCheckpoint {
-    /// Already-authorized compiler checkpoint key; never prefixed here.
-    pub checkpoint_id: String,
-    /// Empty bytes are a read probe, matching the runtime checkpoint contract.
-    pub state: Vec<u8>,
-}
-
-/// Result of a fenced checkpoint read-or-insert.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct InvocationCheckpointResult {
-    /// A checkpoint existed before this call; its first committed bytes win.
-    pub found: bool,
-    /// Existing bytes on a hit, empty on insertion or a missing read probe.
-    pub state: Vec<u8>,
-}
-
-/// Settlement result, including existing checkpoint bytes when another commit
-/// already established the logical replay value. Callers must honor that value.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct InvocationSettlement {
-    /// Winner of cancellation/completion arbitration.
-    pub state: AttemptState,
-    /// Read-or-insert result, only when this call won and requested a checkpoint.
-    pub checkpoint: Option<InvocationCheckpointResult>,
-}
-
-/// A rejected mutation never changes lease, attempt, checkpoint or event state.
+/// A rejected mutation never changes lease state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FenceRejection {
     /// Invalid or unrepresentable identity/counter.
@@ -150,14 +38,6 @@ pub enum FenceRejection {
     InactiveRoot,
     /// Missing, revoked or superseded lease.
     LeaseMismatch,
-    /// Another active start owns this path in the same lease.
-    Busy,
-    /// Unknown, forged or superseded attempt.
-    AttemptMismatch,
-    /// Cancellation already won.
-    Cancelled,
-    /// An outcome already won.
-    Settled,
 }
 
 /// Storage failures are distinct from an expected arbitration rejection.
@@ -187,8 +67,8 @@ pub fn validate_identity(value: &str) -> FenceResult<()> {
 /// Optional capability exposed by [`super::Persistence::invocation_fences`].
 /// All methods serialize with root terminal transitions and each other. A root
 /// lease must be revoked before another owner can claim it. Revocation fences
-/// writes; it does not kill Stores or reclaim their resources. The runner must
-/// still join the old execution before releasing its capacity.
+/// writes; it does not stop the old execution. The runner must still join it
+/// before releasing its capacity.
 #[async_trait]
 pub trait InvocationFences: Send + Sync {
     /// Inspect the current owner for a tenant-owned root, including parked or
@@ -212,90 +92,6 @@ pub trait InvocationFences: Send + Sync {
     ) -> FenceResult<InvocationLease>;
     /// Revoke exactly this owner, idempotently. Works after root termination.
     /// Leaving Running also revokes execution ownership atomically. Resuming
-    /// requires a new lease; logical active/cancelled attempts remain durable.
+    /// requires a new lease.
     async fn revoke_invocation_lease(&self, lease: &InvocationLease) -> FenceResult<()>;
-    /// Inspect an already admitted attempt under a currently active root lease.
-    /// This grants no new admission and does not change its stored ancestry.
-    async fn inspect_invocation_attempt(&self, fence: &AttemptFence) -> FenceResult<AttemptState>;
-    /// Admit a queued durable invocation before constructing a Store. Retrying
-    /// the same start ID in this lease returns its original attempt. A different
-    /// start may follow settlement, or reclaim an abandoned older lease, using
-    /// a new generation. A cancelled logical path returns its tombstone instead
-    /// of admitting another generation, including after a root relaunch.
-    async fn begin_invocation_attempt(
-        &self,
-        lease: &InvocationLease,
-        path: &str,
-        start_id: &str,
-    ) -> FenceResult<InvocationAttempt>;
-    /// Admit a nested invocation under a trusted active parent. The parent must
-    /// belong to this exact root lease; ancestry is immutable for a logical path
-    /// and is never inferred from textual path prefixes. `None` admits a root
-    /// child with the same semantics as `begin_invocation_attempt`.
-    async fn begin_invocation_attempt_with_parent(
-        &self,
-        lease: &InvocationLease,
-        path: &str,
-        start_id: &str,
-        parent: Option<&AttemptFence>,
-    ) -> FenceResult<InvocationAttempt> {
-        if parent.is_some() {
-            return Err(InvocationFenceError::Storage(
-                "nested invocation admission is not implemented".into(),
-            ));
-        }
-        self.begin_invocation_attempt(lease, path, start_id).await
-    }
-    /// Record exact-attempt cancellation, including while its root is parked.
-    /// Completion wins over late cancel. An old generation cannot affect a new
-    /// one. Command ID deduplication belongs to the execution-control layer.
-    async fn cancel_invocation_attempt(&self, fence: &AttemptFence) -> FenceResult<AttemptState>;
-    /// Commit an invocation outcome and optional existing logical checkpoint in
-    /// one transaction. Cancellation returns Cancelled without writing bytes.
-    /// Repeated settlement is a no-op; this ledger never stores result bytes.
-    async fn settle_invocation_attempt(
-        &self,
-        fence: &AttemptFence,
-        checkpoint: Option<&InvocationCheckpoint>,
-    ) -> FenceResult<InvocationSettlement>;
-    /// Read one checkpoint under an active lease/attempt fence. Writes nothing.
-    async fn invocation_checkpoint_lookup(
-        &self,
-        fence: &AttemptFence,
-        checkpoint_id: &str,
-    ) -> FenceResult<Option<Vec<u8>>>;
-    /// Read/insert a checkpoint and update the root's checkpoint pointer under
-    /// the same lease/attempt fence. Existing state is never overwritten.
-    /// Empty state remains a probe for compatibility and does not create an
-    /// empty replay hit; a lookup is [`Self::invocation_checkpoint_lookup`].
-    async fn invocation_checkpoint(
-        &self,
-        fence: &AttemptFence,
-        checkpoint: &InvocationCheckpoint,
-    ) -> FenceResult<InvocationCheckpointResult>;
-    /// Save the in-process sleep checkpoint and root checkpoint pointer under
-    /// one active fence. This preserves the existing sleep upsert, including
-    /// empty bytes; it is not a result-checkpoint probe or first-write cache.
-    /// Does not park the root, schedule a wake or wait out the duration.
-    async fn invocation_sleep_checkpoint(
-        &self,
-        fence: &AttemptFence,
-        checkpoint: &InvocationCheckpoint,
-    ) -> FenceResult<()>;
-    /// Upsert the existing retry audit key without moving the root checkpoint
-    /// pointer. Retrying the same number updates its audit metadata. Counter
-    /// overflow and a derived key longer than the identity limit are rejected.
-    async fn invocation_retry(
-        &self,
-        fence: &AttemptFence,
-        retry: &InvocationRetry,
-    ) -> FenceResult<()>;
-    /// Append child telemetry at the attempt's root/path while the attempt is
-    /// active. Repeated calls append repeated events; this is not deduplication.
-    /// Notify any external observer only after a successful commit.
-    async fn invocation_event(
-        &self,
-        fence: &AttemptFence,
-        event: &InvocationEvent,
-    ) -> FenceResult<()>;
 }

@@ -24,8 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CA made by `runtara-executor init-pki`. The release bundle and the image
   carry the two new binaries; `docker-compose.executor.yml` adds the executor
   to the evaluation stack. Linux only; see `docs/executor.md` for what it
-  isolates and what differs from the embedded runner (no isolated agent
-  children, no debug mode, one executor per server).
+  isolates and what differs from the embedded runner (no debug mode, one
+  executor per server).
 
 - **eBay agent, generated from eBay's Sell API OpenAPI files.** Twenty-five
   capabilities for a seller: list and read orders, ship them (with tracking)
@@ -1432,6 +1432,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   states will be deleted.
 
 ### Removed
+
+- **The isolated-agent experiment.** Agent steps were once compiled, behind
+  an operator policy, as children run in Wasmtime stores of their own. New
+  compiles stopped producing them, and the runtime kept the path only for
+  artifacts already compiled that way. It is removed: the isolation policy
+  (`RUNTARA_EXPERIMENTAL_ISOLATION_POLICY`, now ignored), the scoped runtime
+  and its in-process child tasks, the compiler's isolation adapter, the
+  `runtara-invocation-contract` crate and the `artifact-inventory` tool. An
+  artifact compiled under the experiment no longer runs; recompile the
+  workflow. `workflow:` child runs, which use the same `/v1/tasks` calls,
+  are unchanged. The `scoped-workflow-integration-tests` feature of
+  `runtara-environment` is renamed `composed-workflow-integration-tests`.
+  With it go the persistence operations only those children used: the
+  invocation attempts behind `InvocationFences` (which keeps the root
+  lease), child ownership of a managed wait (`InputAuthority::Invocation`,
+  a request's `invocation_path` and `fence`, and the `invocation_cancelled`
+  and `invocation_settled` closures, and the `WAIT_CANCELLED` error a wait
+  closed that way raised). A migration drops the `invocation_attempts` table
+  and the `invocation_path` and `fence` columns of `instance_input_requests`;
+  a wait closed by a child's end reads as abandoned.
 
 - **`RUNTARA_REQUIRE_CREDENTIAL_ENCRYPTION` and the `RUNTARA_ENV=production`
   encryption check.** Encryption is no longer optional, so neither variable

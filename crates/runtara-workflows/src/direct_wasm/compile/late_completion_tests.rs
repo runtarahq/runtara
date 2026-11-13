@@ -151,7 +151,6 @@ fn compiled_mode(
         components,
         &[staging],
     )?;
-    assert!(compiled.scoped_agents.is_empty() && compiled.invocation_manifest.is_none());
     Ok(compiled)
 }
 

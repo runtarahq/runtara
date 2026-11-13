@@ -1680,7 +1680,6 @@ impl DirectJsonManifest {
         let (code, category) = match reason {
             "expired" => ("WAIT_TIMEOUT", "timeout"),
             "abandoned" => ("WAIT_ABANDONED", "permanent"),
-            "invocation_cancelled" => ("WAIT_CANCELLED", "permanent"),
             _ => ("WAIT_CLOSED", "permanent"),
         };
         let mut error = serde_json::json!({
@@ -13162,8 +13161,6 @@ mod tests {
             for (reason, code) in [
                 ("expired", "WAIT_TIMEOUT"),
                 ("abandoned", "WAIT_ABANDONED"),
-                ("invocation_cancelled", "WAIT_CANCELLED"),
-                ("invocation_settled", "WAIT_CLOSED"),
                 ("instance_terminated", "WAIT_CLOSED"),
                 ("future_reason", "WAIT_CLOSED"),
             ] {

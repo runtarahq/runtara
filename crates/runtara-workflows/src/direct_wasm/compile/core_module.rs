@@ -429,93 +429,6 @@ pub(super) fn emit_direct_core_module(
         config.static_data.has_connections(),
     )?;
 
-    // Async canonical lowering permits fewer flat params than sync lowering.
-    // Scoped invokes therefore use an indirect 40-byte argument record. A core
-    // shim keeps lowerers uniform and owns its record in the same arena as the
-    // input buffers (never rewound while subtasks are live).
-    let scoped_async = import_indices
-        .agent_invokes_async
-        .keys()
-        .filter(|key| {
-            import_indices
-                .agent_invokes
-                .get(*key)
-                .is_some_and(|invoke| invoke.is_scoped())
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let early_realloc = !scoped_async.is_empty();
-    if early_realloc {
-        let realloc_index = imported_function_count + next_defined_function;
-        export_realloc(
-            resolve,
-            mangling,
-            &mut types,
-            &mut type_count,
-            &mut functions,
-            &mut exports,
-            &mut code,
-            imported_function_count,
-            &mut next_defined_function,
-        );
-        for key in scoped_async {
-            let params = import_indices.agent_invokes[&key].params.clone();
-            let invoke = import_indices.agent_invokes_async.get_mut(&key).unwrap();
-            if invoke.params != [WasmType::Pointer, WasmType::Pointer] {
-                return Err(super::component_error(
-                    "unexpected scoped async invoke canonical signature",
-                ));
-            }
-            functions.function(push_core_type(
-                &mut types,
-                &mut type_count,
-                &params,
-                &[WasmType::I32],
-            ));
-            let mut body = WasmFunction::new([(1, ValType::I32)]);
-            // The legacy allocator adds in i32. Reject wrap before reserving
-            // our argument record; failed memory growth then traps on stores.
-            body.instruction(&Instruction::GlobalGet(0));
-            body.instruction(&Instruction::I32Const(-49)); // u32::MAX - 48
-            body.instruction(&Instruction::I32GtU);
-            body.instruction(&Instruction::If(BlockType::Empty));
-            body.instruction(&Instruction::Unreachable);
-            body.instruction(&Instruction::End);
-            for arg in [0, 0, 8, 48] {
-                body.instruction(&Instruction::I32Const(arg));
-            }
-            body.instruction(&Instruction::Call(realloc_index));
-            // The shared legacy bump allocator does not promise alignment.
-            body.instruction(&Instruction::I32Const(7));
-            body.instruction(&Instruction::I32Add);
-            body.instruction(&Instruction::I32Const(-8));
-            body.instruction(&Instruction::I32And);
-            body.instruction(&Instruction::LocalSet(10));
-            for local in 0..9 {
-                body.instruction(&Instruction::LocalGet(10));
-                body.instruction(&Instruction::LocalGet(local));
-                let mem = wasm_encoder::MemArg {
-                    offset: u64::from(local) * 4,
-                    align: 2,
-                    memory_index: 0,
-                };
-                body.instruction(&if local == 8 {
-                    Instruction::I64Store(mem)
-                } else {
-                    Instruction::I32Store(mem)
-                });
-            }
-            body.instruction(&Instruction::LocalGet(10));
-            body.instruction(&Instruction::LocalGet(9));
-            body.instruction(&Instruction::Call(invoke.function_index));
-            body.instruction(&Instruction::End);
-            code.function(&body);
-            invoke.function_index = imported_function_count + next_defined_function;
-            invoke.params = params;
-            next_defined_function += 1;
-        }
-    }
-
     // Reserve forward references so the entry and its post-return retain their
     // existing positions. Each WIT function adds an export and a post-return;
     // realloc (unless already emitted) and initialize follow them.
@@ -529,11 +442,8 @@ pub(super) fn emit_direct_core_module(
                 WorldItem::Type { .. } => 0,
             })
             .sum();
-        let mut next_helper = imported_function_count
-            + next_defined_function
-            + 2 * export_count
-            + u32::from(!early_realloc)
-            + 1;
+        let mut next_helper =
+            imported_function_count + next_defined_function + 2 * export_count + 1 + 1;
         for helper in super::cooperative_wait::Helper::ALL {
             if config.omit_runtime && helper.needs_runtime() {
                 continue;
@@ -609,19 +519,17 @@ pub(super) fn emit_direct_core_module(
         &ConstExpr::i32_const(heap_base),
     );
 
-    if !early_realloc {
-        export_realloc(
-            resolve,
-            mangling,
-            &mut types,
-            &mut type_count,
-            &mut functions,
-            &mut exports,
-            &mut code,
-            imported_function_count,
-            &mut next_defined_function,
-        );
-    }
+    export_realloc(
+        resolve,
+        mangling,
+        &mut types,
+        &mut type_count,
+        &mut functions,
+        &mut exports,
+        &mut code,
+        imported_function_count,
+        &mut next_defined_function,
+    );
     export_initialize(
         resolve,
         mangling,

@@ -52,8 +52,6 @@ struct Store {
             lifecycle::LeaseRelease,
         ),
     >,
-    invocation_attempts: Vec<crate::persistence::invocations::InvocationAttempt>,
-    invocation_parents: HashMap<(String, String), Option<String>>,
     instances: HashMap<String, InstanceRecord>,
     /// Ordered by insertion; `(instance_id, checkpoint_id)` is unique.
     checkpoints: Vec<CheckpointRecord>,
@@ -470,15 +468,6 @@ fn prune_instance(store: &mut Store, id: &str) -> bool {
     let n = store.invocation_leases.len();
     store.invocation_leases.remove(id);
     note(n, store.invocation_leases.len());
-    let n = store.invocation_attempts.len();
-    store
-        .invocation_attempts
-        .retain(|a| a.fence.lease.instance_id != id);
-    note(n, store.invocation_attempts.len());
-    // Postgres keeps the parent path on the attempt row, so it goes with it.
-    let n = store.invocation_parents.len();
-    store.invocation_parents.retain(|(inst, _), _| inst != id);
-    note(n, store.invocation_parents.len());
     // State stays (readers see it after the prune); its write log goes, since
     // a terminal run never replays.
     let n = store.run_state_writes.len();
@@ -1582,12 +1571,6 @@ impl Persistence for InMemoryPersistence {
                 .run_state_writes
                 .retain(|(instance, _)| instance != id);
             store.invocation_leases.remove(id);
-            store
-                .invocation_parents
-                .retain(|(instance, _), _| instance != id);
-            store
-                .invocation_attempts
-                .retain(|a| &a.fence.lease.instance_id != id);
         }
         Ok(deleted)
     }

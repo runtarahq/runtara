@@ -164,12 +164,8 @@ so does a run whose executor closed its socket.
 These hold for any runner that places runs elsewhere (they are properties of
 `runtara-environment`'s provider runner):
 
-- A workflow's **isolated agent children** (agent steps under an isolation
-  policy) are not available: they are child tasks of the run's own process.
-  `workflow:` child runs work.
 - **Debug mode** is off, and a run's result carries no peak memory and no
   guest output. The guest's output is in the executor's log at `debug`.
-- The **scoped agent** review configuration is not consulted.
 - One executor per server.
 
 ## Trying it

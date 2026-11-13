@@ -121,15 +121,6 @@ fn the_backstops_refuse_what_validation_reports() {
     ));
     assert!(text.contains("without the agent catalog"), "{text}");
 
-    let dir = tempfile::tempdir().unwrap();
-    let text = refusal(compile_direct_workflow_with_scoped_agents(
-        input(control(), dir.path(), Some(catalog())),
-        WorkflowRole::Root,
-        false,
-        ["control".to_string()].into(),
-    ));
-    assert!(text.contains("scoped isolation"), "{text}");
-
     // A suspending step without durability or a timeout.
     let mut step = agent("wait", "waiter", "pause");
     step["durable"] = json!(false);
@@ -411,7 +402,6 @@ fn unscoped_workflows_carry_nothing_of_the_operation_scope() {
         None,
         &Default::default(),
         false,
-        &Default::default(),
         &Default::default(),
         false,
         result.component_artifacts.has_timers,

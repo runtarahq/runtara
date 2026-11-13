@@ -1,4 +1,4 @@
-//! Actual DSL -> packaged WASM -> EmbeddedWasmRunner -> PostgreSQL.
+//! Actual DSL -> composed WASM -> EmbeddedWasmRunner -> PostgreSQL.
 //! Requires staged components and an isolated TEST_ENVIRONMENT_DATABASE_URL.
 #[path = "../../runtara-component-host/tests/common/outbound.rs"]
 mod outbound_fixture;
@@ -7,15 +7,12 @@ use runtara_component_host::workflow_manifest::shared_child_steps;
 use runtara_core::persistence::checkpoint_scope::SharedChildSteps;
 use runtara_core::{domain::InstanceStatus, persistence::Persistence};
 use runtara_environment::runner::{
-    EmbeddedWasmRunner, LaunchOptions, Runner, ScopedAgentRunnerConfig, WorkflowRunnerConfig,
+    EmbeddedWasmRunner, LaunchOptions, Runner, WorkflowRunnerConfig,
 };
-use runtara_invocation_contract::{PackageLimits, artifact_digest};
 use runtara_store_postgres::PostgresPersistence;
 use runtara_workflows::ChildWorkflowInput;
 use runtara_workflows::direct_wasm::{
-    AgentIsolationPolicy, AgentIsolationReason, AgentIsolationReview, DirectCompilationInput,
-    DirectCompilationResult, WorkflowRole, compile_direct_workflow_composed_with_isolation_policy,
-    compose_direct_workflow, compose_direct_workflow_with_isolated_agents,
+    DirectCompilationInput, DirectCompilationResult, WorkflowRole, compose_direct_workflow,
 };
 use serde_json::{Value, json};
 use std::{
@@ -29,104 +26,19 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 fn components() -> PathBuf {
     std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
         .map(PathBuf::from)
-        .expect("scoped-workflow-integration-tests requires RUNTARA_AGENT_COMPONENTS_DIR")
+        .expect("composed-workflow-integration-tests requires RUNTARA_AGENT_COMPONENTS_DIR")
 }
-fn bounds(agent: &str) -> ScopedAgentRunnerConfig {
-    let bytes = std::fs::read(components().join(format!("runtara_agent_{agent}.wasm"))).unwrap();
-    ScopedAgentRunnerConfig {
-        reviewed_agents: [(agent.into(), artifact_digest(&bytes))].into(),
-        retained_agents: Default::default(),
-        max_child_tasks: 8,
-        max_result_bytes: 8 * 1024 * 1024,
-        max_handles: 32,
-    }
-}
-fn limits() -> PackageLimits {
-    PackageLimits {
-        total_bytes: 64 * 1024 * 1024,
-        manifest_bytes: 1024 * 1024,
-        artifacts: 64,
-        bindings: 64,
-    }
-}
-fn random_graph() -> Value {
-    json!({"durable":true,"entryPoint":"call","steps":{
-        "call":{"id":"call","stepType":"Agent","agentId":"utils","capabilityId":"random-double","maxRetries":0,"inputMapping":{}},
-        "finish":{"id":"finish","stepType":"Finish","inputMapping":{"value":{"valueType":"reference","value":"steps.call.outputs"}}}},
-        "executionPlan":[{"fromStep":"call","toStep":"finish"}]})
-}
-fn compile(graph: Value, dir: &Path, agent: &str, backend: &str) -> DirectCompilationResult {
-    compile_with_children(graph, vec![], dir, agent, backend)
+fn compile(graph: Value, dir: &Path) -> DirectCompilationResult {
+    compile_with_children(graph, vec![], dir)
 }
 /// [`compile`] with the child workflows its EmbedWorkflow steps run.
 fn compile_with_children(
     graph: Value,
     children: Vec<ChildWorkflowInput>,
     dir: &Path,
-    agent: &str,
-    backend: &str,
 ) -> DirectCompilationResult {
-    if backend == "inventory-v4" {
-        // The guest ABI is unchanged; retain the preceding inventory format
-        // to prove pinned packages still execute with unknown durability.
-        let mut compiled =
-            compile_with_children(graph, children, &dir.join("current"), agent, "scoped");
-        let bytes = std::fs::read(&compiled.wasm_path).unwrap();
-        let package = runtara_invocation_contract::parse(&bytes, limits())
-            .unwrap()
-            .unwrap();
-        let mut inventory = package.invocations().unwrap().clone();
-        inventory.version = 4;
-        inventory.call_durability.clear();
-        let legacy = runtara_invocation_contract::append_with_invocations(
-            package.root,
-            &package.artifacts().values().copied().collect::<Vec<_>>(),
-            package.bindings().values().cloned().collect(),
-            inventory.clone(),
-            limits(),
-        )
-        .unwrap();
-        compiled.wasm_path = dir.join("inventory-v4.wasm");
-        compiled.invocation_manifest = Some(inventory);
-        std::fs::write(&compiled.wasm_path, legacy).unwrap();
-        return compiled;
-    }
-    if backend == "no-runtime" {
-        // A valid package envelope around a runtime-less root must not obtain
-        // the scoped execution path merely by carrying reviewed child bytes.
-        let mut packaged =
-            compile_with_children(graph, children, &dir.join("packaged"), agent, "scoped");
-        let pure_input = DirectCompilationInput {
-            workflow_id: "scoped-runner-test".into(), version: 1, source_checksum: None,
-            execution_graph: serde_json::from_value(json!({"durable":false,"entryPoint":"finish","steps":{"finish":{"id":"finish","stepType":"Finish"}},"executionPlan":[]})).unwrap(),
-            child_workflows: vec![], output_dir: dir.join("pure"), track_events: false, agent_catalog: None, agent_slug: None,
-        };
-        let mut pure = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
-            pure_input,
-            WorkflowRole::Root,
-            true,
-        )
-        .unwrap();
-        assert!(pure.omit_runtime);
-        compose_direct_workflow(&mut pure, components()).unwrap();
-        let bytes = std::fs::read(&packaged.wasm_path).unwrap();
-        let catalog = runtara_invocation_contract::parse(&bytes, limits())
-            .unwrap()
-            .unwrap();
-        let replacement = runtara_invocation_contract::append_with_invocations(
-            &std::fs::read(pure.wasm_path).unwrap(),
-            &catalog.artifacts().values().copied().collect::<Vec<_>>(),
-            catalog.bindings().values().cloned().collect(),
-            catalog.invocations().unwrap().clone(),
-            limits(),
-        )
-        .unwrap();
-        packaged.wasm_path = dir.join("runtime-less.wasm");
-        std::fs::write(&packaged.wasm_path, replacement).unwrap();
-        return packaged;
-    }
     let input = DirectCompilationInput {
-        workflow_id: "scoped-runner-test".into(),
+        workflow_id: "composed-runner-test".into(),
         version: 1,
         source_checksum: None,
         execution_graph: serde_json::from_value(graph).unwrap(),
@@ -136,49 +48,8 @@ fn compile_with_children(
         agent_catalog: None,
         agent_slug: None,
     };
-    if backend == "scoped" {
-        return compile_direct_workflow_composed_with_isolation_policy(
-            input,
-            WorkflowRole::Root,
-            false,
-            &components(),
-            &[],
-            AgentIsolationPolicy {
-                enabled: true,
-                runtime_supports_inventory_v5: true,
-                reviews: bounds(agent)
-                    .reviewed_agents
-                    .into_iter()
-                    .map(|(id, sha256)| {
-                        (
-                            id,
-                            AgentIsolationReview {
-                                sha256,
-                                reset_safe: true,
-                                compiler_checkpoint_contract: true,
-                            },
-                        )
-                    })
-                    .collect(),
-            },
-            limits(),
-        )
-        .unwrap();
-    }
-    assert!(matches!(backend, "legacy" | "live"));
     let mut result = runtara_workflows::direct_wasm::compile_direct_workflow(input).unwrap();
-    if backend == "legacy" {
-        compose_direct_workflow(&mut result, components()).unwrap();
-    } else {
-        compose_direct_workflow_with_isolated_agents(
-            &mut result,
-            components(),
-            &[],
-            &bounds(agent).reviewed_agents,
-            limits(),
-        )
-        .unwrap();
-    }
+    compose_direct_workflow(&mut result, components()).unwrap();
     result
 }
 struct Harness {
@@ -196,8 +67,8 @@ impl Harness {
             persistence: Arc::new(PostgresPersistence::new(pool)),
         }
     }
-    fn runner(&self, config: Option<ScopedAgentRunnerConfig>) -> EmbeddedWasmRunner {
-        let runner = EmbeddedWasmRunner::new(
+    fn runner(&self) -> EmbeddedWasmRunner {
+        EmbeddedWasmRunner::new(
             WorkflowRunnerConfig {
                 data_dir: self.dir.path().join("data"),
                 default_timeout: Duration::from_secs(30),
@@ -207,19 +78,14 @@ impl Harness {
             artifacts().clone(),
         )
         .unwrap()
-        .with_in_process_precompiler_for_tests();
-        if let Some(config) = config {
-            runner.with_scoped_agents(config).unwrap()
-        } else {
-            runner
-        }
+        .with_in_process_precompiler_for_tests()
     }
     async fn options(&self, wasm: &Path) -> LaunchOptions {
-        let id = format!("scoped-runner-{}", uuid::Uuid::new_v4());
+        let id = format!("composed-runner-{}", uuid::Uuid::new_v4());
         let input = serde_json::to_vec(&json!({"data":{},"variables":{}})).unwrap();
         assert!(
             self.persistence
-                .try_register_instance(&id, "scoped-runner-test", Some(&input))
+                .try_register_instance(&id, "composed-runner-test", Some(&input))
                 .await
                 .unwrap()
         );
@@ -236,7 +102,7 @@ impl Harness {
         LaunchOptions {
             launch_id: format!("launch-{id}"),
             instance_id: id,
-            tenant_id: "scoped-runner-test".into(),
+            tenant_id: "composed-runner-test".into(),
             workflow_digest: artifacts().add(wasm),
             preparation_attempt: None,
             preparation_deadline: None,
@@ -252,516 +118,6 @@ impl Harness {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn scoped_runner_admits_reviewed_packages_and_keeps_legacy_execution() {
-    let h = Harness::new().await;
-    for backend in ["legacy", "scoped", "inventory-v4"] {
-        let artifact = compile(
-            random_graph(),
-            &h.dir.path().join(backend),
-            "utils",
-            backend,
-        );
-        let runner = h.runner(Some(bounds("utils")));
-        let options = h.options(&artifact.wasm_path).await;
-        let handle = runner.try_launch_detached(&options).await.unwrap();
-        tokio::time::timeout(
-            Duration::from_secs(10),
-            runner.wait_for_exit(&handle, Duration::from_millis(10)),
-        )
-        .await
-        .unwrap();
-        assert!(!runner.is_running(&handle).await);
-        assert_eq!(runner.occupancy().unwrap().held, 0);
-        let instance = h
-            .persistence
-            .get_instance(&options.instance_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(instance.status, InstanceStatus::Completed);
-        let lease = h
-            .persistence
-            .invocation_fences()
-            .unwrap()
-            .get_invocation_lease(&options.tenant_id, &options.instance_id)
-            .await
-            .unwrap();
-        // Every root run, legacy or scoped, owns its root under its own
-        // registration while it runs and holds nothing once it finishes.
-        let lease = lease.expect("every production root run claims execution authority");
-        assert_eq!(lease.lease.owner, handle.handle_id);
-        assert!(!lease.active, "finished execution must release its lease");
-        let output: Value = serde_json::from_slice(&instance.output.unwrap()).unwrap();
-        assert!((0.0..1.0).contains(&output["value"].as_f64().unwrap()));
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn scoped_runner_retains_exact_historical_reviews_for_pinned_artifacts() {
-    let h = Harness::new().await;
-    let artifact = compile(
-        random_graph(),
-        &h.dir.path().join("retained"),
-        "utils",
-        "scoped",
-    );
-    let mut config = bounds("utils");
-    let historical = config
-        .reviewed_agents
-        .insert("utils".into(), "0".repeat(64))
-        .unwrap();
-    let options = h.options(&artifact.wasm_path).await;
-    let error = h
-        .runner(Some(config.clone()))
-        .try_launch_detached(&options)
-        .await
-        .unwrap_err();
-    assert!(
-        error.to_string().contains("no matching runtime review"),
-        "{error}"
-    );
-    // A historical approval belongs to the exact Agent ID as well as its digest.
-    config
-        .retained_agents
-        .insert("datetime".into(), [historical.clone()].into());
-    assert!(
-        h.runner(Some(config.clone()))
-            .try_launch_detached(&options)
-            .await
-            .is_err()
-    );
-    config
-        .retained_agents
-        .insert("utils".into(), [historical].into());
-    let runner = h.runner(Some(config));
-    let handle = runner.try_launch_detached(&options).await.unwrap();
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        runner.wait_for_exit(&handle, Duration::from_millis(10)),
-    )
-    .await
-    .unwrap();
-    assert_eq!(runner.occupancy().unwrap().held, 0);
-    let instance = h
-        .persistence
-        .get_instance(&options.instance_id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(instance.status, InstanceStatus::Completed);
-    let output: Value = serde_json::from_slice(&instance.output.unwrap()).unwrap();
-    assert!((0.0..1.0).contains(&output["value"].as_f64().unwrap()));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn scoped_runner_rejects_unapproved_and_old_packages_before_run_capacity() {
-    let h = Harness::new().await;
-    for case in ["disabled", "unreviewed", "changed", "live", "no-runtime"] {
-        let mut graph = random_graph();
-        if case == "no-runtime" {
-            graph["durable"] = false.into();
-        }
-        let artifact = compile(
-            graph,
-            &h.dir.path().join(case),
-            "utils",
-            if matches!(case, "live" | "no-runtime") {
-                case
-            } else {
-                "scoped"
-            },
-        );
-        let mut config = bounds("utils");
-        if case == "unreviewed" {
-            config.reviewed_agents.clear();
-        }
-        if case == "changed" {
-            config
-                .reviewed_agents
-                .insert("utils".into(), "0".repeat(64));
-        }
-        let runner = h.runner((case != "disabled").then_some(config));
-        let options = h.options(&artifact.wasm_path).await;
-        let error = runner
-            .try_launch_detached(&options)
-            .await
-            .expect_err("must reject before execution");
-        let message = error.to_string();
-        assert!(
-            message.contains(match case {
-                "disabled" => "runtime is disabled",
-                "live" => "unsupported scoped Agent inventory",
-                "no-runtime" => "native lifecycle persistence",
-                _ => "no matching runtime review",
-            }),
-            "{message}"
-        );
-        assert_eq!(runner.occupancy().unwrap().held, 0);
-        assert_eq!(runner.preparation_occupancy().unwrap().held, 0);
-        let instance = h
-            .persistence
-            .get_instance(&options.instance_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(instance.output.is_none());
-        assert!(instance.started_at.is_none());
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn scoped_runner_stops_a_hung_http_child_on_cancel_or_root_deadline() {
-    let h = Harness::new().await;
-    for cancel in [true, false] {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let (entered, pending) = tokio::sync::oneshot::channel();
-        let (release, released) = tokio::sync::oneshot::channel::<()>();
-        let expected_instance = Arc::new(std::sync::OnceLock::<String>::new());
-        let provider_instance = expected_instance.clone();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            let mut bytes = [0; 4096];
-            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
-                let n = stream.read(&mut bytes).await.unwrap();
-                assert!(n > 0);
-                request.extend_from_slice(&bytes[..n]);
-            }
-            let metadata =
-                outbound_fixture::captured_request(std::str::from_utf8(&request).unwrap(), b"");
-            assert_eq!(metadata["tenant"], "scoped-runner-test");
-            assert_eq!(
-                metadata["instance"].as_str(),
-                provider_instance.get().map(String::as_str)
-            );
-            entered.send(()).unwrap();
-            // The endpoint remains hung until the test confirms workflow teardown.
-            let _ = released.await;
-            let _ = stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
-                .await;
-        });
-        let graph = json!({"durable":false,"entryPoint":"call","steps":{
-            "call":{"id":"call","stepType":"Agent","agentId":"http","capabilityId":"http-request","maxRetries":0,"inputMapping":{
-                "method":{"valueType":"immediate","value":"GET"},"url":{"valueType":"immediate","value":format!("http://{address}/hang")}}},
-            "finish":{"id":"finish","stepType":"Finish"}},"executionPlan":[{"fromStep":"call","toStep":"finish"}]});
-        let artifact = compile(
-            graph,
-            &h.dir.path().join(format!("http-{cancel}")),
-            "http",
-            "scoped",
-        );
-        let runner = h
-            .runner(Some(bounds("http")))
-            .with_outbound_http(Arc::new(outbound_fixture::PublicHttp::default()))
-            .unwrap();
-        let mut options = h.options(&artifact.wasm_path).await;
-        expected_instance.set(options.instance_id.clone()).unwrap();
-        options
-            .env
-            .insert("RUNTARA_TENANT_ID".into(), "forged-guest-tenant".into());
-        options
-            .env
-            .insert("RUNTARA_INSTANCE_ID".into(), "forged-guest-instance".into());
-        if !cancel {
-            options.timeout = Duration::from_secs(2);
-        }
-        let handle = runner.try_launch_detached(&options).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(10), pending)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(runner.is_running(&handle).await);
-        if cancel {
-            runner.stop(&handle).await.unwrap();
-        }
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            runner.wait_for_exit(&handle, Duration::from_millis(10)),
-        )
-        .await
-        .unwrap();
-        assert!(!runner.is_running(&handle).await);
-        assert_eq!(runner.occupancy().unwrap().held, 0);
-        let instance = h
-            .persistence
-            .get_instance(&options.instance_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            instance.output.is_none(),
-            "a cancelled child must not publish root success"
-        );
-        assert_ne!(instance.status, InstanceStatus::Completed);
-        release.send(()).unwrap();
-        server.await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(
-            h.persistence
-                .get_instance(&options.instance_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .output
-                .is_none()
-        );
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn scoped_runner_rechecks_prepared_policy_and_rejects_foreign_engines() {
-    let h = Harness::new().await;
-    let artifact = compile(random_graph(), h.dir.path(), "utils", "scoped");
-    for foreign_engine in [true, false] {
-        let original = h.runner(Some(bounds("utils")));
-        let options = h.options(&artifact.wasm_path).await;
-        let prepared = original.try_prepare_launch(&options).await.unwrap();
-        assert_eq!(original.preparation_occupancy().unwrap().held, 1);
-        let runner = if foreign_engine {
-            h.runner(Some(bounds("utils")))
-        } else {
-            let mut config = bounds("utils");
-            config.reviewed_agents.clear();
-            original.with_scoped_agents(config).unwrap()
-        };
-        let error = runner
-            .try_launch_prepared_detached(&options, prepared)
-            .await
-            .expect_err("recheck must reject");
-        assert!(error.to_string().contains(if foreign_engine {
-            "native lifecycle persistence"
-        } else {
-            "no matching runtime review"
-        }));
-        assert_eq!(runner.occupancy().unwrap().held, 0);
-        assert_eq!(runner.preparation_occupancy().unwrap().held, 0);
-        assert!(
-            h.persistence
-                .get_instance(&options.instance_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .started_at
-                .is_none()
-        );
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn scoped_runner_parks_and_replays_existing_checkpoints() {
-    let h = Harness::new().await;
-    let mut graph = random_graph();
-    graph["steps"]["sleep"] = json!({"id":"sleep","stepType":"Delay","durationMs":{"valueType":"immediate","value":1000}});
-    graph["executionPlan"] =
-        json!([{"fromStep":"call","toStep":"sleep"},{"fromStep":"sleep","toStep":"finish"}]);
-    let artifact = compile(graph, h.dir.path(), "utils", "scoped");
-    let runner = h.runner(Some(bounds("utils")));
-    let mut options = h.options(&artifact.wasm_path).await;
-    let handle = runner.try_launch_detached(&options).await.unwrap();
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        runner.wait_for_exit(&handle, Duration::from_millis(10)),
-    )
-    .await
-    .unwrap();
-    let parked = h
-        .persistence
-        .get_instance(&options.instance_id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(parked.status, InstanceStatus::Suspended);
-    assert!(parked.output.is_none());
-    let prior_lease = h
-        .persistence
-        .invocation_fences()
-        .unwrap()
-        .get_invocation_lease(&options.tenant_id, &options.instance_id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(!prior_lease.active);
-    assert_eq!(prior_lease.lease.owner, handle.handle_id);
-    assert_eq!(runner.occupancy().unwrap().held, 0);
-    let checkpoints = h
-        .persistence
-        .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
-        .await
-        .unwrap();
-    let agent = checkpoints
-        .iter()
-        .find(|c| c.checkpoint_id.contains("random-double"))
-        .expect("Agent result checkpoint");
-    let expected: f64 = serde_json::from_slice(&agent.state).unwrap();
-    let remaining = (parked.sleep_until.unwrap() - chrono::Utc::now())
-        .to_std()
-        .unwrap_or_default();
-    tokio::time::sleep(remaining + Duration::from_millis(20)).await;
-    options.launch_id = format!("resume-{}", options.instance_id);
-    options.prepersisted_input = None;
-    let resumed = runner.try_launch_detached(&options).await.unwrap();
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        runner.wait_for_exit(&resumed, Duration::from_millis(10)),
-    )
-    .await
-    .unwrap();
-    let completed = h
-        .persistence
-        .get_instance(&options.instance_id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(completed.status, InstanceStatus::Completed);
-    let replay_lease = h
-        .persistence
-        .invocation_fences()
-        .unwrap()
-        .get_invocation_lease(&options.tenant_id, &options.instance_id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(!replay_lease.active);
-    assert_eq!(replay_lease.lease.owner, resumed.handle_id);
-    assert!(replay_lease.lease.epoch > prior_lease.lease.epoch);
-    let output: Value = serde_json::from_slice(&completed.output.unwrap()).unwrap();
-    assert_eq!(output["value"].as_f64().unwrap(), expected);
-    let replayed = h
-        .persistence
-        .load_checkpoint(&options.instance_id, &agent.checkpoint_id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(replayed.state, agent.state);
-    assert_eq!(replayed.created_at, agent.created_at);
-    assert_eq!(runner.occupancy().unwrap().held, 0);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn scoped_runner_does_not_start_children_or_charge_active_budget_before_gate_open() {
-    use runtara_environment::runner::StartGate;
-    let h = Harness::new().await;
-    let artifact = compile(random_graph(), h.dir.path(), "utils", "scoped");
-    let runner = h.runner(Some(bounds("utils")));
-    let mut options = h.options(&artifact.wasm_path).await;
-    options.timeout = Duration::from_secs(1);
-    // Prepare before the gate exists, exactly as `dispatch_prepared` does. A
-    // gate built around `try_launch_detached` would spend its handoff budget on
-    // artifact reading and precompilation, so a slow host could expire it
-    // during the assertions below and report a start that never happened.
-    let prepared = runner.try_prepare_launch(&options).await.unwrap();
-    let gate = StartGate::new(Duration::from_secs(10));
-    options.start_gate = Some(gate.clone());
-    let handle = runner
-        .try_launch_prepared_detached(&options, prepared)
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    assert!(runner.is_running(&handle).await);
-    assert!(
-        h.persistence
-            .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        h.persistence
-            .get_instance(&options.instance_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .output
-            .is_none()
-    );
-    // The dispatcher owns durable promotion for a gated launch.
-    h.persistence
-        .mark_instance_running(&options.instance_id, chrono::Utc::now())
-        .await
-        .unwrap();
-    assert!(gate.open());
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        runner.wait_for_exit(&handle, Duration::from_millis(10)),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        h.persistence
-            .get_instance(&options.instance_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
-        InstanceStatus::Completed
-    );
-    assert_eq!(runner.occupancy().unwrap().held, 0);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn scoped_runner_releases_lease_when_durable_start_confirmation_rejects() {
-    use runtara_environment::runner::{RunnerError, StartGate, StartGateConfirmation};
-    struct Reject;
-    #[async_trait::async_trait]
-    impl StartGateConfirmation for Reject {
-        async fn confirm(&self) -> Result<(), RunnerError> {
-            Err(RunnerError::StartFailed("rejected test handoff".into()))
-        }
-    }
-    let h = Harness::new().await;
-    let artifact = compile(random_graph(), h.dir.path(), "utils", "scoped");
-    let runner = h.runner(Some(bounds("utils")));
-    let mut options = h.options(&artifact.wasm_path).await;
-    let gate = StartGate::new(Duration::from_secs(10)).with_confirmation(Arc::new(Reject));
-    options.start_gate = Some(gate.clone());
-    h.persistence
-        .mark_instance_running(&options.instance_id, chrono::Utc::now())
-        .await
-        .unwrap();
-    let handle = runner.try_launch_detached(&options).await.unwrap();
-    assert!(gate.open());
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        runner.wait_for_exit(&handle, Duration::from_millis(10)),
-    )
-    .await
-    .unwrap();
-    let lease = h
-        .persistence
-        .invocation_fences()
-        .unwrap()
-        .get_invocation_lease(&options.tenant_id, &options.instance_id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(lease.lease.owner, handle.handle_id);
-    assert!(!lease.active);
-    assert!(
-        h.persistence
-            .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        h.persistence
-            .get_instance(&options.instance_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .output
-            .is_none()
-    );
-    assert_eq!(runner.occupancy().unwrap().held, 0);
-}
-
-/// Stage a workflow-agent child that waits on a signal, and a parent that calls
-/// it. Returns the parent artifact. The child carries `parks:1`, the
-/// marker that says it may park and carries its wake out through the suspend
-/// sentinel.
 fn parking_child_parent(dir: &Path, timeout_ms: Option<u64>) -> DirectCompilationResult {
     let components = components();
     let components = components.to_str().unwrap();
@@ -854,7 +210,7 @@ fn parking_child_parent(dir: &Path, timeout_ms: Option<u64>) -> DirectCompilatio
 async fn a_published_child_wait_accepts_wakes_and_replays_without_debug_events() {
     let h = Harness::new().await;
     let parent = parking_child_parent(h.dir.path(), None);
-    let runner = h.runner(None);
+    let runner = h.runner();
     let mut options = h.options(&parent.wasm_path).await;
 
     let handle = runner.try_launch_detached(&options).await.unwrap();
@@ -982,7 +338,7 @@ async fn a_published_child_wait_accepts_wakes_and_replays_without_debug_events()
 async fn the_wake_scheduler_claims_a_parked_nested_wait_and_relaunches_it() {
     let h = Harness::new().await;
     let parent = parking_child_parent(h.dir.path(), Some(400));
-    let runner = h.runner(None);
+    let runner = h.runner();
     let mut options = h.options(&parent.wasm_path).await;
 
     let handle = runner.try_launch_detached(&options).await.unwrap();
@@ -1150,10 +506,11 @@ async fn run_until_exit(runner: &EmbeddedWasmRunner, options: &LaunchOptions) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_completed_split_keeps_one_row_and_replays_from_it() {
     let h = Harness::new().await;
-    for backend in ["legacy", "scoped"] {
+    {
+        let backend = "composed";
         let graph = split_graph(json!({}), delay("sleep", 1000));
-        let artifact = compile(graph, &h.dir.path().join(backend), "utils", backend);
-        let runner = h.runner(Some(bounds("utils")));
+        let artifact = compile(graph, &h.dir.path().join(backend));
+        let runner = h.runner();
         let mut options = h.options(&artifact.wasm_path).await;
         run_until_exit(&runner, &options).await;
         let parked = h
@@ -1223,15 +580,16 @@ async fn a_completed_split_keeps_one_row_and_replays_from_it() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_split_parked_mid_iteration_resumes_from_its_item_rows_then_collapses() {
     let h = Harness::new().await;
-    for backend in ["legacy", "scoped"] {
+    {
+        let backend = "composed";
         split_parked_mid_iteration(&h, backend).await;
     }
 }
 
 async fn split_parked_mid_iteration(h: &Harness, backend: &str) {
     let graph = split_graph(delay("pause", 300), json!({}));
-    let artifact = compile(graph, &h.dir.path().join(backend), "utils", backend);
-    let runner = h.runner(Some(bounds("utils")));
+    let artifact = compile(graph, &h.dir.path().join(backend));
+    let runner = h.runner();
     let mut options = h.options(&artifact.wasm_path).await;
     let mut first_item = None;
     for launch in 0..8 {
@@ -1364,7 +722,8 @@ fn in_pass(checkpoint_id: &str) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_completed_while_keeps_one_row_and_replays_from_it() {
     let h = Harness::new().await;
-    for backend in ["legacy", "scoped"] {
+    {
+        let backend = "composed";
         for timeout_ms in [None, Some(60_000)] {
             let label = format!("{backend}, timeout {timeout_ms:?}");
             let graph = while_graph(json!({}), delay("sleep", 1000), timeout_ms);
@@ -1373,10 +732,8 @@ async fn a_completed_while_keeps_one_row_and_replays_from_it() {
                 &h.dir
                     .path()
                     .join(format!("while-{backend}-{}", timeout_ms.is_some())),
-                "utils",
-                backend,
             );
-            let runner = h.runner(Some(bounds("utils")));
+            let runner = h.runner();
             let mut options = h.options(&artifact.wasm_path).await;
             run_until_exit(&runner, &options).await;
             let parked = h
@@ -1452,15 +809,11 @@ async fn a_completed_while_keeps_one_row_and_replays_from_it() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_while_parked_mid_iteration_resumes_from_its_rows_then_collapses() {
     let h = Harness::new().await;
-    for backend in ["legacy", "scoped"] {
+    {
+        let backend = "composed";
         let graph = while_graph(delay("pause", 300), json!({}), None);
-        let artifact = compile(
-            graph,
-            &h.dir.path().join(format!("while-park-{backend}")),
-            "utils",
-            backend,
-        );
-        let runner = h.runner(Some(bounds("utils")));
+        let artifact = compile(graph, &h.dir.path().join(format!("while-park-{backend}")));
+        let runner = h.runner();
         let mut options = h.options(&artifact.wasm_path).await;
         let mut first_pass = None;
         let mut parks = 0;
@@ -1589,14 +942,8 @@ fn embed_call(child: Value) -> (Value, Vec<ChildWorkflowInput>) {
 }
 
 /// Compile `graph`, whose Agent step `call` runs `child` published as the
-/// workflow-agent `random-child`: composed in-process (`legacy`) or isolated
-/// (`scoped`). Returns the artifact and the runner bounds that admit it.
-fn workflow_agent_parent(
-    graph: Value,
-    child: Value,
-    dir: &Path,
-    backend: &str,
-) -> (DirectCompilationResult, ScopedAgentRunnerConfig) {
+/// workflow-agent `random-child`, composed into the parent.
+fn workflow_agent_parent(graph: Value, child: Value, dir: &Path) -> DirectCompilationResult {
     let components = components();
     let mut compiled = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
         DirectCompilationInput {
@@ -1631,14 +978,8 @@ fn workflow_agent_parent(
         serde_json::to_vec(&info).unwrap(),
     )
     .unwrap();
-    let mut config = bounds("utils");
-    config.reviewed_agents.insert(
-        "random-child".into(),
-        artifact_digest(&std::fs::read(&staged).unwrap()),
-    );
-
     let input = DirectCompilationInput {
-        workflow_id: "scoped-runner-test".into(),
+        workflow_id: "composed-runner-test".into(),
         version: 1,
         source_checksum: None,
         execution_graph: serde_json::from_value(graph).unwrap(),
@@ -1650,68 +991,19 @@ fn workflow_agent_parent(
         )),
         agent_slug: None,
     };
-    let parent = if backend == "scoped" {
-        let reviews = config
-            .reviewed_agents
-            .iter()
-            .map(|(id, sha256)| {
-                (
-                    id.clone(),
-                    AgentIsolationReview {
-                        sha256: sha256.clone(),
-                        reset_safe: true,
-                        compiler_checkpoint_contract: true,
-                    },
-                )
-            })
-            .collect();
-        let parent = compile_direct_workflow_composed_with_isolation_policy(
-            input,
-            WorkflowRole::Root,
-            false,
-            &components,
-            std::slice::from_ref(&staging),
-            AgentIsolationPolicy {
-                enabled: true,
-                runtime_supports_inventory_v5: true,
-                reviews,
-            },
-            limits(),
-        )
-        .unwrap();
-        let decision = parent
-            .artifact_metadata
-            .isolation_selection
-            .as_ref()
-            .expect("an isolation report")
-            .agents
-            .iter()
-            .find(|agent| agent.agent_id == "random-child")
-            .expect("the workflow-agent's decision")
-            .reason;
-        assert_eq!(
-            decision,
-            AgentIsolationReason::Isolated,
-            "the call must run isolated, writing through the fenced path"
-        );
-        parent
-    } else {
-        assert_eq!(backend, "legacy");
-        let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
-            input,
-            WorkflowRole::Root,
-            false,
-        )
-        .unwrap();
-        runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
-            &mut parent,
-            &components,
-            std::slice::from_ref(&staging),
-        )
-        .unwrap();
-        parent
-    };
-    (parent, config)
+    let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        input,
+        WorkflowRole::Root,
+        false,
+    )
+    .unwrap();
+    runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+        &mut parent,
+        &components,
+        std::slice::from_ref(&staging),
+    )
+    .unwrap();
+    parent
 }
 
 /// Rows written by a child workflow under its caller.
@@ -1807,16 +1099,15 @@ async fn a_finished_call_replays_from_its_row(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_completed_embed_keeps_one_row_and_replays_from_it() {
     let h = Harness::new().await;
-    for backend in ["legacy", "scoped"] {
+    {
+        let backend = "composed";
         let (call, children) = embed_call(random_child(json!({})));
         let artifact = compile_with_children(
             calling_graph(call, delay("sleep", 1000)),
             children,
             &h.dir.path().join(format!("embed-{backend}")),
-            "utils",
-            backend,
         );
-        let runner = h.runner(Some(bounds("utils")));
+        let runner = h.runner();
         a_finished_call_replays_from_its_row(
             &h,
             &runner,
@@ -1829,26 +1120,26 @@ async fn a_completed_embed_keeps_one_row_and_replays_from_it() {
 }
 
 /// Once an Agent calling a workflow-agent records its result, the rows the
-/// child wrote under the call are gone, composed or isolated, and a replay is
+/// child wrote under the call are gone, and a replay is
 /// served by the result: the child does not run again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_completed_workflow_agent_call_keeps_one_row_and_replays_from_it() {
     let h = Harness::new().await;
-    for backend in ["legacy", "scoped"] {
+    {
+        let backend = "composed";
         let call = json!({"id":"call","stepType":"Agent","agentId":"random-child",
             "capabilityId":"run","maxRetries":0,"inputMapping":{}});
-        let (artifact, config) = workflow_agent_parent(
+        let artifact = workflow_agent_parent(
             calling_graph(call, delay("sleep", 1000)),
             random_child(json!({})),
             &h.dir.path().join(format!("agent-{backend}")),
-            backend,
         );
         assert_eq!(
             shared_child_steps(&std::fs::read(&artifact.wasm_path).unwrap()),
             Some(Default::default()),
             "{backend}: the scan reads the workflow-agent's manifest and finds no onWait step"
         );
-        let runner = h.runner(Some(config));
+        let runner = h.runner();
         a_finished_call_replays_from_its_row(
             &h,
             &runner,
@@ -1866,16 +1157,15 @@ async fn a_completed_workflow_agent_call_keeps_one_row_and_replays_from_it() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_embed_parked_in_its_child_resumes_from_the_child_rows_then_collapses() {
     let h = Harness::new().await;
-    for backend in ["legacy", "scoped"] {
+    {
+        let backend = "composed";
         let (call, children) = embed_call(random_child(delay("pause", 300)));
         let artifact = compile_with_children(
             calling_graph(call, json!({})),
             children,
             &h.dir.path().join(format!("embed-park-{backend}")),
-            "utils",
-            backend,
         );
-        let runner = h.runner(Some(bounds("utils")));
+        let runner = h.runner();
         let mut options = h.options(&artifact.wasm_path).await;
         let mut first = None;
         for launch in 0..8 {
@@ -2103,16 +1393,15 @@ async fn local_state_resumes_then_goes_with_the_result(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_embedded_childs_local_state_resumes_from_its_rows_then_goes_with_the_result() {
     let h = Harness::new().await;
-    for backend in ["legacy", "scoped"] {
+    {
+        let backend = "composed";
         let (call, children) = embed_call(local_state_child(Some(300)));
         let artifact = compile_with_children(
             calling_graph(call, json!({})),
             children,
             &h.dir.path().join(format!("embed-state-{backend}")),
-            "utils",
-            backend,
         );
-        let runner = h.runner(Some(bounds("utils")));
+        let runner = h.runner();
         local_state_resumes_then_goes_with_the_result(
             &h,
             &runner,
@@ -2124,106 +1413,28 @@ async fn an_embedded_childs_local_state_resumes_from_its_rows_then_goes_with_the
     }
 }
 
-/// A workflow-agent keeps its state locally too, composed or isolated; the
-/// result of the Agent calling it closes those rows with the rest of its.
-/// The composed child parks and resumes from them. An isolated one sleeps a
-/// Delay in-process instead of parking its root, so it runs through: its
-/// rows are seen where a failing call saves no result, and seen gone where
-/// the call succeeds.
+/// A workflow-agent keeps its state locally too; the result of the Agent
+/// calling it closes those rows with the rest of its. The child parks and
+/// resumes from them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_workflow_agents_local_state_goes_with_the_result_of_its_call() {
     let h = Harness::new().await;
     let call = json!({"id":"call","stepType":"Agent","agentId":"random-child",
         "capabilityId":"run","maxRetries":0,"inputMapping":{}});
-    let (artifact, config) = workflow_agent_parent(
-        calling_graph(call.clone(), json!({})),
+    let artifact = workflow_agent_parent(
+        calling_graph(call, json!({})),
         local_state_child(Some(300)),
-        &h.dir.path().join("agent-state-legacy"),
-        "legacy",
+        &h.dir.path().join("agent-state"),
     );
-    let runner = h.runner(Some(config));
+    let runner = h.runner();
     local_state_resumes_then_goes_with_the_result(
         &h,
         &runner,
         &artifact,
         r#"runtara:v2:["agent""#,
-        "legacy",
+        "composed",
     )
     .await;
-
-    let (artifact, config) = workflow_agent_parent(
-        calling_graph(call.clone(), json!({})),
-        local_state_child(None),
-        &h.dir.path().join("agent-state-scoped"),
-        "scoped",
-    );
-    let runner = h.runner(Some(config));
-    let options = h.options(&artifact.wasm_path).await;
-    run_until_exit(&runner, &options).await;
-    let completed = h
-        .persistence
-        .get_instance(&options.instance_id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        completed.status,
-        InstanceStatus::Completed,
-        "scoped: {completed:?}"
-    );
-    let output: Value = serde_json::from_slice(&completed.output.unwrap()).unwrap();
-    final_local_state(&output, "scoped");
-    only_the_result_is_left(&h, &options.instance_id, r#"runtara:v2:["agent""#, "scoped").await;
-
-    let mut failing = local_state_child(None);
-    failing["steps"]["done"] = json!({"id":"done","stepType":"Error","category":"permanent",
-        "code":"AFTER_STATE","message":"fails after writing its state","severity":"error"});
-    let handled = json!({"durable":true,"entryPoint":"call","steps":{
-        "call":call,
-        "finish":{"id":"finish","stepType":"Finish","inputMapping":{}},
-        "handled":{"id":"handled","stepType":"Finish","inputMapping":{}}},
-        "executionPlan":[{"fromStep":"call","toStep":"finish"},
-            {"fromStep":"call","toStep":"handled","label":"onError"}]});
-    let (artifact, config) = workflow_agent_parent(
-        handled,
-        failing,
-        &h.dir.path().join("agent-state-scoped-failing"),
-        "scoped",
-    );
-    let runner = h.runner(Some(config));
-    let options = h.options(&artifact.wasm_path).await;
-    run_until_exit(&runner, &options).await;
-    let completed = h
-        .persistence
-        .get_instance(&options.instance_id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        completed.status,
-        InstanceStatus::Completed,
-        "scoped, failing: {completed:?}"
-    );
-    let ids: Vec<String> = h
-        .persistence
-        .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|c| c.checkpoint_id)
-        .collect();
-    for (kind, step) in [
-        ("state-local", "s1"),
-        ("state-local", "s2"),
-        ("state-read-local", "g"),
-    ] {
-        assert!(
-            ids.iter().any(|id| in_child(id)
-                && id.starts_with(&format!(r#"runtara:v2:["{kind}""#))
-                && id.ends_with(&format!(r#"["{step}"]]"#))),
-            "scoped, failing: the isolated child wrote {kind} for {step}: {ids:?}"
-        );
-    }
 }
 
 /// A loopback HTTP endpoint that answers 500 to the first `failures` requests
@@ -2269,7 +1480,8 @@ async fn flaky_http(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_that_retried_keeps_only_its_result_once_it_succeeds() {
     let h = Harness::new().await;
-    for backend in ["legacy", "scoped"] {
+    {
+        let backend = "composed";
         let (address, requests, server) = flaky_http(2).await;
         let call = json!({"id":"call","stepType":"Agent","agentId":"http","capabilityId":"http-request",
             "maxRetries":3,"retryDelay":200,"inputMapping":{
@@ -2278,11 +1490,9 @@ async fn an_agent_that_retried_keeps_only_its_result_once_it_succeeds() {
         let artifact = compile(
             calling_graph(call, json!({})),
             &h.dir.path().join(format!("retry-{backend}")),
-            "http",
-            backend,
         );
         let runner = h
-            .runner(Some(bounds("http")))
+            .runner()
             .with_outbound_http(Arc::new(outbound_fixture::PublicHttp::default()))
             .unwrap();
         let mut options = h.options(&artifact.wasm_path).await;
@@ -2361,7 +1571,8 @@ async fn an_agent_that_retried_keeps_only_its_result_once_it_succeeds() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_result_keeps_the_child_rows_of_an_on_wait_step_with_its_id() {
     let h = Harness::new().await;
-    for backend in ["legacy", "scoped"] {
+    {
+        let backend = "composed";
         let (on_wait_embed, children) = embed_call(random_child(json!({})));
         let mut on_wait_embed = on_wait_embed;
         on_wait_embed["id"] = json!("x");
@@ -2389,15 +1600,13 @@ async fn an_agent_result_keeps_the_child_rows_of_an_on_wait_step_with_its_id() {
             graph,
             children,
             &h.dir.path().join(format!("on-wait-{backend}")),
-            "utils",
-            backend,
         );
         let shared = shared_child_steps(&std::fs::read(&artifact.wasm_path).unwrap());
         assert!(
             shared.as_ref().is_some_and(|steps| steps.contains("x")),
             "{backend}: the onWait step is listed: {shared:?}"
         );
-        let runner = h.runner(Some(bounds("utils")));
+        let runner = h.runner();
         let mut options = h.options(&artifact.wasm_path).await;
         let child_row = |rows: &[runtara_core::persistence::CheckpointRecord]| {
             rows.iter()
