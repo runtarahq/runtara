@@ -643,7 +643,7 @@ mod tests {
 
     #[test]
     fn a_fixed_value_format_is_checked_with_the_declaration() {
-        let api_key = |format: &str| {
+        let declared_with = |format: &str| {
             with(|d| {
                 d.based_on = "http_api_key".into();
                 d.fields.clear();
@@ -651,8 +651,8 @@ mod tests {
                 d.fixed.insert(VALUE_FORMAT_FIELD.into(), format.into());
             })
         };
-        assert_eq!(api_key("Device {}:project").validate_shape(), Ok(()));
-        let error = shape_error(api_key("Device"));
+        assert_eq!(declared_with("Device {}:project").validate_shape(), Ok(()));
+        let error = shape_error(declared_with("Device"));
         assert!(
             error.contains("fixed `value_format` must contain"),
             "{error}"
