@@ -34,8 +34,6 @@ members = [
     "crates/runtara-agent-suspension",
     # Control service contract: caps, codes, capacity share, start schema
     "crates/runtara-control-contract",
-    # Isolated child-component package and invocation-path contract
-    "crates/runtara-invocation-contract",
     # Workflow API v1 contract shared by the host and the guest SDK
     "crates/runtara-workflow-api",
     # Guest side of the workflow API, and a probe workflow built on it

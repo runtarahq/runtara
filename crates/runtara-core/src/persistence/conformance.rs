@@ -3313,12 +3313,8 @@ pub async fn run_prune_pinned_sequence<P: Persistence>(backend: &P) {
     let fences = backend
         .invocation_fences()
         .expect("invocation fences required");
-    let lease = fences
-        .claim_invocation_lease(tenant, &old, "launch-one", None)
-        .await
-        .unwrap();
     fences
-        .begin_invocation_attempt(&lease, "agent/path", "start-1")
+        .claim_invocation_lease(tenant, &old, "launch-one", None)
         .await
         .unwrap();
     backend

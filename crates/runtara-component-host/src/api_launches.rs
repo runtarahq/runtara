@@ -74,9 +74,6 @@ pub struct LaunchSlot {
     /// A suspension it posts wakes on them too, as the old ABI's host
     /// attached them to the run's result.
     pending_waits: Mutex<Vec<String>>,
-    /// The child runs this launch started and has not released, by task id.
-    /// Dropping one cancels its child, so a launch that ends reaps them.
-    tasks: Mutex<LaunchTasks>,
     /// When this launch's lease was last read from the store.
     lease_checked: Mutex<Option<std::time::Instant>>,
     /// What this launch may still append through `POST /v1/events`.
@@ -105,13 +102,6 @@ struct Made {
 
 /// How often a launch's lease is read again while it calls the workflow API.
 const LEASE_RECHECK: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// A launch's child runs.
-#[derive(Default)]
-struct LaunchTasks {
-    next: u64,
-    live: HashMap<String, Arc<crate::execution_host::TaskHandle>>,
-}
 
 impl LaunchSlot {
     fn track_wait(&self, wait_id: &str, poll: &InstanceWaitPoll) {
@@ -233,7 +223,6 @@ impl ApiLaunches {
                 standalone: None,
                 compile: None,
                 pending_waits: Mutex::default(),
-                tasks: Mutex::default(),
                 lease_checked: Mutex::default(),
                 events: Mutex::new(crate::event_budget::EventBudget::new(
                     std::time::Instant::now(),
@@ -254,19 +243,17 @@ impl ApiLaunches {
         trust: StandaloneTrust,
         control: StandaloneControl,
     ) -> Result<(), String> {
-        self.begin_standalone_with_alarm(binding, trust, control, None, None)
+        self.begin_standalone_with_alarm(binding, trust, control, None)
     }
 
     /// [`Self::begin_standalone`] for a workflow store without a run, which
-    /// still owns its cleanup alarm (`POST /v1/run/alarm`) and, when it has
-    /// one, the child-run context of its isolated agents (`/v1/tasks`).
+    /// still owns its cleanup alarm (`POST /v1/run/alarm`).
     pub(crate) fn begin_standalone_with_alarm(
         &self,
         binding: Binding,
         trust: StandaloneTrust,
         control: StandaloneControl,
         cleanup_alarm: Option<crate::cleanup_alarm::CleanupAlarmState>,
-        execution: Option<Arc<crate::execution_host::ExecutionContext>>,
     ) -> Result<(), String> {
         let mut slots = self.slots.lock().expect("workflow API launches poisoned");
         if slots.contains_key(&binding.launch_id) {
@@ -299,7 +286,6 @@ impl ApiLaunches {
                     shorten_deadline: Arc::new(|_| {}),
                     trusted_pins: Arc::default(),
                     cleanup_alarm,
-                    execution,
                     alarm_shortens_deadline: false,
                 },
                 resolver: std::sync::OnceLock::new(),
@@ -308,7 +294,6 @@ impl ApiLaunches {
                 standalone: Some((trust, control)),
                 compile: None,
                 pending_waits: Mutex::default(),
-                tasks: Mutex::default(),
                 lease_checked: Mutex::default(),
                 events: Mutex::new(crate::event_budget::EventBudget::new(
                     std::time::Instant::now(),
@@ -900,30 +885,6 @@ impl runtara_workflow_api::server::CallLimiter for Paced {
 }
 
 impl Backend {
-    /// The live task `task_id` of `binding`'s launch.
-    fn task(
-        &self,
-        binding: &Binding,
-        task_id: &str,
-    ) -> Result<Arc<crate::execution_host::TaskHandle>, ApiError> {
-        let slot = self.0.slot(binding).ok_or_else(not_serving)?;
-        let tasks = slot.tasks.lock().expect("launch tasks poisoned");
-        tasks
-            .live
-            .get(task_id)
-            .map(Arc::clone)
-            .ok_or_else(|| task_error(crate::execution_host::ExecutionError::InvalidTask))
-    }
-
-    /// Whether `task_id` names a task this launch runs in process, live or
-    /// released. Any other id is a child run of the launch's instance, read
-    /// from persistence.
-    fn is_live_task(&self, binding: &Binding, task_id: &str) -> Result<bool, ApiError> {
-        let slot = self.0.slot(binding).ok_or_else(not_serving)?;
-        let tasks = slot.tasks.lock().expect("launch tasks poisoned");
-        Ok(tasks.live.contains_key(task_id) || task_id.starts_with(IN_PROCESS_TASK_PREFIX))
-    }
-
     /// The control host and the authority a child run of `binding`'s run is
     /// started and cancelled under. `operation` names the call site.
     fn child_control(
@@ -1028,9 +989,7 @@ impl Backend {
                     control_host::json::api_error(&error)
                 })?;
             if detail.instance.parent_instance_id.as_deref() != Some(binding.instance_id.as_str()) {
-                return Err(task_error(
-                    crate::execution_host::ExecutionError::InvalidTask,
-                ));
+                return Err(task_error("invalid-task", ErrorCode::NotFound));
             }
             let ended = match detail.instance.status {
                 InstanceStatus::Completed => Some(child_completed(detail.terminal)),
@@ -1228,10 +1187,6 @@ impl Backend {
     }
 }
 
-/// Every in-process task id starts with this; a child run's id is its
-/// instance id, which never does.
-const IN_PROCESS_TASK_PREFIX: &str = "task-";
-
 /// How often a join re-reads a child run that has not ended.
 const CHILD_RUN_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
@@ -1319,58 +1274,9 @@ fn child_error(code: &str, message: &str) -> runtara_workflow_api::ErrorInfo {
     }
 }
 
-/// A child-run failure as the API's error envelope.
-fn task_error(error: crate::execution_host::ExecutionError) -> ApiError {
-    use crate::execution_host::ExecutionError;
-    let (code, like) = match error {
-        ExecutionError::Unavailable => ("unavailable", ErrorCode::Unavailable),
-        ExecutionError::Closed => ("closed", ErrorCode::Unavailable),
-        ExecutionError::Capacity => ("capacity", ErrorCode::Capacity),
-        ExecutionError::InvalidBinding => ("invalid-binding", ErrorCode::Invalid),
-        ExecutionError::InvalidContext => ("invalid-context", ErrorCode::Invalid),
-        ExecutionError::InvalidTask => ("invalid-task", ErrorCode::NotFound),
-        ExecutionError::WorkerLost => ("worker-lost", ErrorCode::Unavailable),
-    };
+/// A child-run call that cannot be served, as the API's error envelope.
+fn task_error(code: &'static str, like: ErrorCode) -> ApiError {
     ApiError::domain(code, like, format!("child run: {code}"))
-}
-
-/// A terminal child run in its wire form.
-fn wire_outcome(outcome: crate::execution_host::TaskOutcome) -> runtara_workflow_api::TaskOutcome {
-    use crate::execution_host::TaskOutcome;
-    use crate::lifecycle::WorkflowWake;
-    use runtara_workflow_api::{SignalWait, Wake};
-    match outcome {
-        TaskOutcome::Completed(bytes) => runtara_workflow_api::TaskOutcome::Completed(bytes),
-        TaskOutcome::Failed(error) => {
-            runtara_workflow_api::TaskOutcome::Failed(runtara_workflow_api::ErrorInfo {
-                code: error.code,
-                message: error.message,
-                category: error.category,
-                severity: error.severity,
-                retryable: error.retryable,
-                retry_after_ms: error.retry_after_ms,
-                attributes: error.attributes.map(serde_json::Value::String),
-                details: error.details.map(serde_json::Value::String),
-            })
-        }
-        TaskOutcome::Suspended(wakes) => runtara_workflow_api::TaskOutcome::Suspended(
-            wakes
-                .into_iter()
-                .map(|wake| match wake {
-                    WorkflowWake::At(at) => Wake::At(at),
-                    WorkflowWake::OnSignal(wait) => Wake::OnSignal(SignalWait {
-                        checkpoint_id: wait.checkpoint_id,
-                        deadline_ms: wait.deadline_ms,
-                    }),
-                    WorkflowWake::OnResume => Wake::OnResume,
-                    WorkflowWake::Instances(id) => Wake::Instances(id),
-                })
-                .collect(),
-        ),
-        TaskOutcome::Cancelled => runtara_workflow_api::TaskOutcome::Cancelled,
-        TaskOutcome::TimedOut => runtara_workflow_api::TaskOutcome::TimedOut,
-        TaskOutcome::Trapped(message) => runtara_workflow_api::TaskOutcome::Trapped(message),
-    }
 }
 
 fn not_serving() -> ApiError {
@@ -1749,40 +1655,9 @@ impl WorkflowApiBackend for Backend {
         if let Some(child) = ChildRunBinding::parse(&start.binding)? {
             return self.start_child_run(binding, child, start, input).await;
         }
-        let slot = self.0.slot(binding).ok_or_else(not_serving)?;
-        let execution = slot
-            .controls
-            .execution
-            .clone()
-            .ok_or_else(|| task_error(crate::execution_host::ExecutionError::Unavailable))?;
-        // Every start is a task of its own: concurrent calls of one call
-        // site (a parallel Split's iterations) share their context.
-        let mut tasks = slot.tasks.lock().expect("launch tasks poisoned");
-        let handle = execution
-            .start_task(crate::execution_host::StartRequest {
-                binding: start.binding.clone(),
-                entry: match &start.entry {
-                    runtara_workflow_api::TaskEntry::Capability(id) => {
-                        crate::execution_host::Entry::Capability(id.clone())
-                    }
-                    runtara_workflow_api::TaskEntry::Workflow => {
-                        crate::execution_host::Entry::Workflow
-                    }
-                },
-                input,
-                context: crate::execution_host::InvocationContext {
-                    path: start.context.path.clone(),
-                    attempt: start.context.attempt,
-                },
-            })
-            .map_err(task_error)?;
-        tasks.next += 1;
-        let id = format!("{IN_PROCESS_TASK_PREFIX}{}", tasks.next);
-        tasks.live.insert(id.clone(), Arc::new(handle));
-        Ok(runtara_workflow_api::TaskStarted {
-            task_id: id,
-            instance_id: None,
-        })
+        // A task is a `workflow:` child run; nothing else is started here.
+        let _ = input;
+        Err(task_error("unavailable", ErrorCode::Unavailable))
     }
 
     async fn task_outcome(
@@ -1791,16 +1666,7 @@ impl WorkflowApiBackend for Backend {
         task_id: &str,
         wait_ms: u64,
     ) -> Result<Option<runtara_workflow_api::TaskOutcome>, ApiError> {
-        if !self.is_live_task(binding, task_id)? {
-            return self.child_run_outcome(binding, task_id, wait_ms).await;
-        }
-        let task = self.task(binding, task_id)?;
-        match tokio::time::timeout(std::time::Duration::from_millis(wait_ms), task.join()).await {
-            Ok(outcome) => outcome
-                .map(|outcome| Some(wire_outcome(outcome)))
-                .map_err(task_error),
-            Err(_) => Ok(None),
-        }
+        self.child_run_outcome(binding, task_id, wait_ms).await
     }
 
     async fn cancel_task(
@@ -1808,52 +1674,14 @@ impl WorkflowApiBackend for Backend {
         binding: &Binding,
         task_id: &str,
     ) -> Result<runtara_workflow_api::CancelStatus, ApiError> {
-        use crate::execution_host::CancelStatus;
-        if !self.is_live_task(binding, task_id)? {
-            return self.cancel_child_run(binding, task_id).await;
-        }
-        Ok(
-            match self
-                .task(binding, task_id)?
-                .request_cancel()
-                .map_err(task_error)?
-            {
-                CancelStatus::Requested => runtara_workflow_api::CancelStatus::Requested,
-                CancelStatus::AlreadyRequested => {
-                    runtara_workflow_api::CancelStatus::AlreadyRequested
-                }
-                CancelStatus::AlreadyTerminal => {
-                    runtara_workflow_api::CancelStatus::AlreadyTerminal
-                }
-            },
-        )
+        self.cancel_child_run(binding, task_id).await
     }
 
     async fn release_task(&self, binding: &Binding, task_id: &str) -> Result<(), ApiError> {
-        if !self.is_live_task(binding, task_id)? {
-            // A child run that is still going is cancelled; a finished one
-            // needs nothing.
-            if self.child_run_outcome(binding, task_id, 0).await?.is_none() {
-                self.cancel_child_run(binding, task_id).await?;
-            }
-            return Ok(());
-        }
-        let slot = self.0.slot(binding).ok_or_else(not_serving)?;
-        let task = slot
-            .tasks
-            .lock()
-            .expect("launch tasks poisoned")
-            .live
-            .get(task_id)
-            .map(Arc::clone);
-        // Releasing a released task is a no-op.
-        if let Some(task) = task {
-            task.release().await.map_err(task_error)?;
-            slot.tasks
-                .lock()
-                .expect("launch tasks poisoned")
-                .live
-                .remove(task_id);
+        // A child run that is still going is cancelled; a finished one
+        // needs nothing.
+        if self.child_run_outcome(binding, task_id, 0).await?.is_none() {
+            self.cancel_child_run(binding, task_id).await?;
         }
         Ok(())
     }
@@ -2532,7 +2360,6 @@ mod tests {
             shorten_deadline: Arc::new(|_| {}),
             trusted_pins: Arc::default(),
             cleanup_alarm: None,
-            execution: None,
             alarm_shortens_deadline: false,
         }
     }
@@ -3564,113 +3391,6 @@ mod tests {
             matches!(result.exit, crate::InvokeExit::CleanupAborted),
             "{:?}",
             result.exit
-        );
-    }
-
-    /// Child runs: the outcome is held until the child ends, release is idempotent, and a launch that
-    /// ends reaps the tasks it did not release.
-    #[tokio::test]
-    async fn tasks_start_join_release_and_end_with_their_launch() {
-        use crate::execution_host::{
-            ExecutionContext, ExecutionError, InvocationLauncher, PreparedInvocation, StartRequest,
-        };
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        struct Dropped(Arc<AtomicUsize>);
-        impl Drop for Dropped {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-        // Each child says it started, waits for `go`, then completes with
-        // its input.
-        struct Gated {
-            go: Arc<tokio::sync::Notify>,
-            started: Arc<tokio::sync::Notify>,
-            dropped: Arc<AtomicUsize>,
-        }
-        impl InvocationLauncher for Gated {
-            fn prepare(&self, request: StartRequest) -> Result<PreparedInvocation, ExecutionError> {
-                let (go, started, dropped) =
-                    (self.go.clone(), self.started.clone(), self.dropped.clone());
-                Ok(PreparedInvocation::leaf(Box::new(move |_| {
-                    Box::pin(async move {
-                        let _guard = Dropped(dropped);
-                        started.notify_one();
-                        go.notified().await;
-                        crate::InvokeExit::Completed(request.input)
-                    })
-                })))
-            }
-        }
-        let engine = crate::build_engine(&Default::default()).unwrap();
-        let go = Arc::new(tokio::sync::Notify::new());
-        let started = Arc::new(tokio::sync::Notify::new());
-        let dropped = Arc::new(AtomicUsize::new(0));
-        let context = ExecutionContext::new(
-            Arc::new(crate::isolated_tasks::IsolatedTasks::new(engine, 4, 1024 * 1024).unwrap()),
-            Arc::new(Gated {
-                go: go.clone(),
-                started: started.clone(),
-                dropped: dropped.clone(),
-            }),
-            8,
-        )
-        .unwrap();
-        let launches = Arc::new(ApiLaunches::default());
-        let backend = Backend(launches.clone());
-        let mut with_tasks = controls();
-        with_tasks.execution = Some(context.clone());
-        launches
-            .begin(binding(1), info(), Vec::new(), no_runtime(), with_tasks)
-            .unwrap();
-        let start = |path: &str| runtara_workflow_api::TaskStart {
-            binding: "child".into(),
-            entry: runtara_workflow_api::TaskEntry::Workflow,
-            context: runtara_workflow_api::TaskContext {
-                path: path.into(),
-                attempt: 1,
-            },
-        };
-
-        let id = backend
-            .start_task(&binding(1), start("a"), b"in".to_vec())
-            .await
-            .unwrap()
-            .task_id;
-        started.notified().await;
-        assert_eq!(
-            backend.task_outcome(&binding(1), &id, 0).await.unwrap(),
-            None
-        );
-        go.notify_one();
-        assert_eq!(
-            backend.task_outcome(&binding(1), &id, 5_000).await.unwrap(),
-            Some(runtara_workflow_api::TaskOutcome::Completed(b"in".to_vec()))
-        );
-        assert_eq!(
-            backend.cancel_task(&binding(1), &id).await.unwrap(),
-            runtara_workflow_api::CancelStatus::AlreadyTerminal
-        );
-        backend.release_task(&binding(1), &id).await.unwrap();
-        backend.release_task(&binding(1), &id).await.unwrap();
-        let error = backend.task_outcome(&binding(1), &id, 0).await.unwrap_err();
-        assert_eq!(error.code.as_str(), "invalid-task");
-
-        // A task the launch never released is reaped when the launch ends.
-        let live = backend
-            .start_task(&binding(1), start("b"), Vec::new())
-            .await
-            .unwrap()
-            .task_id;
-        assert_ne!(live, id);
-        started.notified().await;
-        assert_eq!(dropped.load(Ordering::SeqCst), 1);
-        launches.release(&binding(1).launch_id);
-        context.shutdown().await.unwrap();
-        assert_eq!(
-            dropped.load(Ordering::SeqCst),
-            2,
-            "the live child was reaped"
         );
     }
 

@@ -23,14 +23,12 @@ pub mod outbound_http;
 pub use outbound_http::OutboundHttpHost;
 pub mod dispatcher;
 pub mod engine;
-pub mod execution_host;
 pub mod host_state;
 pub mod instance_wait_host;
 pub use instance_wait_host::InstanceWaitHost;
 pub mod run_channel;
 pub mod run_state_host;
 pub use run_state_host::RunStateHost;
-pub mod isolated_tasks;
 pub mod lifecycle;
 pub mod operation_scope_host;
 pub mod precompile;
@@ -53,10 +51,8 @@ pub use engine::{EPOCH_TICK, EngineConfig, build_engine, spawn_epoch_ticker};
 pub use host_state::{CallContext, HostState};
 pub use registry::{LoadedAgent, build_linker, instantiate, load_agent};
 pub use workflow::{
-    CapabilityInvocation, ChildInvocationScope, ChildInvocationSpec, InvocationScopeFactory,
-    InvokeExit, InvokeRunResult, PreparedChildCatalog, PreparedInvocationLauncher,
-    PreparedWorkflow, RemoteGuestExit, RootExecutionCoordinator, RootLifecycleDecision,
-    WorkflowExecutor, WorkflowLimits, WorkflowRunSpec, WorkflowStartConfirmation, WorkflowState,
+    InvokeExit, InvokeRunResult, PreparedWorkflow, RemoteGuestExit, WorkflowExecutor,
+    WorkflowLimits, WorkflowRunSpec, WorkflowStartConfirmation, WorkflowState,
     remote_invoke_result,
 };
 

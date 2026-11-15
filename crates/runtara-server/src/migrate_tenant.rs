@@ -117,7 +117,6 @@ const RUNTIME_TABLES: &[Table] = &[
     by("pending_signals", INSTANCE_ROWS),
     serial("pending_checkpoint_signals", INSTANCE_ROWS),
     by("invocation_root_leases", INSTANCE_ROWS),
-    by("invocation_attempts", INSTANCE_ROWS),
     by("instance_input_requests", "tenant_id = $1"),
     by("instance_input_parks", INSTANCE_ROWS),
     by(

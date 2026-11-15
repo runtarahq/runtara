@@ -7,8 +7,7 @@
 //! the children it embeds) into a custom section of its workflow-logic
 //! component, next to the ABI section that names the agent id it exports. A
 //! composed artifact keeps the logic component of every workflow-agent it
-//! calls, so their manifests are inside it too; an isolated package holds
-//! them as separate artifacts.
+//! calls, so their manifests are inside it too.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -35,16 +34,7 @@ const AGENT_EXPORT_PREFIX: &str = "runtara:agent-";
 /// has no manifest of its own in the artifact.
 pub fn shared_child_steps(wasm: &[u8]) -> Option<BTreeSet<String>> {
     let mut sections = Vec::new();
-    match runtara_invocation_contract::parse(wasm, package_limits()) {
-        Ok(Some(package)) => {
-            collect_sections(package.root, &mut sections).ok()?;
-            for artifact in package.artifacts().values() {
-                collect_sections(artifact, &mut sections).ok()?;
-            }
-        }
-        Ok(None) => collect_sections(wasm, &mut sections).ok()?,
-        Err(_) => return None,
-    }
+    collect_sections(wasm, &mut sections).ok()?;
     shared_child_steps_in(&sections)
 }
 
@@ -54,16 +44,6 @@ pub fn shared_child_steps_file(path: impl AsRef<Path>) -> anyhow::Result<Option<
     let bytes = std::fs::read(path)
         .map_err(|error| anyhow::anyhow!("read workflow component {}: {error}", path.display()))?;
     Ok(shared_child_steps(&bytes))
-}
-
-fn package_limits() -> runtara_invocation_contract::PackageLimits {
-    let bytes = crate::precompile::MAX_PRECOMPILE_COMPONENT_BYTES;
-    runtara_invocation_contract::PackageLimits {
-        total_bytes: bytes,
-        manifest_bytes: bytes,
-        artifacts: bytes / 8,
-        bindings: bytes / 8,
-    }
 }
 
 /// One workflow-logic component's manifest, and its ABI section when it has

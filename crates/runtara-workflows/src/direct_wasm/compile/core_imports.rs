@@ -991,7 +991,7 @@ pub(super) struct DirectCoreFunctionIndices {
 
 impl DirectCoreFunctionIndices {
     /// The standard (synchronously typed) invoke import of `agent`: its
-    /// `capabilities` interface, or the private scoped one when isolated.
+    /// `capabilities` interface.
     pub(super) fn agent_invoke(&self, agent: &str) -> Option<&DirectAgentInvokeImport> {
         standard_agent_import(&self.agent_invokes, agent)
     }
@@ -1029,8 +1029,6 @@ impl DirectCoreFunctionIndices {
 pub(super) enum AgentInterface {
     /// `runtara:agent-<id>/capabilities`: the ordinary invoke.
     Capabilities,
-    /// `runtara:agent-<id>/scoped-capabilities-v3`: the private isolated invoke.
-    ScopedV3,
 }
 
 impl AgentInterface {
@@ -1038,29 +1036,24 @@ impl AgentInterface {
     pub(super) fn wit_name(self) -> &'static str {
         match self {
             Self::Capabilities => "capabilities",
-            Self::ScopedV3 => "scoped-capabilities-v3",
         }
     }
 
     fn from_wit_name(name: &str) -> Option<Self> {
-        [Self::Capabilities, Self::ScopedV3]
+        [Self::Capabilities]
             .into_iter()
             .find(|interface| interface.wit_name() == name)
     }
 }
 
-/// An invoke import is identified by the agent AND the interface: a legacy
-/// isolated fixture may import both an agent's `capabilities` and its scoped
-/// interface.
+/// An invoke import is identified by the agent and the interface.
 pub(super) type AgentImportKey = (String, AgentInterface);
 
 fn standard_agent_import<'a>(
     imports: &'a BTreeMap<AgentImportKey, DirectAgentInvokeImport>,
     agent: &str,
 ) -> Option<&'a DirectAgentInvokeImport> {
-    [AgentInterface::Capabilities, AgentInterface::ScopedV3]
-        .into_iter()
-        .find_map(|interface| imports.get(&(agent.to_string(), interface)))
+    imports.get(&(agent.to_string(), AgentInterface::Capabilities))
 }
 
 /// Function indices of `runtara:workflow/operation`.
@@ -1090,13 +1083,6 @@ pub(super) struct DirectWaitInstancesImports {
 pub(super) struct DirectAgentInvokeImport {
     pub(super) function_index: u32,
     pub(super) params: Vec<WasmType>,
-}
-
-impl DirectAgentInvokeImport {
-    /// Private scoped-capabilities has nine flattened arguments plus retptr.
-    pub(super) fn is_scoped(&self) -> bool {
-        self.params.len() == 10
-    }
 }
 
 fn require_import(value: Option<u32>, name: &str) -> Result<u32, DirectCompileError> {

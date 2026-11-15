@@ -12,8 +12,8 @@ mod traits;
 
 pub use common::WorkflowRunnerConfig;
 pub use embedded::{
-    EmbeddedWasmRunner, LaunchLifecycle, PersistenceRunState, RootLease, ScopedAgentRunnerConfig,
-    publish_terminal, run_launch_lifecycle,
+    EmbeddedWasmRunner, LaunchLifecycle, PersistenceRunState, RootLease, publish_terminal,
+    run_launch_lifecycle,
 };
 pub use mock::MockRunner;
 pub use provider::{Provider, ProviderEnd, ProviderRunner, RunChannel};
@@ -31,7 +31,6 @@ pub fn build_runner(
     build_embedded_runner(RunnerParts {
         persistence,
         event_observer,
-        scoped_agents: None,
         services: HostServices::default(),
         artifacts,
     })
@@ -55,16 +54,13 @@ pub struct HostServices {
 }
 
 /// What a workflow runner is built from: the persistence runs record into,
-/// the instance-event observer, the operator isolation policy and the native
-/// services every run reaches.
+/// the instance-event observer and the native services every run reaches.
 pub struct RunnerParts {
     /// Durable state: instances, checkpoints, events.
     pub persistence: std::sync::Arc<dyn runtara_core::persistence::Persistence>,
     /// Observes instance events (step counts and the like).
     pub event_observer:
         Option<std::sync::Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>>,
-    /// The operator's isolation policy for scoped agent invocations.
-    pub scoped_agents: Option<ScopedAgentRunnerConfig>,
     /// The native services every run reaches.
     pub services: HostServices,
     /// Where workflow artifacts are kept: a launch names its workflow by
@@ -83,15 +79,11 @@ pub fn build_embedded_runner(parts: RunnerParts) -> Result<std::sync::Arc<dyn Ru
     let RunnerParts {
         persistence,
         event_observer,
-        scoped_agents,
         services,
         artifacts,
     } = parts;
     let mut runner =
         EmbeddedWasmRunner::new(WorkflowRunnerConfig::from_env(), persistence, artifacts)?;
-    if let Some(config) = scoped_agents {
-        runner = runner.with_scoped_agents(config)?;
-    }
     if let Some(service) = services.outbound_http {
         runner = runner.with_outbound_http(service)?;
     }

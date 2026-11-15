@@ -1,7 +1,6 @@
 //! Input transitions share the store lock with every lifecycle and raw write.
 use super::*;
 use crate::persistence::inputs::*;
-use crate::persistence::invocations::{AttemptFence, AttemptState};
 
 pub(super) struct InputPark {
     pub signals: Vec<String>,
@@ -32,7 +31,6 @@ fn wake_candidates(store: &Store, instance: &str, all_accepted: bool) -> Vec<(St
                 && (all_accepted || r.wake_pending)
                 && matches!(r.state, InputState::Accepted { .. })
                 && park.signals.contains(&r.spec.signal_id)
-                && owner_live(store, r)
         })
         .map(|(key, _)| key.clone())
         .collect()
@@ -86,29 +84,11 @@ fn authority(store: &Store, owner: &InputAuthority) -> InputResult<()> {
         InputAuthority::LeasedRoot(lease) => {
             super::invocations::lease(store, lease, true).map_err(|_| InputError::FenceRejected)
         }
-        InputAuthority::Invocation(fence) => {
-            super::invocations::active_attempt(store, fence).map_err(|_| InputError::FenceRejected)
-        }
     }
 }
 
-fn owner_live(store: &Store, request: &InputRequest) -> bool {
-    request.invocation_path.is_empty()
-        || store
-            .invocation_attempts
-            .iter()
-            .rev()
-            .find(|a| {
-                a.fence.lease.instance_id == request.instance_id
-                    && a.fence.path == request.invocation_path
-            })
-            .is_some_and(|a| a.state == AttemptState::Active)
-}
-
 fn actionable(store: &Store, request: &InputRequest, now: DateTime<Utc>) -> bool {
-    request.open_at(now)
-        && !store.instances[&request.instance_id].status.is_terminal()
-        && owner_live(store, request)
+    request.open_at(now) && !store.instances[&request.instance_id].status.is_terminal()
 }
 
 fn replay(
@@ -151,45 +131,6 @@ pub(super) fn close_root(store: &mut Store, instance: &str, now: DateTime<Utc>) 
     }
 }
 
-pub(super) fn close_invocation(store: &mut Store, fence: &AttemptFence, reason: InputClosure) {
-    let mut family = std::collections::HashSet::from([fence.path.clone()]);
-    loop {
-        let descendants: Vec<_> = store
-            .invocation_parents
-            .iter()
-            .filter(|((instance, path), parent)| {
-                instance == &fence.lease.instance_id
-                    && !family.contains(path)
-                    && parent.as_ref().is_some_and(|p| family.contains(p))
-            })
-            .map(|((_, path), _)| path.clone())
-            .collect();
-        if descendants.is_empty() {
-            break;
-        }
-        family.extend(descendants);
-    }
-    // Fencing every descendant also prevents it from registering another wait
-    // after its ancestor has closed. A sibling with a similar name is untouched.
-    for attempt in &mut store.invocation_attempts {
-        if attempt.fence.lease.instance_id == fence.lease.instance_id
-            && attempt.fence.path != fence.path
-            && family.contains(&attempt.fence.path)
-            && attempt.state == AttemptState::Active
-        {
-            attempt.state = AttemptState::Cancelled;
-        }
-    }
-    for request in store
-        .input_requests
-        .values_mut()
-        .filter(|r| r.instance_id == fence.lease.instance_id && family.contains(&r.invocation_path))
-    {
-        request.close(reason, Utc::now());
-        request.wake_pending = false;
-    }
-}
-
 #[async_trait]
 impl InputRequests for InMemoryPersistence {
     async fn reconcile_input_wakes(&self, limit: u32) -> InputResult<u64> {
@@ -218,13 +159,8 @@ impl InputRequests for InMemoryPersistence {
         authority(&store, owner)?;
         let key = (owner.instance_id().to_owned(), spec.request_id());
         if let Some(existing) = store.input_requests.get_mut(&key) {
-            if existing.spec.signal_id != spec.signal_id
-                || existing.invocation_path != owner.invocation_path()
-            {
+            if existing.spec.signal_id != spec.signal_id {
                 return Err(InputError::IdentityConflict);
-            }
-            if let InputAuthority::Invocation(fence) = owner {
-                existing.fence = Some(fence.clone());
             }
             return Ok(existing.clone());
         }
@@ -238,11 +174,6 @@ impl InputRequests for InMemoryPersistence {
             tenant_id: owner.tenant_id().into(),
             instance_id: owner.instance_id().into(),
             request_id: key.1.clone(),
-            invocation_path: owner.invocation_path().into(),
-            fence: match owner {
-                InputAuthority::Invocation(fence) => Some(fence.clone()),
-                _ => None,
-            },
             spec: spec.clone(),
             created_at: Utc::now(),
             state: InputState::Open,
@@ -291,9 +222,6 @@ impl InputRequests for InMemoryPersistence {
             .input_requests
             .get_mut(&(owner.instance_id().into(), request.into()))
             .ok_or(InputError::NotFound)?;
-        if r.invocation_path != owner.invocation_path() {
-            return Err(InputError::FenceRejected);
-        }
         let now = Utc::now();
         if r.spec.deadline.is_some_and(|deadline| deadline <= now) {
             r.close(InputClosure::Expired, now);
@@ -331,7 +259,7 @@ impl InputRequests for InMemoryPersistence {
             return Err(InputError::AlreadyAnswered);
         }
         let now = Utc::now();
-        if !request.open_at(now) || !owner_live(&store, request) {
+        if !request.open_at(now) {
             return Err(InputError::Inactive);
         }
         let receipt = InputReceipt {
@@ -363,9 +291,6 @@ impl InputRequests for InMemoryPersistence {
             .input_requests
             .get_mut(&(owner.instance_id().into(), request.into()))
             .ok_or(InputError::NotFound)?;
-        if r.invocation_path != owner.invocation_path() {
-            return Err(InputError::FenceRejected);
-        }
         let now = Utc::now();
         if reason != InputClosure::Expired
             || r.spec.deadline.is_some_and(|deadline| deadline <= now)

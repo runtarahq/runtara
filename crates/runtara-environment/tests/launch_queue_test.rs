@@ -289,20 +289,16 @@ async fn expired_running_owner_cannot_renew_and_is_recovered_once() {
     // Promotion claimed the run's root lease under its registration.
     let old_lease = running.root_lease.clone();
     assert_eq!(old_lease.owner, container.container_id);
-    let old_attempt = fences
-        .begin_invocation_attempt(&old_lease, "waiting-child", "old-start")
-        .await
-        .unwrap();
     let inputs = persistence.input_requests().unwrap();
     let spec = runtara_core::persistence::inputs::InputRequestSpec {
-        signal_id: "waiting-child/input".into(),
+        signal_id: "waiting/input".into(),
         response_schema: None,
         metadata: serde_json::json!({}),
         deadline: None,
     };
     inputs
         .register_input(
-            &runtara_core::persistence::inputs::InputAuthority::Invocation(old_attempt.fence),
+            &runtara_core::persistence::inputs::InputAuthority::LeasedRoot(old_lease.clone()),
             &spec,
         )
         .await

@@ -2768,8 +2768,6 @@ mod tests {
             workflow_logic_wasm: wasm("workflow-logic.wasm", "logic-sha256"),
             composed_wasm: Some(wasm("workflow.wasm", "composed-sha256")),
             memory_floor_bytes: None,
-            isolation: None,
-            isolation_selection: None,
             shared_components: vec![DirectComponentDependencyMetadata {
                 kind: "shared".to_string(),
                 agent_id: None,

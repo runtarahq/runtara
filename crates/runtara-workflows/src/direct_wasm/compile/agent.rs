@@ -272,7 +272,7 @@ pub(super) fn emit_agent_plan(
         .expect("direct Agent run plans have static capability ids");
     // A memoized parallel-window result is the agent's raw outcome, except a
     // child run's, which the launch pass stored as the normalized result.
-    let normalize_memo = !invoke.is_scoped() && static_data.agent_child_run(agent_id).is_none();
+    let normalize_memo = static_data.agent_child_run(agent_id).is_none();
     if max_retries > 0 {
         body.instruction(&Instruction::I32Const(1));
         body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));

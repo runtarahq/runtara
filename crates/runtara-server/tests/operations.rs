@@ -381,7 +381,6 @@ async fn queues_count_requests_filter_active_work_and_project_typed_state() {
             "expired",
             Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
         ),
-        (&small, "inactive", None),
     ] {
         let request = store
             .register_input(
@@ -398,9 +397,6 @@ async fn queues_count_requests_filter_active_work_and_project_typed_state() {
             )
             .await
             .unwrap();
-        if signal == "inactive" {
-            sqlx::query("UPDATE instance_input_requests SET invocation_path='missing/invocation' WHERE instance_id=$1 AND request_id=$2").bind(id).bind(&request.request_id).execute(&fx.runtime).await.unwrap();
-        }
         requests.push(request);
     }
     let terminal = fx.run(None).await;

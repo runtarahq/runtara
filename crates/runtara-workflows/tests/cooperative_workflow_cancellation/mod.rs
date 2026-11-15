@@ -426,7 +426,6 @@ fn compile_nested_agents_with_parent(
             &components,
             std::slice::from_ref(&staging),
         )?;
-        anyhow::ensure!(child.scoped_agents.is_empty() && child.invocation_manifest.is_none());
         let info = certified_workflow_agent_info(
             &slug,
             &slug,
@@ -864,14 +863,6 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
             false,
         )?
     };
-    anyhow::ensure!(
-        compiled.scoped_agents.is_empty(),
-        "fixture selected isolated Agent adapters"
-    );
-    anyhow::ensure!(
-        compiled.invocation_manifest.is_none(),
-        "fixture emitted an isolation inventory"
-    );
     let server_host = host.clone();
     let server = tokio::spawn(async move {
         let mut connections = tokio::task::JoinSet::new();
