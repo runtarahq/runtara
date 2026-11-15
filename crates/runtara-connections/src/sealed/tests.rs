@@ -107,6 +107,48 @@ async fn seal_attaches_the_secret_and_sends_the_request() {
 }
 
 #[tokio::test]
+async fn an_api_keys_value_format_puts_text_around_the_key_seal_sends() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/orders"))
+        .and(header(
+            "Authorization",
+            format!("Device {SECRET}:project").as_str(),
+        ))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let sealed = sealed_for(&server);
+    let params = json!({
+        "api_key": SECRET,
+        "header_name": "Authorization",
+        "value_format": "Device {}:project",
+        "base_url": format!("{}/api", server.uri()),
+    });
+    let stored = sealed
+        .seal_parameters(TENANT, CONNECTION, "http_api_key", &params, None)
+        .await
+        .unwrap()
+        .expect("http_api_key is sealed");
+    assert!(is_sealed(&stored["api_key"]));
+    assert_eq!(stored["value_format"], "Device {}:project");
+
+    let response = sealed
+        .send(
+            TENANT,
+            CONNECTION,
+            "http_api_key",
+            &stored,
+            get(format!("{}/api/orders", server.uri())),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+}
+
+#[tokio::test]
 async fn a_request_body_is_sent_as_given() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

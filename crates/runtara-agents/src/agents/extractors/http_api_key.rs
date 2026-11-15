@@ -4,6 +4,7 @@
 
 use super::{HttpConnectionConfig, HttpConnectionExtractor};
 use runtara_agent_macro::ConnectionParams;
+use runtara_dsl::derived_connection::{DEFAULT_VALUE_FORMAT, check_header_value_format};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -29,6 +30,15 @@ struct HttpApiKeyParams {
         default = "X-API-Key"
     )]
     header_name: String,
+    /// What the header holds: the key alone (`{}`, the default) or with
+    /// text around it (`Token {}`).
+    #[serde(default)]
+    #[field(
+        display_name = "Value Format",
+        description = "What the header holds, with {} where the key goes. Leave empty to send the key alone.",
+        placeholder = "Token {}"
+    )]
+    value_format: Option<String>,
     /// Base URL prefix. Required + https-validated: the proxy pins every
     /// credentialed request to this host so the API key cannot be sent to an
     /// attacker-chosen destination.
@@ -59,8 +69,17 @@ impl HttpConnectionExtractor for HttpApiKeyExtractor {
         let p: HttpApiKeyParams = serde_json::from_value(params.clone())
             .map_err(|e| format!("Invalid http_api_key connection parameters: {}", e))?;
 
+        let format = match p.value_format.as_deref().filter(|f| !f.trim().is_empty()) {
+            Some(format) => {
+                check_header_value_format(format).map_err(|e| {
+                    format!("Invalid http_api_key connection parameters: value_format {e}")
+                })?;
+                format
+            }
+            None => DEFAULT_VALUE_FORMAT,
+        };
         let mut headers = HashMap::new();
-        headers.insert(p.header_name, p.api_key);
+        headers.insert(p.header_name, format.replacen("{}", &p.api_key, 1));
         headers.insert("Content-Type".to_string(), "application/json".to_string());
 
         Ok(HttpConnectionConfig {

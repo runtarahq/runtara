@@ -686,6 +686,7 @@ const CLIENT_CREDENTIALS_TYPES: &[(&str, &str)] = &[
     ("http_oauth2_client_credentials", "client_secret"),
     ("zendesk_client_credentials", "client_secret"),
     ("ups_client_credentials", "client_secret"),
+    ("paypal_client_credentials", "client_secret"),
     ("teams_bot", "app_password"),
 ];
 
@@ -1314,7 +1315,11 @@ fn secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
         "http_api_key" => one(
             "api_key",
             filled(params, "base_url")?,
-            header(filled(params, "header_name").unwrap_or("X-API-Key"), "{}"),
+            header(
+                filled(params, "header_name").unwrap_or("X-API-Key"),
+                // A format that is not one names no header to seal the key for.
+                runtara_dsl::derived_connection::header_value_format(params).ok()?,
+            ),
         ),
         _ => None,
     }
@@ -1523,6 +1528,14 @@ pub fn why_unsealable(integration_id: &str, params: &Value, allowances: &Allowan
              reached without TLS"
         );
     }
+    if integration_id == "http_api_key"
+        && let Err(problem) = runtara_dsl::derived_connection::header_value_format(params)
+    {
+        return format!(
+            "`{}` {problem}",
+            runtara_dsl::derived_connection::VALUE_FORMAT_FIELD
+        );
+    }
     if let Some(fields) = params.as_object() {
         for (name, value) in fields {
             let Some(text) = value.as_str() else { continue };
@@ -1602,6 +1615,7 @@ pub const SEALABLE_TYPES: &[&str] = &[
     "http_oauth2_client_credentials",
     "zendesk_client_credentials",
     "ups_client_credentials",
+    "paypal_client_credentials",
     "teams_bot",
     "hubspot_private_app",
     "quickbooks_online",
@@ -1892,6 +1906,24 @@ mod tests {
                 json!({"scheme": "https", "host": "api.example.com"}),
                 json!({"header": {"name": "X-Token", "format": "{}"}}),
             ),
+            (
+                "http_api_key",
+                json!({
+                    "api_key": "s", "header_name": "Authorization",
+                    "value_format": "Device {}:project", "base_url": "https://api.example.com",
+                }),
+                "api_key",
+                json!({"scheme": "https", "host": "api.example.com"}),
+                json!({"header": {"name": "Authorization", "format": "Device {}:project"}}),
+            ),
+            // An empty format is the default: the key alone.
+            (
+                "http_api_key",
+                json!({"api_key": "s", "value_format": "", "base_url": "https://api.example.com"}),
+                "api_key",
+                json!({"scheme": "https", "host": "api.example.com"}),
+                json!({"header": {"name": "X-API-Key", "format": "{}"}}),
+            ),
         ];
         for (integration_id, params, field, destination, inject) in cases {
             let (sealed_field, policy) = only(integration_id, params);
@@ -1902,6 +1934,19 @@ mod tests {
                 "{integration_id}"
             );
         }
+    }
+
+    #[test]
+    fn an_api_key_whose_format_has_no_place_for_it_is_not_sealed() {
+        let params = json!({
+            "api_key": "s", "value_format": "Token", "base_url": "https://api.example.com",
+        });
+        assert_eq!(
+            policies("http_api_key", &params, &Allowances::default()),
+            None
+        );
+        let why = why_unsealable("http_api_key", &params, &Allowances::default());
+        assert!(why.starts_with("`value_format` must contain `{}`"), "{why}");
     }
 
     #[test]
@@ -2264,6 +2309,48 @@ mod tests {
         assert_eq!(
             request_fields("http_oauth2_client_credentials", &params),
             ["access_token"]
+        );
+    }
+
+    /// A PayPal app's Secret goes to its environment's token endpoint as HTTP
+    /// Basic, and the token it mints to that environment's API only.
+    #[test]
+    fn a_paypal_secret_and_token_stay_on_their_environments_host() {
+        for (environment, host) in [
+            ("sandbox", "api-m.sandbox.paypal.com"),
+            ("production", "api-m.paypal.com"),
+        ] {
+            let (field, policy) = client_secret(
+                "paypal_client_credentials",
+                json!({"environment": environment, "client_id": "cid", "client_secret": "s"}),
+            );
+            assert_eq!(field, "client_secret");
+            assert_eq!(
+                policy,
+                json!({
+                    "rules": [{
+                        "destination": {
+                            "scheme": "https", "host": host, "path_prefix": "/v1/oauth2/token",
+                        },
+                        "inject": {"basic": {"username": {"literal": "cid"}}},
+                        "seal_response": sealed_access_token(),
+                    }],
+                    "definitions": {"api": {"rules": [{
+                        "destination": {"scheme": "https", "host": host},
+                        "inject": {"header": {"name": "Authorization", "format": "Bearer {}"}},
+                    }]}},
+                }),
+                "{environment}"
+            );
+        }
+        // An environment PayPal does not run is no destination.
+        assert!(
+            policies(
+                "paypal_client_credentials",
+                &json!({"environment": "evil.com", "client_id": "c", "client_secret": "s"}),
+                &Allowances::default()
+            )
+            .is_none()
         );
     }
 
