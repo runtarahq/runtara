@@ -503,6 +503,32 @@ fn test_api_key_extractor_custom_header_name() {
 }
 
 #[test]
+fn test_api_key_extractor_value_format() {
+    let extractor = HttpApiKeyExtractor;
+    let params = json!({
+        "api_key": "k-1",
+        "header_name": "Authorization",
+        "value_format": "Device {}:project"
+    });
+
+    let config = extractor.extract(&params).expect("Should extract config");
+    assert_eq!(
+        config.headers.get("Authorization"),
+        Some(&"Device k-1:project".to_string())
+    );
+
+    // An empty format is the key alone; one with no place for the key is refused.
+    let config = extractor
+        .extract(&json!({"api_key": "k-1", "value_format": ""}))
+        .expect("Should extract config");
+    assert_eq!(config.headers.get("X-API-Key"), Some(&"k-1".to_string()));
+    let error = extractor
+        .extract(&json!({"api_key": "k-1", "value_format": "Token"}))
+        .unwrap_err();
+    assert!(error.contains("value_format"), "{error}");
+}
+
+#[test]
 fn test_api_key_extractor_with_base_url() {
     let extractor = HttpApiKeyExtractor;
     let params = json!({

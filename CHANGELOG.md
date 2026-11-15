@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An API key sent with text around it.** `http_api_key` connections take
+  a `value_format`, with `{}` where the key goes: `Token {}` sends
+  `Authorization: Token <key>`. Empty means the key alone, as before, and
+  existing connections are unchanged. A connection type an agent declares on
+  `http_api_key` can fix the format, so its users enter the key alone
+  (`docs/adding-an-agent.md`).
+
 - **PayPal agent, generated from PayPal's REST API OpenAPI files.** Twenty-one
   capabilities: create, read, update, authorize and capture orders and add or
   update their shipment tracking; read, capture, reauthorize and void
