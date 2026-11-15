@@ -87,7 +87,8 @@ The installer picks its paths from the install mode.
 A system install also creates a `runtara` service user (`_runtara` on macOS) and
 gives it ownership of the data and log directories.
 
-Inside the bundle: `bin/runtara-server`, `agents/` (each agent as a `.wasm` plus
+Inside the bundle: `bin/runtara-server` (with `bin/runtara-executor` and
+`bin/runtara-run`, for [workflows on an executor](executor.md)), `agents/` (each agent as a `.wasm` plus
 a sibling `.meta.json`, alongside the shared workflow components), `licenses/`,
 a `VERSION` file, and `MANIFEST.json` recording the version, commit, rustc
 version, component counts, target, and build date.

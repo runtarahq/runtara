@@ -1,0 +1,53 @@
+[package]
+name = "runtara-executor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The executor service: runs each workflow placed with it in a sandboxed process of its own and relays the run's workflow API calls to the server"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "runtara-executor"
+path = "src/bin/runtara-executor.rs"
+
+[features]
+# Tests that run the probe workflow component through `runtara-run`, which
+# scripts/build-agent-components.sh builds.
+component-integration-tests = []
+
+[dependencies]
+runtara-workflow-api = { path = "../runtara-workflow-api" }
+axum = { version = "0.8", default-features = false, features = ["http2", "json", "query", "tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "io-util", "sync", "time", "fs", "signal"] }
+hyper = { version = "1", features = ["client", "server", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "server-auto", "service", "http2"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http2", "ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+# The deployment's certificates (`init-pki`).
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
+time = "0.3"
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
+zeroize = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[test]]
+name = "executor"
+path = "tests/executor.rs"
+required-features = ["component-integration-tests"]

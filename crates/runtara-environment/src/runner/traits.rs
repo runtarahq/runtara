@@ -367,6 +367,23 @@ impl StartGate {
         self.wait_for_runner_confirmation().await
     }
 
+    /// The runner will not start this generation's guest: where it runs
+    /// refused it, so there is nothing to confirm. A monitor waiting for the
+    /// confirmation learns so at once rather than at the deadline, and reads
+    /// the runner's exit report for why. It does nothing once a confirmation
+    /// has begun.
+    pub fn decline(&self) {
+        let mut started = self
+            .confirmation_started
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !*started {
+            *started = true;
+            self.confirmation_updates
+                .send_replace(Some(StartGateOutcome::ConfirmationFailed));
+        }
+    }
+
     /// Wait for the runner's durable confirmation after the gate opens.
     ///
     /// Monitors use this rather than [`Self::wait_and_confirm`]: only the

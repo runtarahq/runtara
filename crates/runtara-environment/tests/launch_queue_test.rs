@@ -1353,6 +1353,159 @@ async fn a_start_gate_closed_before_open_ends_start_gate_failed() {
     a_failed_gate_through_the_dispatcher(true).await;
 }
 
+/// A runner that cannot place its run: once the dispatcher opens the gate it
+/// declines to start, having reported the run lost, as the provider runner
+/// does when its provider refuses a placement.
+#[derive(Default)]
+struct RefusedPlacementRunner {
+    launches: std::sync::atomic::AtomicUsize,
+    declined: Arc<std::sync::atomic::AtomicBool>,
+    reported: std::sync::Mutex<Option<runtara_environment::runner::RunExitReport>>,
+}
+
+#[async_trait::async_trait]
+impl Runner for RefusedPlacementRunner {
+    fn runner_type(&self) -> &'static str {
+        "refused-placement"
+    }
+
+    async fn try_launch_detached(
+        &self,
+        options: &runtara_environment::runner::LaunchOptions,
+    ) -> runtara_environment::runner::Result<RunnerHandle> {
+        self.launches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let gate = options
+            .start_gate
+            .clone()
+            .expect("the dispatcher gates Start");
+        *self.reported.lock().unwrap() = Some(runtara_environment::runner::RunExitReport::Lost {
+            reason: "the provider refused the run: no room".to_string(),
+        });
+        let declined = self.declined.clone();
+        tokio::spawn(async move {
+            gate.wait().await;
+            gate.decline();
+            declined.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        Ok(RunnerHandle {
+            launch_id: options.launch_id.clone(),
+            handle_id: format!("refused_{}", Uuid::new_v4()),
+            instance_id: options.instance_id.clone(),
+            tenant_id: options.tenant_id.clone(),
+            started_at: chrono::Utc::now(),
+            metrics: None,
+        })
+    }
+
+    async fn is_running(&self, _handle: &RunnerHandle) -> bool {
+        !self.declined.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    async fn stop(&self, _handle: &RunnerHandle) -> runtara_environment::runner::Result<()> {
+        Ok(())
+    }
+
+    async fn take_exit_report(
+        &self,
+        _handle: &RunnerHandle,
+    ) -> Option<runtara_environment::runner::RunExitReport> {
+        self.reported.lock().unwrap().take()
+    }
+
+    async fn collect_result(
+        &self,
+        _handle: &RunnerHandle,
+    ) -> (
+        Option<serde_json::Value>,
+        Option<String>,
+        runtara_environment::runner::ContainerMetrics,
+    ) {
+        (None, None, Default::default())
+    }
+}
+
+/// A run whose runner could not place it (its provider had no room) never
+/// started. It is handed to recovery as a lost run, promptly, and is not
+/// ended `start_gate_failed` when the gate's deadline passes.
+#[tokio::test]
+async fn a_run_its_runner_could_not_place_is_recovered_not_failed() {
+    use runtara_environment::launch_dispatcher::{
+        LaunchDispatcherConfig, LaunchLifecycleObservers,
+    };
+    let context = TestContext::new().await.expect("test database must start");
+    let fixture = fixture(&context).await;
+    std::fs::write(context.data_dir.join("test_binary"), b"mock workflow")
+        .expect("test artifact must be writable");
+    let repository = LaunchRepository::new(context.pool.clone());
+    let launch_id = Uuid::new_v4().to_string();
+    repository
+        .enqueue(request(
+            &fixture,
+            &launch_id,
+            LaunchKind::Start,
+            Duration::from_secs(30),
+        ))
+        .await
+        .expect("queue row must be inserted");
+
+    let observers = LaunchLifecycleObservers::default();
+    let runner = Arc::new(RefusedPlacementRunner::default());
+    // A lease long enough that only the runner's decline, not the gate's
+    // deadline, can explain a prompt answer.
+    let lease = Duration::from_secs(20);
+    let dispatcher = LaunchDispatcher::new(
+        context.pool.clone(),
+        Arc::new(PostgresPersistence::new(context.pool.clone())),
+        runner.clone(),
+        Arc::new(tokio::sync::Notify::new()),
+        observers,
+    )
+    .with_config(LaunchDispatcherConfig {
+        lease_duration: lease,
+        ..Default::default()
+    });
+    let dispatched_at = tokio::time::Instant::now();
+    assert_eq!(
+        dispatcher
+            .dispatch_once()
+            .await
+            .expect("dispatch scan must succeed"),
+        1
+    );
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let (_, reason, _) = instance_result(&context.pool, &fixture.instance_id).await;
+            if reason.is_some() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the lost run must be settled well before the gate's deadline");
+    assert!(dispatched_at.elapsed() < lease);
+
+    let (status, reason, error) = instance_result(&context.pool, &fixture.instance_id).await;
+    assert_eq!(
+        (status.as_str(), reason.as_deref()),
+        ("suspended", Some("executor_lost")),
+        "{error:?}"
+    );
+
+    // Its start is offered again: sweeps do not end it as a failed start.
+    repository
+        .recover_expired_leases(16)
+        .await
+        .expect("lease recovery must succeed");
+    let (status, reason, _) = instance_result(&context.pool, &fixture.instance_id).await;
+    assert_ne!(status, "failed", "{reason:?}");
+    assert_ne!(reason.as_deref(), Some("start_gate_failed"));
+
+    context.cleanup().await;
+}
+
 #[tokio::test]
 async fn expiry_and_pre_start_cancellation_terminalize_the_matching_instance() {
     let context = TestContext::new().await.expect("test database must start");

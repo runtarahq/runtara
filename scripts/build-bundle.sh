@@ -3,6 +3,8 @@
 #
 # The bundle contains:
 #   - runtara-server binary
+#   - runtara-executor and runtara-run binaries (workflows on an executor,
+#     docs/executor.md)
 #   - 25 pre-built agent components (.wasm + .meta.json each) plus the 2 shared
 #     workflow stdlib/runtime components used by direct composition
 #   - License files
@@ -119,19 +121,27 @@ resolve_versions() {
 
 # ─── Build runtara-server ────────────────────────────────────────────────────
 
+# What the bundle's bin/ holds.
+BUNDLE_BINARIES=(runtara-server runtara-executor runtara-run)
+
 build_server() {
     if [ "$SKIP_BUILD" = "1" ]; then
-        if [ ! -f "${TARGET_DIR}/release/runtara-server" ]; then
-            echo "Error: --skip-build but target/release/runtara-server not found" >&2
-            exit 1
-        fi
-        info "Skipping build (--skip-build), using existing target/release/runtara-server"
+        local binary
+        for binary in "${BUNDLE_BINARIES[@]}"; do
+            if [ ! -f "${TARGET_DIR}/release/${binary}" ]; then
+                echo "Error: --skip-build but target/release/${binary} not found" >&2
+                exit 1
+            fi
+        done
+        info "Skipping build (--skip-build), using existing target/release binaries"
         return
     fi
 
-    step "Building runtara-server (release)"
+    # The server, and the executor with the per-run process it starts
+    # (docs/executor.md): one bundle serves either role.
+    step "Building runtara-server, runtara-executor and runtara-run (release)"
     BUILD_VERSION="$RUNTARA_STAMP_VERSION" BUILD_COMMIT="$RUNTARA_COMMIT" BUILD_NUMBER="$RUNTARA_BUILD_NUMBER" \
-        cargo build --release -p runtara-server
+        cargo build --release -p runtara-server -p runtara-executor -p runtara-run
 }
 
 # ─── Build agent components ─────────────────────────────────────────────────
@@ -172,10 +182,13 @@ assemble_bundle() {
     rm -rf "$bundle"
     mkdir -p "$bundle"/{bin,agents,licenses}
 
-    # ── runtara-server binary ──
-    info "Copying runtara-server binary"
-    cp "${TARGET_DIR}/release/runtara-server" "$bundle/bin/"
-    strip "$bundle/bin/runtara-server" 2>/dev/null || warn "strip failed (non-critical)"
+    # ── Binaries ──
+    local binary
+    for binary in "${BUNDLE_BINARIES[@]}"; do
+        info "Copying ${binary} binary"
+        cp "${TARGET_DIR}/release/${binary}" "$bundle/bin/"
+        strip "$bundle/bin/${binary}" 2>/dev/null || warn "strip failed (non-critical)"
+    done
 
     # ── Agent components ──
     # Stage the declared component set, excluding stale artifacts from removed agents.
