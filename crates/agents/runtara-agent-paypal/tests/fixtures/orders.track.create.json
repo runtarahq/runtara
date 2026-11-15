@@ -1,0 +1,100 @@
+{
+  "id": "5O190127TN364715T",
+  "links": [
+    {
+      "href": "https://api-m.paypal.com/v2/checkout/orders/5O190127TN364715T",
+      "method": "GET",
+      "rel": "self"
+    }
+  ],
+  "purchase_units": [
+    {
+      "items": [
+        {
+          "name": "Air Jordan Shoe",
+          "quantity": "1",
+          "sku": "sku01",
+          "unit_amount": {
+            "currency_code": "USD",
+            "value": "50.00"
+          }
+        },
+        {
+          "name": "T-Shirt",
+          "quantity": "1",
+          "sku": "sku02",
+          "unit_amount": {
+            "currency_code": "USD",
+            "value": "50.00"
+          }
+        }
+      ],
+      "payments": {
+        "captures": [
+          {
+            "amount": {
+              "currency_code": "USD",
+              "value": "100.00"
+            },
+            "create_time": "2018-04-01T21:20:49Z",
+            "final_capture": true,
+            "id": "8MC585209K746392H",
+            "links": [
+              {
+                "href": "https://api-m.paypal.com/v2/payments/captures/8MC585209K746392H",
+                "method": "GET",
+                "rel": "self"
+              },
+              {
+                "href": "https://api-m.paypal.com/v2/payments/captures/8MC585209K746392H/refund",
+                "method": "POST",
+                "rel": "refund"
+              }
+            ],
+            "seller_protection": {
+              "status": "NOT_ELIGIBLE"
+            },
+            "seller_receivable_breakdown": {
+              "gross_amount": {
+                "currency_code": "USD",
+                "value": "100.00"
+              },
+              "net_amount": {
+                "currency_code": "USD",
+                "value": "97.00"
+              },
+              "paypal_fee": {
+                "currency_code": "USD",
+                "value": "3.00"
+              }
+            },
+            "status": "COMPLETED",
+            "update_time": "2018-04-01T21:20:49Z"
+          }
+        ]
+      },
+      "reference_id": "d9f80740-38f0-11e8-b467-0ed5f89f718b",
+      "shipping": {
+        "trackers": [
+          {
+            "create_time": "2022-08-12T21:20:49Z",
+            "id": "8MC585209K746392H-443844607820",
+            "links": [
+              {
+                "href": "https://api-m.paypal.com/v2/checkout/orders/5O190127TN364715T",
+                "method": "GET",
+                "rel": "up"
+              },
+              {
+                "href": "https://api-m.paypal.com/v2/checkout/orders/5O190127TN364715T/trackers/8MC585209K746392H-443844607820",
+                "method": "PATCH",
+                "rel": "edit"
+              }
+            ],
+            "update_time": "2022-08-12T21:20:49Z"
+          }
+        ]
+      }
+    }
+  ]
+}

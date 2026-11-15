@@ -1,0 +1,42 @@
+{
+  "amount": {
+    "currency_code": "USD",
+    "value": "1.00"
+  },
+  "create_time": "2024-10-14T14:58:34-07:00",
+  "custom_id": "RefundCustom-14_10_2024_4_58_32_pm",
+  "id": "0K35355239430361V",
+  "invoice_id": "RefundInvoice-14_10_2024_4_58_32_pm",
+  "links": [
+    {
+      "href": "https://api.paypal.com/v2/payments/refunds/0K35355239430361V",
+      "method": "GET",
+      "rel": "self"
+    },
+    {
+      "href": "https://api.paypal.com/v2/payments/captures/7TK53561YB803214S",
+      "method": "GET",
+      "rel": "up"
+    }
+  ],
+  "seller_payable_breakdown": {
+    "gross_amount": {
+      "currency_code": "USD",
+      "value": "1.00"
+    },
+    "net_amount": {
+      "currency_code": "USD",
+      "value": "1.00"
+    },
+    "paypal_fee": {
+      "currency_code": "USD",
+      "value": "0.00"
+    },
+    "total_refunded_amount": {
+      "currency_code": "USD",
+      "value": "11.00"
+    }
+  },
+  "status": "COMPLETED",
+  "update_time": "2024-10-14T14:58:34-07:00"
+}

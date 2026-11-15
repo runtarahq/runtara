@@ -1,6 +1,6 @@
 use runtara_agents::extractors::connection_types::{
     GEMINI_API_BASE_URL, SHIPPO_API_BASE_URL, SHIPPO_API_VERSION, ZENDESK_DEFAULT_SCOPE,
-    jira_base_url, ups_base_url, zendesk_base_url,
+    connection_environment, jira_base_url, paypal_base_url, ups_base_url, zendesk_base_url,
 };
 use runtara_agents::registry::find_connection_type;
 use runtara_dsl::agent_meta::{OAuthConfig, TokenEndpointAuth};
@@ -275,6 +275,14 @@ pub(crate) fn describe_connection_auth(
                 deferred_auth: describe_ups_client_credentials_auth(connection_id, params),
             }
         }
+        // PayPal: the environment picks the host (an unknown one leaves no base
+        // URL, so a credentialed request fails closed at the proxy's pin step).
+        "paypal_client_credentials" => ConnectionAuthDescriptor {
+            base_url: paypal_environment_url(params),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: describe_paypal_client_credentials_auth(connection_id, params),
+        },
         "slack_bot" => ConnectionAuthDescriptor {
             base_url: Some("https://slack.com".into()),
             aws_signing: None,
@@ -492,7 +500,7 @@ fn describe_zendesk_client_credentials_auth(
 const UPS_TRANSACTION_SRC: &str = "runtara";
 
 fn ups_environment_url(params: &Value) -> Option<String> {
-    let environment = params["environment"].as_str().unwrap_or("production");
+    let environment = connection_environment(params).ok()?;
     ups_base_url(environment).ok().map(str::to_string)
 }
 
@@ -512,6 +520,38 @@ fn describe_ups_client_credentials_auth(
             &["ups_client_credentials", &base_url, client_id],
         ),
         token_url: format!("{base_url}/security/v1/oauth/token"),
+        header_name: "Authorization".to_string(),
+        header_value_prefix: Some("Bearer ".to_string()),
+        request_body: TokenRequestBody::FormUrlEncoded(vec![(
+            "grant_type".to_string(),
+            "client_credentials".to_string(),
+        )]),
+        basic_auth: Some((client_id.to_string(), client_secret.to_string())),
+        default_ttl_seconds: DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
+    })
+}
+
+fn paypal_environment_url(params: &Value) -> Option<String> {
+    let environment = connection_environment(params).ok()?;
+    paypal_base_url(environment).ok().map(str::to_string)
+}
+
+/// PayPal mints client-credentials tokens on the environment's own host from a
+/// form body, with the REST app's credentials in a Basic header.
+fn describe_paypal_client_credentials_auth(
+    connection_id: &str,
+    params: &Value,
+) -> Option<DeferredAuth> {
+    let base_url = paypal_environment_url(params)?;
+    let client_id = params["client_id"].as_str()?;
+    let client_secret = params["client_secret"].as_str()?;
+
+    Some(DeferredAuth::OAuth2ClientCredentials {
+        cache_key: token_cache::build_token_cache_key(
+            connection_id,
+            &["paypal_client_credentials", &base_url, client_id],
+        ),
+        token_url: format!("{base_url}/v1/oauth2/token"),
         header_name: "Authorization".to_string(),
         header_value_prefix: Some("Bearer ".to_string()),
         request_body: TokenRequestBody::FormUrlEncoded(vec![(
@@ -1568,6 +1608,73 @@ mod tests {
         );
         assert_eq!(descriptor.base_url, None);
         assert!(descriptor.deferred_auth.is_none());
+    }
+
+    #[test]
+    fn paypal_client_credentials_mint_on_the_environments_host() {
+        for (environment, host) in [
+            (Some("sandbox"), "https://api-m.sandbox.paypal.com"),
+            (Some("production"), "https://api-m.paypal.com"),
+            (None, "https://api-m.paypal.com"),
+        ] {
+            let mut params = json!({ "client_id": "cid", "client_secret": "csec" });
+            if let Some(environment) = environment {
+                params["environment"] = json!(environment);
+            }
+            let mut headers = HashMap::new();
+            let descriptor = describe_connection_auth(
+                "conn-1",
+                "paypal_client_credentials",
+                &params,
+                &mut headers,
+            );
+            assert_eq!(descriptor.base_url.as_deref(), Some(host));
+            assert!(headers.is_empty(), "{headers:?}");
+            match descriptor.deferred_auth {
+                Some(DeferredAuth::OAuth2ClientCredentials {
+                    token_url,
+                    header_value_prefix,
+                    request_body: TokenRequestBody::FormUrlEncoded(fields),
+                    basic_auth,
+                    ..
+                }) => {
+                    assert_eq!(token_url, format!("{host}/v1/oauth2/token"));
+                    assert_eq!(header_value_prefix.as_deref(), Some("Bearer "));
+                    // The credentials go in the Basic header, not the form.
+                    assert_eq!(
+                        fields,
+                        [("grant_type".to_string(), "client_credentials".to_string())]
+                    );
+                    assert_eq!(basic_auth, Some(("cid".to_string(), "csec".to_string())));
+                }
+                _ => panic!("expected a form client-credentials token request"),
+            }
+        }
+        // An environment PayPal does not run, or one that is no string: no
+        // destination, no token. A null one is production, as the extractor
+        // reads it.
+        for environment in [json!("evil.com"), json!(1)] {
+            let mut headers = HashMap::new();
+            let descriptor = describe_connection_auth(
+                "conn-1",
+                "paypal_client_credentials",
+                &json!({ "environment": environment, "client_id": "c", "client_secret": "s" }),
+                &mut headers,
+            );
+            assert_eq!(descriptor.base_url, None, "{environment}");
+            assert!(descriptor.deferred_auth.is_none(), "{environment}");
+        }
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "paypal_client_credentials",
+            &json!({ "environment": null, "client_id": "c", "client_secret": "s" }),
+            &mut headers,
+        );
+        assert_eq!(
+            descriptor.base_url.as_deref(),
+            Some("https://api-m.paypal.com")
+        );
     }
 
     #[test]
