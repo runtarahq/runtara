@@ -1,0 +1,43 @@
+# PayPal REST APIs, generated from PayPal's own OpenAPI files (one per
+# product), pinned to a commit of github.com/paypal/paypal-rest-api-specifications.
+agent:
+  id: paypal
+  name: PayPal
+  description: PayPal — orders, captures, authorizations and refunds, shipment tracking, transaction search and balances, and disputes.
+  integration_id: paypal_client_credentials
+  error_prefix: PAYPAL
+# Orders and Payments list only the production host, the other specs the
+# sandbox first; the connection picks the host either way.
+server: https://api-m.paypal.com
+# The descriptions are HTML.
+html_descriptions: true
+# The connection sends the access token.
+connection_parameters: [Authorization]
+# Partner (platform) and fraud-tool headers, for PayPal partners only.
+omit_parameters: [PayPal-Auth-Assertion, PayPal-Partner-Attribution-Id, PayPal-Client-Metadata-Id]
+# The Payments API's own capture and authorization, named apart from the
+# Orders API's ones by a number in PayPal's spec.
+model_names:
+  capture-2: PaymentCapture
+  authorization-2: PaymentAuthorization
+specs:
+  - name: orders
+    url: https://raw.githubusercontent.com/paypal/paypal-rest-api-specifications/90e8041ffe02d80c452d2b476bedd59a8d219bdc/openapi/checkout_orders_v2.json
+    sha256: 14db0b9e0d7440e38595b823724599edc7ab8b7a2b41ac442463e81b7d477fd6
+    operations: [orders.create, orders.get, orders.patch, orders.authorize, orders.capture, orders.track.create, orders.trackers.patch]
+  - name: payments
+    url: https://raw.githubusercontent.com/paypal/paypal-rest-api-specifications/90e8041ffe02d80c452d2b476bedd59a8d219bdc/openapi/payments_payment_v2.json
+    sha256: ecd8bc60e133bd4bc54de10daae3011a451e3a69e971ddf19c09213aa0f15c21
+    operations: [authorizations.get, authorizations.capture, authorizations.reauthorize, authorizations.void, captures.get, captures.refund, refunds.get]
+  - name: tracking
+    url: https://raw.githubusercontent.com/paypal/paypal-rest-api-specifications/90e8041ffe02d80c452d2b476bedd59a8d219bdc/openapi/shipping_shipment_tracking_v1.json
+    sha256: 837c6db98ebcb6599b463b6f75233aad84221bd644e6bc67a761906c68d26cfb
+    operations: [trackers-batch.post, trackers.get, trackers.put]
+  - name: reporting
+    url: https://raw.githubusercontent.com/paypal/paypal-rest-api-specifications/90e8041ffe02d80c452d2b476bedd59a8d219bdc/openapi/reporting_transactions_v1.json
+    sha256: 40f2af0c02c204dde9227b14a6f9f91c2a6cc4222fe2c7c20983c6bc6f9e52b4
+    operations: [search.get, balances.get]
+  - name: disputes
+    url: https://raw.githubusercontent.com/paypal/paypal-rest-api-specifications/90e8041ffe02d80c452d2b476bedd59a8d219bdc/openapi/customer_disputes_v1.json
+    sha256: a72134c1a48d800f4da69d5c331b5b74ddde3eb71c97fc61c8e221f3aebf035f
+    operations: [disputes.list, disputes.get]

@@ -1,0 +1,53 @@
+{
+  "create_time": "2018-04-01T21:18:49Z",
+  "id": "5O190127TN364715T",
+  "links": [
+    {
+      "href": "https://api-m.paypal.com/v2/checkout/orders/5O190127TN364715T",
+      "method": "GET",
+      "rel": "self"
+    },
+    {
+      "href": "https://www.paypal.com/checkoutnow?token=5O190127TN364715T",
+      "method": "GET",
+      "rel": "approve"
+    },
+    {
+      "href": "https://api-m.paypal.com/v2/checkout/orders/5O190127TN364715T",
+      "method": "PATCH",
+      "rel": "edit"
+    },
+    {
+      "href": "https://api-m.paypal.com/v2/checkout/orders/5O190127TN364715T/capture",
+      "method": "POST",
+      "rel": "capture"
+    }
+  ],
+  "payer": {
+    "email_address": "customer@example.com",
+    "name": {
+      "given_name": "John",
+      "surname": "Doe"
+    },
+    "payer_id": "QYR5Z8XDVJNXQ"
+  },
+  "payment_source": {
+    "paypal": {
+      "account_id": "QYR5Z8XDVJNXQ",
+      "email_address": "customer@example.com",
+      "name": {
+        "given_name": "John",
+        "surname": "Doe"
+      }
+    }
+  },
+  "purchase_units": [
+    {
+      "amount": {
+        "currency_code": "USD",
+        "value": "100.00"
+      },
+      "reference_id": "d9f80740-38f0-11e8-b467-0ed5f89f718b"
+    }
+  ]
+}

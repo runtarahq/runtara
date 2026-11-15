@@ -36,5 +36,6 @@ pub static CONNECTION_TYPES: &[&ConnectionTypeMeta] = &[
     &crate::extractors::connection_types::__CONNECTION_META_ZendeskClientCredentialsParams,
     &crate::extractors::connection_types::__CONNECTION_META_JiraApiTokenParams,
     &crate::extractors::connection_types::__CONNECTION_META_UpsClientCredentialsParams,
+    &crate::extractors::connection_types::__CONNECTION_META_PaypalClientCredentialsParams,
     &crate::extractors::connection_types::__CONNECTION_META_McpConnectionParams,
 ];

@@ -1,0 +1,92 @@
+{
+  "id": "5O190127TN364715T",
+  "links": [
+    {
+      "href": "https://api-m.paypal.com/v2/checkout/orders/5O190127TN364715T",
+      "method": "GET",
+      "rel": "self"
+    }
+  ],
+  "payer": {
+    "email_address": "customer@example.com",
+    "name": {
+      "given_name": "John",
+      "surname": "Doe"
+    },
+    "payer_id": "QYR5Z8XDVJNXQ"
+  },
+  "payment_source": {
+    "paypal": {
+      "account_id": "QYR5Z8XDVJNXQ",
+      "account_status": "VERIFIED",
+      "email_address": "customer@example.com",
+      "name": {
+        "given_name": "John",
+        "surname": "Doe"
+      }
+    }
+  },
+  "purchase_units": [
+    {
+      "payments": {
+        "captures": [
+          {
+            "amount": {
+              "currency_code": "USD",
+              "value": "100.00"
+            },
+            "create_time": "2018-04-01T21:20:49Z",
+            "final_capture": true,
+            "id": "3C679366HH908993F",
+            "links": [
+              {
+                "href": "https://api-m.paypal.com/v2/payments/captures/3C679366HH908993F",
+                "method": "GET",
+                "rel": "self"
+              },
+              {
+                "href": "https://api-m.paypal.com/v2/payments/captures/3C679366HH908993F/refund",
+                "method": "POST",
+                "rel": "refund"
+              }
+            ],
+            "seller_protection": {
+              "dispute_categories": [
+                "ITEM_NOT_RECEIVED",
+                "UNAUTHORIZED_TRANSACTION"
+              ],
+              "status": "ELIGIBLE"
+            },
+            "seller_receivable_breakdown": {
+              "gross_amount": {
+                "currency_code": "USD",
+                "value": "100.00"
+              },
+              "net_amount": {
+                "currency_code": "USD",
+                "value": "97.00"
+              },
+              "paypal_fee": {
+                "currency_code": "USD",
+                "value": "3.00"
+              }
+            },
+            "status": "COMPLETED",
+            "update_time": "2018-04-01T21:20:49Z"
+          }
+        ]
+      },
+      "reference_id": "d9f80740-38f0-11e8-b467-0ed5f89f718b",
+      "shipping": {
+        "address": {
+          "address_line_1": "2211 N First Street",
+          "address_line_2": "Building 17",
+          "admin_area_1": "CA",
+          "admin_area_2": "San Jose",
+          "country_code": "US",
+          "postal_code": "95131"
+        }
+      }
+    }
+  ]
+}

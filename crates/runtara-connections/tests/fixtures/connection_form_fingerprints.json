@@ -102,6 +102,12 @@
     "fnv1a64": "5fce813c446be821"
   },
   {
+    "integrationId": "paypal_client_credentials",
+    "fieldCount": 3,
+    "serializedBytes": 1281,
+    "fnv1a64": "89052a5cf9d7ba86"
+  },
+  {
     "integrationId": "pipedrive_api_token",
     "fieldCount": 1,
     "serializedBytes": 470,
