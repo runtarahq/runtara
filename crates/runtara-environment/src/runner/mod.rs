@@ -16,7 +16,7 @@ pub use embedded::{
     run_launch_lifecycle,
 };
 pub use mock::MockRunner;
-pub use provider::{Provider, ProviderEnd, ProviderRunner, RunChannel};
+pub use provider::{LaunchWorkflows, Provider, ProviderEnd, ProviderRunner, RunChannel};
 pub use traits::*;
 
 /// Build the workflow runner: the in-process embedded wasmtime engine,

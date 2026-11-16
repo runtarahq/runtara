@@ -131,6 +131,72 @@ pub trait Provider: Send + Sync {
     async fn ended(&self, run: &str, timeout: Duration) -> Option<ProviderEnd>;
 }
 
+/// The workflows of the launches being served, for a provider whose runners
+/// fetch what they run instead of being sent it: a launch's runner may read
+/// that launch's workflow and no other.
+#[derive(Default)]
+pub struct LaunchWorkflows {
+    artifacts: std::sync::OnceLock<Arc<dyn runtara_artifact_store::ArtifactStore>>,
+    by_launch: Mutex<HashMap<String, runtara_artifact_store::Digest>>,
+}
+
+impl LaunchWorkflows {
+    /// The component of `launch_id`'s workflow, if `digest` is its digest;
+    /// `None` for any other digest and for a launch not being served.
+    pub async fn get(
+        &self,
+        launch_id: &str,
+        digest: &str,
+    ) -> std::result::Result<Option<Vec<u8>>, String> {
+        let wanted = self
+            .by_launch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(launch_id)
+            .filter(|held| held.as_str() == digest)
+            .cloned();
+        let (Some(wanted), Some(artifacts)) = (wanted, self.artifacts.get()) else {
+            return Ok(None);
+        };
+        artifacts
+            .get(&wanted)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// `launch_id` runs `digest` until the returned guard is dropped.
+    fn serve(
+        self: &Arc<Self>,
+        launch_id: &str,
+        digest: runtara_artifact_store::Digest,
+    ) -> ServedWorkflow {
+        self.by_launch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(launch_id.to_owned(), digest);
+        ServedWorkflow {
+            workflows: Arc::clone(self),
+            launch_id: launch_id.to_owned(),
+        }
+    }
+}
+
+/// A launch's entry in [`LaunchWorkflows`], removed when dropped.
+struct ServedWorkflow {
+    workflows: Arc<LaunchWorkflows>,
+    launch_id: String,
+}
+
+impl Drop for ServedWorkflow {
+    fn drop(&mut self) {
+        self.workflows
+            .by_launch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.launch_id);
+    }
+}
+
 struct ProviderTask {
     cancel: Arc<AtomicBool>,
     run: Mutex<Option<String>>,
@@ -170,6 +236,7 @@ pub struct ProviderRunner {
     handler_state: Arc<runtara_core::instance_handlers::InstanceHandlerState>,
     staged: Mutex<HashMap<(String, String), Staged>>,
     run_channel: Option<RunChannel>,
+    workflows: Option<Arc<LaunchWorkflows>>,
 }
 
 impl ProviderRunner {
@@ -222,6 +289,7 @@ impl ProviderRunner {
             handler_state: Arc::new(handler_state),
             staged: Mutex::default(),
             run_channel: None,
+            workflows: None,
         }
     }
 
@@ -229,6 +297,14 @@ impl ProviderRunner {
     /// launched.
     pub fn with_run_channel(mut self, channel: RunChannel) -> Self {
         self.run_channel = Some(channel);
+        self
+    }
+
+    /// Each launch's workflow is readable from `workflows` while the launch
+    /// is served: for a provider whose runners fetch it.
+    pub fn with_launch_workflows(mut self, workflows: Arc<LaunchWorkflows>) -> Self {
+        let _ = workflows.artifacts.set(self.artifacts.clone());
+        self.workflows = Some(workflows);
         self
     }
 
@@ -346,6 +422,9 @@ struct Placement {
     owner: String,
     trusted_pins: Arc<std::collections::HashSet<String>>,
     channel: Option<RunChannel>,
+    /// The launch's workflow, and where its runner may read it from.
+    workflow: runtara_artifact_store::Digest,
+    workflows: Option<Arc<LaunchWorkflows>>,
 }
 
 fn lost_result(started: Instant) -> InvokeRunResult {
@@ -382,6 +461,8 @@ async fn run_placed(placement: Placement, mut slot: SlotPermit) -> InvokeRunResu
         owner,
         trusted_pins,
         channel,
+        workflow,
+        workflows,
     } = placement;
     let started = Instant::now();
     let failed = |reason: String| InvokeRunResult {
@@ -439,6 +520,9 @@ async fn run_placed(placement: Placement, mut slot: SlotPermit) -> InvokeRunResu
         let _ = launches.finish(&binding.launch_id);
         return failed(error);
     }
+    // Readable by this launch's runner from before it is placed until the
+    // launch is over.
+    let _served = workflows.map(|workflows| workflows.serve(&binding.launch_id, workflow));
     // Placed while its durable start is confirmed: the run starts meanwhile,
     // and its first call waits at the run channel's start gate.
     let run = match provider.place(spec, &artifact, &binding).await {
@@ -639,6 +723,8 @@ impl Runner for ProviderRunner {
             owner: handle_id.clone(),
             trusted_pins,
             channel: self.run_channel.clone(),
+            workflow: options.workflow_digest.clone(),
+            workflows: self.workflows.clone(),
         };
         let (tasks, metrics_for_task, id) =
             (self.tasks.clone(), metrics.clone(), handle_id.clone());
@@ -776,5 +862,40 @@ mod tests {
                 .is_some_and(|c| c.starts_with("rlc1_"))
         );
         assert_eq!(spec["channel"]["trust"]["server_name"], "control");
+    }
+
+    #[tokio::test]
+    async fn a_launch_reads_its_own_workflow_and_only_while_it_is_served() {
+        use runtara_artifact_store::ArtifactStore;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(runtara_artifact_store::FilesystemArtifactStore::new(
+            dir.path().to_path_buf(),
+        ));
+        let mine = store.put(b"mine").await.unwrap();
+        let other = store.put(b"other").await.unwrap();
+        let workflows = Arc::new(LaunchWorkflows::default());
+        let _ = workflows
+            .artifacts
+            .set(store as Arc<dyn runtara_artifact_store::ArtifactStore>);
+
+        let served = workflows.serve("launch-1", mine.clone());
+        assert_eq!(
+            workflows.get("launch-1", mine.as_str()).await.unwrap(),
+            Some(b"mine".to_vec())
+        );
+        // Stored, but not this launch's.
+        assert_eq!(
+            workflows.get("launch-1", other.as_str()).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            workflows.get("launch-2", mine.as_str()).await.unwrap(),
+            None
+        );
+        drop(served);
+        assert_eq!(
+            workflows.get("launch-1", mine.as_str()).await.unwrap(),
+            None
+        );
     }
 }
