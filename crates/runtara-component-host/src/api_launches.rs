@@ -421,6 +421,12 @@ impl ApiLaunches {
         self.credentials.refuse(launch_id)
     }
 
+    /// The launch whose run channel credential `headers` carry, served or
+    /// not yet started ([`crate::run_channel::RunCredentials::launch`]).
+    pub fn credential_launch(&self, headers: &axum::http::HeaderMap) -> Option<Binding> {
+        self.credentials.launch(headers)
+    }
+
     /// The `/v1` router served over the run channel: each request's binding
     /// is the one its bearer credential names ([`crate::run_channel`]).
     pub fn credentialed_router(self: &Arc<Self>) -> axum::Router {
