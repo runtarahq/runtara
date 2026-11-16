@@ -1,4 +1,4 @@
-# Runtara evaluation stack, with workflows on an executor.
+# Runtara evaluation stack, with workflows on executors.
 #
 #   docker compose -f docker-compose.yml -f docker-compose.executor.yml up
 #
@@ -8,15 +8,21 @@
 # in a sandboxed process of its own, in a container that holds no database
 # connection and none of the server's keys. See docs/executor.md.
 #
-# The server and the executor authenticate each other with certificates of a
-# CA made on first start (`executor-pki`). Each gets its own key on a volume
-# of its own; the CA's key is kept nowhere. To make new certificates, remove
-# both volumes and start again:
+# The server is told of no executor: each one tells the server it is here.
+# For more of them, say how many:
+#   RUNTARA_EXECUTORS=3 docker compose -f docker-compose.yml -f docker-compose.executor.yml up
+# or change it while the stack runs, with `--scale executor=3` on the same
+# command. Each takes RUNTARA_EXECUTOR_MAX_RUNS runs at once (default 16).
+#
+# The server and the executors authenticate each other with certificates of a
+# CA made on first start (`executor-pki`). The server and the executors each
+# have their key on a volume of their own; the CA's key is kept nowhere. To
+# make new certificates, remove both volumes and start again:
 #   docker compose -f docker-compose.yml -f docker-compose.executor.yml down
 #   docker volume rm <project>_executor_pki_server <project>_executor_pki_executor
 #
 # The sandbox needs seccomp and Landlock from the host's kernel (Linux 5.13
-# or newer; Docker Desktop and current distributions have both). The executor
+# or newer; Docker Desktop and current distributions have both). An executor
 # checks at start and refuses to run without them.
 
 services:
@@ -49,20 +55,25 @@ services:
       executor-pki:
         condition: service_completed_successfully
     command: ["runtara-executor"]
+    deploy:
+      replicas: ${RUNTARA_EXECUTORS:-1}
     # The image's health check asks the server's port; this is not the server.
     healthcheck:
       disable: true
+    # An executor that is stopped tells the server, which recovers its runs
+    # at once.
+    stop_grace_period: 15s
     environment:
       RUNTARA_EXECUTOR_LISTEN: "0.0.0.0:7443"
       # The server's run channel: where this executor says it is here.
       RUNTARA_EXECUTOR_SERVER_URL: "https://runtara:7444"
       RUNTARA_EXECUTOR_TLS_DIR: /pki
-      # Compiled workflows; nothing here is needed after a restart.
+      # Compiled workflows, on the image's own /data volume: each executor
+      # has its own, and nothing there is needed after a restart.
       RUNTARA_EXECUTOR_STATE_DIR: /data/executor
       RUNTARA_EXECUTOR_MAX_RUNS: "${RUNTARA_EXECUTOR_MAX_RUNS:-16}"
     volumes:
       - executor_pki_executor:/pki:ro
-      - executor_data:/data
 
   runtara:
     depends_on:
@@ -71,8 +82,9 @@ services:
     environment:
       RUNTARA_RUNNER: executor
       RUNTARA_EXECUTOR_TLS_DIR: /pki
-      # Where the executor sends its runs' workflow API calls. Mutual TLS, and
-      # on the stack's private network only: the port is not published.
+      # Where executors say they are here, fetch workflows and send their
+      # runs' workflow API calls. Mutual TLS, and on the stack's private
+      # network only: the port is not published.
       RUNTARA_RUN_CHANNEL_LISTEN: "0.0.0.0:7444"
       RUNTARA_RUN_CHANNEL_ENDPOINT: "https://runtara:7444"
     volumes:
@@ -81,4 +93,3 @@ services:
 volumes:
   executor_pki_server:
   executor_pki_executor:
-  executor_data:
