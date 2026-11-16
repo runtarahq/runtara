@@ -82,13 +82,13 @@ pub async fn resolve_connection_auth(
     let mut sealed_parameters = None;
     let mut token_minted = false;
     if crate::sealed::policy::sealed_token_grant(integration_id, params).is_some() {
-        let (token, minted) = sealed
+        let cached = sealed
             .minted_access_token(tenant_id, connection_id, integration_id, params)
             .await?;
+        token_minted = matches!(cached, token_cache::CachedToken::Minted(_));
         let mut presenting = params.clone();
-        presenting[crate::sealed::policy::ACCESS_TOKEN_FIELD] = token;
+        presenting[crate::sealed::policy::ACCESS_TOKEN_FIELD] = cached.into_token();
         sealed_parameters = Some(presenting);
-        token_minted = minted;
     }
     // A refresh token gets the next pair through seal, sealed too.
     let mut rotated_sealed = None;

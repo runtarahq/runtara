@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use super::{SEALED_MARKER, SealErrorCode, SealedCredentials, keys, policy, presented};
 use crate::auth::token_cache::{
-    self, AuthResolutionError, CachedAccessToken, DeferredAuth, TokenRequestBody,
+    self, AuthResolutionError, CachedAccessToken, CachedToken, DeferredAuth, TokenRequestBody,
 };
 
 /// How long a token endpoint may take, as for a request this process sends.
@@ -143,15 +143,13 @@ impl SealedCredentials {
     /// The access token of a connection whose client secret is sealed
     /// (client-credentials grant), as the marker a request presents: got from
     /// the token endpoint through seal, and kept until it nears its expiry.
-    /// The flag is `true` when the token endpoint issued it now, not when it
-    /// is one kept from an earlier request.
     pub(crate) async fn minted_access_token(
         &self,
         tenant_id: &str,
         connection_id: &str,
         integration_id: &str,
         parameters: &Value,
-    ) -> Result<(Value, bool), AuthResolutionError> {
+    ) -> Result<CachedToken<Value>, AuthResolutionError> {
         let unsupported =
             || AuthResolutionError::permanent("The connection's token request cannot be formed");
         let secret_field = policy::client_secret_field(integration_id).ok_or_else(unsupported)?;
@@ -165,7 +163,7 @@ impl SealedCredentials {
             default_ttl_seconds,
             ..
         } = request;
-        let (envelope, minted) = token_cache::resolve_cached_token(&cache_key.sealed(), || async {
+        let cached = token_cache::resolve_cached_token(&cache_key.sealed(), || async {
             // The request as the type builds it, without the secret: seal
             // puts that where the secret's policy says.
             let (content_type, body) = match request_body {
@@ -204,7 +202,10 @@ impl SealedCredentials {
             })
         })
         .await?;
-        Ok((marker_of(&envelope)?, minted))
+        Ok(match cached {
+            CachedToken::Kept(envelope) => CachedToken::Kept(marker_of(&envelope)?),
+            CachedToken::Minted(envelope) => CachedToken::Minted(marker_of(&envelope)?),
+        })
     }
 }
 
