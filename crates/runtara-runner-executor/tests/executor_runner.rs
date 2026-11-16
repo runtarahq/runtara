@@ -445,3 +445,40 @@ async fn an_executor_that_leaves_loses_its_runs_and_no_others() {
     deployment.runner.stop(kept).await.unwrap();
     deployment.ended(kept).await;
 }
+
+/// An executor whose host is gone answers nothing. While the server still
+/// counts it as here, a run offered to it goes to another within seconds:
+/// it is not held for the whole call and then handed to recovery.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_executor_whose_host_is_gone_is_passed_over_soon() {
+    let deployment = deployment().await;
+    // Registered with all the room there is, at an address nothing is at.
+    deployment
+        .registry
+        .register(
+            "gone",
+            "127.0.0.1".parse().unwrap(),
+            &runtara_executor::protocol::Registration {
+                address: Some("https://10.255.255.1:7443".to_owned()),
+                port: 7443,
+                max_runs: 1024,
+                running: 0,
+            },
+        )
+        .unwrap();
+    let started = std::time::Instant::now();
+    let handle = deployment
+        .launch("inst-1", "complete", Duration::from_secs(60))
+        .await;
+    deployment.ended(&handle).await;
+    assert_eq!(
+        deployment.status("inst-1").await.0,
+        InstanceStatus::Completed
+    );
+    assert!(deployment.runner.take_exit_report(&handle).await.is_none());
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}

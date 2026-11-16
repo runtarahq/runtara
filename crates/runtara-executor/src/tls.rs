@@ -264,17 +264,25 @@ pub type Client = hyper_util::client::legacy::Client<
     Full<Bytes>,
 >;
 
+/// How long a connection may take to be made. A host that is gone answers
+/// nothing, and a call to it must fail as never sent, and soon: the server
+/// then places the run with another executor instead of waiting out the call.
+pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// A client that verifies its peer's certificate against `server_name`,
 /// whatever host it connects to.
 pub fn client(config: ClientConfig, server_name: &str) -> Result<Client, String> {
     let name = ServerName::try_from(server_name.to_owned())
         .map_err(|_| format!("{server_name} is not a name a certificate can be for"))?;
+    let mut tcp = hyper_util::client::legacy::connect::HttpConnector::new();
+    tcp.enforce_http(false);
+    tcp.set_connect_timeout(Some(CONNECT_TIMEOUT));
     let connector = hyper_rustls::HttpsConnectorBuilder::new()
         .with_tls_config(config)
         .https_only()
         .with_server_name_resolver(hyper_rustls::FixedServerNameResolver::new(name))
         .enable_http2()
-        .build();
+        .wrap_connector(tcp);
     Ok(hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(connector))
 }
 
