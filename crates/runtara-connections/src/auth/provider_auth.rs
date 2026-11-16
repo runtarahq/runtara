@@ -704,6 +704,20 @@ pub fn invalidate_connection_token_caches(
     }
 }
 
+/// Whether a connection type authenticates with the OAuth2 client-credentials
+/// grant: its status says only whether the token endpoint accepts its
+/// credentials.
+pub(crate) fn is_client_credentials(
+    meta: Option<&runtara_dsl::agent_meta::ConnectionTypeMeta>,
+) -> bool {
+    meta.is_some_and(|m| {
+        matches!(
+            m.auth_type,
+            Some(runtara_dsl::agent_meta::ConnectionAuthType::Oauth2ClientCredentials)
+        )
+    })
+}
+
 /// Evict *all* in-memory credential state for a connection — every grant type, not
 /// just the refresh-token one the params can address. Called when the connection row
 /// is deleted: without it a still-fresh cached access token keeps being served for a

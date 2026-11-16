@@ -464,7 +464,7 @@ impl ConnectionsFacade {
                 // A dead grant (e.g. `invalid_grant` on refresh) means retrying forever
                 // is pointless — flip the connection to REQUIRES_RECONNECTION so the UI
                 // can prompt a reconnect.
-                self.maybe_flip_needs_reauth(connection_id, tenant_id, integration_id, &e)
+                self.maybe_flip_needs_reauth(connection_id, tenant_id, integration_id, params, &e)
                     .await;
                 return Err(ConnectionsError::AuthResolution(e));
             }
@@ -516,13 +516,17 @@ impl ConnectionsFacade {
     /// provider's descriptor flags as reauth-worthy (e.g. `invalid_grant`), or a
     /// PERMANENT credential failure on a client-credentials connection (wrong
     /// secret → token-endpoint 4xx) — flip the connection to
-    /// `REQUIRES_RECONNECTION`. Best-effort: a failed status write is logged, not
-    /// propagated (the original auth error is what the caller sees).
+    /// `REQUIRES_RECONNECTION`. A client-credentials connection is flipped
+    /// only while it still holds `params`, the parameters refused: a request
+    /// that read them before an edit says nothing about the edited ones.
+    /// Best-effort: a failed status write is logged, not propagated (the
+    /// original auth error is what the caller sees).
     async fn maybe_flip_needs_reauth(
         &self,
         connection_id: &str,
         tenant_id: &str,
         integration_id: &str,
+        params: &Value,
         error: &crate::auth::token_cache::AuthResolutionError,
     ) {
         let meta = runtara_agents::registry::find_connection_type(integration_id);
@@ -532,19 +536,26 @@ impl ConnectionsFacade {
             .unwrap_or(&[]);
         // Client-credentials types declare no oauth_config/reauth codes; for
         // them, permanence of the mint failure IS the terminal signal.
-        let client_credentials_permanent = error.permanent && is_client_credentials(meta);
+        let client_credentials_permanent =
+            error.permanent && provider_auth::is_client_credentials(meta);
         if !client_credentials_permanent && !is_reauth_error(&error.message, codes) {
             return;
         }
-        match self
-            .repo()
-            .update_status(
-                connection_id,
-                tenant_id,
-                ConnectionStatus::RequiresReconnection.as_str(),
-            )
-            .await
-        {
+        let flipped = if client_credentials_permanent {
+            self.repo()
+                .flag_reconnection_status(connection_id, tenant_id, params)
+                .await
+        } else {
+            self.repo()
+                .update_status(
+                    connection_id,
+                    tenant_id,
+                    ConnectionStatus::RequiresReconnection.as_str(),
+                )
+                .await
+        };
+        match flipped {
+            Ok(0) => {}
             // The message holds the token endpoint's status and OAuth error fields
             // (`invalid_scope`, `invalid_client`, …), never its body or a credential;
             // without it the reason is only in a debug log.
@@ -577,7 +588,7 @@ impl ConnectionsFacade {
         integration_id: &str,
         params: &Value,
     ) {
-        if !is_client_credentials(runtara_agents::registry::find_connection_type(
+        if !provider_auth::is_client_credentials(runtara_agents::registry::find_connection_type(
             integration_id,
         )) {
             return;
@@ -740,18 +751,6 @@ impl ConnectionsFacade {
 /// provider's `error` code in the message). Empty `codes` never matches.
 fn is_reauth_error(error: &str, codes: &[&str]) -> bool {
     !codes.is_empty() && codes.iter().any(|code| error.contains(code))
-}
-
-/// Whether a connection type authenticates with the OAuth2 client-credentials
-/// grant: its status says only whether the token endpoint accepts its
-/// credentials.
-fn is_client_credentials(meta: Option<&runtara_dsl::agent_meta::ConnectionTypeMeta>) -> bool {
-    meta.is_some_and(|m| {
-        matches!(
-            m.auth_type,
-            Some(runtara_dsl::agent_meta::ConnectionAuthType::Oauth2ClientCredentials)
-        )
-    })
 }
 
 /// Whether a provider rotates (and invalidates) its refresh token on every refresh.

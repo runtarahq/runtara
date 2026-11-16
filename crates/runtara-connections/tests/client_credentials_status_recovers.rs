@@ -9,8 +9,9 @@
 //! authorization-code connection is the other case: its flag asks for a new
 //! consent, and a refresh does not stand in for one.
 //!
-//! Drives `ConnectionsFacade::resolve_connection_auth` against a real Postgres
-//! with encrypted parameters, seal, and a wiremock token endpoint.
+//! Drives `ConnectionsFacade::resolve_connection_auth`, and an edit through
+//! `ConnectionService`, against a real Postgres with encrypted parameters,
+//! seal, and a wiremock token endpoint.
 //!
 //! Own binary: sets the loopback egress allowlist (read-once env).
 
@@ -23,7 +24,10 @@ use runtara_connections::crypto::aes_gcm::AesGcmCipher;
 use runtara_connections::crypto::{CipherContext, CredentialCipher};
 use runtara_connections::repository::connections::{ConnectionRepository, refresh_token_guard};
 use runtara_connections::sealed::{Allowances, MemoryKeySource, SealedCredentials};
-use runtara_connections::types::{ConnectionStatus, CreateConnectionRequest};
+use runtara_connections::service::connections::ConnectionService;
+use runtara_connections::types::{
+    ConnectionStatus, CreateConnectionRequest, UpdateConnectionRequest,
+};
 use runtara_connections::{
     ConnectionsConfig, ConnectionsError, ConnectionsFacade, ConnectionsState, EveryAgent,
     IntegrationCompatibility,
@@ -97,6 +101,20 @@ impl Fixture {
         .execute(&pool)
         .await
         .expect("create the connection table");
+        // An edit through the service reads a connection's defaults.
+        sqlx::query(
+            r#"CREATE TABLE connection_defaults (
+                tenant_id VARCHAR(255) NOT NULL,
+                default_for VARCHAR(255) NOT NULL,
+                connection_id VARCHAR(255) NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (tenant_id, default_for)
+            )"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create the connection defaults table");
         let address = provider.address();
         let sealed = Arc::new(
             SealedCredentials::in_process(
@@ -120,6 +138,37 @@ impl Fixture {
 
     fn repo(&self) -> ConnectionRepository {
         ConnectionRepository::new(self.pool.clone(), self.cipher.clone())
+    }
+
+    fn service(&self) -> ConnectionService {
+        ConnectionService::new(
+            Arc::new(self.repo()),
+            Arc::new(IntegrationCompatibility::new(HashMap::new())),
+            self.sealed.clone(),
+        )
+    }
+
+    /// Edit a connection's parameters as a member does, through the service.
+    /// Returns the parameters as a request reads them.
+    async fn patch(&self, id: &str, patch: Value) -> Value {
+        let service = self.service();
+        let version = service
+            .get_connection(id, TENANT)
+            .await
+            .expect("read the connection")
+            .edit_projection
+            .expect("a connection has an edit projection")
+            .version;
+        let request: UpdateConnectionRequest = serde_json::from_value(json!({
+            "version": version,
+            "connectionParameterPatch": patch,
+        }))
+        .unwrap();
+        service
+            .update_connection(id, TENANT, request)
+            .await
+            .expect("edit the connection");
+        self.read(id).await
     }
 
     fn facade(&self) -> ConnectionsFacade {
@@ -454,4 +503,167 @@ async fn an_authorization_code_connection_stays_flagged_after_a_refresh() {
         "REQUIRES_RECONNECTION",
         "only a new consent clears an authorization-code connection's flag"
     );
+}
+
+#[tokio::test]
+async fn a_refusal_of_parameters_the_connection_no_longer_holds_leaves_it_alone() {
+    // A request that read the parameters before an edit can be refused after
+    // it: that says nothing about the credentials the connection holds now,
+    // and must not flag a connection a corrected secret made active.
+    allow_loopback();
+    let provider = MockServer::start().await;
+    token_endpoint(&provider).await;
+    let fixture = Fixture::start(&provider).await;
+    let id = "conn-cc-stale-refusal";
+
+    let read_before_the_edit = fixture
+        .create(
+            id,
+            CLIENT_CREDENTIALS,
+            client_credentials(&provider, WRONG_SECRET),
+            ConnectionStatus::Active,
+        )
+        .await;
+    fixture
+        .edit(
+            id,
+            CLIENT_CREDENTIALS,
+            client_credentials(&provider, RIGHT_SECRET),
+        )
+        .await;
+
+    let Err(error) = fixture
+        .resolve(id, CLIENT_CREDENTIALS, &read_before_the_edit)
+        .await
+    else {
+        panic!("the secret read before the edit must not get a token");
+    };
+    assert!(error.to_string().contains("invalid_client"), "{error}");
+    assert_eq!(fixture.status(id).await, "ACTIVE");
+}
+
+#[tokio::test]
+async fn an_edited_secret_is_tried_on_the_next_request() {
+    // The kept token is filed under a key that leaves the secret out. Kept
+    // past an edit, it would stand in for the edited secret until it expired,
+    // and the status would say nothing about that secret meanwhile.
+    allow_loopback();
+    let provider = MockServer::start().await;
+    token_endpoint(&provider).await;
+    let fixture = Fixture::start(&provider).await;
+    let id = "conn-cc-edited";
+
+    let right = fixture
+        .create(
+            id,
+            CLIENT_CREDENTIALS,
+            client_credentials(&provider, RIGHT_SECRET),
+            ConnectionStatus::Active,
+        )
+        .await;
+    fixture
+        .resolve(id, CLIENT_CREDENTIALS, &right)
+        .await
+        .expect("the right secret gets a token");
+
+    let wrong = fixture
+        .patch(id, json!({"write": {"client_secret": WRONG_SECRET}}))
+        .await;
+    let Err(error) = fixture.resolve(id, CLIENT_CREDENTIALS, &wrong).await else {
+        panic!("the edited secret is tried, not the token the old one got");
+    };
+    assert!(error.to_string().contains("invalid_client"), "{error}");
+    assert_eq!(mint_count(&provider).await, 2);
+    assert_eq!(fixture.status(id).await, "REQUIRES_RECONNECTION");
+}
+
+#[tokio::test]
+async fn a_flag_that_lands_while_the_restore_checks_wins() {
+    // The restore reads the row, compares its parameters, then writes. A
+    // refusal flagging the row again in between leaves the same status and
+    // parameters, only a new version: the restore must not undo it.
+    allow_loopback();
+    let provider = MockServer::start().await;
+    token_endpoint(&provider).await;
+    let fixture = Fixture::start(&provider).await;
+    let id = "conn-cc-flag-meanwhile";
+
+    let parameters = fixture
+        .create(
+            id,
+            CLIENT_CREDENTIALS,
+            client_credentials(&provider, RIGHT_SECRET),
+            ConnectionStatus::RequiresReconnection,
+        )
+        .await;
+
+    // The flag, held uncommitted: the restore's read sees the row as it was,
+    // and its write waits for this one.
+    let mut flag = fixture.pool.begin().await.unwrap();
+    sqlx::query(
+        "UPDATE connection_data_entity \
+         SET status = 'REQUIRES_RECONNECTION', updated_at = clock_timestamp() WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&mut *flag)
+    .await
+    .unwrap();
+
+    let repo = fixture.repo();
+    let restore =
+        tokio::spawn(async move { repo.restore_active_status(id, TENANT, &parameters).await });
+    wait_for_a_blocked_update(&fixture.pool).await;
+    flag.commit().await.unwrap();
+
+    assert_eq!(restore.await.unwrap().unwrap(), 0);
+    assert_eq!(fixture.status(id).await, "REQUIRES_RECONNECTION");
+}
+
+#[tokio::test]
+async fn a_mint_leaves_any_other_status_alone() {
+    // Only the flag a refusal sets is a refusal's to undo.
+    allow_loopback();
+    let provider = MockServer::start().await;
+    token_endpoint(&provider).await;
+    let fixture = Fixture::start(&provider).await;
+
+    for status in [
+        ConnectionStatus::Unknown,
+        ConnectionStatus::InvalidCredentials,
+        ConnectionStatus::PendingConfirmation,
+    ] {
+        let id = format!("conn-cc-{}", status.as_str().to_lowercase());
+        let parameters = fixture
+            .create(
+                &id,
+                CLIENT_CREDENTIALS,
+                client_credentials(&provider, RIGHT_SECRET),
+                status.clone(),
+            )
+            .await;
+        let resolved = fixture
+            .resolve(&id, CLIENT_CREDENTIALS, &parameters)
+            .await
+            .expect("the right secret gets a token");
+        assert!(resolved.token_minted);
+        assert_eq!(fixture.status(&id).await, status.as_str());
+    }
+}
+
+/// Wait until an update of a connection waits on a row lock.
+async fn wait_for_a_blocked_update(pool: &PgPool) {
+    for _ in 0..200 {
+        let blocked: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE wait_event_type = 'Lock' AND query LIKE '%UPDATE connection_data_entity%'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if blocked > 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("the restore never reached its write");
 }

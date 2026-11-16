@@ -1092,8 +1092,9 @@ impl ConnectionRepository {
         .await
     }
 
-    /// Update only the connection status (parameters untouched). Used to flip a
-    /// connection to `REQUIRES_RECONNECTION` when its OAuth grant is dead.
+    /// Update only the connection status (parameters untouched). Used to flip an
+    /// authorization-code connection to `REQUIRES_RECONNECTION` when its OAuth
+    /// grant is dead.
     pub async fn update_status(
         &self,
         id: &str,
@@ -1120,11 +1121,6 @@ impl ConnectionRepository {
     /// credentials were just accepted. A row whose parameters were edited
     /// since stays as it is, and so does a row in any other status.
     ///
-    /// The stored parameters are encrypted, and an encryption of the same
-    /// parameters differs each time, so the row is read and compared first;
-    /// the update then lands only on the row as it was read, so an edit or a
-    /// flip meanwhile wins.
-    ///
     /// Returns the number of rows updated (`0` == nothing to restore).
     pub async fn restore_active_status(
         &self,
@@ -1132,17 +1128,63 @@ impl ConnectionRepository {
         tenant_id: &str,
         parameters: &serde_json::Value,
     ) -> Result<u64, sqlx::Error> {
-        let flagged = ConnectionStatus::RequiresReconnection.as_str();
+        self.set_status_while_holding(
+            id,
+            tenant_id,
+            parameters,
+            Some(ConnectionStatus::RequiresReconnection.as_str()),
+            ConnectionStatus::Active.as_str(),
+        )
+        .await
+    }
+
+    /// Flip a connection to `REQUIRES_RECONNECTION`, only while it still
+    /// holds `parameters` (as read, decrypted): the ones just refused. A
+    /// refusal of parameters the connection no longer holds says nothing
+    /// about the ones it holds now.
+    ///
+    /// Returns the number of rows updated (`0` == the parameters changed).
+    pub async fn flag_reconnection_status(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        parameters: &serde_json::Value,
+    ) -> Result<u64, sqlx::Error> {
+        self.set_status_while_holding(
+            id,
+            tenant_id,
+            parameters,
+            None,
+            ConnectionStatus::RequiresReconnection.as_str(),
+        )
+        .await
+    }
+
+    /// Set `status` while the row holds `parameters`, and is in `from` when
+    /// one is given.
+    ///
+    /// The stored parameters are encrypted, and an encryption of the same
+    /// parameters differs each time, so the row is read and compared first;
+    /// the update then lands only on the row as it was read, so an edit or
+    /// another status write meanwhile wins.
+    async fn set_status_while_holding(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        parameters: &serde_json::Value,
+        from: Option<&str>,
+        status: &str,
+    ) -> Result<u64, sqlx::Error> {
         let row: Option<(Option<serde_json::Value>, chrono::DateTime<chrono::Utc>)> =
             sqlx::query_as(
                 r#"
                 SELECT connection_parameters, updated_at FROM connection_data_entity
-                WHERE id = $1 AND tenant_id = $2 AND status = $3
+                WHERE id = $1 AND tenant_id = $2 AND ($3::text IS NULL OR status = $3)
                 "#,
             )
             .bind(id)
             .bind(tenant_id)
-            .bind(flagged)
+            .bind(from)
             .fetch_optional(&self.pool)
             .await?;
         let Some((Some(stored), version)) = row else {
@@ -1155,14 +1197,14 @@ impl ConnectionRepository {
             r#"
             UPDATE connection_data_entity
             SET status = $4, updated_at = NOW()
-            WHERE id = $1 AND tenant_id = $2 AND status = $3
+            WHERE id = $1 AND tenant_id = $2 AND ($3::text IS NULL OR status = $3)
               AND connection_parameters = $5 AND updated_at = $6
             "#,
         )
         .bind(id)
         .bind(tenant_id)
-        .bind(flagged)
-        .bind(ConnectionStatus::Active.as_str())
+        .bind(from)
+        .bind(status)
         .bind(&stored)
         .bind(version)
         .execute(&self.pool)
