@@ -54,6 +54,8 @@ services:
       disable: true
     environment:
       RUNTARA_EXECUTOR_LISTEN: "0.0.0.0:7443"
+      # The server's run channel: where this executor says it is here.
+      RUNTARA_EXECUTOR_SERVER_URL: "https://runtara:7444"
       RUNTARA_EXECUTOR_TLS_DIR: /pki
       # Compiled workflows; nothing here is needed after a restart.
       RUNTARA_EXECUTOR_STATE_DIR: /data/executor

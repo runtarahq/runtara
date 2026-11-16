@@ -74,9 +74,17 @@ async fn deployment() -> Deployment {
     let executor_tls = dir.path().join("executor-tls");
     runtara_executor::pki::init(&server_tls, &executor_tls, false).unwrap();
 
+    // A port for the run channel: taken, read and given back.
+    let run_channel = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+
     let executor = runtara_executor::Executor::bind(&runtara_executor::Config {
         listen: "127.0.0.1:0".parse().unwrap(),
         tls_dir: executor_tls,
+        server_url: format!("https://{run_channel}"),
+        advertise_url: None,
         state_dir: dir.path().join("executor-state"),
         max_runs: 4,
         run_binary: run_binary(),
@@ -89,11 +97,6 @@ async fn deployment() -> Deployment {
     let executor_runs = executor.runs();
     tokio::spawn(executor.serve());
 
-    // A port for the run channel: taken, read and given back.
-    let run_channel = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap();
     let factory = runtara_runner_executor::prepare(runtara_runner_executor::Config {
         executor_url: executor_url.clone(),
         tls_dir: server_tls.clone(),

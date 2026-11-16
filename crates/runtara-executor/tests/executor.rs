@@ -16,7 +16,7 @@ use std::time::Duration;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use runtara_executor::protocol::{EXECUTOR_NAME, Placed, RunState, SERVER_NAME};
@@ -84,6 +84,31 @@ struct RunChannel {
     workflows: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     /// Each fetch: the digest asked for and the credential it carried.
     fetches: Arc<Mutex<Vec<(String, String)>>>,
+    /// Each time an executor said it was here (`PUT`) or leaving (`DELETE`):
+    /// the method, its boot, what it said.
+    registrations: Arc<Mutex<Vec<(String, String, Value)>>>,
+}
+
+async fn here(
+    State(channel): State<RunChannel>,
+    Path(boot): Path<String>,
+    axum::Json(said): axum::Json<Value>,
+) -> impl IntoResponse {
+    channel
+        .registrations
+        .lock()
+        .unwrap()
+        .push(("PUT".to_owned(), boot, said));
+    axum::Json(json!({"heartbeat_ms": 100, "away_after_ms": 300}))
+}
+
+async fn leaving(State(channel): State<RunChannel>, Path(boot): Path<String>) -> StatusCode {
+    channel
+        .registrations
+        .lock()
+        .unwrap()
+        .push(("DELETE".to_owned(), boot, Value::Null));
+    StatusCode::NO_CONTENT
 }
 
 async fn workflow(
@@ -148,6 +173,8 @@ struct Deployment {
     client: tls::Client,
     /// The executor's own certificate, as a client: not the server's.
     impostor: tls::Client,
+    registrar: Arc<runtara_executor::registration::Registrar>,
+    serving: tokio::task::JoinHandle<()>,
     state: tempfile::TempDir,
 }
 
@@ -173,6 +200,7 @@ impl Deployment {
             .route("/v1/run/input", get(input))
             .route("/v1/run/outcome", post(outcome))
             .route("/executor/v1/artifacts/{digest}", get(workflow))
+            .route("/executor/v1/executors/{boot}", put(here).delete(leaving))
             .with_state(channel.clone());
         let listener = tls::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let endpoint = format!("https://{}", listener.local_addr().unwrap());
@@ -186,6 +214,8 @@ impl Deployment {
         let executor = runtara_executor::Executor::bind(&runtara_executor::Config {
             listen: "127.0.0.1:0".parse().unwrap(),
             tls_dir: tls_dir.clone(),
+            server_url: endpoint.clone(),
+            advertise_url: None,
             state_dir: state.path().join("state"),
             max_runs,
             run_binary: runner(),
@@ -195,7 +225,8 @@ impl Deployment {
         .await
         .unwrap();
         let address = format!("https://{}", executor.address());
-        tokio::spawn(executor.serve());
+        let registrar = executor.registrar();
+        let serving = tokio::spawn(executor.serve());
 
         let client = tls::client(
             server.client_config(&for_server.ca_pem, None).unwrap(),
@@ -217,6 +248,8 @@ impl Deployment {
             executor: address,
             client,
             impostor,
+            registrar,
+            serving,
             state,
         }
     }
@@ -575,6 +608,60 @@ async fn a_run_whose_workflow_is_never_had_can_be_stopped() {
         deployment.ended(&run).await,
         RunState::Failed { .. }
     ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_executor_tells_its_server_it_is_here_until_it_stops() {
+    let deployment = Deployment::start(4).await;
+    let said = || deployment.channel.registrations.lock().unwrap().clone();
+    // At start, and again at the interval the server answered with.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while said().len() < 3 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the executor keeps calling");
+    let boot = deployment.registrar.boot().to_owned();
+    let port: u16 = deployment
+        .executor
+        .rsplit(':')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    for (method, from, registration) in said() {
+        assert_eq!((method.as_str(), from.as_str()), ("PUT", boot.as_str()));
+        assert_eq!(
+            registration,
+            json!({"address": null, "port": port, "max_runs": 4, "running": 0})
+        );
+    }
+    // It says what it holds.
+    let run = deployment.place(json!({"mode": "spin"}), 60).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while said().last().unwrap().2["running"] != 1 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the executor says it holds a run");
+    deployment
+        .call("DELETE", &format!("/v1/runs/{run}"), Vec::new())
+        .await;
+    // Stopped, it calls no more; and it says so when it is asked to.
+    deployment.serving.abort();
+    let _ = (&mut { deployment.serving }).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let before = said().len();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(said().len(), before);
+    deployment.registrar.leave().await;
+    let last = said().pop().unwrap();
+    assert_eq!(
+        (last.0.as_str(), last.1.as_str()),
+        ("DELETE", boot.as_str())
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

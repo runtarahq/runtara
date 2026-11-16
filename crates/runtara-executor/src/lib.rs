@@ -11,7 +11,9 @@
 //!                                  relays the guest's API calls      no network, no files
 //! ```
 //!
-//! The server calls the placement API here ([`protocol`]); each run's
+//! An executor tells its server it is here ([`registration`]); a server has
+//! as many executors as have told it. The server calls the placement API
+//! here ([`protocol`]); each run's workflow, when not held, and its
 //! workflow API calls go back to the server's run channel. Both directions
 //! are mutual TLS between two certificates of one deployment CA ([`pki`]),
 //! each side accepting only the other's.
@@ -26,6 +28,7 @@ pub mod api;
 pub mod artifacts;
 pub mod pki;
 pub mod protocol;
+pub mod registration;
 pub mod runs;
 pub mod tls;
 
@@ -40,6 +43,13 @@ pub struct Config {
     pub listen: SocketAddr,
     /// `ca.pem`, `tls.pem` and `tls.key` (`RUNTARA_EXECUTOR_TLS_DIR`).
     pub tls_dir: PathBuf,
+    /// `https://host:port` of the server's run channel, where this executor
+    /// says it is here (`RUNTARA_EXECUTOR_SERVER_URL`).
+    pub server_url: String,
+    /// `https://host:port` at which the server places runs here, when that
+    /// is not where this executor's calls come from
+    /// (`RUNTARA_EXECUTOR_ADVERTISE_URL`).
+    pub advertise_url: Option<String>,
     /// Compiled workflows (`RUNTARA_EXECUTOR_STATE_DIR`).
     pub state_dir: PathBuf,
     /// Runs at once (`RUNTARA_EXECUTOR_MAX_RUNS`).
@@ -73,6 +83,8 @@ impl Config {
                 .parse()
                 .map_err(|_| "RUNTARA_EXECUTOR_LISTEN is not an address".to_owned())?,
             tls_dir: required("RUNTARA_EXECUTOR_TLS_DIR")?.into(),
+            server_url: required("RUNTARA_EXECUTOR_SERVER_URL")?,
+            advertise_url: var("RUNTARA_EXECUTOR_ADVERTISE_URL"),
             state_dir: required("RUNTARA_EXECUTOR_STATE_DIR")?.into(),
             max_runs: match var("RUNTARA_EXECUTOR_MAX_RUNS") {
                 Some(runs) => runs
@@ -105,6 +117,16 @@ pub struct Executor {
     listener: tokio::net::TcpListener,
     tls: rustls::ServerConfig,
     api: api::Api,
+    registrar: Arc<registration::Registrar>,
+}
+
+/// A task that ends with what holds this.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl Executor {
@@ -123,11 +145,25 @@ impl Executor {
             &config.state_dir,
             runner.clone(),
         )?);
-        let runs = runs::Runs::new(artifacts, identity, runner, config.max_runs);
+        let runs = runs::Runs::new(artifacts, identity.clone(), runner, config.max_runs);
+        let listener = tls::bind(config.listen).await?;
+        let port = listener
+            .local_addr()
+            .map_err(|error| error.to_string())?
+            .port();
+        let registrar = Arc::new(registration::Registrar::new(
+            &identity,
+            &config.server_url,
+            config.advertise_url.clone(),
+            port,
+            config.max_runs,
+            runs.clone(),
+        )?);
         Ok(Self {
-            listener: tls::bind(config.listen).await?,
+            listener,
             tls,
             api: api::Api { runs },
+            registrar,
         })
     }
 
@@ -143,8 +179,15 @@ impl Executor {
         self.api.runs.clone()
     }
 
-    /// Serves the placement API to the server, until dropped.
+    /// What tells the server this executor is here.
+    pub fn registrar(&self) -> Arc<registration::Registrar> {
+        self.registrar.clone()
+    }
+
+    /// Serves the placement API to the server and keeps the server told this
+    /// executor is here, until dropped.
     pub async fn serve(self) {
+        let _told = AbortOnDrop(tokio::spawn(self.registrar.clone().keep()));
         tls::serve(
             self.listener,
             self.tls,
