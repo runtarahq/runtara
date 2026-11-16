@@ -1512,9 +1512,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   console kept asking for a reconnect after the credentials were corrected
   and every call worked. A token minted for the parameters the connection
   holds now makes it `ACTIVE` again, on the first request after the fix (not
-  when the edit is saved). An edit of the connection's parameters drops the
-  token kept for it, which was otherwise used until it expired, so the edited
-  secret is tried on the next request. A refusal of parameters the connection
+  when the edit is saved). An edit that changes the connection's parameters
+  drops the token kept for it, which was otherwise used until it expired, so
+  the edited secret is tried on the next request. A refusal of parameters the connection
   no longer holds (a request that read them before an edit) no longer flags
   it. A token kept from an earlier request changes nothing, and an
   authorization-code connection is still cleared only by authorizing it

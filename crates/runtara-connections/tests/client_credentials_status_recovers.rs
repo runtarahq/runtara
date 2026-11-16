@@ -578,6 +578,73 @@ async fn an_edited_secret_is_tried_on_the_next_request() {
 }
 
 #[tokio::test]
+async fn a_patch_that_changes_nothing_keeps_the_token() {
+    // Only a change of the parameters can make the kept token wrong.
+    allow_loopback();
+    let provider = MockServer::start().await;
+    token_endpoint(&provider).await;
+    let fixture = Fixture::start(&provider).await;
+    let id = "conn-cc-no-op-edit";
+
+    let parameters = fixture
+        .create(
+            id,
+            CLIENT_CREDENTIALS,
+            client_credentials(&provider, RIGHT_SECRET),
+            ConnectionStatus::Active,
+        )
+        .await;
+    fixture
+        .resolve(id, CLIENT_CREDENTIALS, &parameters)
+        .await
+        .expect("the right secret gets a token");
+
+    for patch in [json!({}), json!({"set": {"scope": "read"}})] {
+        let unchanged = fixture.patch(id, patch).await;
+        let resolved = fixture
+            .resolve(id, CLIENT_CREDENTIALS, &unchanged)
+            .await
+            .expect("the kept token is used");
+        assert!(!resolved.token_minted);
+    }
+    assert_eq!(mint_count(&provider).await, 1);
+}
+
+#[tokio::test]
+async fn a_secret_entered_again_gets_a_new_token() {
+    // Sealed again, a secret is a change even when it is the same one: the
+    // member says to use it, so it is tried.
+    allow_loopback();
+    let provider = MockServer::start().await;
+    token_endpoint(&provider).await;
+    let fixture = Fixture::start(&provider).await;
+    let id = "conn-cc-secret-again";
+
+    let parameters = fixture
+        .create(
+            id,
+            CLIENT_CREDENTIALS,
+            client_credentials(&provider, RIGHT_SECRET),
+            ConnectionStatus::Active,
+        )
+        .await;
+    fixture
+        .resolve(id, CLIENT_CREDENTIALS, &parameters)
+        .await
+        .expect("the right secret gets a token");
+
+    let entered_again = fixture
+        .patch(id, json!({"write": {"client_secret": RIGHT_SECRET}}))
+        .await;
+    let resolved = fixture
+        .resolve(id, CLIENT_CREDENTIALS, &entered_again)
+        .await
+        .expect("the secret entered again gets a token");
+    assert!(resolved.token_minted);
+    assert_eq!(mint_count(&provider).await, 2);
+}
+
+#[tokio::test]
 async fn a_flag_that_lands_while_the_restore_checks_wins() {
     // The restore reads the row, compares its parameters, then writes. A
     // refusal flagging the row again in between leaves the same status and

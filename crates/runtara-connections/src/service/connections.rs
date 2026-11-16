@@ -1302,8 +1302,12 @@ impl ConnectionService {
         }
         // A client-credentials token is kept under a key that leaves the
         // secret out, so one minted with the old credentials would outlive
-        // the edit. Dropped, the next request mints with the edited ones.
-        if effective_parameters.is_some()
+        // the edit. Dropped, the next request mints with the edited ones. A
+        // patch that leaves the parameters as they were (compared sealed, so
+        // a secret entered again counts as a change) keeps the token.
+        if effective_parameters
+            .as_ref()
+            .is_some_and(|merged| merged != &old_params)
             && crate::auth::provider_auth::is_client_credentials(
                 runtara_agents::registry::find_connection_type(&integration_id),
             )
