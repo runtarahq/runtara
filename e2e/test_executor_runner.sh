@@ -3,11 +3,12 @@
 #
 # Builds `runtara-server`, `runtara-executor` and `runtara-run`, makes the
 # deployment's certificates, starts an executor, and runs the given e2e
-# suites against a server with RUNTARA_RUNNER=executor. Every workflow of the
-# suites is then compiled by the server, staged with the executor over mutual
-# TLS and run in a `runtara-run` process of its own (sandboxed on Linux),
-# its workflow API calls coming back over the run channel. Checks that the
-# suites' launches went through the executor.
+# suites against a server with RUNTARA_RUNNER=executor. The executor tells
+# the server it is here; every workflow of the suites is then compiled by the
+# server, fetched by the executor over mutual TLS and run in a `runtara-run`
+# process of its own (sandboxed on Linux), its workflow API calls coming back
+# over the run channel. Checks that the suites' launches went through the
+# executor. Executors coming and going: e2e/test_scalable_executors.sh.
 #
 # Usage: e2e/test_executor_runner.sh [suite ...]
 #   suites are e2e/test_<suite>.sh names; default: workflow_agent_parity
