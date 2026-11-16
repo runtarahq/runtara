@@ -1501,6 +1501,7 @@ mod tests {
             azure_signing: None,
             sealed_parameters: None,
             rotated_sealed: None,
+            token_minted: false,
         }
     }
 
@@ -1563,6 +1564,7 @@ mod tests {
             azure_signing: None,
             sealed_parameters: None,
             rotated_sealed: None,
+            token_minted: false,
         };
         apply_aws_service_override(Some("sqs"), &mut resolved);
 
@@ -1588,6 +1590,7 @@ mod tests {
             azure_signing: None,
             sealed_parameters: None,
             rotated_sealed: None,
+            token_minted: false,
         }
     }
 
@@ -1793,6 +1796,7 @@ mod tests {
             azure_signing: None,
             sealed_parameters: None,
             rotated_sealed: None,
+            token_minted: false,
         }
     }
 

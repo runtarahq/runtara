@@ -24,6 +24,10 @@ pub struct ResolvedConnectionAuth {
     /// The sealed tokens a refresh through seal brought back, to be stored
     /// with the connection. `None` unless a refresh was made now.
     pub rotated_sealed: Option<crate::sealed::RotatedSealed>,
+    /// Whether the token endpoint issued a client-credentials access token
+    /// now: the connection's credentials were just accepted. `false` for a
+    /// token kept from an earlier request, and for every other grant.
+    pub token_minted: bool,
 }
 
 pub(crate) struct ConnectionAuthDescriptor {
@@ -76,12 +80,14 @@ pub async fn resolve_connection_auth(
     // A client secret gets the access token through seal, already sealed
     // for the connection's API.
     let mut sealed_parameters = None;
+    let mut token_minted = false;
     if crate::sealed::policy::sealed_token_grant(integration_id, params).is_some() {
-        let token = sealed
+        let cached = sealed
             .minted_access_token(tenant_id, connection_id, integration_id, params)
             .await?;
+        token_minted = matches!(cached, token_cache::CachedToken::Minted(_));
         let mut presenting = params.clone();
-        presenting[crate::sealed::policy::ACCESS_TOKEN_FIELD] = token;
+        presenting[crate::sealed::policy::ACCESS_TOKEN_FIELD] = cached.into_token();
         sealed_parameters = Some(presenting);
     }
     // A refresh token gets the next pair through seal, sealed too.
@@ -102,6 +108,7 @@ pub async fn resolve_connection_auth(
         azure_signing: descriptor.azure_signing,
         sealed_parameters,
         rotated_sealed,
+        token_minted,
     })
 }
 
@@ -735,6 +742,20 @@ pub fn invalidate_connection_token_caches(
             &effective.token_url,
         );
     }
+}
+
+/// Whether a connection type authenticates with the OAuth2 client-credentials
+/// grant: its status says only whether the token endpoint accepts its
+/// credentials.
+pub(crate) fn is_client_credentials(
+    meta: Option<&runtara_dsl::agent_meta::ConnectionTypeMeta>,
+) -> bool {
+    meta.is_some_and(|m| {
+        matches!(
+            m.auth_type,
+            Some(runtara_dsl::agent_meta::ConnectionAuthType::Oauth2ClientCredentials)
+        )
+    })
 }
 
 /// Evict *all* in-memory credential state for a connection — every grant type, not

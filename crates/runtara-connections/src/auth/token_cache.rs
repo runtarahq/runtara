@@ -183,22 +183,42 @@ where
     }
 }
 
+/// What [`resolve_cached_token`] found.
+pub(crate) enum CachedToken<T> {
+    /// A token kept from an earlier request, still fresh.
+    Kept(T),
+    /// A token the token endpoint issued now: the credentials it was asked
+    /// with were just accepted.
+    Minted(T),
+}
+
+impl<T> CachedToken<T> {
+    /// The token, wherever it came from.
+    pub(crate) fn into_token(self) -> T {
+        match self {
+            Self::Kept(token) | Self::Minted(token) => token,
+        }
+    }
+}
+
+/// The token kept under `cache_key` while it is fresh, or the one `fetch` gets,
+/// which is then kept.
 pub(crate) async fn resolve_cached_token<F, Fut>(
     cache_key: &TokenCacheKey,
     fetch: F,
-) -> Result<String, AuthResolutionError>
+) -> Result<CachedToken<String>, AuthResolutionError>
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<CachedAccessToken, AuthResolutionError>>,
 {
     if let Some(token) = get_fresh_cached_token(cache_key) {
-        return Ok(token);
+        return Ok(CachedToken::Kept(token));
     }
 
     let cached = fetch().await?;
     let access_token = cached.access_token.clone();
     cache_token(cache_key, cached);
-    Ok(access_token)
+    Ok(CachedToken::Minted(access_token))
 }
 
 /// Re-check a token endpoint immediately before credentials are sent to it
@@ -483,7 +503,7 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(first, "token-123");
+        assert!(matches!(first, CachedToken::Minted(ref token) if token == "token-123"));
 
         let second_counter = Arc::clone(&call_count);
         let second = resolve_cached_token(&key("conn-cached", "cache-key"), move || async move {
@@ -494,7 +514,7 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(second, "token-123");
+        assert!(matches!(second, CachedToken::Kept(ref token) if token == "token-123"));
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 

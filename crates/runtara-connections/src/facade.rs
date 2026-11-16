@@ -464,7 +464,7 @@ impl ConnectionsFacade {
                 // A dead grant (e.g. `invalid_grant` on refresh) means retrying forever
                 // is pointless — flip the connection to REQUIRES_RECONNECTION so the UI
                 // can prompt a reconnect.
-                self.maybe_flip_needs_reauth(connection_id, tenant_id, integration_id, &e)
+                self.maybe_flip_needs_reauth(connection_id, tenant_id, integration_id, params, &e)
                     .await;
                 return Err(ConnectionsError::AuthResolution(e));
             }
@@ -502,6 +502,13 @@ impl ConnectionsFacade {
             .await?;
         }
 
+        // Only a token minted now says the credentials work; a kept one says
+        // nothing new, and keeps this write off the per-request path.
+        if resolved.token_minted {
+            self.maybe_restore_active(connection_id, tenant_id, integration_id, params)
+                .await;
+        }
+
         Ok(resolved)
     }
 
@@ -509,13 +516,17 @@ impl ConnectionsFacade {
     /// provider's descriptor flags as reauth-worthy (e.g. `invalid_grant`), or a
     /// PERMANENT credential failure on a client-credentials connection (wrong
     /// secret → token-endpoint 4xx) — flip the connection to
-    /// `REQUIRES_RECONNECTION`. Best-effort: a failed status write is logged, not
-    /// propagated (the original auth error is what the caller sees).
+    /// `REQUIRES_RECONNECTION`. A client-credentials connection is flipped
+    /// only while it still holds `params`, the parameters refused: a request
+    /// that read them before an edit says nothing about the edited ones.
+    /// Best-effort: a failed status write is logged, not propagated (the
+    /// original auth error is what the caller sees).
     async fn maybe_flip_needs_reauth(
         &self,
         connection_id: &str,
         tenant_id: &str,
         integration_id: &str,
+        params: &Value,
         error: &crate::auth::token_cache::AuthResolutionError,
     ) {
         let meta = runtara_agents::registry::find_connection_type(integration_id);
@@ -525,25 +536,26 @@ impl ConnectionsFacade {
             .unwrap_or(&[]);
         // Client-credentials types declare no oauth_config/reauth codes; for
         // them, permanence of the mint failure IS the terminal signal.
-        let client_credentials_permanent = error.permanent
-            && meta.is_some_and(|m| {
-                matches!(
-                    m.auth_type,
-                    Some(runtara_dsl::agent_meta::ConnectionAuthType::Oauth2ClientCredentials)
-                )
-            });
+        let client_credentials_permanent =
+            error.permanent && provider_auth::is_client_credentials(meta);
         if !client_credentials_permanent && !is_reauth_error(&error.message, codes) {
             return;
         }
-        match self
-            .repo()
-            .update_status(
-                connection_id,
-                tenant_id,
-                ConnectionStatus::RequiresReconnection.as_str(),
-            )
-            .await
-        {
+        let flipped = if client_credentials_permanent {
+            self.repo()
+                .flag_reconnection_status(connection_id, tenant_id, params)
+                .await
+        } else {
+            self.repo()
+                .update_status(
+                    connection_id,
+                    tenant_id,
+                    ConnectionStatus::RequiresReconnection.as_str(),
+                )
+                .await
+        };
+        match flipped {
+            Ok(0) => {}
             // The message holds the token endpoint's status and OAuth error fields
             // (`invalid_scope`, `invalid_client`, …), never its body or a credential;
             // without it the reason is only in a debug log.
@@ -556,6 +568,45 @@ impl ConnectionsFacade {
                 connection_id,
                 error = %e,
                 "failed to flip connection to REQUIRES_RECONNECTION after a reauth error"
+            ),
+        }
+    }
+
+    /// Undo [`Self::maybe_flip_needs_reauth`] for a client-credentials
+    /// connection once the token endpoint accepts its credentials again: they
+    /// were corrected, or the provider stopped refusing them. With no user
+    /// grant behind the connection there is nothing to reconnect, so a mint is
+    /// the whole proof. Only while the connection still holds `params`, the
+    /// parameters that minted (see
+    /// [`ConnectionRepository::restore_active_status`]). An
+    /// authorization-code connection is never restored here: its status is
+    /// its reconnect flow's. Best-effort, as the flip is.
+    async fn maybe_restore_active(
+        &self,
+        connection_id: &str,
+        tenant_id: &str,
+        integration_id: &str,
+        params: &Value,
+    ) {
+        if !provider_auth::is_client_credentials(runtara_agents::registry::find_connection_type(
+            integration_id,
+        )) {
+            return;
+        }
+        match self
+            .repo()
+            .restore_active_status(connection_id, tenant_id, params)
+            .await
+        {
+            Ok(0) => {}
+            Ok(_) => tracing::info!(
+                connection_id,
+                "client-credentials token minted — connection restored to ACTIVE"
+            ),
+            Err(e) => tracing::error!(
+                connection_id,
+                error = %e,
+                "failed to restore connection to ACTIVE after a token mint"
             ),
         }
     }
