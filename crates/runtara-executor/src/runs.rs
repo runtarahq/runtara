@@ -3,6 +3,10 @@
 //! Runs: each is a `runtara-run` process and the task here that supervises
 //! it.
 //!
+//! A run whose workflow this executor does not hold has it fetched first,
+//! from the server that placed the run and as that run
+//! ([`crate::artifacts::Artifacts::ensure`]).
+//!
 //! The process holds the guest and nothing else. Its workflow API calls come
 //! out of it over a socket pair, and this task relays each to the server's
 //! run channel, where it adds what the process never sees: the launch's
@@ -26,8 +30,11 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zeroize::Zeroizing;
 
-use crate::artifacts::{Artifacts, Runner};
-use crate::protocol::{Place, RUN_PROTOCOL, RunIdentity, RunSpec, RunState};
+use crate::artifacts::{Artifacts, Runner, StageError};
+use crate::protocol::{
+    ARTIFACTS_PATH, MAX_ARTIFACT_BYTES, Place, RUN_PROTOCOL, RunIdentity, RunSpec, RunState,
+    valid_digest, valid_tenant,
+};
 use crate::tls::{Client, Identity};
 
 /// How long past its lifetime a run's process is left to end by itself.
@@ -49,8 +56,6 @@ const OUTCOME_ATTEMPTS: u32 = 4;
 pub enum PlaceError {
     /// The spec is wrong.
     Invalid(String),
-    /// The workflow is not staged for the tenant.
-    NotStaged,
     /// Every slot stayed taken; the server offers the run again.
     Capacity,
     Internal(String),
@@ -146,6 +151,32 @@ impl Upstream {
         parts.headers.remove(http::header::TRANSFER_ENCODING);
         parts.headers.remove(http::header::CONNECTION);
         Ok(http::Response::from_parts(parts, body))
+    }
+
+    /// The component of this run's workflow, which is `digest`: fetched from
+    /// beside the run channel, as this run.
+    async fn workflow(&self, digest: &str) -> Result<Bytes, String> {
+        let mut request = http::Request::builder()
+            .method(http::Method::GET)
+            .uri(format!("{}{ARTIFACTS_PATH}/{digest}", self.endpoint))
+            .body(Full::new(Bytes::new()))
+            .map_err(|error| error.to_string())?;
+        request
+            .headers_mut()
+            .insert(http::header::AUTHORIZATION, self.authorization.clone());
+        let response = self
+            .client
+            .request(request)
+            .await
+            .map_err(|_| "the server could not be reached".to_owned())?;
+        if !response.status().is_success() {
+            return Err(format!("the server answered {}", response.status()));
+        }
+        Limited::new(response.into_body(), MAX_ARTIFACT_BYTES)
+            .collect()
+            .await
+            .map(|body| body.to_bytes())
+            .map_err(|_| "the workflow broke off or is too large".to_owned())
     }
 
     /// Posts the failed outcome of a run whose guest posted none. A server
@@ -322,9 +353,15 @@ impl Runs {
             .count()
     }
 
-    /// Starts a run; its id.
+    /// Starts a run; its id. A run whose workflow is not held here is placed
+    /// all the same: its workflow is fetched and compiled before its process
+    /// starts, and a workflow that cannot be had ends the run as failed.
     pub async fn place(self: &Arc<Self>, place: Place) -> Result<String, PlaceError> {
-        let spec = place.spec;
+        let Place {
+            tenant,
+            artifact,
+            spec,
+        } = place;
         if spec.protocol != RUN_PROTOCOL {
             return Err(PlaceError::Invalid(format!(
                 "run protocol {} is not {RUN_PROTOCOL}",
@@ -336,11 +373,12 @@ impl Runs {
                 "lifetime_seconds is out of range".to_owned(),
             ));
         }
+        if !valid_tenant(&tenant) || !valid_digest(&artifact) {
+            return Err(PlaceError::Invalid(
+                "not a tenant and a workflow's SHA-256".to_owned(),
+            ));
+        }
         let upstream = Arc::new(Upstream::new(&self.identity, &spec).map_err(PlaceError::Invalid)?);
-        let compiled = self
-            .artifacts
-            .open(&place.tenant, &place.artifact)
-            .ok_or(PlaceError::NotStaged)?;
         // A burst a little over capacity waits its turn here: runs are
         // short, and a refusal costs the server a recovery. Only an executor
         // that stays full refuses.
@@ -356,31 +394,15 @@ impl Runs {
                 PlaceError::Capacity
             })?;
 
-        let internal = |error: std::io::Error| PlaceError::Internal(error.to_string());
-        let (ours, theirs) = std::os::unix::net::UnixStream::pair().map_err(internal)?;
-        ours.set_nonblocking(true).map_err(internal)?;
-        let ours = tokio::net::UnixStream::from_std(ours).map_err(internal)?;
-        let mut child = self
-            .runner
-            .command("run", compiled.into(), theirs.into())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(internal)?;
-        // What the process is told: the guest's limits, and nothing of where
-        // its calls go or as whom.
-        let told = json!({
-            "wasm_memory_bytes": spec.wasm_memory_bytes,
-            "lifetime_seconds": spec.lifetime_seconds,
-            "env": spec.env,
-        });
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(told.to_string().as_bytes())
-                .await
-                .map_err(internal)?;
-        }
+        // Held already: its process starts before the run is answered for.
+        let started = match self.artifacts.open(&tenant, &artifact) {
+            Some(compiled) => Some(
+                self.start(compiled, &spec)
+                    .await
+                    .map_err(|error| PlaceError::Internal(error.to_string()))?,
+            ),
+            None => None,
+        };
 
         let id = uuid::Uuid::new_v4().simple().to_string();
         let run = Arc::new(Run {
@@ -394,23 +416,24 @@ impl Runs {
         tracing::info!(
             run = %id,
             execution = %spec.run.execution,
-            tenant = %place.tenant,
+            %tenant,
+            fetching = started.is_none(),
             "run placed"
         );
         let runs = Arc::clone(self);
         let supervised = id.clone();
         tokio::spawn(async move {
-            let lifetime = Duration::from_secs(spec.lifetime_seconds);
-            let state = supervise(
-                &supervised,
-                &run,
-                child,
-                ours,
-                upstream,
-                &spec.run,
-                lifetime,
-            )
-            .await;
+            let state = runs
+                .see_through(
+                    &supervised,
+                    &run,
+                    started,
+                    &tenant,
+                    &artifact,
+                    upstream,
+                    &spec,
+                )
+                .await;
             tracing::info!(run = %supervised, execution = %spec.run.execution, ?state, "run ended");
             run.state.send_replace(state);
             drop(slot);
@@ -421,6 +444,112 @@ impl Runs {
                 .remove(&supervised);
         });
         Ok(id)
+    }
+
+    /// Starts a run's process on `compiled`; the process and this side of
+    /// its socket pair.
+    async fn start(
+        &self,
+        compiled: std::fs::File,
+        spec: &RunSpec,
+    ) -> std::io::Result<(tokio::process::Child, tokio::net::UnixStream)> {
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair()?;
+        ours.set_nonblocking(true)?;
+        let ours = tokio::net::UnixStream::from_std(ours)?;
+        let mut child = self
+            .runner
+            .command("run", compiled.into(), theirs.into())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        // What the process is told: the guest's limits, and nothing of where
+        // its calls go or as whom.
+        let told = json!({
+            "wasm_memory_bytes": spec.wasm_memory_bytes,
+            "lifetime_seconds": spec.lifetime_seconds,
+            "env": spec.env,
+        });
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(told.to_string().as_bytes()).await?;
+        }
+        Ok((child, ours))
+    }
+
+    /// The compiled workflow of a run that was placed without it: fetched as
+    /// the run, checked and compiled. Otherwise why the run cannot start.
+    async fn fetched(
+        &self,
+        tenant: &str,
+        artifact: &str,
+        upstream: &Upstream,
+    ) -> Result<std::fs::File, String> {
+        let held = self
+            .artifacts
+            .ensure(tenant, artifact, || upstream.workflow(artifact))
+            .await;
+        match held {
+            Ok(()) => self
+                .artifacts
+                .open(tenant, artifact)
+                .ok_or_else(|| "the executor could not prepare the workflow".to_owned()),
+            Err(StageError::Fetch(why)) => Err(format!("the workflow could not be fetched: {why}")),
+            Err(StageError::Invalid(why)) => Err(format!("the workflow is not usable: {why}")),
+            Err(StageError::Compile(why)) => Err(format!("the workflow was refused: {why}")),
+            Err(StageError::Internal(message)) => {
+                tracing::error!(%tenant, digest = %artifact, %message, "preparing a workflow failed");
+                Err("the executor could not prepare the workflow".to_owned())
+            }
+        }
+    }
+
+    /// Sees a placed run to its end: its workflow fetched if it was not
+    /// held, its process started and supervised. What became of it.
+    #[allow(clippy::too_many_arguments)]
+    async fn see_through(
+        &self,
+        id: &str,
+        run: &Run,
+        started: Option<(tokio::process::Child, tokio::net::UnixStream)>,
+        tenant: &str,
+        artifact: &str,
+        upstream: Arc<Upstream>,
+        spec: &RunSpec,
+    ) -> RunState {
+        let started = match started {
+            Some(started) => Ok(started),
+            None => {
+                let fetched = tokio::select! {
+                    fetched = self.fetched(tenant, artifact, &upstream) => fetched,
+                    // The server asked: it does not wait for an outcome.
+                    _ = run.stop.notified() => {
+                        return RunState::Failed { reason: "stopped".to_owned() };
+                    }
+                };
+                match fetched {
+                    Ok(compiled) => self.start(compiled, spec).await.map_err(|error| {
+                        tracing::error!(run = %id, %error, "starting a run's process failed");
+                        "the run could not be started".to_owned()
+                    }),
+                    Err(why) => Err(why),
+                }
+            }
+        };
+        match started {
+            Ok((child, socket)) => {
+                let lifetime = Duration::from_secs(spec.lifetime_seconds);
+                supervise(id, run, child, socket, upstream, &spec.run, lifetime).await
+            }
+            Err(reason) => {
+                upstream
+                    .post_failed(
+                        &spec.run,
+                        &Failure::permanent("LAUNCH_FAILED", reason.clone()),
+                    )
+                    .await;
+                RunState::Failed { reason }
+            }
+        }
     }
 
     /// Stops a run; whether there is one.

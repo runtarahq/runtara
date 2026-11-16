@@ -123,11 +123,11 @@ impl Executor {
             &config.state_dir,
             runner.clone(),
         )?);
-        let runs = runs::Runs::new(artifacts.clone(), identity, runner, config.max_runs);
+        let runs = runs::Runs::new(artifacts, identity, runner, config.max_runs);
         Ok(Self {
             listener: tls::bind(config.listen).await?,
             tls,
-            api: api::Api { artifacts, runs },
+            api: api::Api { runs },
         })
     }
 

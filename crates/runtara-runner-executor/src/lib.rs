@@ -5,7 +5,8 @@
 //! provider.
 //!
 //! With `RUNTARA_RUNNER=executor` no workflow runs in the server's process.
-//! Each launch's workflow is staged with the executor and placed there; its
+//! Each launch is placed with the executor, which fetches the launch's
+//! workflow from the run channel's listener if it does not hold it; its
 //! guest reaches the workflow API over the run channel this process serves,
 //! each call carrying the credential minted for its launch; and the run ends
 //! on the outcome it posts. The executor says when a run's process ended
@@ -23,14 +24,20 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use axum::Router;
+use axum::extract::Path;
+use axum::response::IntoResponse;
+use axum::routing::get;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use runtara_component_host::api_launches::ApiLaunches;
 use runtara_environment::runner::{
-    LaunchOptions, Provider, ProviderEnd, ProviderRunner, RunChannel, Runner, RunnerFactory,
+    LaunchOptions, LaunchWorkflows, Provider, ProviderEnd, ProviderRunner, RunChannel, Runner,
+    RunnerFactory,
 };
 use runtara_executor::protocol::{
-    EXECUTOR_NAME, Placed, Refusal, RunState, SERVER_NAME, valid_tenant,
+    ARTIFACTS_PATH, EXECUTOR_NAME, Placed, Refusal, RunState, SERVER_NAME, valid_digest,
+    valid_tenant,
 };
 use runtara_executor::tls::{self, Identity};
 use runtara_workflow_api::Binding;
@@ -43,10 +50,8 @@ const DEFAULT_MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
 /// An executor unreachable this long has lost its runs: runtara recovers
 /// them.
 const LOST_AFTER: Duration = Duration::from_secs(30);
-/// How long one call to the executor may take, staging aside.
+/// How long one call to the executor may take.
 const CALL_TIMEOUT: Duration = Duration::from_secs(40);
-/// How long staging a workflow may take: the executor compiles it.
-const STAGE_TIMEOUT: Duration = Duration::from_secs(330);
 
 /// How the server reaches its executor, and the executor the server.
 #[derive(Clone, Debug)]
@@ -210,28 +215,10 @@ impl Provider for ExecutorProvider {
         })
     }
 
-    async fn stage(&self, tenant: &str, bytes: &[u8]) -> Result<String, String> {
-        let digest = hex(&sha2::Sha256::digest(bytes));
-        let path = format!("/v1/artifacts/{}/{digest}", tenant_segment(tenant));
-        let (status, _) = self
-            .call(http::Method::GET, &path, Bytes::new(), CALL_TIMEOUT)
-            .await?;
-        if status == http::StatusCode::NO_CONTENT {
-            return Ok(digest);
-        }
-        let (status, body) = self
-            .call(
-                http::Method::PUT,
-                &path,
-                Bytes::copy_from_slice(bytes),
-                STAGE_TIMEOUT,
-            )
-            .await?;
-        if status == http::StatusCode::NO_CONTENT {
-            Ok(digest)
-        } else {
-            Err(Self::refusal(status, &body))
-        }
+    /// Nothing is sent: the executor fetches a workflow it does not hold
+    /// when a run of it is placed ([`workflow_router`]).
+    async fn stage(&self, _tenant: &str, bytes: &[u8]) -> Result<String, String> {
+        Ok(hex(&sha2::Sha256::digest(bytes)))
     }
 
     async fn place(
@@ -319,11 +306,41 @@ impl Provider for ExecutorProvider {
     }
 }
 
+/// What an executor fetches a launch's workflow from, on the run channel's
+/// listener: `GET /executor/v1/artifacts/{sha256}` with the launch's
+/// credential answers with that launch's workflow component, and with nothing
+/// for any other digest. It is outside `/v1`, which is all an executor relays
+/// from a guest, and it is answered before the launch's start is confirmed:
+/// a workflow being fetched is not a guest acting.
+pub fn workflow_router(launches: Arc<ApiLaunches>, workflows: Arc<LaunchWorkflows>) -> Router {
+    let fetch = move |Path(digest): Path<String>, headers: http::HeaderMap| {
+        let (launches, workflows) = (launches.clone(), workflows.clone());
+        async move {
+            let Some(binding) = launches.credential_launch(&headers) else {
+                return http::StatusCode::UNAUTHORIZED.into_response();
+            };
+            if !valid_digest(&digest) {
+                return http::StatusCode::NOT_FOUND.into_response();
+            }
+            match workflows.get(&binding.launch_id, &digest).await {
+                Ok(Some(component)) => component.into_response(),
+                Ok(None) => http::StatusCode::NOT_FOUND.into_response(),
+                Err(error) => {
+                    tracing::error!(%error, launch = %binding.launch_id, "reading a launch's workflow failed");
+                    http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                }
+            }
+        }
+    };
+    Router::new().route(&format!("{ARTIFACTS_PATH}/{{digest}}"), get(fetch))
+}
+
 /// Serves the run channel and connects to the executor; the factory of the
 /// runner over them. Called once, at boot, on the server's runtime.
 pub async fn prepare(config: Config) -> Result<RunnerFactory, String> {
     let identity = Identity::load(&config.tls_dir)?;
     let launches = Arc::new(ApiLaunches::default());
+    let workflows = Arc::new(LaunchWorkflows::default());
     let listener = tls::bind(config.run_channel_listen).await?;
     tracing::info!(
         listen = %config.run_channel_listen,
@@ -335,7 +352,9 @@ pub async fn prepare(config: Config) -> Result<RunnerFactory, String> {
         listener,
         identity.server_config()?,
         EXECUTOR_NAME,
-        launches.credentialed_router(),
+        launches
+            .credentialed_router()
+            .merge(workflow_router(launches.clone(), workflows.clone())),
     ));
     let channel = RunChannel {
         endpoint: config.run_channel_endpoint,
@@ -348,7 +367,8 @@ pub async fn prepare(config: Config) -> Result<RunnerFactory, String> {
     Ok(Arc::new(move |parts| {
         Ok(Arc::new(
             ProviderRunner::new(provider.clone(), parts, launches.clone(), limit)
-                .with_run_channel(channel.clone()),
+                .with_run_channel(channel.clone())
+                .with_launch_workflows(workflows.clone()),
         ) as Arc<dyn Runner>)
     }))
 }

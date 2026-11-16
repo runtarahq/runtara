@@ -64,6 +64,7 @@ struct Deployment {
     executor_url: String,
     executor_runs: Arc<runtara_executor::runs::Runs>,
     server_tls: PathBuf,
+    executor_state: PathBuf,
     _dir: tempfile::TempDir,
 }
 
@@ -120,6 +121,7 @@ async fn deployment() -> Deployment {
         executor_url,
         executor_runs,
         server_tls,
+        executor_state: dir.path().join("executor-state"),
         _dir: dir,
     }
 }
@@ -198,12 +200,23 @@ async fn a_workflow_runs_on_the_executor_and_completes() {
     assert_eq!(output["tenantId"], "tenant-x");
     assert_eq!(output["echo"]["from"], "executor-test");
 
-    // Staged once: a second run of the same workflow places straight away.
+    // Held by the executor now: a second run of the workflow starts at once.
     deployment
         .run("inst-2", "complete", Duration::from_secs(60))
         .await;
     assert_eq!(
         deployment.status("inst-2").await.0,
+        InstanceStatus::Completed
+    );
+
+    // An executor that lost what it held fetches it again, though the server
+    // staged the workflow moments ago.
+    std::fs::remove_dir_all(deployment.executor_state.join("compiled")).unwrap();
+    deployment
+        .run("inst-3", "complete", Duration::from_secs(60))
+        .await;
+    assert_eq!(
+        deployment.status("inst-3").await.0,
         InstanceStatus::Completed
     );
 }

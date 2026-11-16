@@ -4,13 +4,18 @@
 //!
 //! | Call | Purpose |
 //! |---|---|
-//! | `HEAD /v1/artifacts/{tenant}/{sha256}` | whether the workflow is staged |
-//! | `PUT /v1/artifacts/{tenant}/{sha256}` | stage it: the component's bytes, checked against the digest and compiled |
 //! | `POST /v1/runs` | place a run: [`Place`] → [`Placed`] |
 //! | `GET /v1/runs/{id}?wait_ms=` | the run's [`RunState`], waiting up to `wait_ms` for it to end |
 //! | `DELETE /v1/runs/{id}` | stop it |
 //!
 //! A refusal is a [`Refusal`] with a 4xx or 5xx status.
+//!
+//! And what an executor asks of the server, on the run channel's listener
+//! and besides the workflow API it relays for its runs:
+//!
+//! | Call | Purpose |
+//! |---|---|
+//! | `GET /executor/v1/artifacts/{sha256}` | the workflow component of the launch whose credential the call carries |
 
 use std::collections::BTreeMap;
 
@@ -18,8 +23,11 @@ use serde::{Deserialize, Serialize};
 
 /// The run protocol a spec speaks (`runtara-environment`'s `RUN_PROTOCOL`).
 pub const RUN_PROTOCOL: u64 = 1;
-/// The largest component staged.
+/// The largest workflow component an executor fetches.
 pub const MAX_ARTIFACT_BYTES: usize = 128 * 1024 * 1024;
+/// Where, at a run channel's endpoint, an executor fetches a launch's
+/// workflow: `{ARTIFACTS_PATH}/{sha256}`.
+pub const ARTIFACTS_PATH: &str = "/executor/v1/artifacts";
 /// The longest a status call is held open.
 pub const MAX_WAIT_MS: u64 = 30_000;
 
@@ -50,7 +58,7 @@ pub fn valid_digest(digest: &str) -> bool {
 #[derive(Serialize, Deserialize)]
 pub struct Place {
     pub tenant: String,
-    /// The staged workflow's digest.
+    /// The workflow's digest: the SHA-256 of its component.
     pub artifact: String,
     pub spec: RunSpec,
 }
@@ -80,7 +88,7 @@ pub enum RunState {
 /// Why a call was refused.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Refusal {
-    /// `invalid`, `not_found`, `capacity`, `compile` or `internal`.
+    /// `invalid`, `not_found`, `capacity` or `internal`.
     pub error: String,
     pub message: String,
 }
