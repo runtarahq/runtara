@@ -214,6 +214,11 @@ fn peer_is(certificates: Option<&[CertificateDer<'static>]>, name: &str) -> bool
     rustls::client::verify_server_name(&certificate, &name).is_ok()
 }
 
+/// Where a request's connection came from: in the extensions of every
+/// request [`serve`] hands its router.
+#[derive(Clone, Copy, Debug)]
+pub struct Peer(pub SocketAddr);
+
 /// Serves `router` on `listener` over mutual TLS to the peer whose
 /// certificate is for `peer`; anyone else's connection is closed after the
 /// handshake. Runs until dropped.
@@ -243,7 +248,9 @@ pub async fn serve(
                 tracing::warn!(%from, peer, "refused a certificate that is not the peer's");
                 return;
             }
-            let service = hyper_util::service::TowerToHyperService::new(router);
+            let service = hyper_util::service::TowerToHyperService::new(
+                router.layer(axum::Extension(Peer(from))),
+            );
             let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
                 .serve_connection(TokioIo::new(stream), service)
                 .await;

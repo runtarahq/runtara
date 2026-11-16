@@ -17,6 +17,8 @@
 //! certificates (`runtara-executor init-pki`): this process accepts on its
 //! run channel only the executor's, and places runs only with it.
 
+pub mod registry;
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -341,6 +343,7 @@ pub async fn prepare(config: Config) -> Result<RunnerFactory, String> {
     let identity = Identity::load(&config.tls_dir)?;
     let launches = Arc::new(ApiLaunches::default());
     let workflows = Arc::new(LaunchWorkflows::default());
+    let executors = Arc::new(registry::Registry::new(Identity::load(&config.tls_dir)?));
     let listener = tls::bind(config.run_channel_listen).await?;
     tracing::info!(
         listen = %config.run_channel_listen,
@@ -354,7 +357,8 @@ pub async fn prepare(config: Config) -> Result<RunnerFactory, String> {
         EXECUTOR_NAME,
         launches
             .credentialed_router()
-            .merge(workflow_router(launches.clone(), workflows.clone())),
+            .merge(workflow_router(launches.clone(), workflows.clone()))
+            .merge(registry::router(executors.clone())),
     ));
     let channel = RunChannel {
         endpoint: config.run_channel_endpoint,
