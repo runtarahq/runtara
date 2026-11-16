@@ -24,8 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CA made by `runtara-executor init-pki`. The release bundle and the image
   carry the two new binaries; `docker-compose.executor.yml` adds the executor
   to the evaluation stack. Linux only; see `docs/executor.md` for what it
-  isolates and what differs from the embedded runner (no debug mode, one
-  executor per server).
+  isolates and what differs from the embedded runner (no debug mode).
+
+- **Any number of executors, none of them configured.** An executor tells
+  the server it is here (`RUNTARA_EXECUTOR_SERVER_URL`) and keeps telling it;
+  the server places each run with the executor that has the most room and
+  passes over one that is full, away or gone. Adding one is starting it, and
+  a server that started again learns its executors from their next call. An
+  executor fetches a workflow it does not hold from the server that placed
+  the run, as that run, so nothing has to be sent to an executor beforehand
+  and one that lost its cache recovers by itself. In the evaluation stack:
+  `RUNTARA_EXECUTORS=3`, or `--scale executor=3`.
 
 - **An API key sent with text around it.** `http_api_key` connections take
   a `value_format`, with `{}` where the key goes: `Token {}` sends
