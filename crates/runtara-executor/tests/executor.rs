@@ -444,6 +444,20 @@ async fn a_full_executor_refuses_a_run_for_now() {
         .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "capacity");
+    // Asked not to wait for a slot, it says so at once.
+    let mut at_once: Value =
+        serde_json::from_slice(&deployment.place_body("tenant-1", &artifact, 60)).unwrap();
+    at_once["slot_wait_ms"] = json!(0);
+    let asked = std::time::Instant::now();
+    let (status, _) = deployment
+        .call("POST", "/v1/runs", at_once.to_string().into_bytes())
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        asked.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        asked.elapsed()
+    );
     deployment
         .call("DELETE", &format!("/v1/runs/{first}"), Vec::new())
         .await;

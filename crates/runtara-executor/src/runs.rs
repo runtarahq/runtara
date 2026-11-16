@@ -361,6 +361,7 @@ impl Runs {
             tenant,
             artifact,
             spec,
+            slot_wait_ms,
         } = place;
         if spec.protocol != RUN_PROTOCOL {
             return Err(PlaceError::Invalid(format!(
@@ -381,8 +382,10 @@ impl Runs {
         let upstream = Arc::new(Upstream::new(&self.identity, &spec).map_err(PlaceError::Invalid)?);
         // A burst a little over capacity waits its turn here: runs are
         // short, and a refusal costs the server a recovery. Only an executor
-        // that stays full refuses.
-        let slot = tokio::time::timeout(SLOT_WAIT, self.slots.clone().acquire_owned())
+        // that stays full refuses, or one whose server has another to try.
+        let wait =
+            slot_wait_ms.map_or(SLOT_WAIT, |wait| Duration::from_millis(wait).min(SLOT_WAIT));
+        let slot = tokio::time::timeout(wait, self.slots.clone().acquire_owned())
             .await
             .ok()
             .and_then(Result::ok)

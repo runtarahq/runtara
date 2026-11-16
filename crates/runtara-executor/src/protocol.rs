@@ -102,6 +102,11 @@ pub struct Place {
     /// The workflow's digest: the SHA-256 of its component.
     pub artifact: String,
     pub spec: RunSpec,
+    /// How long, at most, to wait for a slot before refusing for capacity;
+    /// left out, the executor's own wait. A server with another executor to
+    /// try sends 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_wait_ms: Option<u64>,
 }
 
 /// A placed run.

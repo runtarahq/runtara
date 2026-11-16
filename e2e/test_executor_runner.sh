@@ -81,7 +81,6 @@ WRAPPER="${WORK_DIR}/runtara-server"
 cat > "${WRAPPER}" <<WRAP
 #!/bin/bash
 export RUNTARA_RUNNER=executor
-export RUNTARA_EXECUTOR_URL="https://127.0.0.1:${EXECUTOR_PORT}"
 export RUNTARA_EXECUTOR_TLS_DIR="${WORK_DIR}/pki-server"
 export RUNTARA_RUN_CHANNEL_LISTEN="127.0.0.1:${RUN_CHANNEL_PORT}"
 export RUNTARA_RUN_CHANNEL_ENDPOINT="https://127.0.0.1:${RUN_CHANNEL_PORT}"

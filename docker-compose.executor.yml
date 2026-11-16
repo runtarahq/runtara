@@ -70,7 +70,6 @@ services:
         condition: service_completed_successfully
     environment:
       RUNTARA_RUNNER: executor
-      RUNTARA_EXECUTOR_URL: "https://executor:7443"
       RUNTARA_EXECUTOR_TLS_DIR: /pki
       # Where the executor sends its runs' workflow API calls. Mutual TLS, and
       # on the stack's private network only: the port is not published.
