@@ -15,8 +15,8 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_fail_if_retptr_error_inplace, emit_forward_suspended_return, push_retptr_arg,
-    push_retptr_i32_load, push_segment_args, push_zero_value,
+    emit_forward_suspended_return, push_retptr_arg, push_retptr_i32_load, push_segment_args,
+    push_zero_value,
 };
 use super::agent_io::emit_agent_connection_input;
 use super::{
@@ -63,7 +63,7 @@ pub(super) fn emit_agent_invoke(
     let deadline = matches!(
         site,
         AgentInvocationSite::Step(_)
-            | AgentInvocationSite::AiTool(_)
+            | AgentInvocationSite::AiTool
             | AgentInvocationSite::MemoryLoad
             | AgentInvocationSite::MemorySave
     ) && static_data.agent_timeout(agent_id).is_some();
@@ -115,24 +115,12 @@ pub(super) fn emit_agent_invoke(
     push_segment_args(body, capability_id);
     body.instruction(&Instruction::LocalGet(input_ptr_local));
     body.instruction(&Instruction::LocalGet(input_len_local));
-    if invoke.is_scoped() {
-        emit_agent_context(
-            body,
-            indices,
-            static_data,
-            agent_id,
-            source_ptr_local,
-            source_len_local,
-            site,
-        );
-    } else {
-        for param_type in invoke
-            .params
-            .get(4..invoke.params.len().saturating_sub(1))
-            .unwrap_or(&[])
-        {
-            push_zero_value(body, param_type);
-        }
+    for param_type in invoke
+        .params
+        .get(4..invoke.params.len().saturating_sub(1))
+        .unwrap_or(&[])
+    {
+        push_zero_value(body, param_type);
     }
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(async_invoke.function_index));
@@ -154,7 +142,7 @@ pub(super) fn emit_agent_invoke(
     // handles its own `suspended` (agent_suspend::emit_after_invoke); every
     // other site normalizes here, before retry classification, per-attempt
     // checkpointing or onError routing reads the result.
-    if !invoke.is_scoped() && !static_data.agent_suspends(agent_id) {
+    if !static_data.agent_suspends(agent_id) {
         emit_normalize_outcome(
             body,
             indices,
@@ -485,56 +473,14 @@ pub(super) fn emit_move_completed_list(body: &mut WasmFunction, area: i32) {
     }
 }
 
-/// Stable domains distinguish auxiliary invocations even when they target the
-/// same Agent. AI activation counters are restored by the guest replay logic.
+/// Where an Agent invoke is emitted: which sites carry a step attempt and a
+/// timeout.
 #[derive(Clone, Copy)]
 pub(super) enum AgentInvocationSite {
     Step(Option<u32>),
     MemoryLoad,
     AiTurn,
-    AiTool(u32),
+    AiTool,
     Summarize,
     MemorySave,
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn emit_agent_context(
-    body: &mut WasmFunction,
-    indices: &DirectCoreFunctionIndices,
-    static_data: &DirectCoreStaticData,
-    agent_id: u32,
-    source_ptr_local: u32,
-    source_len_local: u32,
-    site: AgentInvocationSite,
-) {
-    body.instruction(&Instruction::I32Const(agent_id as i32));
-    body.instruction(&Instruction::LocalGet(source_ptr_local));
-    body.instruction(&Instruction::LocalGet(source_len_local));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_agent_cache_key));
-    emit_fail_if_retptr_error_inplace(body, indices);
-    push_retptr_i32_load(body, 4);
-    push_retptr_i32_load(body, 8);
-    let (domain, activation) = match site {
-        AgentInvocationSite::Step(_) => (0, None),
-        AgentInvocationSite::MemoryLoad => (1, None),
-        AgentInvocationSite::AiTurn => (2, Some(super::DIRECT_AI_ITER_LOCAL)),
-        AgentInvocationSite::AiTool(_) => (3, Some(super::DIRECT_AI_TOOL_CALL_COUNTER_LOCAL)),
-        AgentInvocationSite::Summarize => (4, None),
-        AgentInvocationSite::MemorySave => (5, None),
-    };
-    let caller = match site {
-        AgentInvocationSite::AiTool(caller) => caller,
-        _ => agent_id,
-    };
-    body.instruction(&Instruction::I32Const(
-        static_data.invocation_site(agent_id, caller, domain) as i32,
-    ));
-    body.instruction(&activation.map_or(Instruction::I32Const(0), Instruction::LocalGet));
-    if let AgentInvocationSite::Step(Some(attempt)) = site {
-        body.instruction(&Instruction::LocalGet(attempt));
-        body.instruction(&Instruction::I64ExtendI32U);
-    } else {
-        body.instruction(&Instruction::I64Const(1));
-    }
 }

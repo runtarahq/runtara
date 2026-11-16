@@ -1,0 +1,83 @@
+# Runtara evaluation stack, with workflows on an executor.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.executor.yml up
+#
+# An overlay on docker-compose.yml: it adds an `executor` service and has the
+# server place every workflow run with it (RUNTARA_RUNNER=executor) instead of
+# running workflows in its own process. Each run is then a WebAssembly guest
+# in a sandboxed process of its own, in a container that holds no database
+# connection and none of the server's keys. See docs/executor.md.
+#
+# The server and the executor authenticate each other with certificates of a
+# CA made on first start (`executor-pki`). Each gets its own key on a volume
+# of its own; the CA's key is kept nowhere. To make new certificates, remove
+# both volumes and start again:
+#   docker compose -f docker-compose.yml -f docker-compose.executor.yml down
+#   docker volume rm <project>_executor_pki_server <project>_executor_pki_executor
+#
+# The sandbox needs seccomp and Landlock from the host's kernel (Linux 5.13
+# or newer; Docker Desktop and current distributions have both). The executor
+# checks at start and refuses to run without them.
+
+services:
+  # One-shot: the deployment's certificates, unless they are already there.
+  # Runs as root to write to the fresh volumes, then hands the files to the
+  # image's unprivileged user.
+  executor-pki:
+    image: ghcr.io/runtarahq/runtara:${RUNTARA_IMAGE_TAG:-latest}
+    pull_policy: always
+    restart: "no"
+    user: "0:0"
+    healthcheck:
+      disable: true
+    entrypoint:
+      - sh
+      - -c
+      - |
+        if [ ! -s /pki/server/tls.key ] || [ ! -s /pki/executor/tls.key ]; then
+          runtara-executor init-pki --server-dir /pki/server --executor-dir /pki/executor --replace || exit 1
+        fi
+        chown -R 10001:0 /pki/server /pki/executor
+    volumes:
+      - executor_pki_server:/pki/server
+      - executor_pki_executor:/pki/executor
+
+  executor:
+    image: ghcr.io/runtarahq/runtara:${RUNTARA_IMAGE_TAG:-latest}
+    pull_policy: always
+    depends_on:
+      executor-pki:
+        condition: service_completed_successfully
+    command: ["runtara-executor"]
+    # The image's health check asks the server's port; this is not the server.
+    healthcheck:
+      disable: true
+    environment:
+      RUNTARA_EXECUTOR_LISTEN: "0.0.0.0:7443"
+      RUNTARA_EXECUTOR_TLS_DIR: /pki
+      # Compiled workflows; nothing here is needed after a restart.
+      RUNTARA_EXECUTOR_STATE_DIR: /data/executor
+      RUNTARA_EXECUTOR_MAX_RUNS: "${RUNTARA_EXECUTOR_MAX_RUNS:-16}"
+    volumes:
+      - executor_pki_executor:/pki:ro
+      - executor_data:/data
+
+  runtara:
+    depends_on:
+      executor-pki:
+        condition: service_completed_successfully
+    environment:
+      RUNTARA_RUNNER: executor
+      RUNTARA_EXECUTOR_URL: "https://executor:7443"
+      RUNTARA_EXECUTOR_TLS_DIR: /pki
+      # Where the executor sends its runs' workflow API calls. Mutual TLS, and
+      # on the stack's private network only: the port is not published.
+      RUNTARA_RUN_CHANNEL_LISTEN: "0.0.0.0:7444"
+      RUNTARA_RUN_CHANNEL_ENDPOINT: "https://runtara:7444"
+    volumes:
+      - executor_pki_server:/pki:ro
+
+volumes:
+  executor_pki_server:
+  executor_pki_executor:
+  executor_data:

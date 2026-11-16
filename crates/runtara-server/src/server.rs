@@ -880,10 +880,18 @@ fn redact_store_url(url: &str) -> String {
 /// [`start`], composed with `options`.
 pub async fn start_with(
     pool: PgPool,
-    options: ServerOptions,
+    mut options: ServerOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(source) = options.entitlements.clone() {
         config::install_entitlement_source(source);
+    }
+
+    // `RUNTARA_RUNNER=executor`: workflows run on an executor, none in this
+    // process, unless the host supplied a runner of its own. A setting that
+    // cannot be honoured stops the server here: it never falls back to
+    // running workflows in process.
+    if options.runner_factory.is_none() {
+        options.runner_factory = runtara_runner_executor::from_env().await?;
     }
 
     // Every artifact lives in one store, shared with Environment and its

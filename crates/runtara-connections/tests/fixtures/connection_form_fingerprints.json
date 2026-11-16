@@ -25,9 +25,9 @@
   },
   {
     "integrationId": "http_api_key",
-    "fieldCount": 3,
-    "serializedBytes": 1029,
-    "fnv1a64": "ba67ec945a80eac6"
+    "fieldCount": 4,
+    "serializedBytes": 1354,
+    "fnv1a64": "634e01c8f3b50799"
   },
   {
     "integrationId": "http_basic",
@@ -100,6 +100,12 @@
     "fieldCount": 3,
     "serializedBytes": 1083,
     "fnv1a64": "5fce813c446be821"
+  },
+  {
+    "integrationId": "paypal_client_credentials",
+    "fieldCount": 3,
+    "serializedBytes": 1281,
+    "fnv1a64": "89052a5cf9d7ba86"
   },
   {
     "integrationId": "pipedrive_api_token",

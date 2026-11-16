@@ -34,7 +34,6 @@ mod cooperative_measurement;
 mod cooperative_workflow_cancellation;
 #[path = "support/managed_inputs.rs"]
 mod direct_managed_inputs;
-mod isolated_agent_execution;
 #[path = "../../runtara-component-host/tests/support/object_model.rs"]
 mod sql_fixture;
 mod wait_for_instances;
@@ -14410,56 +14409,6 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             assert!(!text.contains("secret_access_key"));
         }
     }
-
-    // Packaging a separately instantiated child must keep its approval pin on
-    // the root before the package section, where precompilation can validate it.
-    // Isolated packages exist only on the WIT guest ABI.
-    let mut scoped =
-        runtara_workflows::direct_wasm::compile_direct_workflow(DirectCompilationInput {
-            workflow_id: "trusted-scoped".into(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: serde_json::from_value(graph.clone()).unwrap(),
-            child_workflows: vec![],
-            output_dir: temp.path().join("scoped"),
-            track_events: false,
-            agent_catalog: Some(dispatcher.catalog()),
-            agent_slug: None,
-        })
-        .unwrap();
-    use sha2::Digest;
-    let digest = format!(
-        "{:x}",
-        sha2::Sha256::digest(fs::read(components.join("runtara_agent_s3_storage.wasm")).unwrap())
-    );
-    let package_limits = runtara_invocation_contract::PackageLimits {
-        total_bytes: 64 * 1024 * 1024,
-        manifest_bytes: 1024 * 1024,
-        artifacts: 16,
-        bindings: 16,
-    };
-    runtara_workflows::direct_wasm::compose_direct_workflow_with_isolated_agents(
-        &mut scoped,
-        &components,
-        &[],
-        &std::collections::BTreeMap::from([("s3-storage".into(), digest)]),
-        package_limits,
-    )
-    .unwrap();
-    let packaged = fs::read(&scoped.wasm_path).unwrap();
-    let parsed = runtara_invocation_contract::parse(&packaged, package_limits)
-        .unwrap()
-        .unwrap();
-    assert!(
-        top_level_component_imports(parsed.root)
-            .iter()
-            .any(|name| name.starts_with("runtara:trusted-artifacts/s3-storage-"))
-    );
-    assert_eq!(
-        runtara_workflows::direct_wasm::trusted_artifact_pins(&packaged).unwrap(),
-        installed,
-        "a packaged artifact records its root's pins"
-    );
 
     // Parallel Split uses the same host route for every item.
     let split_graph = serde_json::json!({

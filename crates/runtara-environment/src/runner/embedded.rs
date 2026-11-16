@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
@@ -37,8 +37,8 @@ use tracing::{debug, error, info, warn};
 
 use runtara_component_host::precompile::{
     PRECOMPILE_NONCE_BYTES, PRECOMPILE_WORKER_ARGUMENT, PrecompileRequest, PrecompileResponse,
-    deserialize_trusted_precompiled_component, deserialize_trusted_precompiled_package,
-    read_precompile_response_async, validate_precompile_response, write_precompile_request_async,
+    deserialize_trusted_precompiled_component, read_precompile_response_async,
+    validate_precompile_response, write_precompile_request_async,
 };
 use runtara_component_host::{
     EngineConfig, PreparedWorkflow, WorkflowExecutor, WorkflowLimits, WorkflowRunSpec,
@@ -164,8 +164,6 @@ mod root_lease;
 pub use root_lease::RootLease;
 mod run_state;
 pub use run_state::PersistenceRunState;
-mod scoped;
-pub use scoped::ScopedAgentRunnerConfig;
 
 // Keys identify physical executions, not reusable durable launch rows.
 type TaskRegistry = Arc<Mutex<HashMap<String, Arc<InstanceTask>>>>;
@@ -221,7 +219,6 @@ pub struct EmbeddedWasmRunner {
     config: WorkflowRunnerConfig,
     /// Launches serving the workflow API (runs on the `wasi:cli/run` ABI).
     workflow_api: Arc<runtara_component_host::api_launches::ApiLaunches>,
-    scoped_agents: Option<Arc<ScopedAgentRunnerConfig>>,
     limits: WorkflowLimits,
     persistence: Arc<dyn Persistence>,
     /// Where launches' workflow artifacts are read from, by digest.
@@ -542,11 +539,11 @@ impl ComponentPrecompiler for ChildComponentPrecompiler {
         // the component-host protocol writer. The protocol validation checks
         // its nonce, digest, and engine fingerprint before Wasmtime sees it.
         let component = unsafe {
-            deserialize_trusted_precompiled_package(executor.engine(), &request, &response)
+            deserialize_trusted_precompiled_component(executor.engine(), &request, &response)
         }
         .map_err(|error| map_precompile_error(wasm_path, error))?;
         let workflow = executor
-            .prepare_precompiled_package(component)
+            .prepare_precompiled(component)
             .await
             .map_err(|error| {
                 RunnerError::StartFailed(format!("link precompiled workflow: {error:#}"))
@@ -613,11 +610,11 @@ impl ComponentPrecompiler for InProcessTestComponentPrecompiler {
         // function in-process and immediately wraps its exact output in the
         // protocol response used by production.
         let component = unsafe {
-            deserialize_trusted_precompiled_package(executor.engine(), &request, &response)
+            deserialize_trusted_precompiled_component(executor.engine(), &request, &response)
         }
         .map_err(|error| map_precompile_error(wasm_path, error))?;
         let workflow = executor
-            .prepare_precompiled_package(component)
+            .prepare_precompiled(component)
             .await
             .map_err(|error| {
                 RunnerError::StartFailed(format!("link test precompiled workflow: {error:#}"))
@@ -812,7 +809,6 @@ impl EmbeddedWasmRunner {
         Ok(Self {
             config,
             workflow_api,
-            scoped_agents: None,
             limits: limits_from_env(),
             preparation_permits,
             preparation_limit,
@@ -832,14 +828,6 @@ impl EmbeddedWasmRunner {
     /// Launches currently serving the workflow API.
     pub fn workflow_api_launches(&self) -> &Arc<runtara_component_host::api_launches::ApiLaunches> {
         &self.workflow_api
-    }
-
-    /// Opt into reviewed scoped Agent packages. Legacy artifacts retain their
-    /// existing path. Package reviews must come from trusted operator policy.
-    pub fn with_scoped_agents(mut self, config: ScopedAgentRunnerConfig) -> Result<Self> {
-        config.validate()?;
-        self.scoped_agents = Some(Arc::new(config));
-        Ok(self)
     }
 
     /// Attach native outbound HTTP shared by all runs and scoped children.
@@ -1118,8 +1106,6 @@ impl EmbeddedWasmRunner {
             .precompiler
             .prepare(&self.executor, options, &wasm_path)
             .await?;
-
-        scoped::admit(&workflow, &self.executor, self.scoped_agents.as_deref())?;
 
         // This is a cancellable database operation, so it observes the same
         // absolute preparation lease deadline as the dispatcher. Missing or
@@ -2037,12 +2023,6 @@ impl Runner for EmbeddedWasmRunner {
             input,
         } = prepared.take()?;
 
-        // A prepared token can outlive configuration construction or come from
-        // another runner. Recheck policy before taking any active run capacity.
-        let scoped_authority =
-            scoped::admit(&workflow, &self.executor, self.scoped_agents.as_deref())?;
-        let scoped_config = self.scoped_agents.clone();
-
         // The child compiler already read, hashed, compiled, and returned the
         // exact serialized component held by `workflow`; no parent artifact
         // reread is permitted at this boundary. Releasing preparation before
@@ -2144,45 +2124,28 @@ impl Runner for EmbeddedWasmRunner {
             invocation_owner,
             start_gate,
             cancel: Arc::clone(&task_for_run.cancel),
-            requires_root_lease: scoped_authority.is_some(),
+            requires_root_lease: false,
             exit_reports,
         };
         tokio::spawn(async move {
             let _completion = completion;
             let lifecycle_host = Arc::clone(&runtime_host);
             let ran =
-                run_launch_lifecycle(lifecycle, lifecycle_host, move |root_lease| async move {
-                    if let Some(authority) = scoped_authority {
-                        // The lifecycle refused to execute without one.
-                        let lease = root_lease.expect("a scoped root owns its root lease");
-                        scoped::execute(
-                            &executor,
+                run_launch_lifecycle(lifecycle, lifecycle_host, move |_root_lease| async move {
+                    let run = executor
+                        .execute_prepared_invoke_with_start_confirmation(
                             &workflow,
                             spec,
-                            runtime_host,
                             input,
                             start_confirmation.clone(),
-                            authority,
-                            scoped_config.as_ref().expect("admitted scoped policy"),
-                            &lease,
                         )
-                        .await
-                    } else {
-                        let run = executor
-                            .execute_prepared_invoke_with_start_confirmation(
-                                &workflow,
-                                spec,
-                                input,
-                                start_confirmation.clone(),
-                            )
-                            .await;
-                        // The return value is the run's only terminal channel:
-                        // persist it once, here, before the completion guard drops
-                        // and the monitor would record a still-running run as
-                        // crashed. (A scoped root publishes after its cleanup.)
-                        publish_terminal(&runtime_host, &instance_id, &run).await;
-                        run
-                    }
+                        .await;
+                    // The return value is the run's only terminal channel:
+                    // persist it once, here, before the completion guard drops
+                    // and the monitor would record a still-running run as
+                    // crashed.
+                    publish_terminal(&runtime_host, &instance_id, &run).await;
+                    run
                 })
                 .await;
             if let Some(run) = ran {
@@ -2291,7 +2254,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    use std::time::Instant;
 
     fn abort_test_task() -> Arc<InstanceTask> {
         Arc::new(InstanceTask {

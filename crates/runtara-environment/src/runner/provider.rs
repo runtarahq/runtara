@@ -455,6 +455,11 @@ async fn run_placed(placement: Placement, mut slot: SlotPermit) -> InvokeRunResu
                         reason: format!("{} refused the run: {error}", provider.name()),
                     },
                 );
+            // Nothing will confirm this start: its monitor reads the report
+            // above now, instead of failing the run at the gate's deadline.
+            if let Some(gate) = &gate {
+                gate.decline();
+            }
             return lost_result(started);
         }
     };

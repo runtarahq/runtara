@@ -104,7 +104,7 @@ const PARK_AT: u32 = DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL;
 ///
 /// - any operation-scoped site: an AiAgent tool, memory provider or synthetic
 ///   AiAgent call, a workflow embedded as an AiAgent tool, an omitted runtime,
-///   scoped isolation, and a control call compiled without the agent catalog
+///   and a control call compiled without the agent catalog
 ///   (it could not be classified);
 /// - any operation-scoped site in a `WaitForSignal.onWait` graph, directly or
 ///   through an embedded workflow;
@@ -116,13 +116,9 @@ const PARK_AT: u32 = DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL;
 pub(super) fn check_sites(
     manifest: &DirectWorkflowManifest,
     omit_runtime: bool,
-    scoped_agents: &BTreeSet<String>,
     has_catalog: bool,
 ) -> Result<(), DirectCompileError> {
-    let target = SiteTarget {
-        omit_runtime,
-        scoped_agents,
-    };
+    let target = SiteTarget { omit_runtime };
     if !has_catalog {
         let control = std::iter::once(&manifest.graph)
             .chain(manifest.child_workflows.iter().map(|child| &child.graph))
@@ -171,9 +167,8 @@ pub(super) fn check_sites(
 }
 
 /// The compile target every operation-scoped site must support.
-struct SiteTarget<'a> {
+struct SiteTarget {
     omit_runtime: bool,
-    scoped_agents: &'a BTreeSet<String>,
 }
 
 fn refuse(step: &str, kind: &str, why: &str) -> Result<(), DirectCompileError> {
@@ -262,7 +257,7 @@ fn check_graph(
     graph: &DirectGraphManifest,
     in_on_wait: bool,
     in_tool_workflow: bool,
-    target: &SiteTarget<'_>,
+    target: &SiteTarget,
 ) -> Result<(), DirectCompileError> {
     for agent in graph.agents.iter().filter(|agent| agent.operation_scoped) {
         let step = agent.step_id.as_str();
@@ -290,9 +285,6 @@ fn check_graph(
         }
         if target.omit_runtime {
             return refuse(step, kind, "needs the host-imported workflow runtime");
-        }
-        if target.scoped_agents.contains(&agent.agent_id) {
-            return refuse(step, kind, "cannot run under scoped isolation");
         }
         if !agent.suspends {
             continue;
@@ -346,9 +338,6 @@ fn check_graph(
         if target.omit_runtime {
             return refuse(step, kind, "needs the host-imported workflow runtime");
         }
-        if target.scoped_agents.contains(&agent.agent_id) {
-            return refuse(step, kind, "cannot run under scoped isolation");
-        }
         if !agent.durable {
             return refuse(step, kind, "must be durable");
         }
@@ -381,7 +370,7 @@ fn check_wait_for_instances(
     step: &str,
     in_on_wait: bool,
     in_tool_workflow: bool,
-    target: &SiteTarget<'_>,
+    target: &SiteTarget,
 ) -> Result<(), DirectCompileError> {
     let callers = graph.edges.iter().filter(|edge| edge.to_step == step);
     if callers.clone().any(|edge| is_ai_edge(graph, edge)) {

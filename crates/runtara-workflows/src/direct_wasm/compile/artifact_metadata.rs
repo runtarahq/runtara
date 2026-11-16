@@ -70,39 +70,10 @@ pub struct DirectArtifactMetadata {
     pub shared_components: Vec<DirectComponentDependencyMetadata>,
     /// Agent components required for static composition.
     pub agent_components: Vec<DirectComponentDependencyMetadata>,
-    /// Explicit experimental isolated Agent selection; absent for legacy artifacts.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub isolation: Option<DirectIsolationMetadata>,
-    /// Policy decisions, including reasons for packages retained on the legacy path.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub isolation_selection: Option<super::AgentIsolationReport>,
     /// Preloaded child workflows that will be statically inlined by the direct
     /// emitter once `EmbedWorkflow` lowering is enabled.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub child_workflows: Vec<DirectChildWorkflowDependencyMetadata>,
-}
-
-/// Composition-stage isolated Agent inventory. The context contract distinguishes
-/// live v1 adapter calls from replay-stable v2 logical step/attempt identities.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DirectIsolationMetadata {
-    /// Raw package version required by the selected runtime. V2 retains the
-    /// compiler invocation manifest; older inventory sidecars default to v1.
-    #[serde(default = "legacy_package_version")]
-    pub package_version: u32,
-    /// Guest bridge contract version.
-    pub adapter_version: u32,
-    /// Identity semantics supplied to the scoped launcher.
-    pub context_contract: String,
-    /// Exact packaged components and their invocation interfaces.
-    pub bindings: Vec<runtara_invocation_contract::Binding>,
-    /// Packages left with their original component lifetime.
-    pub legacy_agents: Vec<String>,
-}
-
-fn legacy_package_version() -> u32 {
-    1
 }
 
 /// File identity captured in direct artifact metadata.
@@ -221,8 +192,6 @@ pub(super) fn initial_artifact_metadata(
         },
         composed_wasm: None,
         memory_floor_bytes: None,
-        isolation: None,
-        isolation_selection: None,
         shared_components: input
             .component_artifacts
             .shared_components

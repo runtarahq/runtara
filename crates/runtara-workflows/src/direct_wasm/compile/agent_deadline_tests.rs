@@ -659,7 +659,6 @@ fn assert_runtime_free(compiled: &DirectCompilationResult) -> anyhow::Result<()>
         !imports.iter().any(|name| name.contains("workflow-runtime")),
         "published child imports runtime: {imports:?}"
     );
-    assert!(compiled.scoped_agents.is_empty() && compiled.invocation_manifest.is_none());
     Ok(())
 }
 

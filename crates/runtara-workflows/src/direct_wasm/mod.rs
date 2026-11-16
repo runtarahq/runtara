@@ -36,27 +36,16 @@ pub mod support;
 
 #[cfg(feature = "compiler")]
 pub use compile::{
-    AGENT_IMPORT_ALLOWLIST, AgentImportKind, AgentIsolationDecision, AgentIsolationReason,
-    AgentIsolationReport, DIRECT_WORKFLOW_ABI_SECTION, DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME,
-    DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION, DIRECT_WORKFLOW_MANIFEST_SECTION,
-    DIRECT_WORKFLOW_SUPPORT_SECTION, DirectArtifactFileMetadata, DirectArtifactMetadata,
-    DirectChildWorkflowDependencyMetadata, DirectCompilationInput, DirectCompilationResult,
-    DirectComponentDependencyMetadata, DirectComponentSidecarMetadata, DirectIsolationMetadata,
+    AGENT_IMPORT_ALLOWLIST, AgentImportKind, DIRECT_WORKFLOW_ABI_SECTION,
+    DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME, DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION,
+    DIRECT_WORKFLOW_MANIFEST_SECTION, DIRECT_WORKFLOW_SUPPORT_SECTION, DirectArtifactFileMetadata,
+    DirectArtifactMetadata, DirectChildWorkflowDependencyMetadata, DirectCompilationInput,
+    DirectCompilationResult, DirectComponentDependencyMetadata, DirectComponentSidecarMetadata,
     bundled_trusted_pin, check_agent_component_imports, compile_direct_workflow,
     compile_direct_workflow_composed, compile_direct_workflow_composed_configured,
     compile_direct_workflow_with_abi, compose_direct_workflow,
     compose_direct_workflow_with_extra_dirs, set_composition_validated, staged_dependency_is_stale,
     trusted_artifact_pins,
-};
-// Builders for old packages exist only in the existing integration-test surface.
-#[cfg(all(
-    feature = "compiler",
-    any(test, feature = "direct-wasm-integration-tests")
-))]
-pub use compile::{
-    AgentIsolationPolicy, AgentIsolationReview,
-    compile_direct_workflow_composed_with_isolation_policy,
-    compile_direct_workflow_with_scoped_agents, compose_direct_workflow_with_isolated_agents,
 };
 #[cfg(feature = "compiler")]
 pub use component::{

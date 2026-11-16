@@ -203,6 +203,16 @@ pub fn get_default_rate_limit_config(integration_id: &str) -> Option<RateLimitCo
             max_retries: 3,
             max_wait_ms: 60000,
         }),
+        // PayPal: no published fixed limits; it answers a burst it will not take
+        // with 429 RATE_LIMIT_REACHED. 5 req/s with a burst of 10 keeps one
+        // connection modest, and a 429 is retried after its wait.
+        "paypal_client_credentials" => Some(RateLimitConfigDto {
+            requests_per_second: 5,
+            burst_size: 10,
+            retry_on_limit: true,
+            max_retries: 3,
+            max_wait_ms: 60000,
+        }),
         // Shippo: limits are per minute and per endpoint. Live tokens get 500 writes
         // and 50 list reads, test tokens 50 and 10. 5 req/s with burst 10 stays under
         // the live write limit; heavy listing or a test token relies on the 429 retry.
@@ -293,6 +303,14 @@ mod tests {
     #[test]
     fn test_ups_defaults_retry_on_429() {
         let config = get_default_rate_limit_config("ups_client_credentials").unwrap();
+        assert_eq!(config.requests_per_second, 5);
+        assert_eq!(config.burst_size, 10);
+        assert!(config.retry_on_limit);
+    }
+
+    #[test]
+    fn test_paypal_defaults_retry_on_429() {
+        let config = get_default_rate_limit_config("paypal_client_credentials").unwrap();
         assert_eq!(config.requests_per_second, 5);
         assert_eq!(config.burst_size, 10);
         assert!(config.retry_on_limit);

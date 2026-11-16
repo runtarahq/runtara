@@ -1,15 +1,14 @@
 //! Atomic managed waits. Every writer locks the tenant-owned root first.
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use runtara_core::persistence::{inputs::*, invocations::AttemptState};
+use runtara_core::persistence::inputs::*;
 use serde_json::Value;
 use sqlx::{PgConnection, Postgres, Transaction};
 
 use crate::PostgresPersistence;
 
-// Shared by paged discovery and batched flags. Logical attempts remain active
-// across a resumable park even when the physical execution lease is revoked.
-const ACTIONABLE_FILTER: &str = "r.tenant_id=$1 AND r.instance_id=ANY($2) AND r.state='open' AND (r.deadline IS NULL OR r.deadline>$3) AND i.status NOT IN ('completed','failed','cancelled') AND (r.invocation_path='' OR (SELECT a.state FROM invocation_attempts a WHERE a.instance_id=r.instance_id AND a.invocation_path=r.invocation_path ORDER BY generation DESC LIMIT 1)='active')";
+// Shared by paged discovery and batched flags.
+const ACTIONABLE_FILTER: &str = "r.tenant_id=$1 AND r.instance_id=ANY($2) AND r.state='open' AND (r.deadline IS NULL OR r.deadline>$3) AND i.status NOT IN ('completed','failed','cancelled')";
 
 fn storage(error: impl std::fmt::Display) -> InputError {
     InputError::Storage(error.to_string())
@@ -20,8 +19,6 @@ struct RequestRow {
     tenant_id: String,
     instance_id: String,
     request_id: String,
-    invocation_path: String,
-    fence: Option<Value>,
     // Exact serialized text: JSONB would renumber floats and reject NUL escapes.
     spec: String,
     created_at: DateTime<Utc>,
@@ -65,12 +62,6 @@ impl RequestRow {
             tenant_id: self.tenant_id,
             instance_id: self.instance_id,
             request_id: self.request_id,
-            invocation_path: self.invocation_path,
-            fence: self
-                .fence
-                .map(serde_json::from_value)
-                .transpose()
-                .map_err(storage)?,
             spec: serde_json::from_str(&self.spec).map_err(storage)?,
             created_at: self.created_at,
             state,
@@ -144,19 +135,6 @@ async fn authority(db: &mut PgConnection, owner: &InputAuthority) -> InputResult
         InputAuthority::LeasedRoot(lease) => crate::invocations::check_lease(db, lease, true)
             .await
             .map_err(fence_error),
-        InputAuthority::Invocation(fence) => {
-            crate::invocations::check_lease(db, &fence.lease, true)
-                .await
-                .map_err(fence_error)?;
-            if crate::invocations::check_attempt(db, fence)
-                .await
-                .map_err(fence_error)?
-                != AttemptState::Active
-            {
-                return Err(InputError::FenceRejected);
-            }
-            Ok(())
-        }
     }
 }
 
@@ -215,18 +193,9 @@ async fn replay(
     Ok(None)
 }
 
-async fn owner_live(db: &mut PgConnection, request: &InputRequest) -> InputResult<bool> {
-    if request.invocation_path.is_empty() {
-        return Ok(true);
-    }
-    let state: Option<String> = sqlx::query_scalar("SELECT state FROM invocation_attempts WHERE instance_id=$1 AND invocation_path=$2 ORDER BY generation DESC LIMIT 1")
-        .bind(&request.instance_id).bind(&request.invocation_path).fetch_optional(db).await.map_err(storage)?;
-    Ok(state.as_deref() == Some("active"))
-}
-
 // Used by both recovery candidate selection and the locked scheduling helper.
 // All writers of the instance, ownership, park and request hold the root lock.
-const WAKE_ELIGIBLE: &str = "i.status='suspended' AND i.termination_reason='waiting_signal' AND r.state='accepted' AND r.signal_id=ANY(p.signal_ids) AND (r.invocation_path='' OR (SELECT a.state FROM invocation_attempts a WHERE a.instance_id=r.instance_id AND a.invocation_path=r.invocation_path ORDER BY generation DESC LIMIT 1)='active')";
+const WAKE_ELIGIBLE: &str = "i.status='suspended' AND i.termination_reason='waiting_signal' AND r.state='accepted' AND r.signal_id=ANY(p.signal_ids)";
 
 /// Schedule once per park, under the caller's root lock. Fresh parks inspect all
 /// retained accepted responses, including ones whose earlier wake was handled.
@@ -279,30 +248,6 @@ pub(crate) async fn close_roots(
         .await?;
     sqlx::query("UPDATE instance_input_requests SET state=CASE WHEN state='open' THEN 'closed' ELSE state END, closure_reason=CASE WHEN state='open' THEN 'instance_terminated' ELSE closure_reason END, closed_at=CASE WHEN state='open' THEN clock_timestamp() ELSE closed_at END, wake_pending=false WHERE instance_id=ANY($1) AND (state='open' OR wake_pending)")
         .bind(instances).execute(db).await?;
-    Ok(())
-}
-
-/// Invocation transitions retain answered receipts but invalidate further input.
-pub(crate) async fn close_invocation(
-    db: &mut PgConnection,
-    instance: &str,
-    path: &str,
-    reason: InputClosure,
-) -> Result<(), sqlx::Error> {
-    let family: Vec<String> = sqlx::query_scalar(
-        "WITH RECURSIVE family(path) AS (
-            SELECT $2::text UNION
-            SELECT a.invocation_path FROM invocation_attempts a JOIN family f ON a.parent_path=f.path
-            WHERE a.instance_id=$1
-         ) SELECT path FROM family"
-    ).bind(instance).bind(path).fetch_all(&mut *db).await?;
-    // The ancestor transition also fences descendants with no input yet; they
-    // cannot register a new request after the cancellation/settlement commits.
-    sqlx::query("UPDATE invocation_attempts SET state='cancelled' WHERE instance_id=$1 AND invocation_path=ANY($2) AND invocation_path<>$3 AND state='active'")
-        .bind(instance).bind(&family).bind(path).execute(&mut *db).await?;
-    let reason = serde_json::to_value(reason).expect("closure serializes");
-    sqlx::query("UPDATE instance_input_requests SET state=CASE WHEN state='open' THEN 'closed' ELSE state END, closure_reason=CASE WHEN state='open' THEN $3 ELSE closure_reason END, closed_at=CASE WHEN state='open' THEN clock_timestamp() ELSE closed_at END, wake_pending=false WHERE instance_id=$1 AND invocation_path=ANY($2) AND (state='open' OR wake_pending)")
-        .bind(instance).bind(&family).bind(reason.as_str().unwrap()).execute(db).await?;
     Ok(())
 }
 
@@ -365,21 +310,11 @@ impl InputRequests for PostgresPersistence {
         let mut tx = self.input_transaction().await?;
         authority(&mut tx, owner).await?;
         let id = spec.request_id();
-        let fence = match owner {
-            InputAuthority::Invocation(fence) => {
-                Some(serde_json::to_value(fence).map_err(storage)?)
-            }
-            _ => None,
-        };
         if let Some(existing) = load(&mut tx, owner.instance_id(), &id).await? {
             // Identity only: the first registration's metadata and deadline win.
-            if existing.spec.signal_id != spec.signal_id
-                || existing.invocation_path != owner.invocation_path()
-            {
+            if existing.spec.signal_id != spec.signal_id {
                 return Err(InputError::IdentityConflict);
             }
-            sqlx::query("UPDATE instance_input_requests SET fence=$3 WHERE instance_id=$1 AND request_id=$2")
-                .bind(owner.instance_id()).bind(&id).bind(fence).execute(&mut *tx).await.map_err(storage)?;
         } else {
             let raw: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_checkpoint_signals WHERE instance_id=$1 AND checkpoint_id=$2)")
                 .bind(owner.instance_id()).bind(&spec.signal_id).fetch_one(&mut *tx).await.map_err(storage)?;
@@ -388,8 +323,8 @@ impl InputRequests for PostgresPersistence {
             }
             let at = now(&mut tx).await?;
             let expired = spec.deadline.is_some_and(|deadline| deadline <= at);
-            sqlx::query("INSERT INTO instance_input_requests (instance_id,tenant_id,request_id,signal_id,invocation_path,fence,spec,created_at,deadline,state,closure_reason,closed_at,action_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)")
-                .bind(owner.instance_id()).bind(owner.tenant_id()).bind(&id).bind(&spec.signal_id).bind(owner.invocation_path()).bind(fence)
+            sqlx::query("INSERT INTO instance_input_requests (instance_id,tenant_id,request_id,signal_id,spec,created_at,deadline,state,closure_reason,closed_at,action_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
+                .bind(owner.instance_id()).bind(owner.tenant_id()).bind(&id).bind(&spec.signal_id)
                 .bind(serde_json::to_string(spec).map_err(storage)?).bind(at).bind(spec.deadline)
                 .bind(if expired { "closed" } else { "open" }).bind(expired.then_some("expired")).bind(expired.then_some(at))
                 .bind(spec.metadata.get("action_key").and_then(serde_json::Value::as_str).filter(|key| !key.contains('\0')))
@@ -476,7 +411,7 @@ impl InputRequests for PostgresPersistence {
             return Err(InputError::AlreadyAnswered);
         }
         let at = now(&mut tx).await?;
-        if !request.open_at(at) || !owner_live(&mut tx, &request).await? {
+        if !request.open_at(at) {
             return Err(InputError::Inactive);
         }
         let receipt = InputReceipt {
@@ -513,9 +448,6 @@ impl InputRequests for PostgresPersistence {
         let mut record = load(&mut tx, owner.instance_id(), request)
             .await?
             .ok_or(InputError::NotFound)?;
-        if record.invocation_path != owner.invocation_path() {
-            return Err(InputError::FenceRejected);
-        }
         let at = now(&mut tx).await?;
         if reason != InputClosure::Expired
             || record.spec.deadline.is_some_and(|deadline| deadline <= at)

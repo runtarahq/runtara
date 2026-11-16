@@ -251,8 +251,7 @@ pub fn bundled_trusted_pin(components_dir: &std::path::Path, agent: &str) -> Opt
 /// `runtara:trusted-artifacts/*` imports, and the legacy control
 /// `runtara:builtin-artifacts/*` ones of artifacts built before control became
 /// an ordinary composed agent (no host installs those, so such an artifact is
-/// never ready and recompiles). An isolated package's catalog is a
-/// trailing custom section, so the root's pins are read the same way.
+/// never ready and recompiles).
 pub fn trusted_artifact_pins(
     wasm: &[u8],
 ) -> Result<std::collections::BTreeSet<String>, DirectCompileError> {
@@ -446,44 +445,6 @@ mod tests {
         assert_eq!(
             trusted_artifact_pins(&pinned).unwrap(),
             std::collections::BTreeSet::from([pin])
-        );
-    }
-
-    #[test]
-    fn recorded_pins_are_the_root_imports_even_when_packaged() {
-        let pin = |agent: &str| {
-            runtara_dsl::agent_meta::trusted_artifact_import(
-                agent,
-                &"a".repeat(64),
-                &"b".repeat(64),
-            )
-        };
-        let mut child = wasm_encoder::Component::new().finish();
-        append_pins(&mut child, 0, std::iter::once(pin("child-only").as_str()));
-        let mut root = wasm_encoder::Component::new().finish();
-        assert!(trusted_artifact_pins(&root).unwrap().is_empty());
-        append_pins(&mut root, 0, std::iter::once(pin("s3-storage").as_str()));
-        let limits = runtara_invocation_contract::PackageLimits {
-            total_bytes: 1024 * 1024,
-            manifest_bytes: 64 * 1024,
-            artifacts: 4,
-            bindings: 4,
-        };
-        let digest = runtara_invocation_contract::artifact_digest(&child);
-        let packaged = runtara_invocation_contract::append(
-            &root,
-            &[child.as_slice()],
-            vec![runtara_invocation_contract::Binding {
-                id: "child".into(),
-                artifact: digest,
-                interface: "runtara:agent-child/capabilities@0.1.0".into(),
-            }],
-            limits,
-        )
-        .unwrap();
-        assert_eq!(
-            trusted_artifact_pins(&packaged).unwrap(),
-            std::collections::BTreeSet::from([pin("s3-storage")])
         );
     }
 

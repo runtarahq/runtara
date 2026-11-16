@@ -1,0 +1,42 @@
+[package]
+name = "runtara-runner-executor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The server's side of an executor: places each workflow run with it and serves the runs' workflow API over the run channel"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# Tests that run the probe workflow component through a real executor and
+# `runtara-run`.
+component-integration-tests = []
+
+[dependencies]
+runtara-environment = { path = "../runtara-environment" }
+runtara-component-host = { path = "../runtara-component-host" }
+runtara-workflow-api = { path = "../runtara-workflow-api" }
+runtara-executor = { path = "../runtara-executor" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["net", "rt", "time", "sync"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tracing = "0.1"
+
+[dev-dependencies]
+runtara-core = { path = "../runtara-core", features = ["test-support"] }
+runtara-artifact-store = { path = "../runtara-artifact-store", features = ["test-support"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tempfile = "3"
+
+[[test]]
+name = "executor_runner"
+path = "tests/executor_runner.rs"
+required-features = ["component-integration-tests"]

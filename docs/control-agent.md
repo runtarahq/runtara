@@ -405,9 +405,8 @@ lifetime:
 - Unlabeled starts are never checked for uniqueness.
 
 A start operation's identity is deterministic: the start step plus its loop
-position. The host service derives it from the invoking step (core already
-records invocation paths in `invocation_attempts`); the agent never supplies
-it, so a workflow cannot collide with or evade its own identity. A start step
+position. The host service derives it from the invoking step; the agent never
+supplies it, so a workflow cannot collide with or evade its own identity. A start step
 inside Split or While must therefore produce a distinct label per iteration
 (for example `order-123-prepare-{i}`); validation should warn when such a step
 uses a constant label.

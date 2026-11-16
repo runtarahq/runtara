@@ -1,0 +1,60 @@
+{
+  "amount": {
+    "currency_code": "USD",
+    "value": "100.00"
+  },
+  "create_time": "2024-10-23T20:55:19Z",
+  "final_capture": true,
+  "id": "74L756601X447022Y",
+  "invoice_id": "OrderInvoice-23_10_2024_12_27_32_pm",
+  "links": [
+    {
+      "href": "https://api-m.sandbox.paypal.com/v2/payments/captures/74L756601X447022Y",
+      "method": "GET",
+      "rel": "self"
+    },
+    {
+      "href": "https://api-m.sandbox.paypal.com/v2/payments/captures/74L756601X447022Y/refund",
+      "method": "POST",
+      "rel": "refund"
+    },
+    {
+      "href": "https://api-m.sandbox.paypal.com/v2/payments/authorizations/0T620041CK889853A",
+      "method": "GET",
+      "rel": "up"
+    }
+  ],
+  "payee": {
+    "email_address": "merchant@example.com",
+    "merchant_id": "YXZY75W2GKDQE"
+  },
+  "seller_protection": {
+    "dispute_categories": [
+      "ITEM_NOT_RECEIVED",
+      "UNAUTHORIZED_TRANSACTION"
+    ],
+    "status": "ELIGIBLE"
+  },
+  "seller_receivable_breakdown": {
+    "gross_amount": {
+      "currency_code": "USD",
+      "value": "100.00"
+    },
+    "net_amount": {
+      "currency_code": "USD",
+      "value": "96.02"
+    },
+    "paypal_fee": {
+      "currency_code": "USD",
+      "value": "3.98"
+    }
+  },
+  "status": "COMPLETED",
+  "supplementary_data": {
+    "related_ids": {
+      "authorization_id": "0T620041CK889853A",
+      "order_id": "25M43554V9523650M"
+    }
+  },
+  "update_time": "2024-10-23T20:55:19Z"
+}

@@ -13,6 +13,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Workflows on an executor, each in a sandboxed process of its own.** With
+  `RUNTARA_RUNNER=executor` the server runs no workflow itself: it places each
+  run with a `runtara-executor`, a service on a host of its own that holds no
+  database connection and none of the server's keys. Every run there is a
+  `runtara-run` process that gives up files, sockets, new programs and other
+  processes (seccomp and Landlock) before it loads the workflow, and whose
+  guest reaches only the workflow API, over a socket pair to the executor.
+  The server and the executor authenticate each other with certificates of a
+  CA made by `runtara-executor init-pki`. The release bundle and the image
+  carry the two new binaries; `docker-compose.executor.yml` adds the executor
+  to the evaluation stack. Linux only; see `docs/executor.md` for what it
+  isolates and what differs from the embedded runner (no debug mode, one
+  executor per server).
+
+- **An API key sent with text around it.** `http_api_key` connections take
+  a `value_format`, with `{}` where the key goes: `Token {}` sends
+  `Authorization: Token <key>`. Empty means the key alone, as before, and
+  existing connections are unchanged. A connection type an agent declares on
+  `http_api_key` can fix the format, so its users enter the key alone
+  (`docs/adding-an-agent.md`).
+
+- **PayPal agent, generated from PayPal's REST API OpenAPI files.** Twenty-one
+  capabilities: create, read, update, authorize and capture orders and add or
+  update their shipment tracking; read, capture, reauthorize and void
+  authorizations; read and refund captures, and read refunds; add trackers in
+  a batch, read and update them; search transactions and read balances; and
+  list and read disputes. A failed step carries PayPal's `issue` and
+  `debug_id`, a POST sent with a `PayPal-Request-Id` is retried after a timeout
+  (PayPal carries it out once) while any other is not, and a tracker batch
+  PayPal adds only in part fails with `PAYPAL_VALIDATION_FAILED`, naming the
+  trackers it added. A capture PayPal declines or a refund that fails is an
+  error, though PayPal answers it with 201; an order capture always asks for
+  the whole order (`Prefer: return=representation`), as only that shows its
+  captures. The new `paypal_client_credentials` connection type
+  takes a REST app's Client ID and Secret, in production or the sandbox.
+
+- **`connector_gen` takes PayPal's specs.** `server` gives specs that list
+  different servers the one their paths are relative to. A field that is an
+  `allOf` of a scalar schema and parts that only describe it is that scalar,
+  schema keywords written on a parameter go into its schema, and an array body
+  of models is a `Vec` of their structs (a template change).
+
 - **eBay agent, generated from eBay's Sell API OpenAPI files.** Twenty-five
   capabilities for a seller: list and read orders, ship them (with tracking)
   and refund them; create, replace, list and delete inventory items, update
@@ -1419,6 +1461,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **The isolated-agent experiment.** Agent steps were once compiled, behind
+  an operator policy, as children run in Wasmtime stores of their own. New
+  compiles stopped producing them, and the runtime kept the path only for
+  artifacts already compiled that way. It is removed: the isolation policy
+  (`RUNTARA_EXPERIMENTAL_ISOLATION_POLICY`, now ignored), the scoped runtime
+  and its in-process child tasks, the compiler's isolation adapter, the
+  `runtara-invocation-contract` crate and the `artifact-inventory` tool. An
+  artifact compiled under the experiment no longer runs; recompile the
+  workflow. `workflow:` child runs, which use the same `/v1/tasks` calls,
+  are unchanged. The `scoped-workflow-integration-tests` feature of
+  `runtara-environment` is renamed `composed-workflow-integration-tests`.
+  With it go the persistence operations only those children used: the
+  invocation attempts behind `InvocationFences` (which keeps the root
+  lease), child ownership of a managed wait (`InputAuthority::Invocation`,
+  a request's `invocation_path` and `fence`, and the `invocation_cancelled`
+  and `invocation_settled` closures, and the `WAIT_CANCELLED` error a wait
+  closed that way raised). A migration drops the `invocation_attempts` table
+  and the `invocation_path` and `fence` columns of `instance_input_requests`;
+  a wait closed by a child's end reads as abandoned.
+
 - **`RUNTARA_REQUIRE_CREDENTIAL_ENCRYPTION` and the `RUNTARA_ENV=production`
   encryption check.** Encryption is no longer optional, so neither variable
   has an effect.
@@ -1457,6 +1519,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it. A token kept from an earlier request changes nothing, and an
   authorization-code connection is still cleared only by authorizing it
   again.
+
+- **A run that could not be placed is offered again instead of failing.**
+  When a runner that places runs elsewhere (a fleet, an executor) was refused
+  a placement, the run was reported lost, but nothing read the report: the
+  launch waited out its start gate and ended `start_gate_failed`. The runner
+  now declines the start, and the launch is recovered at once like any run
+  whose executor was lost.
 
 - **A POST, PUT or PATCH without content now says `Content-Length: 0`.** The
   host's outbound HTTP sent such a request (an agent's bodyless POST, such as

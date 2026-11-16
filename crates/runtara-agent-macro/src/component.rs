@@ -72,7 +72,6 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
     // as absolute directories inside `runtara-wit`.
     let shape = runtara_wit::AgentShape {
         trusted: args.trusted,
-        ..Default::default()
     };
     let package = runtara_wit::agent_package(agent, shape);
     let mut dirs = vec![format!("{}/agent", runtara_wit::WIT_DIR)];

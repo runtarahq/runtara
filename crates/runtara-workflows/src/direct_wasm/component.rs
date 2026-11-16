@@ -175,27 +175,20 @@ pub const WORKFLOW_API_ADAPTER_REQUIREMENTS: &[DirectSharedComponentRequirement]
     }];
 
 /// `wac` composed for the workflow API: the `runtara:api` component (when
-/// `with_api`) satisfies the `runtara:api` imports of the logic and of the
-/// `isolated` packages (the isolation adapters), and the run shim re-exports
-/// its entry as `wasi:cli/run`, the only export left.
-pub(crate) fn http_guest_wac(
-    wac: &str,
-    with_api: bool,
-    entry: bool,
-    isolated: &std::collections::BTreeSet<String>,
-) -> Result<String, String> {
+/// `with_api`) satisfies the `runtara:api` imports of the logic, and the run
+/// shim re-exports its entry as `wasi:cli/run`, the only export left.
+pub(crate) fn http_guest_wac(wac: &str, with_api: bool, entry: bool) -> Result<String, String> {
     const LOGIC: &str = "let wf = new runtara:workflow-logic {";
     const EXPORT: &str = "export wf...;\n";
     if wac.matches(LOGIC).count() != 1 || !wac.ends_with(EXPORT) {
         return Err("the workflow composition has no single logic instance to wrap".into());
     }
-    // The api component serves the logic and the isolation adapters, which
-    // start their child through `runtara:api/tasks`. A plain agent imports
-    // none of it, and a spread that satisfies nothing is a wac error.
+    // The api component serves the logic. An agent imports none of it, and a
+    // spread that satisfies nothing is a wac error.
     const STDLIB: &str = "let workflow-stdlib = new runtara:workflow-stdlib { ... };\n";
     const API: &str = "let workflow-api = new runtara:api-component { ... };\n";
     let wac = if with_api {
-        let composed = match wac.matches(STDLIB).count() {
+        match wac.matches(STDLIB).count() {
             1 => wac.replacen(STDLIB, &format!("{STDLIB}{API}"), 1),
             // Linked: no stdlib instance, so the api component goes first.
             0 if DirectStdlibMode::current() == DirectStdlibMode::Linked => {
@@ -205,27 +198,7 @@ pub(crate) fn http_guest_wac(
                 format!("{}\n{API}{}", &wac[..first], &wac[first + 1..])
             }
             _ => return Err("the workflow composition has no single stdlib instance".into()),
-        };
-        composed
-            .lines()
-            .map(|line| {
-                let adapter = line.starts_with("let agent-")
-                    && line.ends_with(" { ... };")
-                    && isolated.iter().any(|package| {
-                        line.ends_with(&format!(" = new {} {{ ... }};", wac_name(package)))
-                    });
-                if adapter {
-                    format!(
-                        "{} {{ ...workflow-api, ... }};",
-                        &line[..line.len() - " { ... };".len()]
-                    )
-                } else {
-                    line.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n"
+        }
     } else {
         wac.to_string()
     };
@@ -403,7 +376,6 @@ pub(super) fn emit_direct_component_artifacts_with_pools_and_connections(
         parallel_pools,
         has_connections,
         &Default::default(),
-        &Default::default(),
         false,
         false,
         false,
@@ -418,7 +390,6 @@ pub(super) fn emit_direct_component_artifacts_scoped(
     export_agent_id: Option<&str>,
     parallel_pools: &std::collections::BTreeMap<String, u32>,
     has_connections: bool,
-    scoped_agents: &std::collections::BTreeSet<String>,
     suspending_agents: &std::collections::BTreeSet<String>,
     operation_scope: bool,
     needs_timers: bool,
@@ -433,13 +404,12 @@ pub(super) fn emit_direct_component_artifacts_scoped(
             export_agent_id,
             parallel_pools,
             has_connections,
-            scoped_agents,
             suspending_agents,
             operation_scope,
             needs_timers,
             needs_monotonic_clock,
         ),
-        wac_source: emit_wac(agents, parallel_pools, scoped_agents),
+        wac_source: emit_wac(agents, parallel_pools),
         stdlib_package: STDLIB_PACKAGE.to_string(),
         has_connections,
         has_timers: needs_timers || !parallel_pools.is_empty() || !agents.is_empty(),
@@ -491,7 +461,6 @@ fn emit_world_wit(
     export_agent_id: Option<&str>,
     parallel_pools: &std::collections::BTreeMap<String, u32>,
     has_connections: bool,
-    scoped_agents: &std::collections::BTreeSet<String>,
     suspending_agents: &std::collections::BTreeSet<String>,
     operation_scope: bool,
     needs_timers: bool,
@@ -528,11 +497,7 @@ fn emit_world_wit(
         out.push_str(&format!("    import {};\n", runtara_wit::api::OPERATIONS));
     }
     for agent in agents {
-        let interface = if scoped_agents.contains(agent) {
-            "scoped-capabilities-v3"
-        } else {
-            "capabilities"
-        };
+        let interface = "capabilities";
         out.push_str(&format!(
             "    import runtara:agent-{agent}/{interface}@{DIRECT_AGENT_WIT_VERSION};\n"
         ));
@@ -586,11 +551,7 @@ struct WacAgentInstance<'a> {
     pool: Vec<(String, String)>,
 }
 
-fn emit_wac(
-    agents: &[String],
-    parallel_pools: &std::collections::BTreeMap<String, u32>,
-    scoped_agents: &std::collections::BTreeSet<String>,
-) -> String {
+fn emit_wac(agents: &[String], parallel_pools: &std::collections::BTreeMap<String, u32>) -> String {
     let mut out = format!(
         "// Generated by runtara-workflows direct component scaffold.\n\
          package runtara:workflow-instance@{DIRECT_AGENT_WIT_VERSION};\n\
@@ -639,11 +600,7 @@ fn emit_wac(
     }
     for instance in &instances {
         let agent = instance.agent;
-        let interface = if scoped_agents.contains(agent) {
-            "scoped-capabilities-v3"
-        } else {
-            "capabilities"
-        };
+        let interface = "capabilities";
         out.push_str(&format!(" ...{},", instance.name));
         // The quoted import and export names are the real ones.
         for (id, member) in &instance.pool {

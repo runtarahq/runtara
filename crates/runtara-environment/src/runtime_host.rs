@@ -21,7 +21,6 @@
 //!   consumed cancel/shutdown.
 
 mod inputs;
-pub mod scoped;
 
 #[cfg(all(test, feature = "db-integration-tests"))]
 use runtara_core::domain::InstanceStatus as CoreInstanceStatus;

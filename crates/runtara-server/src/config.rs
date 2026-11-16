@@ -1,4 +1,3 @@
-pub mod isolation;
 mod runtime;
 
 pub use runtime::{RuntimeOverrides, RuntimePoolConfig, ShutdownGrace, core_instance_api_enabled};
@@ -104,8 +103,6 @@ pub struct Config {
     /// Directory containing prebuilt direct workflow stdlib/runtime components
     /// plus agent components. Defaults to `agent_components_dir`.
     pub direct_wasm_components_dir: Option<std::path::PathBuf>,
-    /// Runtime approvals retained solely for previously compiled isolation artifacts.
-    pub isolation_policy: Option<std::sync::Arc<isolation::IsolationPolicy>>,
     /// Host or host:port authorities accepted by the MCP Streamable HTTP transport.
     pub mcp_allowed_hosts: Vec<String>,
     /// Backing store for MCP Streamable HTTP session recovery.
@@ -283,7 +280,6 @@ impl Config {
                 .or(agent_components_dir.as_deref()),
         );
 
-        let isolation_policy = isolation::IsolationPolicy::from_env()?;
         let mcp_allowed_hosts = mcp_allowed_hosts_from_raw(
             std::env::var(RUNTARA_MCP_ALLOWED_HOSTS_ENV).ok().as_deref(),
         );
@@ -366,7 +362,6 @@ impl Config {
             object_model_pool_cache_ttl_secs,
             agent_components_dir,
             direct_wasm_components_dir,
-            isolation_policy,
             mcp_allowed_hosts,
             mcp_session_store,
             mcp_session_ttl_seconds,
@@ -655,13 +650,7 @@ pub fn get() -> &'static Config {
     CONFIG.get().expect("Config must be initialized before use")
 }
 
-/// Legacy artifact runtime approvals. Never rereads the file.
-pub fn isolation_policy() -> Option<std::sync::Arc<isolation::IsolationPolicy>> {
-    try_get().and_then(|config| config.isolation_policy.clone())
-}
-
-/// New compilation always uses standard component composition. Legacy runtime
-/// approvals cannot change cache identity or select another compiler backend.
+/// New compilation always uses standard component composition.
 /// The tag is the one this process's compiles get: in its runner's stdlib
 /// mode, so an artifact built in another mode reads as stale and rebuilds.
 pub fn workflow_lowering_tag() -> String {
@@ -1072,7 +1061,6 @@ mod tests {
         let actual = workflow_lowering_tag();
         assert_eq!(actual, runtara_workflows::direct_lowering_tag());
         assert!(actual.contains("agent-composition=standard-v1"));
-        assert!(!actual.contains("isolation=v1-"));
     }
 
     #[test]

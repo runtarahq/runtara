@@ -85,10 +85,10 @@ pub struct ActiveQueue {
 const REQUEST_FROM: &str = " FROM instance_input_requests r JOIN instances i ON i.instance_id=r.instance_id JOIN instance_images ii ON ii.instance_id=i.instance_id JOIN images img ON img.image_id=ii.image_id";
 
 fn push_actionable(query: &mut QueryBuilder<'_, Postgres>, at: DateTime<Utc>) {
-    // Match managed-input discovery, including the latest owning invocation.
+    // Match managed-input discovery.
     query.push(" AND r.tenant_id=i.tenant_id AND r.state='open' AND (r.deadline IS NULL OR r.deadline>")
         .push_bind(at)
-        .push(") AND i.status NOT IN ('completed','failed','cancelled') AND (r.invocation_path='' OR (SELECT a.state FROM invocation_attempts a WHERE a.instance_id=r.instance_id AND a.invocation_path=r.invocation_path ORDER BY a.generation DESC LIMIT 1)='active')");
+        .push(") AND i.status NOT IN ('completed','failed','cancelled')");
 }
 
 fn push_projection(query: &mut QueryBuilder<'_, Postgres>, fields: &[String]) {

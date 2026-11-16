@@ -218,7 +218,7 @@ existing connection type (`http_bearer`, `http_api_key`,
      `redirectUri` names.
    - OAuth2 client credentials against the vendor's own token endpoint get a
      `describe_<vendor>_client_credentials_auth` returning
-     `DeferredAuth::OAuth2ClientCredentials` (Shopify, Zendesk): the shape of
+     `DeferredAuth::OAuth2ClientCredentials` (Shopify, Zendesk, UPS, PayPal): the shape of
      the token request. seal sends it with the sealed client secret, and the
      token comes back sealed for the API. Send the body the vendor documents
      (`TokenRequestBody::Json` or `FormUrlEncoded`), and ask for a token
@@ -278,6 +278,10 @@ declared type's id in its `integration_ids`.
   host.
 - `fields` relabel the base type's fields. `fixed` gives base fields a
   value the user cannot change, such as `header_name` for `http_api_key`.
+- Where the service wants text around the key, fix `http_api_key`'s
+  `value_format` too: `{}` stands for the key, exactly once.
+  `"fixed": { "header_name": "Authorization", "value_format": "Token {}" }`
+  sends `Authorization: Token <key>`, and the user enters the key alone.
   The base's `base_url` is never a user field, and secrecy is always the
   base's.
 - `iconUrl` is an `https://` URL, served by the CDN rather than by runtara.

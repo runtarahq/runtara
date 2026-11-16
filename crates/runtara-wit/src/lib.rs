@@ -207,35 +207,18 @@ pub fn resolve() -> Result<wit_parser::Resolve, String> {
 /// Which interfaces a generated `runtara:agent-<id>` package declares.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AgentShape {
-    /// The compiler's isolated-agent variant: `scoped-capabilities-v3`, whose
-    /// `invoke` also takes the logical call context.
-    pub scoped: bool,
     /// Also export `runtara:trusted/execution`.
     pub trusted: bool,
 }
 
-/// Name of the per-agent capabilities interface for `shape`.
-pub fn capabilities_interface(shape: AgentShape) -> &'static str {
-    if shape.scoped {
-        "scoped-capabilities-v3"
-    } else {
-        "capabilities"
-    }
-}
+/// Name of the per-agent capabilities interface.
+pub const CAPABILITIES_INTERFACE: &str = "capabilities";
 
 /// The `runtara:agent-<id>` package an agent exports, and the compiler
 /// imports, for `id` (the agent id in kebab case).
 pub fn agent_package(id: &str, shape: AgentShape) -> String {
     let version = VERSION;
-    let interface = capabilities_interface(shape);
-    // The scoped isolation adapter's private interface keeps the bare list:
-    // the host adapter, not the agent, owns suspension there.
-    let result = if shape.scoped { "list<u8>" } else { "outcome" };
-    let context = if shape.scoped {
-        "\n        path: string, call-site: u32, activation: u32, attempt: u64,"
-    } else {
-        ""
-    };
+    let interface = CAPABILITIES_INTERFACE;
     let mut wit = format!(
         "package runtara:agent-{id}@{version};\n\
          \n\
@@ -243,8 +226,8 @@ pub fn agent_package(id: &str, shape: AgentShape) -> String {
              use runtara:agent/types@{version}.{{error-info, outcome}};\n    \
              invoke: async func(\n        \
                  capability-id: string,\n        \
-                 input: list<u8>,{context}\n    \
-             ) -> result<{result}, error-info>;\n\
+                 input: list<u8>,\n    \
+             ) -> result<outcome, error-info>;\n\
          }}\n"
     );
     // Suspending and control agents read their operation from their input
