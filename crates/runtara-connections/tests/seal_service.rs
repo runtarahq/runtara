@@ -1,13 +1,20 @@
 //! Sealed credentials with seal as a process of its own: seal's service, on a
 //! Unix socket, holds the keys, and this side only asks it. A tenant's keyset
-//! is made, used and destroyed through seal's calls.
+//! is made, used and destroyed through seal's calls, and the keys a server
+//! kept in its database are handed over to seal's key directory.
 
 #![cfg(unix)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use runtara_connections::sealed::keys::{PgKeySource, export_keys, export_wrapping_key};
 use runtara_connections::sealed::mode::SealMode;
-use runtara_connections::sealed::{Allowances, SealedCredentials};
+use runtara_connections::sealed::{Allowances, SealedCredentials, forget_keys_seal_holds};
+use sqlx::PgPool;
+use testcontainers::ContainerAsync;
+use testcontainers::runners::AsyncRunner;
+use testcontainers_modules::postgres::Postgres;
 
 const TENANT: &str = "acme";
 const SECRET: &str = "s3cr3t-CANARY-token";
@@ -185,4 +192,156 @@ async fn a_seal_that_does_not_answer_is_found_when_it_is_asked() {
     };
     let sealed = SealedCredentials::remote(mode.client().unwrap().unwrap(), Allowances::default());
     assert!(sealed.reach().await.is_err());
+}
+
+async fn key_table() -> (PgPool, ContainerAsync<Postgres>) {
+    let container = Postgres::default()
+        .start()
+        .await
+        .expect("required Docker Postgres container must start");
+    let url = format!(
+        "postgres://postgres:postgres@{}:{}/postgres",
+        container.get_host().await.unwrap(),
+        container.get_host_port_ipv4(5432).await.unwrap()
+    );
+    let pool = PgPool::connect(&url).await.unwrap();
+    // As the server's migration makes it.
+    sqlx::query(
+        "CREATE TABLE seal_wrapped_key (
+            keyset TEXT NOT NULL,
+            kid TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            public_key TEXT NOT NULL,
+            created BIGINT NOT NULL,
+            wrap_id TEXT NOT NULL,
+            wrapped TEXT NOT NULL,
+            stored_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (keyset, kid)
+        )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    (pool, container)
+}
+
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files.extend(files_under(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
+
+/// A deployment that ran seal in its server moves to a seal of its own: the
+/// keys go from its database to seal's directory, with the key that wraps
+/// them, and what was sealed before opens there.
+#[tokio::test(flavor = "multi_thread")]
+async fn keys_a_server_kept_are_handed_over_to_a_seal_of_its_own() {
+    let (pool, _postgres) = key_table().await;
+    let wrapping_key = [7_u8; 32];
+    let in_server = SealedCredentials::in_process(
+        Arc::new(PgKeySource::new(pool.clone())),
+        &wrapping_key,
+        Allowances::default(),
+    )
+    .unwrap();
+    let marker = in_server
+        .seal_webhook_secret(TENANT, "c-1", None, SECRET)
+        .await
+        .unwrap();
+    let other = in_server
+        .seal_webhook_secret("another-tenant", "c-9", None, SECRET)
+        .await
+        .unwrap();
+
+    let dir = Seal::dir();
+    let (keys, kek) = (dir.path().join("keys"), dir.path().join("kek"));
+    assert_eq!(export_keys(&pool, &keys).await.unwrap(), (2, 0));
+    // Run again, it finds them there and replaces nothing.
+    assert_eq!(export_keys(&pool, &keys).await.unwrap(), (0, 2));
+    export_wrapping_key(&kek, &wrapping_key).unwrap();
+    assert!(
+        export_wrapping_key(&kek, &wrapping_key).is_err(),
+        "a wrapping key file is never written over"
+    );
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&kek), 0o600);
+        assert_eq!(mode(&keys), 0o700);
+    }
+    // The directory holds the keys wrapped, as the table did: neither the
+    // secret nor the wrapping key is in it.
+    for file in files_under(&keys) {
+        let content = std::fs::read(&file).unwrap();
+        assert!(
+            !content
+                .windows(SECRET.len())
+                .any(|w| w == SECRET.as_bytes())
+        );
+        assert!(!content.windows(32).any(|w| w == wrapping_key));
+    }
+
+    let seal = Seal::over(dir, keys, kek).await;
+    let sealed = seal.client();
+    assert_eq!(
+        sealed
+            .verify_webhook_secret(TENANT, "c-1", &marker, SECRET)
+            .await,
+        Ok(true)
+    );
+    assert_eq!(
+        sealed
+            .verify_webhook_secret("another-tenant", "c-9", &other, SECRET)
+            .await,
+        Ok(true)
+    );
+    // New secrets are sealed to the key that came over, not a new one.
+    sealed
+        .seal_webhook_secret(TENANT, "c-2", None, SECRET)
+        .await
+        .unwrap();
+    assert_eq!(seal.key_files(TENANT), 1);
+
+    // The database's copy goes once seal holds every key: not from a server
+    // that still runs seal itself, and not while a key has not come over.
+    let rows = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM seal_wrapped_key")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let refused = forget_keys_seal_holds(&pool, &in_server).await.unwrap_err();
+    assert!(refused.contains("in_process"), "{refused}");
+    // A key made in the database after the export, which seal never got.
+    in_server
+        .seal_webhook_secret("late-tenant", "c-1", None, SECRET)
+        .await
+        .unwrap();
+    let missing = forget_keys_seal_holds(&pool, &sealed).await.unwrap_err();
+    assert!(missing.contains("late-tenant"), "{missing}");
+    assert_eq!(rows().await, 3, "nothing is deleted while a key is missing");
+    // Exported now, it is there for seal to find. (seal was just asked for
+    // that keyset, and remembers for half a minute that it had no key: the
+    // rest of this test does not wait for that.)
+    assert_eq!(export_keys(&pool, &seal.keys).await.unwrap(), (1, 2));
+    sqlx::query("DELETE FROM seal_wrapped_key WHERE keyset = 'late-tenant'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(forget_keys_seal_holds(&pool, &sealed).await, Ok(2));
+    assert_eq!(rows().await, 0);
+    // What was sealed still opens: seal's copy is the one in use.
+    assert_eq!(
+        sealed
+            .verify_webhook_secret(TENANT, "c-1", &marker, SECRET)
+            .await,
+        Ok(true)
+    );
 }

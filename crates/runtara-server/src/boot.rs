@@ -108,6 +108,15 @@ async fn run_as_platform(options: ServerOptions) -> Result<(), Box<dyn std::erro
         None => None,
     };
 
+    let seal_keys = match crate::seal_keys::parse_args(std::env::args_os()) {
+        Some(Ok(args)) => Some(args),
+        Some(Err(msg)) => {
+            eprintln!("{msg}");
+            std::process::exit(2);
+        }
+        None => None,
+    };
+
     let destroy_seal_keys = match crate::destroy_seal_keys::parse_args(std::env::args_os()) {
         Some(Ok(args)) => Some(args),
         Some(Err(msg)) => {
@@ -174,6 +183,14 @@ async fn run_as_platform(options: ServerOptions) -> Result<(), Box<dyn std::erro
         crate::observability::init_cli_logging();
         if let Err(msg) = crate::reencrypt::run(pool, args, options.credential_cipher.clone()).await
         {
+            eprintln!("❌ {msg}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    if let Some(args) = seal_keys {
+        crate::observability::init_cli_logging();
+        if let Err(msg) = crate::seal_keys::run(pool, args).await {
             eprintln!("❌ {msg}");
             std::process::exit(1);
         }

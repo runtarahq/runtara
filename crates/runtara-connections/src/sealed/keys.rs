@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
 use seal_format::{KeyId, KeysetId};
-use seal_keys::{FileKeyWrap, KeyError, KeySource, KeyWrap, KeyWraps, RewrapOptions, WrappedKey};
+use seal_keys::{
+    DirKeySource, FileKeyWrap, KeyError, KeySource, KeyWrap, KeyWraps, RewrapOptions, WrappedKey,
+};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use zeroize::Zeroizing;
@@ -341,6 +343,79 @@ pub async fn rewrap_retired(
         );
     }
     Ok(done.rewrapped)
+}
+
+/// Writes every seal key in the table into `dir`, as the key directory of a
+/// seal that runs as a process of its own holds them
+/// (`<dir>/<keyset>/<kid>.json`), still wrapped. Returns how many were
+/// written and how many were already there.
+///
+/// The directory is seal's own (`DirKeySource`), so the layout is seal's and
+/// not a copy of it. A key is never replaced: one already in the directory
+/// under the same name is left, so the command can be run again.
+pub async fn export_keys(pool: &PgPool, dir: &std::path::Path) -> Result<(usize, usize), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        if !dir.exists() {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)
+                .map_err(|error| format!("{} could not be made: {error}", dir.display()))?;
+        }
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)
+        .map_err(|error| format!("{} could not be made: {error}", dir.display()))?;
+    let source = PgKeySource::new(pool.clone());
+    let target = DirKeySource::new(dir, usize::MAX);
+    let (mut written, mut present) = (0, 0);
+    for keyset in source
+        .keysets()
+        .await
+        .map_err(|error| format!("the keysets could not be listed: {error}"))?
+    {
+        for key in source
+            .wrapped_keys(&keyset)
+            .await
+            .map_err(|error| format!("the keys of a keyset could not be read: {error}"))?
+        {
+            match target.store(&key).await {
+                Ok(()) => written += 1,
+                Err(KeyError::AlreadyExists) => present += 1,
+                Err(error) => {
+                    return Err(format!(
+                        "key {}/{} could not be written: {error}",
+                        key.keyset.as_str(),
+                        key.kid.as_str()
+                    ));
+                }
+            }
+        }
+    }
+    Ok((written, present))
+}
+
+/// Writes the key that wraps tenants' seal keys to `path`, as seal reads a
+/// wrapping key file: its 32 bytes, in a new file only its owner can read.
+/// For moving the key to the host of a seal that runs as a process of its
+/// own; nothing else should hold a copy afterwards.
+pub fn export_wrapping_key(path: &std::path::Path, key: &[u8; 32]) -> Result<(), String> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("{} could not be made: {error}", path.display()))?;
+    file.write_all(key)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("{} could not be written: {error}", path.display()))
 }
 
 #[cfg(test)]

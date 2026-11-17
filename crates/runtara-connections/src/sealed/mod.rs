@@ -1022,6 +1022,60 @@ pub fn from_env(
     Ok(Arc::new(sealed))
 }
 
+/// Deletes from `pool` the seal keys that `seal`, a process of its own, holds:
+/// every one of them, or none. Returns how many were deleted.
+///
+/// A key is deleted only when seal answers for it: for each keyset in the
+/// table, every key the table has must be among those seal lists. Until then
+/// the table is the only place a key that did not come over still exists, so
+/// one missing key leaves the whole table as it is, and is named.
+pub async fn forget_keys_seal_holds(
+    pool: &sqlx::PgPool,
+    seal: &SealedCredentials,
+) -> Result<usize, String> {
+    if seal.keys.is_some() {
+        return Err(format!(
+            "seal runs in this server ({}=in_process), which reads its keys from this \
+             database: there is no other seal to hold them",
+            mode::MODE_ENV
+        ));
+    }
+    let held: Vec<(String, String)> =
+        sqlx::query_as("SELECT keyset, kid FROM seal_wrapped_key ORDER BY keyset, kid")
+            .fetch_all(pool)
+            .await
+            .map_err(|error| format!("the keys could not be read: {error}"))?;
+    let mut by_keyset: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (keyset, kid) in held {
+        by_keyset.entry(keyset).or_default().push(kid);
+    }
+    for (keyset, kids) in &by_keyset {
+        let id = KeysetId::new(keyset.clone())
+            .map_err(|_| format!("the stored keyset `{keyset}` is not one"))?;
+        let at_seal: Vec<String> = match seal.client.public_keys(&id).await {
+            Ok(keys) => keys.into_iter().map(|key| key.kid).collect(),
+            Err(error) if error.code == SealErrorCode::KeysetUnknown => Vec::new(),
+            Err(error) => {
+                return Err(format!(
+                    "seal could not be asked for keyset `{keyset}`: {error}"
+                ));
+            }
+        };
+        if let Some(missing) = kids.iter().find(|kid| !at_seal.contains(kid)) {
+            return Err(format!(
+                "seal does not hold key `{missing}` of keyset `{keyset}`: export the keys to \
+                 seal first. (seal remembers for half a minute that a keyset had no key; one \
+                 exported just now is found after that.) Nothing was deleted"
+            ));
+        }
+    }
+    let deleted = sqlx::query("DELETE FROM seal_wrapped_key")
+        .execute(pool)
+        .await
+        .map_err(|error| format!("the keys could not be deleted: {error}"))?;
+    Ok(usize::try_from(deleted.rows_affected()).unwrap_or(0))
+}
+
 /// Has tenants' seal keys follow a rotation of the credential encryption key.
 ///
 /// Without [`WRAPPING_KEY_ENV`], the key that wraps them is derived from the
