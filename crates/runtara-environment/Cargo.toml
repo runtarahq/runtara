@@ -122,6 +122,11 @@ path = "tests/db_cleanup_worker_test.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
+name = "row_security_test"
+path = "tests/row_security_test.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
 name = "db_test"
 path = "tests/db_test.rs"
 required-features = ["db-integration-tests"]

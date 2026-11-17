@@ -6,7 +6,7 @@
 //!
 //! Requires the explicit `db-integration-tests` feature and a live Postgres.
 
-use runtara_store_postgres::tenant_scope::{scoped, scoping};
+use runtara_store_postgres::tenant_scope::{scoped, scoping, system};
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use uuid::Uuid;
@@ -124,8 +124,9 @@ async fn every_table_is_policed_by_tenant_or_global_by_design() {
            AND NOT EXISTS (SELECT 1 FROM pg_policies p \
                 WHERE p.schemaname = 'public' AND p.tablename = c.relname \
                   AND p.cmd = 'ALL' AND p.permissive = 'PERMISSIVE' \
-                  AND p.qual LIKE 'runtara_tenant_visible(%' \
-                  AND p.with_check LIKE 'runtara_tenant_visible(%') \
+                  AND p.qual LIKE '%= current_setting(''runtara.tenant_id''::text, true)) \
+                       OR ( SELECT runtara_all_tenants() AS runtara_all_tenants))' \
+                  AND p.with_check = p.qual) \
             OR EXISTS (SELECT 1 FROM pg_policies p \
                 WHERE p.schemaname = 'public' AND p.tablename = c.relname \
                   AND p.policyname <> 'runtara_tenant') \
@@ -187,7 +188,7 @@ async fn a_scoped_connection_reaches_only_its_tenants_rows() {
             };
             match tenant {
                 Some(tenant) => scoped(tenant, count).await,
-                None => count.await,
+                None => system(count).await,
             }
         }
     };
@@ -198,8 +199,24 @@ async fn a_scoped_connection_reaches_only_its_tenants_rows() {
     assert_eq!(
         counted(None, workflows).await,
         2,
-        "the system path sees all"
+        "the platform's scope sees all"
     );
+
+    // In no scope, a tenant's rows are neither read nor written: the
+    // statement is refused, not answered with nothing.
+    let read = sqlx::query_scalar::<_, i64>(workflows)
+        .bind(&tenants[..])
+        .fetch_one(&pool)
+        .await
+        .expect_err("a read in no scope is refused");
+    assert!(read.to_string().contains("no tenant scope"), "{read}");
+    let written =
+        sqlx::query("INSERT INTO workflows (tenant_id, workflow_id) VALUES ($1, 'unscoped')")
+            .bind(&a)
+            .execute(&pool)
+            .await
+            .expect_err("a write in no scope is refused");
+    assert!(written.to_string().contains("no tenant scope"), "{written}");
 
     // Writes: another tenant's rows are untouched, and no row can be written
     // as another tenant.
