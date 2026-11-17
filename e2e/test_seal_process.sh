@@ -7,7 +7,8 @@
 #
 #   1. IN THE SERVER    a Postgres connection's password is sealed; the
 #                       tenant's seal key is in the server's database.
-#   2. HANDED OVER      `seal-keys export` writes the keys and the key that
+#   2. HANDED OVER      a server does not start on a seal that lacks its
+#                       keys. `seal-keys export` writes them and the key that
 #                       wraps them; seal is started over them, on a socket.
 #   3. ON A SOCKET      the server, told RUNTARA_SEAL_MODE=unix, uses the old
 #                       connection and seals a new one, through seal: seal's
@@ -314,6 +315,22 @@ echo "  the connection logs in through seal in the server; the tenant's key is i
 #-------------------------------------------------------------------------
 print_step "2. The keys are handed over to a seal of its own..."
 stop_server
+# First, a seal that was not given them: a server that started on it would
+# seal to new keys, and what is sealed already would stop opening.
+HANDED_OVER_DIR="${SEAL_DIR}"
+SEAL_DIR="$(mktemp -d /tmp/rseal.XXXXXX)"
+mkdir "${SEAL_DIR}/keys"
+(umask 077 && head -c 32 /dev/urandom > "${SEAL_DIR}/kek")
+write_seal_config "unix = \"${SEAL_DIR}/seal.sock\"" "unix_uid = $(id -u)"
+start_seal
+SEAL_ENV=(RUNTARA_SEAL_MODE=unix "RUNTARA_SEAL_SOCKET=${SEAL_DIR}/seal.sock")
+SAID=$(refused_start) || exit 1
+echo "${SAID}" | grep -q "Hand the keys over first" \
+    || { print_error "a server on a seal without its keys said: $(echo "${SAID}" | tail -2)"; exit 1; }
+stop_seal
+rm -rf "${SEAL_DIR}"
+SEAL_DIR="${HANDED_OVER_DIR}"
+SEAL_ENV=()
 EXPORT_LOG="${TEST_DATA_DIR}/export.log"
 (server_env SKIP_MIGRATIONS=true "${RUNTARA_SERVER_BIN}" seal-keys export \
     --out "${SEAL_DIR}/keys" --wrapping-key-out "${SEAL_DIR}/kek") >"${EXPORT_LOG}" 2>&1 \
@@ -333,7 +350,7 @@ if (server_env SKIP_MIGRATIONS=true "${RUNTARA_SERVER_BIN}" seal-keys export \
 fi
 write_seal_config "unix = \"${SEAL_DIR}/seal.sock\"" "unix_uid = $(id -u)"
 start_seal
-echo "  one key and the key that wraps it are seal's; seal runs over them on a socket ✓"
+echo "  a seal without the keys is refused; one key and the key that wraps it are exported, and seal runs over them ✓"
 
 #-------------------------------------------------------------------------
 print_step "3. The server uses seal on its socket..."

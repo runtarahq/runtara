@@ -1022,17 +1022,28 @@ pub fn from_env(
     Ok(Arc::new(sealed))
 }
 
-/// Deletes from `pool` the seal keys that `seal`, a process of its own, holds:
-/// every one of them, or none. Returns how many were deleted.
+/// What became of the seal keys a deployment kept in its database, once seal
+/// is a process of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeysHandedOver {
+    /// The database holds none: nothing was kept there, or it was deleted.
+    NoneKept,
+    /// seal holds every key the database still has, this many.
+    All(usize),
+    /// The database has a key seal does not: what was sealed to it would no
+    /// longer open.
+    Missing { keyset: String, kid: String },
+}
+
+/// Whether `seal`, a process of its own, holds the seal keys still in `pool`.
 ///
-/// A key is deleted only when seal answers for it: for each keyset in the
-/// table, every key the table has must be among those seal lists. Until then
-/// the table is the only place a key that did not come over still exists, so
-/// one missing key leaves the whole table as it is, and is named.
-pub async fn forget_keys_seal_holds(
+/// seal is asked for each keyset the table has, and must list every key the
+/// table has for it. Until the keys are handed over (`seal-keys export`),
+/// the table is the only place they exist.
+pub async fn keys_handed_over(
     pool: &sqlx::PgPool,
     seal: &SealedCredentials,
-) -> Result<usize, String> {
+) -> Result<KeysHandedOver, String> {
     if seal.keys.is_some() {
         return Err(format!(
             "seal runs in this server ({}=in_process), which reads its keys from this \
@@ -1045,11 +1056,15 @@ pub async fn forget_keys_seal_holds(
             .fetch_all(pool)
             .await
             .map_err(|error| format!("the keys could not be read: {error}"))?;
+    if held.is_empty() {
+        return Ok(KeysHandedOver::NoneKept);
+    }
+    let count = held.len();
     let mut by_keyset: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (keyset, kid) in held {
         by_keyset.entry(keyset).or_default().push(kid);
     }
-    for (keyset, kids) in &by_keyset {
+    for (keyset, kids) in by_keyset {
         let id = KeysetId::new(keyset.clone())
             .map_err(|_| format!("the stored keyset `{keyset}` is not one"))?;
         let at_seal: Vec<String> = match seal.client.public_keys(&id).await {
@@ -1061,9 +1076,28 @@ pub async fn forget_keys_seal_holds(
                 ));
             }
         };
-        if let Some(missing) = kids.iter().find(|kid| !at_seal.contains(kid)) {
+        if let Some(kid) = kids.into_iter().find(|kid| !at_seal.contains(kid)) {
+            return Ok(KeysHandedOver::Missing { keyset, kid });
+        }
+    }
+    Ok(KeysHandedOver::All(count))
+}
+
+/// Deletes from `pool` the seal keys that `seal`, a process of its own, holds:
+/// every one of them, or none. Returns how many were deleted.
+///
+/// A key is deleted only when seal answers for it ([`keys_handed_over`]):
+/// one missing key leaves the whole table as it is, and is named.
+pub async fn forget_keys_seal_holds(
+    pool: &sqlx::PgPool,
+    seal: &SealedCredentials,
+) -> Result<usize, String> {
+    match keys_handed_over(pool, seal).await? {
+        KeysHandedOver::NoneKept => return Ok(0),
+        KeysHandedOver::All(_) => {}
+        KeysHandedOver::Missing { keyset, kid } => {
             return Err(format!(
-                "seal does not hold key `{missing}` of keyset `{keyset}`: export the keys to \
+                "seal does not hold key `{kid}` of keyset `{keyset}`: export the keys to \
                  seal first. (seal remembers for half a minute that a keyset had no key; one \
                  exported just now is found after that.) Nothing was deleted"
             ));

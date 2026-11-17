@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 use runtara_connections::sealed::keys::{PgKeySource, export_keys, export_wrapping_key};
 use runtara_connections::sealed::mode::SealMode;
-use runtara_connections::sealed::{Allowances, SealedCredentials, forget_keys_seal_holds};
+use runtara_connections::sealed::{
+    Allowances, KeysHandedOver, SealedCredentials, forget_keys_seal_holds, keys_handed_over,
+};
 use sqlx::PgPool;
 use testcontainers::ContainerAsync;
 use testcontainers::runners::AsyncRunner;
@@ -288,8 +290,21 @@ async fn keys_a_server_kept_are_handed_over_to_a_seal_of_its_own() {
         assert!(!content.windows(32).any(|w| w == wrapping_key));
     }
 
+    // A seal that was not given the keys is told apart from one that was,
+    // before a server starts on it and seals to new keys.
+    let empty = Seal::fresh().await;
+    assert!(matches!(
+        keys_handed_over(&pool, &empty.client()).await,
+        Ok(KeysHandedOver::Missing { .. })
+    ));
+    drop(empty);
+
     let seal = Seal::over(dir, keys, kek).await;
     let sealed = seal.client();
+    assert_eq!(
+        keys_handed_over(&pool, &sealed).await,
+        Ok(KeysHandedOver::All(2))
+    );
     assert_eq!(
         sealed
             .verify_webhook_secret(TENANT, "c-1", &marker, SECRET)
@@ -336,6 +351,10 @@ async fn keys_a_server_kept_are_handed_over_to_a_seal_of_its_own() {
         .await
         .unwrap();
     assert_eq!(forget_keys_seal_holds(&pool, &sealed).await, Ok(2));
+    assert_eq!(
+        keys_handed_over(&pool, &sealed).await,
+        Ok(KeysHandedOver::NoneKept)
+    );
     assert_eq!(rows().await, 0);
     // What was sealed still opens: seal's copy is the one in use.
     assert_eq!(
