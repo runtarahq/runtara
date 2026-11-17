@@ -13,8 +13,6 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use sqlx::PgPool;
 
-use crate::api::repositories::object_model::ObjectStoreManager;
-
 use super::tools;
 
 /// MCP server state — holds references to runtara-server internals.
@@ -23,7 +21,6 @@ use super::tools;
 pub struct SmoMcpServer {
     tool_router: ToolRouter<Self>,
     pub(crate) pool: PgPool,
-    pub(crate) object_store_manager: Arc<ObjectStoreManager>,
     /// What tools ask of the engine beyond the API's own routes.
     pub(crate) engine: Arc<dyn crate::engine::Engine>,
     pub(crate) tenant_id: String,
@@ -47,7 +44,6 @@ impl SmoMcpServer {
 impl SmoMcpServer {
     pub fn new(
         pool: PgPool,
-        object_store_manager: Arc<ObjectStoreManager>,
         engine: Arc<dyn crate::engine::Engine>,
         tenant_id: String,
         internal_router: axum::Router,
@@ -55,7 +51,6 @@ impl SmoMcpServer {
         Self {
             tool_router: Self::tool_router(),
             pool,
-            object_store_manager,
             engine,
             tenant_id,
             internal_router,
@@ -1246,7 +1241,6 @@ impl ServerHandler for SmoMcpServer {
 /// Create an Axum router that serves the MCP Streamable HTTP endpoint.
 pub fn create_mcp_router(
     pool: PgPool,
-    object_store_manager: Arc<ObjectStoreManager>,
     engine: Arc<dyn crate::engine::Engine>,
     tenant_id: String,
     internal_router: axum::Router,
@@ -1264,7 +1258,6 @@ pub fn create_mcp_router(
         move || {
             Ok(SmoMcpServer::new(
                 pool.clone(),
-                object_store_manager.clone(),
                 engine.clone(),
                 tenant_id.clone(),
                 internal_router.clone(),

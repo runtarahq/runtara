@@ -4005,7 +4005,6 @@ mod add_agent_step_tests {
         use axum::routing::{get, post};
         use runtara_dsl::agent_meta::workflow_agent_info;
 
-        use crate::api::repositories::object_model::ObjectStoreManager;
         use crate::mcp::server::SmoMcpServer;
         // No other test uses these tenants, so code that resolves a tenant's
         // agents while `DATA_DIR` points here never sees the one staged below.
@@ -4077,7 +4076,6 @@ mod add_agent_step_tests {
         let server = |tenant: &str| {
             SmoMcpServer::new(
                 pool.clone(),
-                Arc::new(ObjectStoreManager::new()),
                 crate::engine::without_runtime(),
                 tenant.into(),
                 crate::api::handlers::operators::agent_lookup_routes()

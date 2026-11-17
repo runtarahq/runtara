@@ -256,8 +256,6 @@ mod tests {
     use axum::routing::{get, post};
     use sqlx::postgres::PgPoolOptions;
 
-    use crate::api::repositories::object_model::ObjectStoreManager;
-
     use super::*;
 
     fn generated_property_schema<T: JsonSchema>(property: &str) -> serde_json::Value {
@@ -365,7 +363,6 @@ mod tests {
             .unwrap();
         let server = SmoMcpServer::new(
             pool,
-            Arc::new(ObjectStoreManager::new()),
             crate::engine::without_runtime(),
             "tenant-1".into(),
             internal_router,
@@ -460,7 +457,6 @@ mod tests {
         let server = |tenant: &str| {
             SmoMcpServer::new(
                 pool.clone(),
-                Arc::new(ObjectStoreManager::new()),
                 crate::engine::without_runtime(),
                 tenant.into(),
                 internal_router.clone(),
@@ -551,7 +547,6 @@ mod tests {
             .unwrap();
         let server = SmoMcpServer::new(
             pool.clone(),
-            Arc::new(ObjectStoreManager::new()),
             crate::engine::without_runtime(),
             "validate-gate-tenant".into(),
             crate::api::handlers::workflows::graph_validate_routes(pool, catalog),
@@ -607,7 +602,6 @@ mod validate_db_tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::api::repositories::object_model::ObjectStoreManager;
     use crate::api::repositories::workflows::WorkflowRepository;
 
     /// The server database, migrated, and a tenant no other test uses.
@@ -622,7 +616,6 @@ mod validate_db_tests {
     fn server(pool: &PgPool, tenant: &str, catalog: AgentCatalog) -> SmoMcpServer {
         SmoMcpServer::new(
             pool.clone(),
-            Arc::new(ObjectStoreManager::new()),
             crate::engine::without_runtime(),
             tenant.into(),
             crate::api::handlers::workflows::graph_validate_routes(pool.clone(), Arc::new(catalog)),

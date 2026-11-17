@@ -444,8 +444,52 @@ use runtime_client::RuntimeClient;
 pub struct ApiDoc;
 
 /// Application state shared across all handlers
+/// What the API's own routes are answered from. Nothing here reaches a
+/// connection's credentials or a run: what a handler needs of those, it asks
+/// of `engine`.
 #[derive(Clone)]
 struct AppState {
+    pool: PgPool,
+    valkey_conn: Option<redis::aio::ConnectionManager>,
+    engine: Arc<dyn crate::engine::Engine>,
+    agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
+    events: product_events::ProductEventSink,
+}
+
+impl axum::extract::FromRef<AppState> for Arc<dyn crate::engine::Engine> {
+    fn from_ref(state: &AppState) -> Self {
+        state.engine.clone()
+    }
+}
+
+impl axum::extract::FromRef<AppState> for PgPool {
+    fn from_ref(state: &AppState) -> PgPool {
+        state.pool.clone()
+    }
+}
+
+impl axum::extract::FromRef<AppState> for Arc<runtara_dsl::agent_meta::AgentCatalog> {
+    fn from_ref(state: &AppState) -> Arc<runtara_dsl::agent_meta::AgentCatalog> {
+        state.agent_catalog.clone()
+    }
+}
+
+impl axum::extract::FromRef<AppState> for product_events::ProductEventSink {
+    fn from_ref(state: &AppState) -> product_events::ProductEventSink {
+        state.events.clone()
+    }
+}
+
+impl axum::extract::FromRef<AppState> for Option<redis::aio::ConnectionManager> {
+    fn from_ref(state: &AppState) -> Option<redis::aio::ConnectionManager> {
+        state.valkey_conn.clone()
+    }
+}
+
+/// What the routes the engine serves are answered from: the engine's own
+/// holdings, which the API's routes are given none of.
+#[derive(Clone)]
+struct ServedState {
     pool: PgPool,
     object_store_manager: Arc<ObjectStoreManager>,
     /// Trigger stream publisher for async executions (None if Valkey not configured)
@@ -471,70 +515,70 @@ struct AppState {
     events: product_events::ProductEventSink,
 }
 
-impl axum::extract::FromRef<AppState> for Arc<dyn crate::engine::Engine> {
-    fn from_ref(state: &AppState) -> Self {
+impl axum::extract::FromRef<ServedState> for Arc<dyn crate::engine::Engine> {
+    fn from_ref(state: &ServedState) -> Self {
         state.engine.clone()
     }
 }
 
-// Implement FromRef to allow extracting PgPool from AppState
-impl axum::extract::FromRef<AppState> for PgPool {
-    fn from_ref(state: &AppState) -> PgPool {
+// Implement FromRef to allow extracting PgPool from ServedState
+impl axum::extract::FromRef<ServedState> for PgPool {
+    fn from_ref(state: &ServedState) -> PgPool {
         state.pool.clone()
     }
 }
 
-// Implement FromRef to allow extracting ObjectStoreManager from AppState
-impl axum::extract::FromRef<AppState> for Arc<ObjectStoreManager> {
-    fn from_ref(state: &AppState) -> Arc<ObjectStoreManager> {
+// Implement FromRef to allow extracting ObjectStoreManager from ServedState
+impl axum::extract::FromRef<ServedState> for Arc<ObjectStoreManager> {
+    fn from_ref(state: &ServedState) -> Arc<ObjectStoreManager> {
         state.object_store_manager.clone()
     }
 }
 
-// Implement FromRef to allow extracting the agent catalog from AppState.
-impl axum::extract::FromRef<AppState> for Arc<runtara_dsl::agent_meta::AgentCatalog> {
-    fn from_ref(state: &AppState) -> Arc<runtara_dsl::agent_meta::AgentCatalog> {
+// Implement FromRef to allow extracting the agent catalog from ServedState.
+impl axum::extract::FromRef<ServedState> for Arc<runtara_dsl::agent_meta::AgentCatalog> {
+    fn from_ref(state: &ServedState) -> Arc<runtara_dsl::agent_meta::AgentCatalog> {
         state.agent_catalog.clone()
     }
 }
 
-// Implement FromRef to allow extracting the product-event sink from AppState.
-impl axum::extract::FromRef<AppState> for product_events::ProductEventSink {
-    fn from_ref(state: &AppState) -> product_events::ProductEventSink {
+// Implement FromRef to allow extracting the product-event sink from ServedState.
+impl axum::extract::FromRef<ServedState> for product_events::ProductEventSink {
+    fn from_ref(state: &ServedState) -> product_events::ProductEventSink {
         state.events.clone()
     }
 }
 
-// Implement FromRef to allow extracting runtime_client from AppState
-// Implement FromRef to allow extracting trigger_stream from AppState
-impl axum::extract::FromRef<AppState>
+// Implement FromRef to allow extracting runtime_client from ServedState
+// Implement FromRef to allow extracting trigger_stream from ServedState
+impl axum::extract::FromRef<ServedState>
     for Option<Arc<api::repositories::trigger_stream::TriggerStreamPublisher>>
 {
     fn from_ref(
-        state: &AppState,
+        state: &ServedState,
     ) -> Option<Arc<api::repositories::trigger_stream::TriggerStreamPublisher>> {
         state.trigger_stream.clone()
     }
 }
 
-// Implement FromRef to allow extracting valkey_conn from AppState
-impl axum::extract::FromRef<AppState> for Option<redis::aio::ConnectionManager> {
-    fn from_ref(state: &AppState) -> Option<redis::aio::ConnectionManager> {
+// Implement FromRef to allow extracting valkey_conn from ServedState
+impl axum::extract::FromRef<ServedState> for Option<redis::aio::ConnectionManager> {
+    fn from_ref(state: &ServedState) -> Option<redis::aio::ConnectionManager> {
         state.valkey_conn.clone()
     }
 }
 
-// Implement FromRef to allow extracting connections facade from AppState
-impl axum::extract::FromRef<AppState> for Arc<runtara_connections::ConnectionsFacade> {
-    fn from_ref(state: &AppState) -> Arc<runtara_connections::ConnectionsFacade> {
+// Implement FromRef to allow extracting connections facade from ServedState
+impl axum::extract::FromRef<ServedState> for Arc<runtara_connections::ConnectionsFacade> {
+    fn from_ref(state: &ServedState) -> Arc<runtara_connections::ConnectionsFacade> {
         state.connections.clone()
     }
 }
 
-// Implement FromRef to allow extracting the unified execution engine from AppState
-// Implement FromRef to allow extracting AgentsService from AppState
-impl axum::extract::FromRef<AppState> for api::services::operators::AgentsService {
-    fn from_ref(state: &AppState) -> api::services::operators::AgentsService {
+// Implement FromRef to allow extracting the unified execution engine from ServedState
+// Implement FromRef to allow extracting AgentsService from ServedState
+impl axum::extract::FromRef<ServedState> for api::services::operators::AgentsService {
+    fn from_ref(state: &ServedState) -> api::services::operators::AgentsService {
         state.agents.clone()
     }
 }
@@ -2718,12 +2762,8 @@ async fn start_as_platform(
         .merge(api_keys_router)
         .with_state(AppState {
             pool: pool.clone(),
-            object_store_manager: object_store_manager.clone(),
-            trigger_stream: trigger_stream.clone(),
             valkey_conn: valkey_conn.clone(),
-            connections: connections_facade.clone(),
             engine: engine_api.clone(),
-            agents: agents_service.clone(),
             agent_catalog: agent_catalog.clone(),
             events: product_event_sink.clone(),
         })
@@ -2779,7 +2819,7 @@ async fn start_as_platform(
                 "/api/runtime/agents/{name}/capabilities/{capability_id}/test",
                 post(api::handlers::agent_testing::test_agent_handler),
             )
-            .with_state(AppState {
+            .with_state(ServedState {
                 pool: pool.clone(),
                 object_store_manager: object_store_manager.clone(),
                 trigger_stream: trigger_stream.clone(),
@@ -2825,7 +2865,7 @@ async fn start_as_platform(
                     .put(api::handlers::triggers::update_invocation_trigger)
                     .delete(api::handlers::triggers::delete_invocation_trigger),
             )
-            .with_state(AppState {
+            .with_state(ServedState {
                 pool: pool.clone(),
                 object_store_manager: object_store_manager.clone(),
                 trigger_stream: trigger_stream.clone(),
@@ -3056,7 +3096,7 @@ async fn start_as_platform(
                 .delete(api::handlers::events::capture_http_event)
                 .patch(api::handlers::events::capture_http_event),
         )
-        .with_state(AppState {
+        .with_state(ServedState {
             pool: pool.clone(),
             object_store_manager: object_store_manager.clone(),
             trigger_stream: trigger_stream.clone(),
@@ -3173,7 +3213,6 @@ async fn start_as_platform(
     // fallback_service, which route_layer would skip.
     let mcp_router = mcp::create_mcp_router(
         pool.clone(),
-        object_store_manager.clone(),
         engine_api.clone(),
         tenant_id.clone(),
         internal_router,

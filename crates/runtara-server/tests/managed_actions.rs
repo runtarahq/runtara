@@ -75,13 +75,7 @@ fn mcp_server(
                 },
             ),
         );
-    runtara_server::mcp::server::SmoMcpServer::new(
-        pool,
-        Arc::new(runtara_server::api::repositories::object_model::ObjectStoreManager::new()),
-        tools,
-        tenant.into(),
-        router,
-    )
+    runtara_server::mcp::server::SmoMcpServer::new(pool, tools, tenant.into(), router)
 }
 
 fn mcp_json(result: rmcp::model::CallToolResult) -> Value {
