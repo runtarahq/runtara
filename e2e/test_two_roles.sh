@@ -8,7 +8,8 @@
 # here in full. Everything is asked of the API.
 #
 #   1. refusals         an API given the runtime database refuses to start,
-#                       and so does an engine with nowhere to listen
+#                       and so does an engine with nowhere to listen, or
+#                       with seal in itself
 #   2. what each holds  the API's environment has no key, no runtime database
 #                       and no way to seal; the engine has no public listener
 #   3. runs             a workflow is made, compiled and run through the API,
@@ -414,10 +415,13 @@ SAID=$(refused_start env -i "${API_ENV[@]}" "SERVER_PORT=${API_PORT}" \
     "${RUNTARA_SERVER_BIN}")
 echo "${SAID}" | grep -q "was given RUNTARA_CONNECTIONS_ENCRYPTION_KEY, RUNTARA_SEAL_SOCKET" \
     || { print_error "an API given a key and the way to seal did not refuse them: ${SAID}"; exit 1; }
+SAID=$(refused_start engine_env env -u RUNTARA_SEAL_MODE -u RUNTARA_SEAL_SOCKET "${RUNTARA_SERVER_BIN}")
+echo "${SAID}" | grep -q "RUNTARA_ROLE=engine needs a seal of its own" \
+    || { print_error "an engine with seal in itself did not refuse to start: ${SAID}"; exit 1; }
 SAID=$(refused_start engine_env env -u RUNTARA_ENGINE_LISTEN "${RUNTARA_SERVER_BIN}")
 echo "${SAID}" | grep -q "RUNTARA_ROLE=engine needs RUNTARA_ENGINE_LISTEN" \
     || { print_error "an engine with nowhere to listen did not refuse to start: ${SAID}"; exit 1; }
-print_success "an API refuses the engine's holdings, and an engine refuses to be unreachable"
+print_success "an API refuses the engine's holdings; an engine refuses to be unreachable, or to hold seal's keys"
 
 # --- 2 ------------------------------------------------------------------
 print_step "2. Starting the engine, two executors and the API..."

@@ -2149,6 +2149,19 @@ async fn start_as_platform(
     // does. Each piece of background work below is started for the role it
     // belongs to.
     let workers = crate::roles::Workers::new(roles);
+    // An engine that is a process of its own does not hold the keys that open
+    // connections' secrets either: it is given a seal of its own.
+    if !roles.runs(crate::roles::Role::Api)
+        && !runtara_connections::sealed::mode::SealMode::from_env()
+            .is_ok_and(|mode| mode.is_remote())
+    {
+        eprintln!(
+            "❌ RUNTARA_ROLE=engine needs a seal of its own (RUNTARA_SEAL_MODE=unix or mtls, \
+             docs/seal.md): an engine split from its API is not where the keys that open \
+             connections' secrets are kept"
+        );
+        std::process::exit(1);
+    }
     let listen = match crate::roles::engine_listen() {
         Ok(Some(listen)) => Some(listen),
         Ok(None) if roles.runs(crate::roles::Role::Api) => None,

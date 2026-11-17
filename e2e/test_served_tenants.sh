@@ -82,6 +82,8 @@ SERVER_PID=""
 # the tenant's scope entered on the engine's side.
 TWO_ROLES="${TWO_ROLES:-false}"
 ENGINE_PID=""
+SEAL_PID=""
+SEAL_DIR=""
 TEST_ENGINE_PORT="${TEST_ENGINE_PORT:-17885}"
 VALKEY_CONTAINER=""
 TENANT="served_tenants_e2e"
@@ -111,6 +113,8 @@ cleanup() {
         kill "${ENGINE_PID}" 2>/dev/null || true
         wait "${ENGINE_PID}" 2>/dev/null || true
     fi
+    [ -z "${SEAL_PID}" ] || kill "${SEAL_PID}" 2>/dev/null || true
+    [ -z "${SEAL_DIR}" ] || rm -rf "${SEAL_DIR}"
     if [ -n "${VALKEY_CONTAINER}" ]; then
         docker rm -f "${VALKEY_CONTAINER}" >/dev/null 2>&1 || true
     fi
@@ -198,6 +202,55 @@ SERVER_DB_URL="postgresql://${RUNTIME_ROLE}:${RUNTIME_PASSWORD}@${POSTGRES_HOST}
 # No platform object-model database: tenants sharing a process take none
 # (M7.16).
 
+# An engine that is a process of its own has a seal of its own: SEAL_BIN, or
+# seal built at the revision the server uses.
+start_seal() {
+    local rev
+    rev=$(sed -n 's/^seal-client = .*rev = "\([0-9a-f]*\)".*/\1/p' "${PROJECT_ROOT}/crates/runtara-connections/Cargo.toml")
+    if [ -z "${SEAL_BIN:-}" ]; then
+        SEAL_BIN="${PROJECT_ROOT}/target/seal/${rev}/bin/seal"
+        [ -x "${SEAL_BIN}" ] || cargo install --locked --git https://github.com/runtarahq/seal \
+            --rev "${rev}" --root "${PROJECT_ROOT}/target/seal/${rev}" seal >&2
+    fi
+    # A socket's path is short.
+    SEAL_DIR="$(mktemp -d /tmp/rseal.XXXXXX)"
+    mkdir "${SEAL_DIR}/keys"
+    (umask 077 && head -c 32 /dev/urandom > "${SEAL_DIR}/kek")
+    cat > "${SEAL_DIR}/seal.toml" <<TOML
+[listen]
+unix = "${SEAL_DIR}/seal.sock"
+
+[[callers]]
+name = "runtara-server"
+unix_uid = $(id -u)
+keysets = ["*"]
+admin = true
+destroy_keysets = true
+
+[keys]
+source = { dir = "${SEAL_DIR}/keys" }
+wrap = { file = "${SEAL_DIR}/kek" }
+lock_memory = "off"
+
+[network]
+allow_private_cidrs = ["127.0.0.0/8", "::1/128"]
+honour_private_rules = true
+honour_plaintext_postgres_rules = true
+
+[audit]
+sink = { file = "${SEAL_DIR}/audit.jsonl" }
+TOML
+    chmod 600 "${SEAL_DIR}/seal.toml"
+    "${SEAL_BIN}" serve --config "${SEAL_DIR}/seal.toml" >>"${TEST_DATA_DIR}/seal.log" 2>&1 &
+    SEAL_PID=$!
+    for _ in {1..40}; do
+        kill -0 "${SEAL_PID}" 2>/dev/null || { print_error "seal exited as it started"; tail -20 "${TEST_DATA_DIR}/seal.log"; exit 1; }
+        [ -S "${SEAL_DIR}/seal.sock" ] && return 0
+        sleep 0.25
+    done
+    print_error "seal did not listen"; exit 1
+}
+
 # The API in front of an engine: what it is given, in full. Stopping "the
 # server" then stops the API; the engine keeps running, as its runs do.
 start_api() {
@@ -236,9 +289,12 @@ start_server() {
                 --api-dir "${TEST_DATA_DIR}/pki-api" >/dev/null
             mkdir "${TEST_DATA_DIR}/agent-descriptions"
             cp "${COMPONENTS_DIR}"/runtara_agent_*.meta.json "${TEST_DATA_DIR}/agent-descriptions/"
+            start_seal
             RUNTARA_ROLE=engine \
             RUNTARA_ENGINE_LISTEN="127.0.0.1:${TEST_ENGINE_PORT}" \
             RUNTARA_ENGINE_TLS_DIR="${TEST_DATA_DIR}/pki-engine" \
+            RUNTARA_SEAL_MODE=unix \
+            RUNTARA_SEAL_SOCKET="${SEAL_DIR}/seal.sock" \
                 start_one_server
             ENGINE_PID="${SERVER_PID}"
             for _ in {1..120}; do
