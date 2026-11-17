@@ -86,6 +86,11 @@ Each directory is given `ca.pem`, `tls.pem` and `tls.key` (its own key, mode
 to replace a certificate, run it again with `--replace` and restart both
 sides. The certificates are good for five years.
 
+A server whose API and engine are two processes ([roles.md](roles.md)) has a
+third certificate from the same CA, for the API: add `--api-dir <dir for the
+API>`. The server's directory is then the engine's. The run channel does
+not accept the API's certificate.
+
 Each side accepts only the other's certificate, by the name in it
 (`runtara-server`, `runtara-executor`): the names are not host names, so the
 hosts can be called anything. Every executor uses the executor's directory:

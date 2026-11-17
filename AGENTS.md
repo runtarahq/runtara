@@ -9,7 +9,9 @@ scoped README files, examples.
 
 - `crates/runtara-server` is the native application and composition root. It
   owns the public/internal HTTP APIs, auth, MCP endpoint, workers, and OpenAPI.
-  It serves no UI.
+  It serves no UI. It runs as its API, its engine, or both (`RUNTARA_ROLE`,
+  `docs/roles.md`): the API role holds nothing of the engine's and asks an
+  engine in another process over mutual TLS (`src/engine/`).
 - `crates/runtara-core` owns durable execution state: instances, checkpoints,
   signals, events, and sleep.
 - `crates/runtara-environment` owns image and instance lifecycle, runners, and
@@ -93,6 +95,13 @@ scoped README files, examples.
   served by the engine (`Engine::serve`). Background work is started through
   `roles::Workers`, for the role it belongs to. See
   `docs/separating-concerns.md`.
+- An operation of `Engine` is also a message in `src/engine/wire.rs` and a
+  method of `RemoteEngine`, and what it speaks is serializable: the API may
+  be another process. The API's side (`api_app` and `start_as_api` in
+  `server.rs`, `api/handlers`, `mcp`) reads nothing the engine set in its own
+  process: no artifact store, no staged agents, no installed component
+  release. What it needs of those it asks the engine. Do not add to what the
+  API role is given (`roles::given_to_the_api_role` lists what it refuses).
 - Never read, print, log, or commit credential values. Treat `.env*`, tokens,
   connection parameters, and database URLs as sensitive.
 - Do not hand-edit generated artifacts or ignored build outputs.
