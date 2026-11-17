@@ -1065,7 +1065,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request to a list of `X-Amz-*` headers, or a copy to a source: where a
   secret may go is still sealed with it, and what it may do there is for its
   own permissions at the provider. Values sealed with those options still
-  open. A session token is part of a presigned URL only where its own rule
+  open. Likewise a Postgres password is sealed for a server and no longer
+  for one database on it: which databases a role may use is for its own
+  privileges, so give a tenant's role only the database it is to reach.
+  A session token is part of a presigned URL only where its own rule
   says so, which a storage connection's now does; one sealed before this
   presigns without its token until its secrets are entered again.
   Tenants' seal keys are wrapped again, after an encryption key rotation,

@@ -149,6 +149,12 @@ seal's audit log shows each use. It cannot copy one out: when the breach is
 closed, nothing was taken that still works. It also still has its databases.
 seal's own threat model, in its repository, says the rest.
 
+seal holds a credential to where it goes, not to what it does there. A
+request's method, a database on the server a password is for, an object in
+the account a key is for: those are the credential's own permissions at the
+provider, and seal does not stand in for them. Give a connection a
+credential that may do only what the connection is for.
+
 Running seal on the server's host under another user protects against a
 broken server process, not against root on that host. Running it on another
 host protects against that too, and then the host seal is on is the one to
