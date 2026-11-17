@@ -466,12 +466,9 @@ mcp_status '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
     || { print_error "the session is kept under the primary tenant"; exit 1; }
 
 # A restart drops the in-memory session, so the next request must restore it
-# from Valkey, under the requesting tenant. At start the server revokes the
-# API keys of users who are no longer members of their tenant, and in this
-# suite's auth mode nothing records a member: say the keys' user is one.
-for member_of in "${TENANT}" "${SECOND_TENANT}"; do
-    valkey_cli SET "${member_of}:member:local" owner >/dev/null
-done
+# from Valkey, under the requesting tenant. The API keys made above survive
+# the restart: in this suite's auth mode nothing records who is a member, and
+# the server does not take that for their user having left.
 kill "${SERVER_PID}"; wait "${SERVER_PID}" 2>/dev/null || true
 start_server
 LIST='{"jsonrpc":"2.0","id":1,"method":"tools/list"}'

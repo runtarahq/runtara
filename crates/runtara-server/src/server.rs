@@ -2048,12 +2048,17 @@ async fn start_as_platform(
             let control_config = config.clone();
             let control_shutdown = shutdown_signal.clone();
             let control_tenant = control_tenant.clone();
+            let control_sweep = crate::valkey::control_events::ReconcileSweep::for_auth(
+                auth_kind,
+                membership_policy,
+            );
             let scope = control_tenant.clone();
             shutdown_coordinator.spawn_intake(scoped(scope, async move {
                 crate::valkey::control_events::run(
                     control_pool,
                     control_config,
                     control_tenant,
+                    control_sweep,
                     control_shutdown,
                 )
                 .await;

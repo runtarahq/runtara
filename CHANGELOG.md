@@ -1576,6 +1576,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A restart no longer revokes every API key where membership is not
+  enforced.** At start the server revokes the keys of users who are no
+  longer members of their tenant, and took a missing membership record for
+  that. Nothing writes those records in `local` and `trust_proxy` auth, and
+  under `oidc` the request gate ignores them unless
+  `RUNTARA_AUTH_MEMBERSHIP_POLICY=required`, so every key a user had made was
+  revoked each time the server started. The sweep now follows the gate: it
+  revokes under `oidc` with `required`, reports what it would revoke under
+  `logging`, and otherwise does nothing.
+
 - **A client-credentials connection is active again once its credentials
   work.** A token endpoint that refuses the stored credentials (a wrong
   secret: `401 invalid_client`) flags the connection
