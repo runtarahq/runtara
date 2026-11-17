@@ -121,6 +121,15 @@ server must be able to reach it.
 The run channel is its own listener, apart from the public API: mutual TLS,
 for executors only. Keep it on the private network between them.
 
+Both listeners, the run channel (7444) and an executor's (7443), bind every
+interface by default, because the server and its executors are usually on
+different hosts. Neither is for the internet. A caller without a certificate
+from the deployment's CA is refused in the TLS handshake, and that is the
+last barrier, not the only one that should be there: let only the executors'
+addresses reach 7444 and only the server's reach 7443, or bind them to the
+private interface. The certificates are not revocable; one that leaks is
+replaced by making the CA again (`init-pki`).
+
 A server told `RUNTARA_RUNNER=executor` that cannot honour it (no
 certificate, a port it cannot bind) does not start. It never falls back to
 running workflows in its own process: with no executor, runs wait.
