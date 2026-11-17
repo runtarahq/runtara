@@ -1470,7 +1470,7 @@ fn api_app(parts: ApiParts) -> Router {
         public_app
     };
 
-    let public_app = public_app
+    public_app
         .layer(from_fn(
             middleware::security_headers::security_headers_middleware,
         ))
@@ -1479,9 +1479,7 @@ fn api_app(parts: ApiParts) -> Router {
         .layer(from_fn(middleware::http_metrics::http_metrics_middleware))
         // Outermost: credential headers are marked sensitive before any
         // layer or handler can log them.
-        .layer(middleware::sensitive_headers::layer());
-
-    public_app
+        .layer(middleware::sensitive_headers::layer())
 }
 
 /// How a host composes the server beyond its environment configuration.
