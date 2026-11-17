@@ -75,6 +75,14 @@ TEST_VALKEY_PORT="${TEST_VALKEY_PORT:-16480}"
 TEST_DATA_DIR="$(mktemp -d -t runtara_served_tenants_e2e_XXXXXX)"
 TEST_LOG="${TEST_DATA_DIR}/server.log"
 SERVER_PID=""
+# TWO_ROLES=true runs the server as two processes (RUNTARA_ROLE): an engine,
+# and an API in front of it that every request here goes to. The API is then
+# the plain database role with nothing of the engine's, and what the engine
+# is asked crosses a wire, so this is the same test of the same tenants with
+# the tenant's scope entered on the engine's side.
+TWO_ROLES="${TWO_ROLES:-false}"
+ENGINE_PID=""
+TEST_ENGINE_PORT="${TEST_ENGINE_PORT:-17885}"
 VALKEY_CONTAINER=""
 TENANT="served_tenants_e2e"
 SECOND_TENANT="served_tenants_e2e_b"
@@ -98,6 +106,10 @@ cleanup() {
     if [ -n "${SERVER_PID}" ] && kill -0 "${SERVER_PID}" 2>/dev/null; then
         kill "${SERVER_PID}" 2>/dev/null || true
         wait "${SERVER_PID}" 2>/dev/null || true
+    fi
+    if [ -n "${ENGINE_PID}" ] && kill -0 "${ENGINE_PID}" 2>/dev/null; then
+        kill "${ENGINE_PID}" 2>/dev/null || true
+        wait "${ENGINE_PID}" 2>/dev/null || true
     fi
     if [ -n "${VALKEY_CONTAINER}" ]; then
         docker rm -f "${VALKEY_CONTAINER}" >/dev/null 2>&1 || true
@@ -186,8 +198,72 @@ SERVER_DB_URL="postgresql://${RUNTIME_ROLE}:${RUNTIME_PASSWORD}@${POSTGRES_HOST}
 # No platform object-model database: tenants sharing a process take none
 # (M7.16).
 
+# The API in front of an engine: what it is given, in full. Stopping "the
+# server" then stops the API; the engine keeps running, as its runs do.
+start_api() {
+    (cd "${TEST_DATA_DIR}" && exec env -i \
+    PATH="${PATH}" HOME="${HOME}" \
+    RUNTARA_ROLE=api \
+    RUNTARA_ENGINE_URL="https://127.0.0.1:${TEST_ENGINE_PORT}" \
+    RUNTARA_ENGINE_TLS_DIR="${TEST_DATA_DIR}/pki-api" \
+    RUNTARA_SERVER_DATABASE_URL="${SERVER_DB_URL}" \
+    TENANT_ID="${TENANT}" \
+    RUNTARA_SERVED_TENANTS="${SECOND_TENANT}" \
+    RUNTARA_REQUIRE_ROW_SECURITY=true \
+    RUNTARA_TENANT_ENTITLEMENTS_JSON="{\"${SECOND_TENANT}\": {\"overrides\": {\"limits\": {\"maxWorkflows\": 1, \"workflowCallsPerMinute\": 12}}}}" \
+    SERVER_HOST=127.0.0.1 \
+    SERVER_PORT="${TEST_PORT_PUBLIC}" \
+    RUNTARA_AGENT_COMPONENTS_DIR="${TEST_DATA_DIR}/agent-descriptions" \
+    MAX_CONCURRENT_EXECUTIONS=40 \
+    RUST_LOG="warn,runtara_server=info" \
+    AUTH_PROVIDER=local \
+    RUNTARA_OAUTH_TENANTLESS_CALLBACK=false \
+    VALKEY_HOST=127.0.0.1 \
+    VALKEY_PORT="${TEST_VALKEY_PORT}" \
+    OTEL_SDK_DISABLED=true \
+    SKIP_MIGRATIONS=true \
+    "${RUNTARA_SERVER_BIN}") >>"${TEST_LOG}" 2>&1 &
+    SERVER_PID=$!
+}
+
 start_server() {
     print_step "Starting runtara-server on :${TEST_PORT_PUBLIC}..."
+    if [ "${TWO_ROLES}" = "true" ]; then
+        if [ -z "${ENGINE_PID}" ]; then
+            "$(dirname "${RUNTARA_SERVER_BIN}")/runtara-executor" init-pki \
+                --server-dir "${TEST_DATA_DIR}/pki-engine" \
+                --executor-dir "${TEST_DATA_DIR}/pki-executor" \
+                --api-dir "${TEST_DATA_DIR}/pki-api" >/dev/null
+            mkdir "${TEST_DATA_DIR}/agent-descriptions"
+            cp "${COMPONENTS_DIR}"/runtara_agent_*.meta.json "${TEST_DATA_DIR}/agent-descriptions/"
+            RUNTARA_ROLE=engine \
+            RUNTARA_ENGINE_LISTEN="127.0.0.1:${TEST_ENGINE_PORT}" \
+            RUNTARA_ENGINE_TLS_DIR="${TEST_DATA_DIR}/pki-engine" \
+                start_one_server
+            ENGINE_PID="${SERVER_PID}"
+            for _ in {1..120}; do
+                grep -q "engine is ready" "${TEST_LOG}" && break
+                sleep 1
+                kill -0 "${ENGINE_PID}" 2>/dev/null || { print_error "Engine exited during boot."; tail -30 "${TEST_LOG}"; exit 1; }
+            done
+        fi
+        start_api
+    else
+        start_one_server
+    fi
+
+    for _ in {1..60}; do
+        if curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${TEST_PORT_PUBLIC}/health" 2>/dev/null | grep -q "^2"; then
+            break
+        fi
+        sleep 1
+        kill -0 "${SERVER_PID}" 2>/dev/null || { print_error "Server exited during boot."; tail -30 "${TEST_LOG}"; exit 1; }
+    done
+    echo "  Server up (PID ${SERVER_PID})"
+}
+
+# One server process, in whatever role its environment names.
+start_one_server() {
     RUNTARA_SERVER_DATABASE_URL="${SERVER_DB_URL}" \
     RUNTARA_DATABASE_CONNECTION_GUARD=off \
     RUNTARA_DATABASE_URL="postgresql://${RUNTIME_ROLE}:${RUNTIME_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_RUNTIME}" \
@@ -217,15 +293,6 @@ start_server() {
     SQLX_OFFLINE="${SQLX_OFFLINE}" \
     "${RUNTARA_SERVER_BIN}" >>"${TEST_LOG}" 2>&1 &
     SERVER_PID=$!
-
-    for _ in {1..60}; do
-        if curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${TEST_PORT_PUBLIC}/health" 2>/dev/null | grep -q "^2"; then
-            break
-        fi
-        sleep 1
-        kill -0 "${SERVER_PID}" 2>/dev/null || { print_error "Server exited during boot."; tail -30 "${TEST_LOG}"; exit 1; }
-    done
-    echo "  Server up (PID ${SERVER_PID})"
 }
 
 start_server
