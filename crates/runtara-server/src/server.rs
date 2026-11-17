@@ -2124,6 +2124,7 @@ async fn start_as_api(
         tenant_id,
     });
 
+    workers.log_started();
     let signal_coordinator = shutdown_coordinator.clone();
     let signal_task = runtara_store_postgres::tenant_scope::spawn(async move {
         if let Err(e) = wait_for_shutdown_signal().await {
@@ -3826,24 +3827,8 @@ async fn start_as_platform(
     });
 
     // Which background work this process started, by role.
-    {
-        let names = |role: crate::roles::Role| {
-            let mut names: Vec<&str> = workers
-                .started()
-                .into_iter()
-                .filter(|(started, _)| *started == role)
-                .map(|(_, name)| name)
-                .collect();
-            names.sort_unstable();
-            names.dedup();
-            names.join(", ")
-        };
-        tracing::info!(
-            engine = %names(crate::roles::Role::Engine),
-            api = %names(crate::roles::Role::Api),
-            "Background work started"
-        );
-    }
+    workers.log_started();
+
     // Install SIGINT / SIGTERM handlers that flip the shutdown flag. Runs
     // concurrently with the server — exiting is driven by the flag, not by
     // the server returning.

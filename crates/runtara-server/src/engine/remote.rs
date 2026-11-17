@@ -36,9 +36,26 @@ const ORDINARY: Duration = Duration::from_secs(60);
 const HELD: Duration = Duration::from_secs(15 * 60);
 /// The largest answer to an operation this side reads.
 const ANSWER_LIMIT: usize = 256 * 1024 * 1024;
-/// The largest body of a request handed to the engine: what the engine's own
-/// routes accept at most.
+/// The largest body of a request handed to the engine for a caller the API
+/// authenticated: what the engine's own routes accept at most.
 const HANDED_OVER_LIMIT: usize = 96 * 1024 * 1024;
+
+/// The largest body the API reads before it hands a request over. A part
+/// anyone may send to (a webhook, an OAuth redirect) is held to what the
+/// engine's routes for it accept, so that no one makes this process hold
+/// more than the engine would have taken.
+fn handed_over_limit(part: Served) -> usize {
+    match part {
+        Served::Events | Served::EventsForCallers | Served::Channels => {
+            crate::api::handlers::events::webhook_max_body_bytes().min(HANDED_OVER_LIMIT)
+        }
+        // A redirect from a provider carries its answer in the query.
+        Served::OAuthCallbacks => 64 * 1024,
+        Served::Connections | Served::ObjectModel | Served::Agents | Served::Triggers => {
+            HANDED_OVER_LIMIT
+        }
+    }
+}
 
 /// Why the engine did not answer.
 #[derive(Debug, Clone)]
@@ -426,7 +443,7 @@ async fn handed_over(
             HeaderValue::from_str(&source).map_err(|_| bad())?,
         );
     }
-    let body = axum::body::to_bytes(body, HANDED_OVER_LIMIT)
+    let body = axum::body::to_bytes(body, handed_over_limit(part))
         .await
         .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE.into_response())?;
     let mut request = http::Request::new(body);
@@ -1249,6 +1266,25 @@ mod tests {
             "{seen}"
         );
         assert!(seen.contains("scope=Some(\"acme\")"), "{seen}");
+    }
+
+    /// What anyone may send is not read past what the engine takes of it.
+    #[tokio::test]
+    async fn a_body_too_large_for_its_part_is_not_handed_over() {
+        let engine = api_side(engine_side());
+        let oversized = vec![b'x'; 64 * 1024 + 1];
+        let request = http::Request::post("/api/oauth/provider/callback")
+            .body(Body::from(oversized.clone()))
+            .unwrap();
+        let answer = engine.serve(Served::OAuthCallbacks, request).await;
+        assert_eq!(answer.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        // The same body is one a signed-in caller's request may carry.
+        let request = http::Request::post("/api/runtime/triggers/t-1")
+            .body(Body::from(oversized))
+            .unwrap();
+        let answer = engine.serve(Served::Triggers, request).await;
+        assert_eq!(answer.status(), StatusCode::OK);
+        assert!(handed_over_limit(Served::Events) <= HANDED_OVER_LIMIT);
     }
 
     #[tokio::test]

@@ -446,6 +446,10 @@ grep "Background work started" "${ENGINE_LOG}" | tail -1 | grep -Eq 'api=( |$)' 
     || { print_error "the engine started work that is the API's"; exit 1; }
 grep "Background work started" "${ENGINE_LOG}" | tail -1 | grep -q "trigger worker" \
     || { print_error "the engine did not start its own work"; exit 1; }
+grep "Background work started" "${API_LOG}" | tail -1 | grep -Eq 'engine=( |$)' \
+    || { print_error "the API started work that is the engine's"; exit 1; }
+grep "Background work started" "${API_LOG}" | tail -1 | grep -q "member control events" \
+    || { print_error "the API did not start its own work"; exit 1; }
 if healthy "${ENGINE_PUBLIC_PORT}"; then
     print_error "the engine serves the public API"; exit 1
 fi

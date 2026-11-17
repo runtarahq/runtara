@@ -206,6 +206,26 @@ impl Workers {
         }
     }
 
+    /// Says in the log what was started, for each role.
+    pub fn log_started(&self) {
+        let names = |role: Role| {
+            let mut names: Vec<&str> = self
+                .started()
+                .into_iter()
+                .filter(|(started, _)| *started == role)
+                .map(|(_, name)| name)
+                .collect();
+            names.sort_unstable();
+            names.dedup();
+            names.join(", ")
+        };
+        tracing::info!(
+            engine = %names(Role::Engine),
+            api = %names(Role::Api),
+            "Background work started"
+        );
+    }
+
     /// What was started, by role and name. A piece started once per tenant
     /// is named once per tenant.
     pub fn started(&self) -> Vec<(Role, &'static str)> {
