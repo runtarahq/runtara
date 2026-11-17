@@ -14,8 +14,9 @@ use axum::{
 use crate::api::dto::agent_testing::{
     TestAgentErrorResponse, TestAgentQuery, TestAgentRequest, TestAgentResponse,
 };
-use crate::api::services::agent_testing::{AgentTestingService, ServiceError};
+use crate::api::services::agent_testing::ServiceError;
 use crate::auth::AuthContext;
+use crate::engine::Engine;
 use crate::entitlement_error::EntitlementDenial;
 use crate::middleware::tenant_auth::{OrgId, Source};
 use crate::product_events::{EventType, ProductEvent, ProductEventSink};
@@ -49,7 +50,7 @@ use serde_json::json;
 #[allow(clippy::too_many_arguments)]
 pub async fn test_agent_handler(
     OrgId(tenant_id): OrgId,
-    State(service): State<Option<AgentTestingService>>,
+    State(service): State<std::sync::Arc<dyn Engine>>,
     State(events): State<ProductEventSink>,
     Extension(ctx): Extension<AuthContext>,
     Source(source): Source,
@@ -67,8 +68,8 @@ pub async fn test_agent_handler(
         return Err(EntitlementDenial::from(err).into_response());
     }
 
-    let service = service.ok_or_else(|| {
-        (
+    if !service.tests_agents() {
+        return Err((
             StatusCode::NOT_FOUND,
             Json(TestAgentErrorResponse {
                 success: false,
@@ -79,8 +80,8 @@ pub async fn test_agent_handler(
                 ),
             }),
         )
-            .into_response()
-    })?;
+            .into_response());
+    }
 
     match service
         .test_agent(

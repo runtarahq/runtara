@@ -448,7 +448,6 @@ pub struct ApiDoc;
 struct AppState {
     pool: PgPool,
     object_store_manager: Arc<ObjectStoreManager>,
-    agent_testing: Option<AgentTestingService>,
     /// Trigger stream publisher for async executions (None if Valkey not configured)
     trigger_stream: Option<Arc<api::repositories::trigger_stream::TriggerStreamPublisher>>,
     /// Valkey connection manager for session queue operations (None if Valkey not configured)
@@ -489,13 +488,6 @@ impl axum::extract::FromRef<AppState> for PgPool {
 impl axum::extract::FromRef<AppState> for Arc<ObjectStoreManager> {
     fn from_ref(state: &AppState) -> Arc<ObjectStoreManager> {
         state.object_store_manager.clone()
-    }
-}
-
-// Implement FromRef to allow extracting agent_testing from AppState
-impl axum::extract::FromRef<AppState> for Option<AgentTestingService> {
-    fn from_ref(state: &AppState) -> Option<AgentTestingService> {
-        state.agent_testing.clone()
     }
 }
 
@@ -2230,7 +2222,8 @@ async fn start_as_platform(
             execution_engine.clone(),
             pool.clone(),
         )
-        .with_agent_catalog(agent_catalog.clone()),
+        .with_agent_catalog(agent_catalog.clone())
+        .with_agent_testing(agent_testing.clone()),
     );
     let engine_api: Arc<dyn crate::engine::Engine> = local_engine.clone();
     native_control.install_engine(execution_engine.clone());
@@ -2582,28 +2575,7 @@ async fn start_as_platform(
         )
         // Reporting endpoints are mounted through reports_router.
         // Rate limit analytics are served by runtara-connections.
-        .route(
-            "/api/runtime/triggers",
-            post(api::handlers::triggers::create_invocation_trigger),
-        )
-        // Reporting endpoints are mounted through reports_router.
-        // Rate limit analytics are served by runtara-connections.
-        .route(
-            "/api/runtime/triggers",
-            get(api::handlers::triggers::list_invocation_triggers),
-        )
-        .route(
-            "/api/runtime/triggers/{id}",
-            get(api::handlers::triggers::get_invocation_trigger),
-        )
-        .route(
-            "/api/runtime/triggers/{id}",
-            put(api::handlers::triggers::update_invocation_trigger),
-        )
-        .route(
-            "/api/runtime/triggers/{id}",
-            delete(api::handlers::triggers::delete_invocation_trigger),
-        )
+        // Triggers are served by the engine: see `triggers_served` below.
         // API Key management endpoints — defined in `api_keys_router` above and merged below.
         // Entitlements snapshot endpoint
         .route(
@@ -2681,7 +2653,6 @@ async fn start_as_platform(
         .with_state(AppState {
             pool: pool.clone(),
             object_store_manager: object_store_manager.clone(),
-            agent_testing: agent_testing.clone(),
             trigger_stream: trigger_stream.clone(),
             valkey_conn: valkey_conn.clone(),
             connections: connections_facade.clone(),
@@ -2711,6 +2682,48 @@ async fn start_as_platform(
         // file inputs (workflow `file` fields) are not rejected with 413
         // (SYN-457). See TENANT_REQUEST_BODY_LIMIT_BYTES.
         .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES));
+
+    // Triggers are the engine's: making or changing one may register a webhook
+    // at its provider, with the connection's sealed secret. The API
+    // authenticates the caller and hands the request over; the caller's role
+    // is held to the route on the engine's side.
+    local_engine.serves(
+        crate::engine::Served::Triggers,
+        Router::new()
+            .route(
+                "/api/runtime/triggers",
+                post(api::handlers::triggers::create_invocation_trigger)
+                    .get(api::handlers::triggers::list_invocation_triggers),
+            )
+            .route(
+                "/api/runtime/triggers/{id}",
+                get(api::handlers::triggers::get_invocation_trigger)
+                    .put(api::handlers::triggers::update_invocation_trigger)
+                    .delete(api::handlers::triggers::delete_invocation_trigger),
+            )
+            .with_state(AppState {
+                pool: pool.clone(),
+                object_store_manager: object_store_manager.clone(),
+                trigger_stream: trigger_stream.clone(),
+                valkey_conn: valkey_conn.clone(),
+                connections: connections_facade.clone(),
+                engine: engine_api.clone(),
+                agents: agents_service.clone(),
+                agent_catalog: agent_catalog.clone(),
+                events: product_event_sink.clone(),
+            })
+            .route_layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
+            .route_layer(from_fn(crate::middleware::authorization::authorize(
+                membership_policy,
+            )))
+            .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES)),
+    );
+    let trigger_routes = Router::new().nest(
+        "/api/runtime/triggers",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Triggers).layer(
+            from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
+        ),
+    );
 
     // Connections crate routes (CRUD, OAuth authorize, type discovery, rate limit analytics)
     // Mounted as a separate router with tenant bridge middleware.
@@ -2902,7 +2915,7 @@ async fn start_as_platform(
     // Event capture routes (webhook endpoints — no JWT auth required).
     // These are called by external services (Shopify, etc.) and use the
     // configured TENANT_ID directly (single-tenant runtime).
-    let event_routes = Router::new()
+    let events_served = Router::new()
         .route(
             "/api/runtime/events/http-sync/{workflow_id}",
             post(api::handlers::workflows_sync::capture_http_event_sync)
@@ -2922,7 +2935,6 @@ async fn start_as_platform(
         .with_state(AppState {
             pool: pool.clone(),
             object_store_manager: object_store_manager.clone(),
-            agent_testing: agent_testing.clone(),
             trigger_stream: trigger_stream.clone(),
             valkey_conn: valkey_conn.clone(),
             connections: connections_facade.clone(),
@@ -2938,6 +2950,24 @@ async fn start_as_platform(
         .layer(DefaultBodyLimit::max(
             api::handlers::events::webhook_max_body_bytes(),
         ));
+    // A trigger's HTTP events are the engine's: each is checked against its
+    // connection's sealed secret before a run is accepted. Whoever sends one
+    // is not authenticated, so the API hands it over as it arrived. The same
+    // routes asked from inside (an MCP tool, for a caller the API already
+    // authenticated) hold the caller's role to what it may run.
+    local_engine.serves(
+        crate::engine::Served::EventsForCallers,
+        events_served
+            .clone()
+            .route_layer(from_fn(crate::middleware::authorization::authorize(
+                membership_policy,
+            ))),
+    );
+    local_engine.serves(crate::engine::Served::Events, events_served);
+    let event_routes = Router::new().nest(
+        "/api/runtime/events",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Events),
+    );
 
     // Initialize channel router for conversational triggers (Telegram, Slack, Teams).
     // The router is always available — it looks up connection + trigger from DB per request.
@@ -2996,17 +3026,16 @@ async fn start_as_platform(
     // process, though, `execute_workflow_sync` reaches it as a real identity, so the internal
     // copy gets the same gate every other MCP-reachable route has. Without it that single tool
     // would run a workflow for a caller whose role or credential scope forbids executing one.
-    let internal_event_routes =
-        event_routes
-            .clone()
-            .route_layer(from_fn(crate::middleware::authorization::authorize(
-                membership_policy,
-            )));
+    let internal_event_routes = Router::new().nest(
+        "/api/runtime/events",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::EventsForCallers),
+    );
 
     let internal_router = Router::new()
         .merge(tenant_routes.clone())
         .merge(object_model_routes.clone())
         .merge(connections_tenant_routes.clone())
+        .merge(trigger_routes.clone())
         .merge(public_routes.clone())
         .merge(internal_event_routes);
 
@@ -3111,6 +3140,7 @@ async fn start_as_platform(
     let public_app = Router::new()
         .merge(tenant_routes)
         .merge(connections_tenant_routes)
+        .merge(trigger_routes)
         .merge(oauth_callback_routes)
         .merge(object_model_routes)
         .merge(me_routes)

@@ -28,10 +28,14 @@ use runtara_core::persistence::inputs::{
 use runtara_store_postgres::tenant_scope::scoped;
 use serde_json::Value;
 
+use crate::api::dto::agent_testing::TestEngine;
 use crate::api::dto::executions::{ExecutionFilters, ExecutionSummary};
 use crate::api::dto::operations::OperationQueue;
 use crate::api::dto::trigger_event::TriggerEvent;
 use crate::api::dto::workflows::{PageWorkflowInstanceHistoryDto, WorkflowInstanceDto};
+use crate::api::services::agent_testing::{
+    AgentTestingService, ServiceError as AgentTestError, TestResult,
+};
 use crate::api::services::compilation::{
     CompilationResultDto, CompilationService, ServiceError as CompilationError,
 };
@@ -66,6 +70,14 @@ pub enum Served {
     ObjectModel,
     /// Webhooks of chat channels, each checked against its connection.
     Channels,
+    /// Triggers: registering one may register a webhook at its provider.
+    Triggers,
+    /// A trigger's HTTP events, each checked against its connection, from
+    /// whoever sends them.
+    Events,
+    /// The same, asked by a caller the API authenticated, whose role is held
+    /// to what it may run.
+    EventsForCallers,
 }
 
 /// What the API asks of the engine. See the module.
@@ -332,6 +344,23 @@ pub trait Engine: Send + Sync {
         image_id: &str,
     ) -> Result<Option<ImageSummary>, RuntimeError>;
 
+    // ---- Running an agent on request ---------------------------------------
+
+    /// Whether this engine runs an agent's capability on request at all.
+    fn tests_agents(&self) -> bool;
+
+    /// Runs one capability of an agent with the given input, with a
+    /// connection's credentials if it names one.
+    async fn test_agent(
+        &self,
+        tenant_id: &str,
+        agent_name: &str,
+        capability_id: &str,
+        input: Value,
+        connection_id: Option<String>,
+        engine: TestEngine,
+    ) -> Result<TestResult, AgentTestError>;
+
     // ---- Parts of the API the engine serves --------------------------------
 
     /// Answers a request for `part` of the API. The request carries what the
@@ -353,6 +382,8 @@ pub struct LocalEngine {
     pool: sqlx::PgPool,
     /// The agents a compiled workflow may use.
     agent_catalog: Option<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
+    /// Runs an agent's capability on request, if this server allows it.
+    agent_testing: Option<AgentTestingService>,
     /// The parts of the API this engine serves, each a router of its own.
     /// They are built after the engine is, from what the engine holds.
     served: std::sync::RwLock<std::collections::HashMap<Served, axum::Router>>,
@@ -369,8 +400,16 @@ impl LocalEngine {
             executions,
             pool,
             agent_catalog: None,
+            agent_testing: None,
             served: std::sync::RwLock::default(),
         }
+    }
+
+    /// With the service that runs an agent's capability on request.
+    #[must_use]
+    pub fn with_agent_testing(mut self, agent_testing: Option<AgentTestingService>) -> Self {
+        self.agent_testing = agent_testing;
+        self
     }
 
     /// Has this engine serve `part` of the API with `router`.
@@ -820,6 +859,34 @@ impl Engine for LocalEngine {
         image_id: &str,
     ) -> Result<Option<ImageSummary>, RuntimeError> {
         self.runtime()?.get_image(image_id, tenant_id).await
+    }
+
+    fn tests_agents(&self) -> bool {
+        self.agent_testing.is_some()
+    }
+
+    async fn test_agent(
+        &self,
+        tenant_id: &str,
+        agent_name: &str,
+        capability_id: &str,
+        input: Value,
+        connection_id: Option<String>,
+        engine: TestEngine,
+    ) -> Result<TestResult, AgentTestError> {
+        let Some(service) = &self.agent_testing else {
+            return Err(AgentTestError::NotEnabled);
+        };
+        service
+            .test_agent(
+                tenant_id,
+                agent_name,
+                capability_id,
+                input,
+                connection_id,
+                engine,
+            )
+            .await
     }
 
     async fn serve(
