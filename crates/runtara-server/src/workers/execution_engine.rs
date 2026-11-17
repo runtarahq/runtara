@@ -706,7 +706,7 @@ impl ExecutionEngine {
         let reserved = self.reservations_for(&tenant_id);
         let counts = Arc::clone(&self.concurrency_counts);
 
-        tokio::spawn(async move {
+        runtara_store_postgres::tenant_scope::spawn(async move {
             let Ok(_refreshing) = refresh.try_lock() else {
                 return;
             };
@@ -1446,7 +1446,7 @@ impl ExecutionEngine {
             let trigger_id = event.trigger_id().map(|s| s.to_string());
             let tenant_id = event.tenant_id.clone();
             const ANALYTICS_POLL_INTERVAL: Duration = Duration::from_secs(2);
-            tokio::spawn(async move {
+            runtara_store_postgres::tenant_scope::spawn(async move {
                 // Wait one interval before the first look. The run was started
                 // microseconds ago, so an immediate poll almost never sees a
                 // terminal state, and each poll is the two-join instance read.

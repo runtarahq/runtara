@@ -146,7 +146,7 @@ mod relay {
         }
         let listener = tokio::net::UnixListener::bind(&socket)
             .map_err(|error| format!("cannot start a database relay: {error}"))?;
-        let task = tokio::spawn(serve_seal(
+        let task = runtara_store_postgres::tenant_scope::spawn(serve_seal(
             listener,
             sealed,
             tenant,
@@ -201,7 +201,7 @@ mod relay {
                 connection_id.clone(),
                 parameters.clone(),
             );
-            tokio::spawn(async move {
+            runtara_store_postgres::tenant_scope::spawn(async move {
                 match sealed
                     .connect_pg(&tenant, &connection_id, &parameters)
                     .await

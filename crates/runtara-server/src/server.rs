@@ -880,6 +880,16 @@ fn redact_store_url(url: &str) -> String {
 /// [`start`], composed with `options`.
 pub async fn start_with(
     pool: PgPool,
+    options: ServerOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Starting, and every worker started here, is the platform's own work:
+    // it reaches every tenant's rows, and says so. A worker for one tenant
+    // enters that tenant's scope; a request starts in none.
+    runtara_store_postgres::tenant_scope::system(start_as_platform(pool, options)).await
+}
+
+async fn start_as_platform(
+    pool: PgPool,
     mut options: ServerOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(source) = options.entitlements.clone() {
@@ -1430,7 +1440,7 @@ pub async fn start_with(
             // An app entered, changed or removed (`runtara-server oauth-apps`)
             // is seen by every instance within a minute.
             let (apps, sealed) = (stored.clone(), sealed_credentials.clone());
-            tokio::spawn(async move {
+            runtara_store_postgres::tenant_scope::spawn(async move {
                 let mut every = tokio::time::interval(std::time::Duration::from_secs(60));
                 every.tick().await;
                 loop {
@@ -1507,7 +1517,7 @@ pub async fn start_with(
 
     // Spawn background task to warn when pool usage is high
     let pool_monitor = pool.clone();
-    tokio::spawn(async move {
+    runtara_store_postgres::tenant_scope::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             interval.tick().await;
@@ -1559,7 +1569,7 @@ pub async fn start_with(
 
     // Spawn background task to report object-model pool stats / warn on pressure.
     let object_model_pool_monitor = object_store_manager.clone();
-    tokio::spawn(async move {
+    runtara_store_postgres::tenant_scope::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
@@ -1778,7 +1788,7 @@ pub async fn start_with(
         .with_direct_compilation(
             api::services::compilation::direct_compilation_settings_from_config(),
         );
-        tokio::spawn(async move {
+        runtara_store_postgres::tenant_scope::spawn(async move {
             for tenant_id in config::served_tenants() {
                 let (rebuilt, failed) = service.restage_missing_artifacts(tenant_id).await;
                 if rebuilt + failed > 0 {
@@ -2108,7 +2118,7 @@ pub async fn start_with(
         // not `spawn_intake`: it trims streams on its own interval and never
         // reads the shutdown flag, so waiting for it would spend the whole
         // intake grace on every shutdown for a task that cannot exit.
-        tokio::spawn(async move {
+        runtara_store_postgres::tenant_scope::spawn(async move {
             let redis_url = cleanup_config.connection_url();
             match valkey::open_client(redis_url.as_str()) {
                 Ok(redis_client) => {
@@ -2884,7 +2894,7 @@ pub async fn start_with(
             ));
             // Dispatches messages a previous process acknowledged but did not
             // finish, retries pending ones, and purges handled ones.
-            tokio::spawn(channel_router.clone().run_intake_worker());
+            runtara_store_postgres::tenant_scope::spawn(channel_router.clone().run_intake_worker());
             println!("✓ Channel router initialized");
 
             channels::routes(channel_router)
@@ -3106,7 +3116,7 @@ pub async fn start_with(
     }
 
     // Spawn heartbeat task for log pipeline monitoring
-    tokio::spawn(async {
+    runtara_store_postgres::tenant_scope::spawn(async {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600)); // 1 hour
         loop {
             interval.tick().await;
@@ -3141,7 +3151,7 @@ pub async fn start_with(
     // concurrently with the server — exiting is driven by the flag, not by
     // the server returning.
     let signal_coordinator = shutdown_coordinator.clone();
-    let signal_task = tokio::spawn(async move {
+    let signal_task = runtara_store_postgres::tenant_scope::spawn(async move {
         if let Err(e) = wait_for_shutdown_signal().await {
             tracing::error!(error = %e, "Signal handler failed");
         }

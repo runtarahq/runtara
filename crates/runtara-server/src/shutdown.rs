@@ -155,7 +155,9 @@ impl ShutdownCoordinator {
         self.intake_workers
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .spawn(worker);
+            // In the scope it is started from: the platform's, unless the
+            // worker is given one tenant's.
+            .spawn(runtara_store_postgres::tenant_scope::inherit(worker));
     }
 
     /// Wait up to `RUNTARA_SHUTDOWN_INTAKE_GRACE_MS` for every worker spawned
