@@ -802,3 +802,62 @@ pub(crate) fn without_runtime() -> Arc<dyn Engine> {
     ));
     Arc::new(LocalEngine::new(None, executions, pool))
 }
+
+#[cfg(test)]
+mod boundary {
+    //! Code that takes requests reaches the engine through [`super::Engine`]
+    //! and nothing else. The server's state does not hand out the runtime
+    //! client or the execution engine, so a handler cannot be given them; this
+    //! keeps one from naming them some other way.
+
+    use std::path::{Path, PathBuf};
+
+    /// The engine's own types, which only the engine's side may name.
+    const ENGINE_ONLY: &[&str] = &["RuntimeClient", "ExecutionEngine", "EnvironmentClient"];
+
+    fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("a source directory") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                sources(&path, found);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                found.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn code_that_takes_requests_names_none_of_the_engines_own_types() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        for dir in ["api/handlers", "mcp"] {
+            sources(&src.join(dir), &mut files);
+        }
+        assert!(files.len() > 20, "the handlers and MCP tools are read");
+        let mut named = Vec::new();
+        for file in files {
+            let name = file.to_string_lossy().into_owned();
+            if name.ends_with("_tests.rs") || name.ends_with("/tests.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&file).expect("a source file");
+            // A file's own tests may build an engine to test against.
+            let code = text.split("#[cfg(test)]").next().unwrap_or_default();
+            for (number, line) in code.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                for forbidden in ENGINE_ONLY {
+                    if line.contains(forbidden) {
+                        named.push(format!("{name}:{}: {forbidden}", number + 1));
+                    }
+                }
+            }
+        }
+        assert!(
+            named.is_empty(),
+            "code that takes requests asks the engine through `Engine`, not:\n{}",
+            named.join("\n")
+        );
+    }
+}

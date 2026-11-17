@@ -449,19 +449,16 @@ struct AppState {
     pool: PgPool,
     object_store_manager: Arc<ObjectStoreManager>,
     agent_testing: Option<AgentTestingService>,
-    /// Runtime client for workflow execution via Management SDK (None if not configured)
-    runtime_client: Option<Arc<RuntimeClient>>,
     /// Trigger stream publisher for async executions (None if Valkey not configured)
     trigger_stream: Option<Arc<api::repositories::trigger_stream::TriggerStreamPublisher>>,
     /// Valkey connection manager for session queue operations (None if Valkey not configured)
     valkey_conn: Option<redis::aio::ConnectionManager>,
     /// Connections facade for unified connection operations
     connections: Arc<runtara_connections::ConnectionsFacade>,
-    /// Unified execution engine — single orchestrator for all execution paths
-    engine: Arc<workers::execution_engine::ExecutionEngine>,
-    /// What code that takes requests may ask of the engine. Handlers hold
-    /// this, and are moving off the two fields above it.
-    engine_api: Arc<dyn crate::engine::Engine>,
+    /// What code that takes requests may ask of the engine, and all it is
+    /// given of it: the state holds neither the runtime client nor the
+    /// execution engine, so a handler cannot take them.
+    engine: Arc<dyn crate::engine::Engine>,
     /// Metadata service for agent listings — pre-built with the component
     /// dispatcher so component-backed agents override the legacy registry.
     agents: api::services::operators::AgentsService,
@@ -477,7 +474,7 @@ struct AppState {
 
 impl axum::extract::FromRef<AppState> for Arc<dyn crate::engine::Engine> {
     fn from_ref(state: &AppState) -> Self {
-        state.engine_api.clone()
+        state.engine.clone()
     }
 }
 
@@ -517,12 +514,6 @@ impl axum::extract::FromRef<AppState> for product_events::ProductEventSink {
 }
 
 // Implement FromRef to allow extracting runtime_client from AppState
-impl axum::extract::FromRef<AppState> for Option<Arc<RuntimeClient>> {
-    fn from_ref(state: &AppState) -> Option<Arc<RuntimeClient>> {
-        state.runtime_client.clone()
-    }
-}
-
 // Implement FromRef to allow extracting trigger_stream from AppState
 impl axum::extract::FromRef<AppState>
     for Option<Arc<api::repositories::trigger_stream::TriggerStreamPublisher>>
@@ -549,12 +540,6 @@ impl axum::extract::FromRef<AppState> for Arc<runtara_connections::ConnectionsFa
 }
 
 // Implement FromRef to allow extracting the unified execution engine from AppState
-impl axum::extract::FromRef<AppState> for Arc<workers::execution_engine::ExecutionEngine> {
-    fn from_ref(state: &AppState) -> Arc<workers::execution_engine::ExecutionEngine> {
-        state.engine.clone()
-    }
-}
-
 // Implement FromRef to allow extracting AgentsService from AppState
 impl axum::extract::FromRef<AppState> for api::services::operators::AgentsService {
     fn from_ref(state: &AppState) -> api::services::operators::AgentsService {
@@ -2696,12 +2681,10 @@ async fn start_as_platform(
             pool: pool.clone(),
             object_store_manager: object_store_manager.clone(),
             agent_testing: agent_testing.clone(),
-            runtime_client: runtime_client.clone(),
             trigger_stream: trigger_stream.clone(),
             valkey_conn: valkey_conn.clone(),
             connections: connections_facade.clone(),
-            engine: execution_engine.clone(),
-            engine_api: engine_api.clone(),
+            engine: engine_api.clone(),
             agents: agents_service.clone(),
             agent_catalog: agent_catalog.clone(),
             events: product_event_sink.clone(),
@@ -2921,12 +2904,10 @@ async fn start_as_platform(
             pool: pool.clone(),
             object_store_manager: object_store_manager.clone(),
             agent_testing: agent_testing.clone(),
-            runtime_client: runtime_client.clone(),
             trigger_stream: trigger_stream.clone(),
             valkey_conn: valkey_conn.clone(),
             connections: connections_facade.clone(),
-            engine: execution_engine.clone(),
-            engine_api: engine_api.clone(),
+            engine: engine_api.clone(),
             agents: agents_service.clone(),
             agent_catalog: agent_catalog.clone(),
             events: product_event_sink.clone(),
