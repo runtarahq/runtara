@@ -3537,9 +3537,10 @@ pub struct DisputesTransactionInfo {
     #[serde(
         rename = "payment_processor",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub payment_processor: Option<Value>,
+    pub payment_processor: Option<Option<Value>>,
     #[field(
         display_name = r##"Reference ID"##,
         description = r##"The ID, as seen by the partner, for this transaction."##
@@ -5296,30 +5297,34 @@ pub struct ItemInfo {
     #[serde(
         rename = "agreed_refund_details",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub agreed_refund_details: Option<Value>,
+    pub agreed_refund_details: Option<Option<Value>>,
     #[field(display_name = r##"Booking Details"##)]
     #[serde(
         rename = "booking_details",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub booking_details: Option<Value>,
+    pub booking_details: Option<Option<Value>>,
     #[field(display_name = r##"Cancellation Details"##)]
     #[serde(
         rename = "cancellation_details",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub cancellation_details: Option<Value>,
+    pub cancellation_details: Option<Option<Value>>,
     #[field(display_name = r##"Digital Download Details"##)]
     #[serde(
         rename = "digital_download_details",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub digital_download_details: Option<Value>,
+    pub digital_download_details: Option<Option<Value>>,
     #[field(
         display_name = r##"Dispute Amount"##,
         description = r##"The amount of the item in the dispute."##
@@ -5385,9 +5390,10 @@ pub struct ItemInfo {
     #[serde(
         rename = "product_details",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub product_details: Option<Value>,
+    pub product_details: Option<Option<Value>>,
     #[field(
         display_name = r##"Dispute Reason"##,
         description = r##"The reason for the item-level dispute. For information about the required information for each dispute reason and associated evidence type, see dispute reasons. One of: MERCHANDISE_OR_SERVICE_NOT_RECEIVED, MERCHANDISE_OR_SERVICE_NOT_AS_DESCRIBED, UNAUTHORISED, CREDIT_NOT_PROCESSED, DUPLICATE_TRANSACTION, INCORRECT_AMOUNT, PAYMENT_BY_OTHER_MEANS, CANCELED_RECURRING_BILLING, PROBLEM_WITH_REMITTANCE, OTHER."##
@@ -5398,9 +5404,10 @@ pub struct ItemInfo {
     #[serde(
         rename = "service_details",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub service_details: Option<Value>,
+    pub service_details: Option<Option<Value>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -8360,8 +8367,13 @@ pub struct Patch {
         display_name = r##"Patch Value"##,
         description = r##"The value to apply. The `remove`, `copy`, and `move` operations do not require a value. Since JSON Patch allows any type for `value`, the `type` property is not specified."##
     )]
-    #[serde(rename = "value", default, skip_serializing_if = "Option::is_none")]
-    pub value: Option<Value>,
+    #[serde(
+        rename = "value",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub value: Option<Option<Value>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]

@@ -60,6 +60,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   titled `float`), and `comma_separated_query_arrays` sends array query
   parameters as `id:in=4,5,6`.
 
+- **A nullable field inside a generated agent's model keeps an explicit
+  `null`.** A field of a record sent in a batch, or of an object input, was
+  an `Option<T>`, so `null` was dropped and the vendor kept the old value:
+  BigCommerce kept a variant's price override, Zoho CRM a record field a
+  workflow meant to clear. It is now told apart from an absent field, as a
+  top-level body field already was, and a `null` read from a response is
+  kept. Specs in OpenAPI 3.1 (BigCommerce, Shippo, Zoho CRM) had their
+  nullable fields ignored altogether, top-level ones included; they now
+  render too. This regenerates the BigCommerce, Jira, PayPal, Pipedrive,
+  Shippo, Slack, Zendesk and Zoho CRM agents (a template change).
+
 - **PayPal agent, generated from PayPal's REST API OpenAPI files.** Twenty-one
   capabilities: create, read, update, authorize and capture orders and add or
   update their shipment tracking; read, capture, reauthorize and void

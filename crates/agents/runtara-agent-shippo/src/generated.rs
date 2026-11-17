@@ -2043,9 +2043,10 @@ Please check the [carrier accounts tutorial](https://docs.goshippo.com/docs/carr
     #[serde(
         rename = "carrier_name",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub carrier_name: Option<Value>,
+    pub carrier_name: Option<Option<Value>>,
     #[field(display_name = r##"Is Shippo Account"##, example = r##"false"##)]
     #[serde(
         rename = "is_shippo_account",
@@ -2242,9 +2243,10 @@ Please check the [carrier accounts tutorial](https://docs.goshippo.com/docs/carr
     #[serde(
         rename = "carrier_name",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub carrier_name: Option<Value>,
+    pub carrier_name: Option<Option<Value>>,
     #[field(display_name = r##"Is Shippo Account"##, example = r##"false"##)]
     #[serde(
         rename = "is_shippo_account",

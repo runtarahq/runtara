@@ -662,6 +662,23 @@ fn a_list_filter_is_sent_comma_separated() {
 }
 
 #[test]
+fn a_variant_override_is_cleared_with_null_and_kept_when_left_out() {
+    // `null` makes the variant fall back to the product's price, weight or
+    // size; a field left out keeps the variant's own value.
+    let cleared = json!([{ "id": 77, "price": null, "sale_price": null, "weight": null }]);
+    let input: VariantsBatchUpdateVariantsBatchInput =
+        serde_json::from_value(json!({ "body": cleared })).unwrap();
+    assert_eq!(input.request().unwrap().body_json(), Some(cleared));
+
+    let untouched = json!([{ "id": 77, "sale_price": 19.5 }]);
+    let input: VariantsBatchUpdateVariantsBatchInput =
+        serde_json::from_value(json!({ "body": untouched })).unwrap();
+    let body = input.request().unwrap().body_json().unwrap();
+    assert_eq!(body, untouched);
+    assert!(body[0].get("price").is_none(), "{body}");
+}
+
+#[test]
 fn inventory_is_filtered_by_lists_of_variants_and_skus() {
     // The inventory spec types these as one value; BigCommerce takes a
     // comma-separated list.

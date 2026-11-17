@@ -72,8 +72,13 @@ pub struct AttachmentBaseObject {
         display_name = r##"Height"##,
         description = r##"The height of the image file in pixels. If height is unknown, returns null"##
     )]
-    #[serde(rename = "height", default, skip_serializing_if = "Option::is_none")]
-    pub height: Option<i64>,
+    #[serde(
+        rename = "height",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub height: Option<Option<i64>>,
     #[field(
         display_name = r##"ID"##,
         description = r##"Automatically assigned when created"##
@@ -134,8 +139,13 @@ can be referenced within the comment of a ticket. Default is false
         display_name = r##"Width"##,
         description = r##"The width of the image file in pixels. If width is unknown, returns null"##
     )]
-    #[serde(rename = "width", default, skip_serializing_if = "Option::is_none")]
-    pub width: Option<i64>,
+    #[serde(
+        rename = "width",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub width: Option<Option<i64>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -181,8 +191,13 @@ pub struct AttachmentObject {
         display_name = r##"Height"##,
         description = r##"The height of the image file in pixels. If height is unknown, returns null"##
     )]
-    #[serde(rename = "height", default, skip_serializing_if = "Option::is_none")]
-    pub height: Option<i64>,
+    #[serde(
+        rename = "height",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub height: Option<Option<i64>>,
     #[field(
         display_name = r##"ID"##,
         description = r##"Automatically assigned when created"##
@@ -243,8 +258,13 @@ can be referenced within the comment of a ticket. Default is false
         display_name = r##"Width"##,
         description = r##"The width of the image file in pixels. If width is unknown, returns null"##
     )]
-    #[serde(rename = "width", default, skip_serializing_if = "Option::is_none")]
-    pub width: Option<i64>,
+    #[serde(
+        rename = "width",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub width: Option<Option<i64>>,
     #[field(
         display_name = r##"Thumbnails"##,
         description = r##"An array of attachment objects. Note that photo thumbnails do not have thumbnails"##
@@ -396,9 +416,10 @@ pub struct CreateUserRequest {
     #[serde(
         rename = "active_brand_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub active_brand_id: Option<i64>,
+    pub active_brand_id: Option<Option<i64>>,
     #[field(display_name = r##"Agent Brand IDs"##)]
     #[serde(
         rename = "agent_brand_ids",
@@ -410,8 +431,13 @@ pub struct CreateUserRequest {
         display_name = r##"Alias"##,
         description = r##"An alias displayed to end users"##
     )]
-    #[serde(rename = "alias", default, skip_serializing_if = "Option::is_none")]
-    pub alias: Option<String>,
+    #[serde(
+        rename = "alias",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub alias: Option<Option<String>>,
     #[field(
         display_name = r##"Auto Ownership"##,
         description = r##"When true, creates the identity specified by `email` as "owned", or as "shared" if another user owns the address. Does not apply to `identities[]`. See [Shared email](/api-reference/ticketing/users/user_identities/#shared-email)."##
@@ -429,9 +455,10 @@ pub struct CreateUserRequest {
     #[serde(
         rename = "custom_role_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub custom_role_id: Option<i64>,
+    pub custom_role_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Default Group ID"##,
         description = r##"The id of the user's default group"##
@@ -439,15 +466,21 @@ pub struct CreateUserRequest {
     #[serde(
         rename = "default_group_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub default_group_id: Option<i64>,
+    pub default_group_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Details"##,
         description = r##"Any details you want to store about the user, such as an address"##
     )]
-    #[serde(rename = "details", default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<String>,
+    #[serde(
+        rename = "details",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub details: Option<Option<String>>,
     #[field(display_name = r##"Email"##)]
     #[serde(rename = "email", default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
@@ -458,15 +491,21 @@ pub struct CreateUserRequest {
     #[serde(
         rename = "external_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub external_id: Option<String>,
+    pub external_id: Option<Option<String>>,
     #[field(
         display_name = r##"Group ID"##,
         description = r##"The id of the user's default group. Alias for default_group_id"##
     )]
-    #[serde(rename = "group_id", default, skip_serializing_if = "Option::is_none")]
-    pub group_id: Option<i64>,
+    #[serde(
+        rename = "group_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub group_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Group IDs"##,
         description = r##"The ids of the groups to assign to the user"##
@@ -487,26 +526,46 @@ pub struct CreateUserRequest {
         display_name = r##"Language"##,
         description = r##"The user's language preference. Alias for locale."##
     )]
-    #[serde(rename = "language", default, skip_serializing_if = "Option::is_none")]
-    pub language: Option<String>,
+    #[serde(
+        rename = "language",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub language: Option<Option<String>>,
     #[field(
         display_name = r##"Locale"##,
         description = r##"The user's locale. A BCP-47 compliant tag for the locale. If both "locale" and "locale_id" are present on create or update, "locale_id" is ignored and only "locale" is used."##
     )]
-    #[serde(rename = "locale", default, skip_serializing_if = "Option::is_none")]
-    pub locale: Option<String>,
+    #[serde(
+        rename = "locale",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub locale: Option<Option<String>>,
     #[field(
         display_name = r##"Locale ID"##,
         description = r##"The user's language identifier"##
     )]
-    #[serde(rename = "locale_id", default, skip_serializing_if = "Option::is_none")]
-    pub locale_id: Option<i64>,
+    #[serde(
+        rename = "locale_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub locale_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Moderator"##,
         description = r##"Designates whether the user has forum moderation capabilities"##
     )]
-    #[serde(rename = "moderator", default, skip_serializing_if = "Option::is_none")]
-    pub moderator: Option<bool>,
+    #[serde(
+        rename = "moderator",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub moderator: Option<Option<bool>>,
     #[field(display_name = r##"Name"##)]
     #[serde(rename = "name", default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -514,8 +573,13 @@ pub struct CreateUserRequest {
         display_name = r##"Notes"##,
         description = r##"Any notes you want to store about the user"##
     )]
-    #[serde(rename = "notes", default, skip_serializing_if = "Option::is_none")]
-    pub notes: Option<String>,
+    #[serde(
+        rename = "notes",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub notes: Option<Option<String>>,
     #[field(
         display_name = r##"Only Private Comments"##,
         description = r##"true if the user can only create private comments"##
@@ -523,9 +587,10 @@ pub struct CreateUserRequest {
     #[serde(
         rename = "only_private_comments",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub only_private_comments: Option<bool>,
+    pub only_private_comments: Option<Option<bool>>,
     #[field(display_name = r##"Organization"##)]
     #[serde(
         rename = "organization",
@@ -540,9 +605,10 @@ pub struct CreateUserRequest {
     #[serde(
         rename = "organization_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub organization_id: Option<i64>,
+    pub organization_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Organization IDs"##,
         description = r##"The ids of the user's organizations"##
@@ -550,9 +616,10 @@ pub struct CreateUserRequest {
     #[serde(
         rename = "organization_ids",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub organization_ids: Option<Vec<i64>>,
+    pub organization_ids: Option<Option<Vec<i64>>>,
     #[field(
         display_name = r##"Organization Name"##,
         description = r##"The name of the user's organization (deprecated, use organization object instead)"##
@@ -560,9 +627,10 @@ pub struct CreateUserRequest {
     #[serde(
         rename = "organization_name",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub organization_name: Option<String>,
+    pub organization_name: Option<Option<String>>,
     #[field(
         display_name = r##"Password"##,
         description = r##"The user's password"##
@@ -573,8 +641,13 @@ pub struct CreateUserRequest {
         display_name = r##"Phone"##,
         description = r##"The user's primary phone number"##
     )]
-    #[serde(rename = "phone", default, skip_serializing_if = "Option::is_none")]
-    pub phone: Option<String>,
+    #[serde(
+        rename = "phone",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub phone: Option<Option<String>>,
     #[field(
         display_name = r##"Remote Photo URL"##,
         description = r##"A URL pointing to the user's profile picture"##
@@ -582,9 +655,10 @@ pub struct CreateUserRequest {
     #[serde(
         rename = "remote_photo_url",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub remote_photo_url: Option<String>,
+    pub remote_photo_url: Option<Option<String>>,
     #[field(display_name = r##"Role"##)]
     #[serde(rename = "role", default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
@@ -602,15 +676,21 @@ pub struct CreateUserRequest {
     #[serde(
         rename = "shared_phone_number",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub shared_phone_number: Option<bool>,
+    pub shared_phone_number: Option<Option<bool>>,
     #[field(
         display_name = r##"Signature"##,
         description = r##"The user's signature. Only agents and admins can have signatures"##
     )]
-    #[serde(rename = "signature", default, skip_serializing_if = "Option::is_none")]
-    pub signature: Option<String>,
+    #[serde(
+        rename = "signature",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub signature: Option<Option<String>>,
     #[field(
         display_name = r##"Skip Verify Email"##,
         description = r##"If true, the user won't receive a verification email"##
@@ -618,18 +698,29 @@ pub struct CreateUserRequest {
     #[serde(
         rename = "skip_verify_email",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub skip_verify_email: Option<bool>,
+    pub skip_verify_email: Option<Option<bool>>,
     #[field(
         display_name = r##"Suspended"##,
         description = r##"If the user is suspended"##
     )]
-    #[serde(rename = "suspended", default, skip_serializing_if = "Option::is_none")]
-    pub suspended: Option<bool>,
+    #[serde(
+        rename = "suspended",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub suspended: Option<Option<bool>>,
     #[field(display_name = r##"Tags"##, description = r##"The user's tags"##)]
-    #[serde(rename = "tags", default, skip_serializing_if = "Option::is_none")]
-    pub tags: Option<Vec<String>>,
+    #[serde(
+        rename = "tags",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub tags: Option<Option<Vec<String>>>,
     #[field(
         display_name = r##"Ticket Restriction"##,
         description = r##"Specifies which tickets the user has access to"##
@@ -637,15 +728,21 @@ pub struct CreateUserRequest {
     #[serde(
         rename = "ticket_restriction",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub ticket_restriction: Option<String>,
+    pub ticket_restriction: Option<Option<String>>,
     #[field(
         display_name = r##"Time Zone"##,
         description = r##"The user's time zone"##
     )]
-    #[serde(rename = "time_zone", default, skip_serializing_if = "Option::is_none")]
-    pub time_zone: Option<String>,
+    #[serde(
+        rename = "time_zone",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub time_zone: Option<Option<String>>,
     #[field(
         display_name = r##"User Fields"##,
         description = r##"Values of custom fields in the user's profile"##
@@ -653,15 +750,21 @@ pub struct CreateUserRequest {
     #[serde(
         rename = "user_fields",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub user_fields: Option<HashMap<String, Value>>,
+    pub user_fields: Option<Option<HashMap<String, Value>>>,
     #[field(
         display_name = r##"Verified"##,
         description = r##"Any of the user's identities is verified"##
     )]
-    #[serde(rename = "verified", default, skip_serializing_if = "Option::is_none")]
-    pub verified: Option<bool>,
+    #[serde(
+        rename = "verified",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub verified: Option<Option<bool>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -743,9 +846,10 @@ pub struct CurrentUserResponseUser {
     #[serde(
         rename = "custom_role_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub custom_role_id: Option<i64>,
+    pub custom_role_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Default Group ID"##,
         description = r##"The id of the user's default group"##
@@ -775,9 +879,10 @@ pub struct CurrentUserResponseUser {
     #[serde(
         rename = "external_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub external_id: Option<String>,
+    pub external_id: Option<Option<String>>,
     #[field(
         display_name = r##"Iana Time Zone"##,
         description = r##"The time zone for the user"##
@@ -912,8 +1017,13 @@ Explore](https://support.zendesk.com/hc/en-us/articles/4762263171610-Announcing-
         display_name = r##"Role Type"##,
         description = r##"The user's role id. 0 for a custom agent, 1 for a light agent, 2 for a chat agent, 3 for a chat agent added to the Support account as a contributor ([Chat Phase 4](https://support.zendesk.com/hc/en-us/articles/4408836197658#topic_p1h_sx4_pgb)), 4 for an admin, and 5 for a billing admin"##
     )]
-    #[serde(rename = "role_type", default, skip_serializing_if = "Option::is_none")]
-    pub role_type: Option<i64>,
+    #[serde(
+        rename = "role_type",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub role_type: Option<Option<i64>>,
     #[field(display_name = r##"Separation"##)]
     #[serde(
         rename = "separation",
@@ -963,9 +1073,10 @@ Explore](https://support.zendesk.com/hc/en-us/articles/4762263171610-Announcing-
     #[serde(
         rename = "suspension_details",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub suspension_details: Option<UserForAdminSuspensionDetails>,
+    pub suspension_details: Option<Option<UserForAdminSuspensionDetails>>,
     #[field(
         display_name = r##"Tags"##,
         description = r##"The user's tags. Only present if your account has user tagging enabled"##
@@ -979,9 +1090,10 @@ Explore](https://support.zendesk.com/hc/en-us/articles/4762263171610-Announcing-
     #[serde(
         rename = "ticket_restriction",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub ticket_restriction: Option<String>,
+    pub ticket_restriction: Option<Option<String>>,
     #[field(
         display_name = r##"Time Zone"##,
         description = r##"The time-zone of this user"##
@@ -995,9 +1107,10 @@ Explore](https://support.zendesk.com/hc/en-us/articles/4762263171610-Announcing-
     #[serde(
         rename = "two_factor_auth_enabled",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub two_factor_auth_enabled: Option<bool>,
+    pub two_factor_auth_enabled: Option<Option<bool>>,
     #[field(
         display_name = r##"Updated At"##,
         description = r##"The time of the last update of the user"##
@@ -1197,8 +1310,13 @@ pub struct FollowerObject {
     #[serde(rename = "user_id", default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<FollowerObjectUserId>,
     #[field(display_name = r##"User Name"##)]
-    #[serde(rename = "user_name", default, skip_serializing_if = "Option::is_none")]
-    pub user_name: Option<String>,
+    #[serde(
+        rename = "user_name",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub user_name: Option<Option<String>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -1322,8 +1440,13 @@ pub struct OrganizationObject {
         display_name = r##"Details"##,
         description = r##"Any details obout the organization, such as the address"##
     )]
-    #[serde(rename = "details", default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<String>,
+    #[serde(
+        rename = "details",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub details: Option<Option<String>>,
     #[field(
         display_name = r##"Domain Names"##,
         description = r##"An array of domain names associated with this organization"##
@@ -1341,15 +1464,21 @@ pub struct OrganizationObject {
     #[serde(
         rename = "external_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub external_id: Option<String>,
+    pub external_id: Option<Option<String>>,
     #[field(
         display_name = r##"Group ID"##,
         description = r##"New tickets from users in this organization are automatically put in this group"##
     )]
-    #[serde(rename = "group_id", default, skip_serializing_if = "Option::is_none")]
-    pub group_id: Option<i64>,
+    #[serde(
+        rename = "group_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub group_id: Option<Option<i64>>,
     #[field(
         display_name = r##"ID"##,
         description = r##"Automatically assigned when the organization is created"##
@@ -1366,8 +1495,13 @@ pub struct OrganizationObject {
         display_name = r##"Notes"##,
         description = r##"Any notes you have about the organization"##
     )]
-    #[serde(rename = "notes", default, skip_serializing_if = "Option::is_none")]
-    pub notes: Option<String>,
+    #[serde(
+        rename = "notes",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub notes: Option<Option<String>>,
     #[field(
         display_name = r##"Organization Fields"##,
         description = r##"Custom fields for this organization. See [Custom organization fields](/api-reference/ticketing/organizations/organizations/#custom-organization-fields)"##
@@ -1375,9 +1509,11 @@ pub struct OrganizationObject {
     #[serde(
         rename = "organization_fields",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub organization_fields: Option<HashMap<String, OrganizationObjectOrganizationFieldsValue>>,
+    pub organization_fields:
+        Option<Option<HashMap<String, OrganizationObjectOrganizationFieldsValue>>>,
     #[field(
         display_name = r##"Shared Comments"##,
         description = r##"End users in this organization are able to comment on each other's tickets"##
@@ -1462,8 +1598,13 @@ pub struct OrganizationUpdateInput {
         display_name = r##"Details"##,
         description = r##"Any details about the organization, such as the address. `null` clears the stored value."##
     )]
-    #[serde(rename = "details", default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<String>,
+    #[serde(
+        rename = "details",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub details: Option<Option<String>>,
     #[field(display_name = r##"Domain Names"##)]
     #[serde(
         rename = "domain_names",
@@ -1482,8 +1623,13 @@ pub struct OrganizationUpdateInput {
         display_name = r##"Group ID"##,
         description = r##"New tickets from users in this organization are automatically put in this group. `null` unassigns the group."##
     )]
-    #[serde(rename = "group_id", default, skip_serializing_if = "Option::is_none")]
-    pub group_id: Option<i64>,
+    #[serde(
+        rename = "group_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub group_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Name"##,
         description = r##"A unique name for the organization. Cannot contain the `|` character and must be unique within the account; a duplicate returns 422. Cannot be cleared — an empty string or `null` fails the presence validation with 422."##
@@ -1494,8 +1640,13 @@ pub struct OrganizationUpdateInput {
         display_name = r##"Notes"##,
         description = r##"Any notes you have about the organization. `null` clears the stored value for a caller with `edit` permission; for an agent restricted to `edit_notes`, `null` is ignored and the stored notes are left untouched — only a non-empty value (including an empty string) is assigned. This is the only attribute an agent restricted to `edit_notes` can change; for such an agent every other attribute here is silently ignored and the request still returns 200. `organization_fields` is the exception — it is applied for a restricted agent too, unless the account has `up_restrict_organization_field_updates` enabled."##
     )]
-    #[serde(rename = "notes", default, skip_serializing_if = "Option::is_none")]
-    pub notes: Option<String>,
+    #[serde(
+        rename = "notes",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub notes: Option<Option<String>>,
     #[field(
         display_name = r##"Organization Fields"##,
         description = r##"Custom organization field values, keyed by field key. See [Custom organization fields](/api-reference/ticketing/organizations/organizations/#custom-organization-fields). Only keys matching an existing organization field take effect; unknown keys are silently ignored. Supplied keys are merged into the stored values, so omitted keys keep their value, and a `null` or blank value for a key deletes that field's stored value. `null` for the whole map is accepted and changes nothing. Requires the `user_and_organization_fields` account feature; without it the whole map is silently ignored, as it also is for agents without `edit` permission on organizations when the account has `up_restrict_organization_field_updates` enabled."##
@@ -1503,9 +1654,10 @@ pub struct OrganizationUpdateInput {
     #[serde(
         rename = "organization_fields",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub organization_fields: Option<HashMap<String, Value>>,
+    pub organization_fields: Option<Option<HashMap<String, Value>>>,
     #[field(
         display_name = r##"Shared Comments"##,
         description = r##"End users in this organization are able to comment on each other's tickets. An explicit `null` is rejected with 400. Only takes effect when `shared_tickets` is `true` — the model resets it to `false` whenever the organization is not sharing tickets."##
@@ -1536,9 +1688,10 @@ pub struct OrganizationUpdateInput {
     #[serde(
         rename = "ticket_restriction",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub ticket_restriction: Option<String>,
+    pub ticket_restriction: Option<Option<String>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -1561,8 +1714,13 @@ pub struct SearchExportResponse {
         display_name = r##"Facets"##,
         description = r##"The facets corresponding to the search query"##
     )]
-    #[serde(rename = "facets", default, skip_serializing_if = "Option::is_none")]
-    pub facets: Option<String>,
+    #[serde(
+        rename = "facets",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub facets: Option<Option<String>>,
     #[field(display_name = r##"Links"##)]
     #[serde(rename = "links", default, skip_serializing_if = "Option::is_none")]
     pub links: Option<SearchExportResponseLinks>,
@@ -1588,14 +1746,24 @@ pub struct SearchExportResponseLinks {
         display_name = r##"Next"##,
         description = r##"The url to the next entry via the cursor."##
     )]
-    #[serde(rename = "next", default, skip_serializing_if = "Option::is_none")]
-    pub next: Option<String>,
+    #[serde(
+        rename = "next",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub next: Option<Option<String>>,
     #[field(
         display_name = r##"Prev"##,
         description = r##"The url to the previous entry via the cursor."##
     )]
-    #[serde(rename = "prev", default, skip_serializing_if = "Option::is_none")]
-    pub prev: Option<String>,
+    #[serde(
+        rename = "prev",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub prev: Option<Option<String>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -1612,9 +1780,10 @@ pub struct SearchExportResponseMeta {
     #[serde(
         rename = "after_cursor",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub after_cursor: Option<String>,
+    pub after_cursor: Option<Option<String>>,
     #[field(
         display_name = r##"Before Cursor"##,
         description = r##"The cursor id for the previous object."##
@@ -1622,9 +1791,10 @@ pub struct SearchExportResponseMeta {
     #[serde(
         rename = "before_cursor",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub before_cursor: Option<String>,
+    pub before_cursor: Option<Option<String>>,
     #[field(
         display_name = r##"Has More"##,
         description = r##"Whether there are more items yet to be returned by the cursor."##
@@ -1650,14 +1820,24 @@ pub struct SearchResponse {
         display_name = r##"Facets"##,
         description = r##"The facets corresponding to the search query"##
     )]
-    #[serde(rename = "facets", default, skip_serializing_if = "Option::is_none")]
-    pub facets: Option<String>,
+    #[serde(
+        rename = "facets",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub facets: Option<Option<String>>,
     #[field(
         display_name = r##"Next Page"##,
         description = r##"URL to the next page of results"##
     )]
-    #[serde(rename = "next_page", default, skip_serializing_if = "Option::is_none")]
-    pub next_page: Option<String>,
+    #[serde(
+        rename = "next_page",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub next_page: Option<Option<String>>,
     #[field(
         display_name = r##"Previous Page"##,
         description = r##"URL to the previous page of results"##
@@ -1665,9 +1845,10 @@ pub struct SearchResponse {
     #[serde(
         rename = "previous_page",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub previous_page: Option<String>,
+    pub previous_page: Option<Option<String>>,
     #[field(
         display_name = r##"Results"##,
         description = r##"May consist of tickets, users, groups, or organizations, as specified by the `result_type` property in each result object"##
@@ -1853,8 +2034,13 @@ pub struct TicketCommentObject {
         display_name = r##"Author ID"##,
         description = r##"The id of the comment author. If null or omitted on create, defaults to the authenticated user. See [Author id](#author-id)"##
     )]
-    #[serde(rename = "author_id", default, skip_serializing_if = "Option::is_none")]
-    pub author_id: Option<i64>,
+    #[serde(
+        rename = "author_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub author_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Body"##,
         description = r##"The comment string. See [Bodies](#bodies)"##
@@ -1878,9 +2064,10 @@ pub struct TicketCommentObject {
     #[serde(
         rename = "channel_source_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub channel_source_id: Option<String>,
+    pub channel_source_id: Option<Option<String>>,
     #[field(
         display_name = r##"Created At"##,
         description = r##"The time the comment was created"##
@@ -1932,9 +2119,10 @@ pub struct TicketCommentObject {
     #[serde(
         rename = "translate_to",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub translate_to: Option<String>,
+    pub translate_to: Option<Option<String>>,
     #[field(
         display_name = r##"Type"##,
         description = r##"`Comment` or `VoiceComment`. The JSON object for adding voice comments to tickets is different. See [Adding voice comments to tickets](/documentation/ticketing/managing-tickets/adding-voice-comments-to-tickets)"##
@@ -2200,8 +2388,13 @@ pub struct TicketFieldObject {
         display_name = r##"Key"##,
         description = r##"A unique key that identifies the ticket field. System-managed fields use a `standard::` prefix."##
     )]
-    #[serde(rename = "key", default, skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
+    #[serde(
+        rename = "key",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub key: Option<Option<String>>,
     #[field(
         display_name = r##"Max Selections"##,
         description = r##"Present for [multi_lookup](/api-reference/ticketing/lookup_relationships/lookup_relationships/#about-multi-lookup-relationship-fields) fields only. The maximum number of target records the field accepts. Defaults to 20"##
@@ -2251,9 +2444,10 @@ pub struct TicketFieldObject {
     #[serde(
         rename = "regexp_for_validation",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub regexp_for_validation: Option<String>,
+    pub regexp_for_validation: Option<Option<String>>,
     #[field(
         display_name = r##"Relationship Filter"##,
         description = r##"A filter definition that allows your autocomplete to filter down results"##
@@ -2320,8 +2514,13 @@ pub struct TicketFieldObject {
         display_name = r##"Tag"##,
         description = r##"For "checkbox" fields only. A tag added to tickets when the checkbox field is selected"##
     )]
-    #[serde(rename = "tag", default, skip_serializing_if = "Option::is_none")]
-    pub tag: Option<String>,
+    #[serde(
+        rename = "tag",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub tag: Option<Option<String>>,
     #[field(
         display_name = r##"Title"##,
         description = r##"The title of the ticket field"##
@@ -2383,8 +2582,13 @@ pub struct TicketFieldValueInput {
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<TicketFieldValueInputId>,
     #[field(display_name = r##"Value"##, example = r##"745"##)]
-    #[serde(rename = "value", default, skip_serializing_if = "Option::is_none")]
-    pub value: Option<TicketFieldValueInputValue>,
+    #[serde(
+        rename = "value",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub value: Option<Option<TicketFieldValueInputValue>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -2463,9 +2667,10 @@ pub struct TicketObject {
     #[serde(
         rename = "assignee_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub assignee_id: Option<i64>,
+    pub assignee_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Attribute Value IDs"##,
         description = r##"Write only. An array of the IDs of attribute values to be associated with the ticket"##
@@ -2477,8 +2682,13 @@ pub struct TicketObject {
     )]
     pub attribute_value_ids: Option<Vec<i64>>,
     #[field(display_name = r##"Brand ID"##)]
-    #[serde(rename = "brand_id", default, skip_serializing_if = "Option::is_none")]
-    pub brand_id: Option<TicketObjectBrandId>,
+    #[serde(
+        rename = "brand_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub brand_id: Option<Option<TicketObjectBrandId>>,
     #[field(
         display_name = r##"Collaborator IDs"##,
         description = r##"The ids of users currently CC'ed on the ticket"##
@@ -2532,9 +2742,10 @@ See [Setting custom field values](/documentation/ticketing/managing-tickets/crea
     #[serde(
         rename = "custom_status_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub custom_status_id: Option<i64>,
+    pub custom_status_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Description"##,
         description = r##"The first comment on the ticket. When [creating a ticket](#create-ticket), use `comment` to set the description.
@@ -2552,8 +2763,13 @@ On create, can be set directly as an alternative to `comment`. Silently ignored 
         display_name = r##"Due At"##,
         description = r##"If this is a ticket of type "task" it has a due date.  Due date format uses [ISO 8601](http://en.wikipedia.org/wiki/ISO_8601) format"##
     )]
-    #[serde(rename = "due_at", default, skip_serializing_if = "Option::is_none")]
-    pub due_at: Option<String>,
+    #[serde(
+        rename = "due_at",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub due_at: Option<Option<String>>,
     #[field(
         display_name = r##"Email CC IDs"##,
         description = r##"The ids of agents or end users currently CC'ed on the ticket. See [CCs and followers resources](https://support.zendesk.com/hc/en-us/articles/4408822451482) in the Support Help Center"##
@@ -2568,8 +2784,13 @@ On create, can be set directly as an alternative to `comment`. Silently ignored 
         display_name = r##"Email Ccs"##,
         description = r##"Write only. An array of objects that represent agent or end users email CCs to add or delete from the ticket. See [Setting email CCs](/documentation/ticketing/managing-tickets/creating-and-updating-tickets/#setting-email-ccs). Ignored when [CCs and followers](https://support.zendesk.com/hc/en-us/articles/4408822451482) is not enabled"##
     )]
-    #[serde(rename = "email_ccs", default, skip_serializing_if = "Option::is_none")]
-    pub email_ccs: Option<Vec<EmailCcObject>>,
+    #[serde(
+        rename = "email_ccs",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub email_ccs: Option<Option<Vec<EmailCcObject>>>,
     #[field(
         display_name = r##"Encoded ID"##,
         description = r##"An encoded string representing the ticket's unique identifier"##
@@ -2587,9 +2808,10 @@ On create, can be set directly as an alternative to `comment`. Silently ignored 
     #[serde(
         rename = "external_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub external_id: Option<String>,
+    pub external_id: Option<Option<String>>,
     #[field(
         display_name = r##"Fields"##,
         description = r##"Alias for custom_fields. Custom field values to set on the ticket.
@@ -2658,8 +2880,13 @@ Each entry specifies a field ID and its value.
         display_name = r##"Group ID"##,
         description = r##"The group this ticket is assigned to"##
     )]
-    #[serde(rename = "group_id", default, skip_serializing_if = "Option::is_none")]
-    pub group_id: Option<i64>,
+    #[serde(
+        rename = "group_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub group_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Has Incidents"##,
         description = r##"Is true if a ticket is a problem type and has one or more incidents linked to it. Otherwise, the value is false."##
@@ -2707,9 +2934,10 @@ Each entry specifies a field ID and its value.
     #[serde(
         rename = "organization_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub organization_id: Option<i64>,
+    pub organization_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Origin Zrn"##,
         description = r##"Write only. The Zendesk Resource Name (ZRN) of the origin for this ticket"##
@@ -2724,8 +2952,13 @@ Each entry specifies a field ID and its value.
         display_name = r##"Priority"##,
         description = r##"The urgency with which the ticket should be addressed One of: urgent, high, normal, low."##
     )]
-    #[serde(rename = "priority", default, skip_serializing_if = "Option::is_none")]
-    pub priority: Option<String>,
+    #[serde(
+        rename = "priority",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub priority: Option<Option<String>>,
     #[field(
         display_name = r##"Problem ID"##,
         description = r##"For tickets of type "incident", the ID of the problem the incident is linked to"##
@@ -2733,9 +2966,10 @@ Each entry specifies a field ID and its value.
     #[serde(
         rename = "problem_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub problem_id: Option<i64>,
+    pub problem_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Raw Subject"##,
         description = r##"The dynamic content placeholder, if present, or the "subject" value, if not. See [Dynamic Content Items](/api-reference/ticketing/ticket-management/dynamic_content/).
@@ -2761,9 +2995,10 @@ When set on create or update, overrides the `subject` field.
     #[serde(
         rename = "requester_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub requester_id: Option<i64>,
+    pub requester_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Safe Update"##,
         description = r##"Write only. Optional boolean. When true and an `updated_stamp` date is included, protects against ticket update collisions and returns a message to let you know if one occurs. See [Protecting against ticket update collisions](/documentation/ticketing/managing-tickets/creating-and-updating-tickets/#protecting-against-ticket-update-collisions). A value of false has the same effect as true. Omit the property to force the updates to not be safe"##
@@ -2826,8 +3061,13 @@ status category. See [custom ticket statuses](#custom-ticket-statuses)
         description = r##"The value of the subject field for this ticket. See [Subject](/api-reference/ticketing/tickets/tickets/#subject)
 "##
     )]
-    #[serde(rename = "subject", default, skip_serializing_if = "Option::is_none")]
-    pub subject: Option<String>,
+    #[serde(
+        rename = "subject",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub subject: Option<Option<String>>,
     #[field(
         display_name = r##"Submitter ID"##,
         description = r##"The user who submitted the ticket. The submitter always becomes the
@@ -2839,9 +3079,10 @@ If not specified, defaults to the authenticated user.
     #[serde(
         rename = "submitter_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub submitter_id: Option<i64>,
+    pub submitter_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Support Type"##,
         description = r##"The type of support that handled the ticket One of: agent, ai_agent."##
@@ -2849,9 +3090,10 @@ If not specified, defaults to the authenticated user.
     #[serde(
         rename = "support_type",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub support_type: Option<String>,
+    pub support_type: Option<Option<String>>,
     #[field(
         display_name = r##"Suspended Ticket ID"##,
         description = r##"Write only. The ID of the suspended ticket being recovered"##
@@ -2896,9 +3138,10 @@ If not specified, defaults to the authenticated user.
     #[serde(
         rename = "ticket_form_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub ticket_form_id: Option<i64>,
+    pub ticket_form_id: Option<Option<i64>>,
     #[field(display_name = r##"Tpe Voice Comment"##)]
     #[serde(
         rename = "tpe_voice_comment",
@@ -2910,8 +3153,13 @@ If not specified, defaults to the authenticated user.
         display_name = r##"Type"##,
         description = r##"The type of this ticket One of: problem, incident, question, task."##
     )]
-    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
-    pub r#type: Option<String>,
+    #[serde(
+        rename = "type",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub r#type: Option<Option<String>>,
     #[field(
         display_name = r##"Updated At"##,
         description = r##"When this record last got updated. It is updated only if the update generates a [ticket event](#incremental-ticket-event-export)"##
@@ -3136,21 +3384,32 @@ pub struct TicketObjectTdeWorkspaceWorkspace {
 #[capability_output(display_name = "TicketObjectTpeVoiceComment")]
 pub struct TicketObjectTpeVoiceComment {
     #[field(display_name = r##"Agent ID"##)]
-    #[serde(rename = "agent_id", default, skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<i64>,
+    #[serde(
+        rename = "agent_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub agent_id: Option<Option<i64>>,
     #[field(display_name = r##"Answering Machine Detection Status"##)]
     #[serde(
         rename = "answering_machine_detection_status",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub answering_machine_detection_status: Option<String>,
+    pub answering_machine_detection_status: Option<Option<String>>,
     #[field(display_name = r##"App ID"##)]
     #[serde(rename = "app_id", default, skip_serializing_if = "Option::is_none")]
     pub app_id: Option<i64>,
     #[field(display_name = r##"App Name"##)]
-    #[serde(rename = "app_name", default, skip_serializing_if = "Option::is_none")]
-    pub app_name: Option<String>,
+    #[serde(
+        rename = "app_name",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub app_name: Option<Option<String>>,
     #[field(display_name = r##"Author ID"##)]
     #[serde(rename = "author_id", default, skip_serializing_if = "Option::is_none")]
     pub author_id: Option<i64>,
@@ -3158,23 +3417,26 @@ pub struct TicketObjectTpeVoiceComment {
     #[serde(
         rename = "call_connected_at",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub call_connected_at: Option<String>,
+    pub call_connected_at: Option<Option<String>>,
     #[field(display_name = r##"Call Disposition"##)]
     #[serde(
         rename = "call_disposition",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub call_disposition: Option<String>,
+    pub call_disposition: Option<Option<String>>,
     #[field(display_name = r##"Call Ended At"##)]
     #[serde(
         rename = "call_ended_at",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub call_ended_at: Option<String>,
+    pub call_ended_at: Option<Option<String>>,
     #[field(display_name = r##"Call ID"##)]
     #[serde(rename = "call_id", default, skip_serializing_if = "Option::is_none")]
     pub call_id: Option<i64>,
@@ -3182,23 +3444,26 @@ pub struct TicketObjectTpeVoiceComment {
     #[serde(
         rename = "call_recording_consent",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub call_recording_consent: Option<String>,
+    pub call_recording_consent: Option<Option<String>>,
     #[field(display_name = r##"Call Recording Consent Action"##)]
     #[serde(
         rename = "call_recording_consent_action",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub call_recording_consent_action: Option<String>,
+    pub call_recording_consent_action: Option<Option<String>>,
     #[field(display_name = r##"Call Recording Consent Keypress"##)]
     #[serde(
         rename = "call_recording_consent_keypress",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub call_recording_consent_keypress: Option<String>,
+    pub call_recording_consent_keypress: Option<Option<String>>,
     #[field(display_name = r##"Call Started At"##)]
     #[serde(
         rename = "call_started_at",
@@ -3207,43 +3472,53 @@ pub struct TicketObjectTpeVoiceComment {
     )]
     pub call_started_at: Option<String>,
     #[field(display_name = r##"Call Type"##)]
-    #[serde(rename = "call_type", default, skip_serializing_if = "Option::is_none")]
-    pub call_type: Option<String>,
+    #[serde(
+        rename = "call_type",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub call_type: Option<Option<String>>,
     #[field(display_name = r##"Callback Number"##)]
     #[serde(
         rename = "callback_number",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub callback_number: Option<String>,
+    pub callback_number: Option<Option<String>>,
     #[field(display_name = r##"Callback Requested At"##)]
     #[serde(
         rename = "callback_requested_at",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub callback_requested_at: Option<String>,
+    pub callback_requested_at: Option<Option<String>>,
     #[field(display_name = r##"Completion Status"##)]
     #[serde(
         rename = "completion_status",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub completion_status: Option<String>,
+    pub completion_status: Option<Option<String>>,
     #[field(display_name = r##"Connection Attempts"##)]
     #[serde(
         rename = "connection_attempts",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub connection_attempts: Option<i64>,
+    pub connection_attempts: Option<Option<i64>>,
     #[field(display_name = r##"Consultation Time"##)]
     #[serde(
         rename = "consultation_time",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub consultation_time: Option<i64>,
+    pub consultation_time: Option<Option<i64>>,
     #[field(display_name = r##"Direction"##)]
     #[serde(rename = "direction", default, skip_serializing_if = "Option::is_none")]
     pub direction: Option<String>,
@@ -3251,39 +3526,58 @@ pub struct TicketObjectTpeVoiceComment {
     #[serde(
         rename = "disconnection_reason",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub disconnection_reason: Option<String>,
+    pub disconnection_reason: Option<Option<String>>,
     #[field(display_name = r##"Dnis"##)]
-    #[serde(rename = "dnis", default, skip_serializing_if = "Option::is_none")]
-    pub dnis: Option<String>,
+    #[serde(
+        rename = "dnis",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub dnis: Option<Option<String>>,
     #[field(display_name = r##"Duration"##)]
-    #[serde(rename = "duration", default, skip_serializing_if = "Option::is_none")]
-    pub duration: Option<i64>,
+    #[serde(
+        rename = "duration",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub duration: Option<Option<i64>>,
     #[field(display_name = r##"End User ID"##)]
     #[serde(
         rename = "end_user_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub end_user_id: Option<i64>,
+    pub end_user_id: Option<Option<i64>>,
     #[field(display_name = r##"End User Location"##)]
     #[serde(
         rename = "end_user_location",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub end_user_location: Option<String>,
+    pub end_user_location: Option<Option<String>>,
     #[field(display_name = r##"Exceeded Queue Time"##)]
     #[serde(
         rename = "exceeded_queue_time",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub exceeded_queue_time: Option<bool>,
+    pub exceeded_queue_time: Option<Option<bool>>,
     #[field(display_name = r##"Extension"##)]
-    #[serde(rename = "extension", default, skip_serializing_if = "Option::is_none")]
-    pub extension: Option<String>,
+    #[serde(
+        rename = "extension",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub extension: Option<Option<String>>,
     #[field(display_name = r##"External ID"##)]
     #[serde(
         rename = "external_id",
@@ -3298,32 +3592,50 @@ pub struct TicketObjectTpeVoiceComment {
     #[serde(
         rename = "from_line_nickname",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub from_line_nickname: Option<String>,
+    pub from_line_nickname: Option<Option<String>>,
     #[field(display_name = r##"Hold Time"##)]
-    #[serde(rename = "hold_time", default, skip_serializing_if = "Option::is_none")]
-    pub hold_time: Option<i64>,
+    #[serde(
+        rename = "hold_time",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub hold_time: Option<Option<i64>>,
     #[field(display_name = r##"Intent"##)]
-    #[serde(rename = "intent", default, skip_serializing_if = "Option::is_none")]
-    pub intent: Option<String>,
+    #[serde(
+        rename = "intent",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub intent: Option<Option<String>>,
     #[field(display_name = r##"Ivr Destination Group Name"##)]
     #[serde(
         rename = "ivr_destination_group_name",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub ivr_destination_group_name: Option<String>,
+    pub ivr_destination_group_name: Option<Option<String>>,
     #[field(display_name = r##"Ivr Time Spent"##)]
     #[serde(
         rename = "ivr_time_spent",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub ivr_time_spent: Option<i64>,
+    pub ivr_time_spent: Option<Option<i64>>,
     #[field(display_name = r##"Language"##)]
-    #[serde(rename = "language", default, skip_serializing_if = "Option::is_none")]
-    pub language: Option<String>,
+    #[serde(
+        rename = "language",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub language: Option<Option<String>>,
     #[field(display_name = r##"Line Type"##)]
     #[serde(rename = "line_type", default, skip_serializing_if = "Option::is_none")]
     pub line_type: Option<String>,
@@ -3331,37 +3643,42 @@ pub struct TicketObjectTpeVoiceComment {
     #[serde(
         rename = "longest_hold_time",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub longest_hold_time: Option<i64>,
+    pub longest_hold_time: Option<Option<i64>>,
     #[field(display_name = r##"Number Of Holds"##)]
     #[serde(
         rename = "number_of_holds",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub number_of_holds: Option<i64>,
+    pub number_of_holds: Option<Option<i64>>,
     #[field(display_name = r##"Outside Business Hours"##)]
     #[serde(
         rename = "outside_business_hours",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub outside_business_hours: Option<bool>,
+    pub outside_business_hours: Option<Option<bool>>,
     #[field(display_name = r##"Overflowed To"##)]
     #[serde(
         rename = "overflowed_to",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub overflowed_to: Option<String>,
+    pub overflowed_to: Option<Option<String>>,
     #[field(display_name = r##"Phone Name"##)]
     #[serde(
         rename = "phone_name",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub phone_name: Option<String>,
+    pub phone_name: Option<Option<String>>,
     #[field(display_name = r##"Public"##)]
     #[serde(rename = "public", default, skip_serializing_if = "Option::is_none")]
     pub public: Option<bool>,
@@ -3369,23 +3686,26 @@ pub struct TicketObjectTpeVoiceComment {
     #[serde(
         rename = "quality_score",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub quality_score: Option<i64>,
+    pub quality_score: Option<Option<i64>>,
     #[field(display_name = r##"Queue Name"##)]
     #[serde(
         rename = "queue_name",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub queue_name: Option<String>,
+    pub queue_name: Option<Option<String>>,
     #[field(display_name = r##"Queue Time"##)]
     #[serde(
         rename = "queue_time",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub queue_time: Option<i64>,
+    pub queue_time: Option<Option<i64>>,
     #[field(display_name = r##"Recorded"##)]
     #[serde(rename = "recorded", default, skip_serializing_if = "Option::is_none")]
     pub recorded: Option<bool>,
@@ -3393,9 +3713,10 @@ pub struct TicketObjectTpeVoiceComment {
     #[serde(
         rename = "recording_time",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub recording_time: Option<i64>,
+    pub recording_time: Option<Option<i64>>,
     #[field(display_name = r##"Recording Type"##)]
     #[serde(
         rename = "recording_type",
@@ -3407,57 +3728,74 @@ pub struct TicketObjectTpeVoiceComment {
     #[serde(
         rename = "recording_url",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub recording_url: Option<String>,
+    pub recording_url: Option<Option<String>>,
     #[field(display_name = r##"Sentiment Agent"##)]
     #[serde(
         rename = "sentiment_agent",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub sentiment_agent: Option<String>,
+    pub sentiment_agent: Option<Option<String>>,
     #[field(display_name = r##"Sentiment Call"##)]
     #[serde(
         rename = "sentiment_call",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub sentiment_call: Option<String>,
+    pub sentiment_call: Option<Option<String>>,
     #[field(display_name = r##"Sentiment Customer"##)]
     #[serde(
         rename = "sentiment_customer",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub sentiment_customer: Option<String>,
+    pub sentiment_customer: Option<Option<String>>,
     #[field(display_name = r##"Sentiment Trend"##)]
     #[serde(
         rename = "sentiment_trend",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub sentiment_trend: Option<String>,
+    pub sentiment_trend: Option<Option<String>>,
     #[field(display_name = r##"Short Summary"##)]
     #[serde(
         rename = "short_summary",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub short_summary: Option<String>,
+    pub short_summary: Option<Option<String>>,
     #[field(display_name = r##"Summary"##)]
-    #[serde(rename = "summary", default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
+    #[serde(
+        rename = "summary",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub summary: Option<Option<String>>,
     #[field(display_name = r##"Talk Time"##)]
-    #[serde(rename = "talk_time", default, skip_serializing_if = "Option::is_none")]
-    pub talk_time: Option<i64>,
+    #[serde(
+        rename = "talk_time",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub talk_time: Option<Option<i64>>,
     #[field(display_name = r##"Time To Answer"##)]
     #[serde(
         rename = "time_to_answer",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub time_to_answer: Option<i64>,
+    pub time_to_answer: Option<Option<i64>>,
     #[field(display_name = r##"Title"##)]
     #[serde(rename = "title", default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -3468,16 +3806,18 @@ pub struct TicketObjectTpeVoiceComment {
     #[serde(
         rename = "to_line_nickname",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub to_line_nickname: Option<String>,
+    pub to_line_nickname: Option<Option<String>>,
     #[field(display_name = r##"Transcript"##)]
     #[serde(
         rename = "transcript",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub transcript: Option<String>,
+    pub transcript: Option<Option<String>>,
     #[field(display_name = r##"Via ID"##)]
     #[serde(rename = "via_id", default, skip_serializing_if = "Option::is_none")]
     pub via_id: Option<i64>,
@@ -3485,22 +3825,34 @@ pub struct TicketObjectTpeVoiceComment {
     #[serde(
         rename = "video_recording_url",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub video_recording_url: Option<String>,
+    pub video_recording_url: Option<Option<String>>,
     #[field(display_name = r##"Voicemail"##)]
-    #[serde(rename = "voicemail", default, skip_serializing_if = "Option::is_none")]
-    pub voicemail: Option<bool>,
+    #[serde(
+        rename = "voicemail",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub voicemail: Option<Option<bool>>,
     #[field(display_name = r##"Voicemail Requested At"##)]
     #[serde(
         rename = "voicemail_requested_at",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub voicemail_requested_at: Option<String>,
+    pub voicemail_requested_at: Option<Option<String>>,
     #[field(display_name = r##"Wait Time"##)]
-    #[serde(rename = "wait_time", default, skip_serializing_if = "Option::is_none")]
-    pub wait_time: Option<i64>,
+    #[serde(
+        rename = "wait_time",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub wait_time: Option<Option<i64>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -3517,9 +3869,10 @@ pub struct TicketObjectVoiceComment {
     #[serde(
         rename = "answered_by_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub answered_by_id: Option<i64>,
+    pub answered_by_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Call Duration"##,
         description = r##"Duration of the call in seconds"##
@@ -3537,8 +3890,13 @@ pub struct TicketObjectVoiceComment {
         display_name = r##"Location"##,
         description = r##"Location of the caller"##
     )]
-    #[serde(rename = "location", default, skip_serializing_if = "Option::is_none")]
-    pub location: Option<String>,
+    #[serde(
+        rename = "location",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub location: Option<Option<String>>,
     #[field(
         display_name = r##"Recording URL"##,
         description = r##"URL of the recording"##
@@ -3546,9 +3904,10 @@ pub struct TicketObjectVoiceComment {
     #[serde(
         rename = "recording_url",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub recording_url: Option<String>,
+    pub recording_url: Option<Option<String>>,
     #[field(display_name = r##"To"##, description = r##"Dialed phone number"##)]
     #[serde(rename = "to", default, skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
@@ -3559,9 +3918,10 @@ pub struct TicketObjectVoiceComment {
     #[serde(
         rename = "transcription_text",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub transcription_text: Option<String>,
+    pub transcription_text: Option<Option<String>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -3655,9 +4015,10 @@ pub struct UserForAdmin {
     #[serde(
         rename = "custom_role_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub custom_role_id: Option<i64>,
+    pub custom_role_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Default Group ID"##,
         description = r##"The id of the user's default group"##
@@ -3687,9 +4048,10 @@ pub struct UserForAdmin {
     #[serde(
         rename = "external_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub external_id: Option<String>,
+    pub external_id: Option<Option<String>>,
     #[field(
         display_name = r##"Iana Time Zone"##,
         description = r##"The time zone for the user"##
@@ -3762,21 +4124,32 @@ using an API token
     #[serde(
         rename = "organization_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub organization_id: Option<i64>,
+    pub organization_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Phone"##,
         description = r##"The user's primary phone number. See [Phone Number](#phone-number) below"##
     )]
-    #[serde(rename = "phone", default, skip_serializing_if = "Option::is_none")]
-    pub phone: Option<String>,
+    #[serde(
+        rename = "phone",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub phone: Option<Option<String>>,
     #[field(
         display_name = r##"Photo"##,
         description = r##"The user's profile picture represented as an [Attachment](/api-reference/ticketing/tickets/ticket-attachments/) object"##
     )]
-    #[serde(rename = "photo", default, skip_serializing_if = "Option::is_none")]
-    pub photo: Option<HashMap<String, Value>>,
+    #[serde(
+        rename = "photo",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub photo: Option<Option<HashMap<String, Value>>>,
     #[field(
         display_name = r##"Remote Photo URL"##,
         description = r##"A URL pointing to the user's profile picture."##
@@ -3824,8 +4197,13 @@ Explore](https://support.zendesk.com/hc/en-us/articles/4762263171610-Announcing-
         display_name = r##"Role Type"##,
         description = r##"The user's role id. 0 for a custom agent, 1 for a light agent, 2 for a chat agent, 3 for a chat agent added to the Support account as a contributor ([Chat Phase 4](https://support.zendesk.com/hc/en-us/articles/4408836197658#topic_p1h_sx4_pgb)), 4 for an admin, and 5 for a billing admin"##
     )]
-    #[serde(rename = "role_type", default, skip_serializing_if = "Option::is_none")]
-    pub role_type: Option<i64>,
+    #[serde(
+        rename = "role_type",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub role_type: Option<Option<i64>>,
     #[field(display_name = r##"Separation"##)]
     #[serde(
         rename = "separation",
@@ -3856,9 +4234,10 @@ Explore](https://support.zendesk.com/hc/en-us/articles/4762263171610-Announcing-
     #[serde(
         rename = "shared_phone_number",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub shared_phone_number: Option<bool>,
+    pub shared_phone_number: Option<Option<bool>>,
     #[field(
         display_name = r##"Signature"##,
         description = r##"The user's signature. Only agents and admins can have signatures"##
@@ -3875,9 +4254,10 @@ Explore](https://support.zendesk.com/hc/en-us/articles/4762263171610-Announcing-
     #[serde(
         rename = "suspension_details",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub suspension_details: Option<UserForAdminSuspensionDetails>,
+    pub suspension_details: Option<Option<UserForAdminSuspensionDetails>>,
     #[field(
         display_name = r##"Tags"##,
         description = r##"The user's tags. Only present if your account has user tagging enabled"##
@@ -3891,9 +4271,10 @@ Explore](https://support.zendesk.com/hc/en-us/articles/4762263171610-Announcing-
     #[serde(
         rename = "ticket_restriction",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub ticket_restriction: Option<String>,
+    pub ticket_restriction: Option<Option<String>>,
     #[field(
         display_name = r##"Time Zone"##,
         description = r##"The user's time zone. See [Time Zone](#time-zone)"##
@@ -3907,9 +4288,10 @@ Explore](https://support.zendesk.com/hc/en-us/articles/4762263171610-Announcing-
     #[serde(
         rename = "two_factor_auth_enabled",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub two_factor_auth_enabled: Option<bool>,
+    pub two_factor_auth_enabled: Option<Option<bool>>,
     #[field(
         display_name = r##"Updated At"##,
         description = r##"The time the user was last updated"##
@@ -4184,15 +4566,21 @@ pub struct UserUpdateInput {
     #[serde(
         rename = "agent_brand_ids",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub agent_brand_ids: Option<Vec<i64>>,
+    pub agent_brand_ids: Option<Option<Vec<i64>>>,
     #[field(
         display_name = r##"Alias"##,
         description = r##"An alias displayed to end users"##
     )]
-    #[serde(rename = "alias", default, skip_serializing_if = "Option::is_none")]
-    pub alias: Option<String>,
+    #[serde(
+        rename = "alias",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub alias: Option<Option<String>>,
     #[field(
         display_name = r##"Auto Ownership"##,
         description = r##"When true, creates the identity specified by `email` as "owned", or as "shared" if another user owns the address. See [Shared email](/api-reference/ticketing/users/user_identities/#shared-email)."##
@@ -4210,9 +4598,10 @@ pub struct UserUpdateInput {
     #[serde(
         rename = "custom_role_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub custom_role_id: Option<i64>,
+    pub custom_role_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Default Group ID"##,
         description = r##"The id of the user's default group"##
@@ -4220,15 +4609,21 @@ pub struct UserUpdateInput {
     #[serde(
         rename = "default_group_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub default_group_id: Option<i64>,
+    pub default_group_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Details"##,
         description = r##"Any details you want to store about the user, such as an address"##
     )]
-    #[serde(rename = "details", default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<String>,
+    #[serde(
+        rename = "details",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub details: Option<Option<String>>,
     #[field(
         display_name = r##"Email"##,
         description = r##"The user's primary email address"##
@@ -4242,15 +4637,21 @@ pub struct UserUpdateInput {
     #[serde(
         rename = "external_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub external_id: Option<String>,
+    pub external_id: Option<Option<String>>,
     #[field(
         display_name = r##"Group ID"##,
         description = r##"The id of the user's default group. Alias for default_group_id"##
     )]
-    #[serde(rename = "group_id", default, skip_serializing_if = "Option::is_none")]
-    pub group_id: Option<i64>,
+    #[serde(
+        rename = "group_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub group_id: Option<Option<i64>>,
     #[field(display_name = r##"Identities"##)]
     #[serde(
         rename = "identities",
@@ -4262,26 +4663,46 @@ pub struct UserUpdateInput {
         display_name = r##"Language"##,
         description = r##"The user's language preference. Alias for locale."##
     )]
-    #[serde(rename = "language", default, skip_serializing_if = "Option::is_none")]
-    pub language: Option<String>,
+    #[serde(
+        rename = "language",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub language: Option<Option<String>>,
     #[field(
         display_name = r##"Locale"##,
         description = r##"The user's locale. A BCP-47 compliant tag for the locale. If both "locale" and "locale_id" are present on create or update, "locale_id" is ignored and only "locale" is used."##
     )]
-    #[serde(rename = "locale", default, skip_serializing_if = "Option::is_none")]
-    pub locale: Option<String>,
+    #[serde(
+        rename = "locale",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub locale: Option<Option<String>>,
     #[field(
         display_name = r##"Locale ID"##,
         description = r##"The user's language identifier"##
     )]
-    #[serde(rename = "locale_id", default, skip_serializing_if = "Option::is_none")]
-    pub locale_id: Option<i64>,
+    #[serde(
+        rename = "locale_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub locale_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Moderator"##,
         description = r##"Designates whether the user has forum moderation capabilities"##
     )]
-    #[serde(rename = "moderator", default, skip_serializing_if = "Option::is_none")]
-    pub moderator: Option<bool>,
+    #[serde(
+        rename = "moderator",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub moderator: Option<Option<bool>>,
     #[field(display_name = r##"Name"##, description = r##"The user's name"##)]
     #[serde(rename = "name", default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -4289,8 +4710,13 @@ pub struct UserUpdateInput {
         display_name = r##"Notes"##,
         description = r##"Any notes you want to store about the user"##
     )]
-    #[serde(rename = "notes", default, skip_serializing_if = "Option::is_none")]
-    pub notes: Option<String>,
+    #[serde(
+        rename = "notes",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub notes: Option<Option<String>>,
     #[field(
         display_name = r##"Only Private Comments"##,
         description = r##"true if the user can only create private comments"##
@@ -4298,9 +4724,10 @@ pub struct UserUpdateInput {
     #[serde(
         rename = "only_private_comments",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub only_private_comments: Option<bool>,
+    pub only_private_comments: Option<Option<bool>>,
     #[field(
         display_name = r##"Organization ID"##,
         description = r##"The id of the user's organization"##
@@ -4308,9 +4735,10 @@ pub struct UserUpdateInput {
     #[serde(
         rename = "organization_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub organization_id: Option<i64>,
+    pub organization_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Organization IDs"##,
         description = r##"The ids of the user's organizations"##
@@ -4318,21 +4746,32 @@ pub struct UserUpdateInput {
     #[serde(
         rename = "organization_ids",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub organization_ids: Option<Vec<i64>>,
+    pub organization_ids: Option<Option<Vec<i64>>>,
     #[field(
         display_name = r##"Phone"##,
         description = r##"The user's primary phone number"##
     )]
-    #[serde(rename = "phone", default, skip_serializing_if = "Option::is_none")]
-    pub phone: Option<String>,
+    #[serde(
+        rename = "phone",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub phone: Option<Option<String>>,
     #[field(
         display_name = r##"Photo"##,
         description = r##"The user's profile picture"##
     )]
-    #[serde(rename = "photo", default, skip_serializing_if = "Option::is_none")]
-    pub photo: Option<HashMap<String, Value>>,
+    #[serde(
+        rename = "photo",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub photo: Option<Option<HashMap<String, Value>>>,
     #[field(
         display_name = r##"Remote Photo URL"##,
         description = r##"A URL pointing to the user's profile picture"##
@@ -4340,9 +4779,10 @@ pub struct UserUpdateInput {
     #[serde(
         rename = "remote_photo_url",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub remote_photo_url: Option<String>,
+    pub remote_photo_url: Option<Option<String>>,
     #[field(display_name = r##"Role"##, description = r##"The user's role"##)]
     #[serde(rename = "role", default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
@@ -4353,15 +4793,21 @@ pub struct UserUpdateInput {
     #[serde(
         rename = "shared_phone_number",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub shared_phone_number: Option<bool>,
+    pub shared_phone_number: Option<Option<bool>>,
     #[field(
         display_name = r##"Signature"##,
         description = r##"The user's signature. Only agents and admins can have signatures"##
     )]
-    #[serde(rename = "signature", default, skip_serializing_if = "Option::is_none")]
-    pub signature: Option<String>,
+    #[serde(
+        rename = "signature",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub signature: Option<Option<String>>,
     #[field(
         display_name = r##"Skip Verify Email"##,
         description = r##"If true, the user won't receive a verification email"##
@@ -4369,18 +4815,29 @@ pub struct UserUpdateInput {
     #[serde(
         rename = "skip_verify_email",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub skip_verify_email: Option<bool>,
+    pub skip_verify_email: Option<Option<bool>>,
     #[field(
         display_name = r##"Suspended"##,
         description = r##"If the user is suspended"##
     )]
-    #[serde(rename = "suspended", default, skip_serializing_if = "Option::is_none")]
-    pub suspended: Option<bool>,
+    #[serde(
+        rename = "suspended",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub suspended: Option<Option<bool>>,
     #[field(display_name = r##"Tags"##, description = r##"The user's tags"##)]
-    #[serde(rename = "tags", default, skip_serializing_if = "Option::is_none")]
-    pub tags: Option<Vec<String>>,
+    #[serde(
+        rename = "tags",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub tags: Option<Option<Vec<String>>>,
     #[field(
         display_name = r##"Ticket Restriction"##,
         description = r##"Specifies which tickets the user has access to"##
@@ -4388,15 +4845,21 @@ pub struct UserUpdateInput {
     #[serde(
         rename = "ticket_restriction",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub ticket_restriction: Option<String>,
+    pub ticket_restriction: Option<Option<String>>,
     #[field(
         display_name = r##"Time Zone"##,
         description = r##"The user's time zone"##
     )]
-    #[serde(rename = "time_zone", default, skip_serializing_if = "Option::is_none")]
-    pub time_zone: Option<String>,
+    #[serde(
+        rename = "time_zone",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub time_zone: Option<Option<String>>,
     #[field(
         display_name = r##"User Fields"##,
         description = r##"Values of custom fields in the user's profile"##
@@ -4404,15 +4867,21 @@ pub struct UserUpdateInput {
     #[serde(
         rename = "user_fields",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub user_fields: Option<HashMap<String, Value>>,
+    pub user_fields: Option<Option<HashMap<String, Value>>>,
     #[field(
         display_name = r##"Verified"##,
         description = r##"Any of the user's identities is verified"##
     )]
-    #[serde(rename = "verified", default, skip_serializing_if = "Option::is_none")]
-    pub verified: Option<bool>,
+    #[serde(
+        rename = "verified",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub verified: Option<Option<bool>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -4456,8 +4925,13 @@ pub struct ViaObjectSource {
     #[serde(rename = "from", default, skip_serializing_if = "Option::is_none")]
     pub from: Option<ViaObjectSourceFrom>,
     #[field(display_name = r##"Rel"##)]
-    #[serde(rename = "rel", default, skip_serializing_if = "Option::is_none")]
-    pub rel: Option<String>,
+    #[serde(
+        rename = "rel",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub rel: Option<Option<String>>,
     #[field(display_name = r##"To"##)]
     #[serde(rename = "to", default, skip_serializing_if = "Option::is_none")]
     pub to: Option<ViaObjectSourceTo>,
@@ -4471,17 +4945,37 @@ pub struct ViaObjectSource {
 #[capability_output(display_name = "ViaObjectSourceFrom")]
 pub struct ViaObjectSourceFrom {
     #[field(display_name = r##"Address"##)]
-    #[serde(rename = "address", default, skip_serializing_if = "Option::is_none")]
-    pub address: Option<String>,
+    #[serde(
+        rename = "address",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub address: Option<Option<String>>,
     #[field(display_name = r##"ID"##)]
-    #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<i64>,
+    #[serde(
+        rename = "id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub id: Option<Option<i64>>,
     #[field(display_name = r##"Name"##)]
-    #[serde(rename = "name", default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    #[serde(
+        rename = "name",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub name: Option<Option<String>>,
     #[field(display_name = r##"Title"##)]
-    #[serde(rename = "title", default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
+    #[serde(
+        rename = "title",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub title: Option<Option<String>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]

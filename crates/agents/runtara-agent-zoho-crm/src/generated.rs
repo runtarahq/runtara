@@ -290,9 +290,10 @@ Possible values:
     #[serde(
         rename = "default_value",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub default_value: Option<Value>,
+    pub default_value: Option<Option<Value>>,
     #[field(
         display_name = r##"Display Field"##,
         description = r##"Indicates whether the field is configured as a display field.
@@ -2715,16 +2716,18 @@ pub struct DeletedRecordsSuccessResponseDataInner {
     #[serde(
         rename = "created_by",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub created_by: Option<DeletedRecordsSuccessResponseDataInnerCreatedBy>,
+    pub created_by: Option<Option<DeletedRecordsSuccessResponseDataInnerCreatedBy>>,
     #[field(display_name = r##"Deleted By"##)]
     #[serde(
         rename = "deleted_by",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub deleted_by: Option<DeletedRecordsSuccessResponseDataInnerDeletedBy>,
+    pub deleted_by: Option<Option<DeletedRecordsSuccessResponseDataInnerDeletedBy>>,
     #[field(
         display_name = r##"Deleted Time"##,
         description = r##"Represents the data value."##
@@ -2742,9 +2745,10 @@ pub struct DeletedRecordsSuccessResponseDataInner {
     #[serde(
         rename = "display_name",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub display_name: Option<String>,
+    pub display_name: Option<Option<String>>,
     #[field(
         display_name = r##"ID"##,
         description = r##"Represents the data value."##
@@ -3659,8 +3663,13 @@ pub struct GetModules200ResponseModulesInner {
         display_name = r##"Arguments"##,
         description = r##"Array of argument objects used to substitute dynamic parameters in web tab URLs; for example, `https://...&id=${Users.User Id}&name=${Users.First Name}`. Duplicates are allowed, up to 50 entries."##
     )]
-    #[serde(rename = "arguments", default, skip_serializing_if = "Option::is_none")]
-    pub arguments: Option<Vec<GetModules200ResponseModulesInnerArgumentsInner>>,
+    #[serde(
+        rename = "arguments",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub arguments: Option<Option<Vec<GetModules200ResponseModulesInnerArgumentsInner>>>,
     #[field(
         display_name = r##"Business Card Field Limit"##,
         description = r##"Maximum number of fields that can be displayed on the business card view for this module; must be a non-negative integer."##
@@ -3710,9 +3719,10 @@ pub struct GetModules200ResponseModulesInner {
     #[serde(
         rename = "description",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub description: Option<String>,
+    pub description: Option<Option<String>>,
     #[field(
         display_name = r##"Editable"##,
         description = r##"Whether records in this module can be edited by users."##
@@ -3839,9 +3849,10 @@ pub struct GetModules200ResponseModulesInner {
     #[serde(
         rename = "modified_time",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub modified_time: Option<String>,
+    pub modified_time: Option<Option<String>>,
     #[field(
         display_name = r##"Module Name"##,
         description = r##"Represents the display name of the module."##
@@ -3866,9 +3877,10 @@ pub struct GetModules200ResponseModulesInner {
     #[serde(
         rename = "parent_module",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub parent_module: Option<GetModules200ResponseModulesInnerParentModule>,
+    pub parent_module: Option<Option<GetModules200ResponseModulesInnerParentModule>>,
     #[field(
         display_name = r##"Plural Label"##,
         description = r##"Plural display label for the module; returns the translated label when translation is enabled, otherwise matches `actual_plural_label`."##
@@ -3893,9 +3905,10 @@ pub struct GetModules200ResponseModulesInner {
     #[serde(
         rename = "private_profile",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub private_profile: Option<GetModules200ResponseModulesInnerPrivateProfile>,
+    pub private_profile: Option<Option<GetModules200ResponseModulesInnerPrivateProfile>>,
     #[field(
         display_name = r##"Profile Count"##,
         description = r##"Represents the number of profiles associated with this module; 0 indicates no profile assignments."##
@@ -3986,9 +3999,11 @@ pub struct GetModules200ResponseModulesInner {
     #[serde(
         rename = "static_subform_properties",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub static_subform_properties: Option<GetModules200ResponseModulesInnerStaticSubformProperties>,
+    pub static_subform_properties:
+        Option<Option<GetModules200ResponseModulesInnerStaticSubformProperties>>,
     #[field(
         display_name = r##"Status"##,
         description = r##"Lifecycle state of the module. Possible values: `visible`, `user_hidden`, `system_hidden`, `scheduled_for_deletion`. This status is separate from the numeric bitwise `visibility` flags. It does not itself enable/disable individual features. One of: visible, scheduled_for_deletion, user_hidden, system_hidden."##
@@ -4006,8 +4021,13 @@ pub struct GetModules200ResponseModulesInner {
     )]
     pub sub_menu_available: Option<bool>,
     #[field(display_name = r##"Territory"##)]
-    #[serde(rename = "territory", default, skip_serializing_if = "Option::is_none")]
-    pub territory: Option<GetModules200ResponseModulesInnerTerritory>,
+    #[serde(
+        rename = "territory",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub territory: Option<Option<GetModules200ResponseModulesInnerTerritory>>,
     #[field(
         display_name = r##"Track Current Data"##,
         description = r##"Whether current data tracking is enabled for this module."##
@@ -4048,8 +4068,13 @@ pub struct GetModules200ResponseModulesInner {
         display_name = r##"Web Link"##,
         description = r##"URL for web tab modules; supports dynamic parameter substitution via the arguments array."##
     )]
-    #[serde(rename = "web_link", default, skip_serializing_if = "Option::is_none")]
-    pub web_link: Option<String>,
+    #[serde(
+        rename = "web_link",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub web_link: Option<Option<String>>,
     #[field(
         display_name = r##"Webform Supported"##,
         description = r##"Whether webform integration is supported for this module."##
@@ -4664,8 +4689,13 @@ pub struct GetUserDetails {
         display_name = r##"Mobile"##,
         description = r##"Represents the user's mobile phone number. Returns null when no mobile number is associated with the account."##
     )]
-    #[serde(rename = "mobile", default, skip_serializing_if = "Option::is_none")]
-    pub mobile: Option<String>,
+    #[serde(
+        rename = "mobile",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub mobile: Option<Option<String>>,
     #[field(
         display_name = r##"Name Format S"##,
         description = r##"Represents the format used to display the user's name. One of: Salutation,First Name,Last Name, Salutation,Last Name,First Name, First Name,Salutation,Last Name, First Name,Last Name,Salutation, Last Name,Salutation,First Name, Last Name,First Name,Salutation."##
@@ -4726,8 +4756,13 @@ pub struct GetUserDetails {
         display_name = r##"Phone"##,
         description = r##"Represents the user's phone number. Returns null when no phone number is associated with the account."##
     )]
-    #[serde(rename = "phone", default, skip_serializing_if = "Option::is_none")]
-    pub phone: Option<String>,
+    #[serde(
+        rename = "phone",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub phone: Option<Option<String>>,
     #[field(display_name = r##"Profile"##)]
     #[serde(rename = "profile", default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<GetUserDetailsProfile>,
@@ -4768,8 +4803,13 @@ pub struct GetUserDetails {
         display_name = r##"Signature"##,
         description = r##"Represents the email signature configured for the user. Returns null if no signature has been set."##
     )]
-    #[serde(rename = "signature", default, skip_serializing_if = "Option::is_none")]
-    pub signature: Option<String>,
+    #[serde(
+        rename = "signature",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub signature: Option<Option<String>>,
     #[field(
         display_name = r##"Sort Order Preference S"##,
         description = r##"Represents the user's preferred sort order for displaying records. One of: First Name,Last Name, Last Name,First Name."##
@@ -4922,9 +4962,10 @@ pub struct GetUserDetailsCustomizeInfo {
     #[serde(
         rename = "notes_desc",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub notes_desc: Option<bool>,
+    pub notes_desc: Option<Option<bool>>,
     #[field(
         display_name = r##"Show Detail View"##,
         description = r##"Indicates whether the detail view panel is displayed for the user.\nPossible values:\ntrue - The detail view panel is displayed.\nfalse - The detail view panel is not displayed."##
@@ -4948,9 +4989,10 @@ pub struct GetUserDetailsCustomizeInfo {
     #[serde(
         rename = "show_left_panel",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub show_left_panel: Option<bool>,
+    pub show_left_panel: Option<Option<bool>>,
     #[field(
         display_name = r##"show_right_panel"##,
         description = r##"Indicates that the right panel is displayed in the user interface."##
@@ -5150,9 +5192,10 @@ pub struct GetUserDetailsTheme {
     #[serde(
         rename = "new_background",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub new_background: Option<String>,
+    pub new_background: Option<Option<String>>,
     #[field(display_name = r##"Normal Tab"##)]
     #[serde(
         rename = "normal_tab",
@@ -7471,8 +7514,13 @@ Possible values:
 **true** - Multi-currency is enabled.
 **false** - Multi-currency is not enabled."##
     )]
-    #[serde(rename = "mc_status", default, skip_serializing_if = "Option::is_none")]
-    pub mc_status: Option<bool>,
+    #[serde(
+        rename = "mc_status",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub mc_status: Option<Option<bool>>,
     #[field(
         display_name = r##"mobile"##,
         description = r##"Represents the mobile phone number of the organization when one is provided."##
@@ -7613,9 +7661,10 @@ Possible values:
     #[serde(
         rename = "strictly_reporting",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub strictly_reporting: Option<bool>,
+    pub strictly_reporting: Option<Option<bool>>,
     #[field(
         display_name = r##"Type"##,
         description = r##"Represents the hierarchy type configured for the organization. 
@@ -8985,9 +9034,10 @@ pub struct RecordGetDataItem {
     #[serde(
         rename = "$wizard_connection_path",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub dollar_wizard_connection_path: Option<String>,
+    pub dollar_wizard_connection_path: Option<Option<String>>,
     #[field(display_name = r##"Created By"##)]
     #[serde(
         rename = "Created_By",
@@ -9192,9 +9242,10 @@ pub struct RecordGetSuccessResponseInfo {
     #[serde(
         rename = "next_page_token",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub next_page_token: Option<String>,
+    pub next_page_token: Option<Option<String>>,
     #[field(
         display_name = r##"Page"##,
         description = r##"Represents the info value."##
@@ -9208,9 +9259,10 @@ pub struct RecordGetSuccessResponseInfo {
     #[serde(
         rename = "page_token_expiry",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub page_token_expiry: Option<String>,
+    pub page_token_expiry: Option<Option<String>>,
     #[field(
         display_name = r##"Per Page"##,
         description = r##"Represents the info value."##
@@ -9224,9 +9276,10 @@ pub struct RecordGetSuccessResponseInfo {
     #[serde(
         rename = "previous_page_token",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub previous_page_token: Option<String>,
+    pub previous_page_token: Option<Option<String>>,
     #[field(
         display_name = r##"Sort By"##,
         description = r##"Represents the info value."##
@@ -9542,9 +9595,10 @@ pub struct RecordPostSuccessDataItemDetails {
     #[serde(
         rename = "$wizard_connection_path",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub dollar_wizard_connection_path: Option<String>,
+    pub dollar_wizard_connection_path: Option<Option<String>>,
     #[field(display_name = r##"Created By"##)]
     #[serde(
         rename = "Created_By",
@@ -9810,9 +9864,10 @@ pub struct RecordUpsertSuccessDataItem {
     #[serde(
         rename = "duplicate_field",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub duplicate_field: Option<String>,
+    pub duplicate_field: Option<Option<String>>,
     #[field(
         display_name = r##"Message"##,
         description = r##"Represents the error message describing why the operation failed."##,
@@ -9932,9 +9987,10 @@ pub struct RecordUpsertSuccessResponseDataInner {
     #[serde(
         rename = "duplicate_field",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub duplicate_field: Option<String>,
+    pub duplicate_field: Option<Option<String>>,
     #[field(
         display_name = r##"Message"##,
         description = r##"Represents the data value."##,
@@ -10419,9 +10475,10 @@ If a matching record is found based on these fields, the record is updated; othe
     #[serde(
         rename = "wf_trigger",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub wf_trigger: Option<String>,
+    pub wf_trigger: Option<Option<String>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -12686,9 +12743,10 @@ If a matching record is found based on these fields, the record is updated; othe
     #[serde(
         rename = "wf_trigger",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub wf_trigger: Option<String>,
+    pub wf_trigger: Option<Option<String>>,
 }
 
 #[capability(

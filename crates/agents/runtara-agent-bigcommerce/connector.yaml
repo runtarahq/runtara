@@ -67,6 +67,17 @@ field_types:
     item_id: {type: integer, format: int64}
   TaxExemptItem:
     item_id: {type: integer, format: int64}
+  # A variant's price, weight or size set to null falls back to the product's,
+  # as the field descriptions say; the spec does not mark them nullable.
+  CatalogVariantsPutRequestBodyContentApplicationJsonSchemaItems:
+    price: {type: number, format: double, nullable: true}
+    sale_price: {type: number, format: double, nullable: true}
+    retail_price: {type: number, format: double, nullable: true}
+    cost_price: {type: number, format: double, nullable: true}
+    weight: {type: number, format: double, nullable: true}
+    width: {type: number, format: double, nullable: true}
+    height: {type: number, format: double, nullable: true}
+    depth: {type: number, format: double, nullable: true}
   # A product's categories are ids too, in what a step sends and what it reads.
   ProductBasePost:
     categories: {type: array, items: {type: integer, format: int64}}

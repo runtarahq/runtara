@@ -1276,9 +1276,10 @@ control panel or using the API. Using the API set `availability` to `available`.
     #[serde(
         rename = "preorder_release_date",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub preorder_release_date: Option<String>,
+    pub preorder_release_date: Option<Option<String>>,
     #[field(
         display_name = r##"Price"##,
         description = r##"The price of the product. The price should include or exclude tax, based on the store settings.
@@ -1764,8 +1765,8 @@ control panel or using the API. Using the API set `availability` to `available`.
     pub preorder_message: Option<String>,
     #[field(display_name = r##"Preorder Release Date"##, description = r##"Pre-order release date. See the `availability` field for details on setting a productʼs availability to accept pre-orders.
 "##)]
-    #[serde(rename = "preorder_release_date", default, skip_serializing_if = "Option::is_none")]
-    pub preorder_release_date: Option<String>,
+    #[serde(rename = "preorder_release_date", default, skip_serializing_if = "Option::is_none", deserialize_with = "kit::nullable")]
+    pub preorder_release_date: Option<Option<String>>,
     #[field(display_name = r##"Price"##, description = r##"The price of the product. The price should include or exclude tax, based on the store settings.
 "##)]
     #[serde(rename = "price", default, skip_serializing_if = "Option::is_none")]
@@ -1914,16 +1915,22 @@ pub struct CatalogVariantsPutRequestBodyContentApplicationJsonSchemaItems {
     #[serde(
         rename = "cost_price",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub cost_price: Option<f64>,
+    pub cost_price: Option<Option<f64>>,
     #[field(
         display_name = r##"Depth"##,
         description = r##"Depth of the variant, which can be used when calculating shipping costs. If this value is `null`, the productʼs default depth (set in the Product resourceʼs `depth` field) will be used as the base depth.
 "##
     )]
-    #[serde(rename = "depth", default, skip_serializing_if = "Option::is_none")]
-    pub depth: Option<f64>,
+    #[serde(
+        rename = "depth",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub depth: Option<Option<f64>>,
     #[field(
         display_name = r##"Fixed Cost Shipping Price"##,
         description = r##"A fixed shipping cost for the variant. If defined, this value will be used during checkout instead of normal shipping-cost calculation.
@@ -1940,8 +1947,13 @@ pub struct CatalogVariantsPutRequestBodyContentApplicationJsonSchemaItems {
         description = r##"Height of the variant, which can be used when calculating shipping costs. If this value is `null`, the productʼs default height (set in the Product resourceʼs `height` field) will be used as the base height.
 "##
     )]
-    #[serde(rename = "height", default, skip_serializing_if = "Option::is_none")]
-    pub height: Option<f64>,
+    #[serde(
+        rename = "height",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub height: Option<Option<f64>>,
     #[field(display_name = r##"ID"##)]
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>,
@@ -1986,8 +1998,13 @@ The Catalog API handles limits in a different way than the Inventory API. For mo
         display_name = r##"Price"##,
         description = r##"This variant’s base price on the storefront. If a Price List ID is used, the Price List value will be used. If a Price List ID is not used, and this value is `null`, the product’s default price (set in the Product resource’s `price` field) will be used as the base price."##
     )]
-    #[serde(rename = "price", default, skip_serializing_if = "Option::is_none")]
-    pub price: Option<f64>,
+    #[serde(
+        rename = "price",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub price: Option<Option<f64>>,
     #[field(
         display_name = r##"Purchasing Disabled"##,
         description = r##"If `true`, this variant will not be purchasable on the storefront."##
@@ -2015,9 +2032,10 @@ The Catalog API handles limits in a different way than the Inventory API. For mo
     #[serde(
         rename = "retail_price",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub retail_price: Option<f64>,
+    pub retail_price: Option<Option<f64>>,
     #[field(
         display_name = r##"Sale Price"##,
         description = r##"This variant’s sale price on the storefront. If a Price List ID is used, the Price List value will be used. If a Price List ID is not used, and this value is null, the product’s sale price (set in the Product resource’s `price` field) will be used as the sale price."##
@@ -2025,28 +2043,44 @@ The Catalog API handles limits in a different way than the Inventory API. For mo
     #[serde(
         rename = "sale_price",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub sale_price: Option<f64>,
+    pub sale_price: Option<Option<f64>>,
     #[field(
         display_name = r##"UPC"##,
         description = r##"The UPC code used in feeds for shopping comparison sites and external channel integrations."##
     )]
-    #[serde(rename = "upc", default, skip_serializing_if = "Option::is_none")]
-    pub upc: Option<String>,
+    #[serde(
+        rename = "upc",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub upc: Option<Option<String>>,
     #[field(
         display_name = r##"Weight"##,
         description = r##"This variant’s base weight on the storefront. If this value is null, the product’s default weight (set in the Product resource’s weight field) will be used as the base weight."##
     )]
-    #[serde(rename = "weight", default, skip_serializing_if = "Option::is_none")]
-    pub weight: Option<f64>,
+    #[serde(
+        rename = "weight",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub weight: Option<Option<f64>>,
     #[field(
         display_name = r##"Width"##,
         description = r##"Width of the variant, which can be used when calculating shipping costs. If this value is `null`, the productʼs default width (set in the Product resourceʼs `width` field) will be used as the base width.
 "##
     )]
-    #[serde(rename = "width", default, skip_serializing_if = "Option::is_none")]
-    pub width: Option<f64>,
+    #[serde(
+        rename = "width",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub width: Option<Option<f64>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -2266,8 +2300,13 @@ The Catalog API handles limits in a different way than the Inventory API. For mo
         display_name = r##"UPC"##,
         description = r##"The UPC code used in feeds for shopping comparison sites and external channel integrations."##
     )]
-    #[serde(rename = "upc", default, skip_serializing_if = "Option::is_none")]
-    pub upc: Option<String>,
+    #[serde(
+        rename = "upc",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub upc: Option<Option<String>>,
     #[field(
         display_name = r##"Weight"##,
         description = r##"This variant’s base weight on the storefront. If this value is null, the product’s default weight (set in the Product resource’s weight field) will be used as the base weight."##
@@ -4226,9 +4265,10 @@ pub struct ItemResponseLocationsItemsSettings {
     #[serde(
         rename = "backorder_limit",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub backorder_limit: Option<i64>,
+    pub backorder_limit: Option<Option<i64>>,
     #[field(
         display_name = r##"backorder_message"##,
         description = r##"The backorder message assigned to this item at this location."##
@@ -5567,9 +5607,10 @@ pub struct OrderFeesPost {
     #[serde(
         rename = "tax_class_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub tax_class_id: Option<i64>,
+    pub tax_class_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Type"##,
         description = r##"The type of the fee. One of: custom_fee."##
@@ -5659,9 +5700,10 @@ pub struct OrderFeesPut {
     #[serde(
         rename = "tax_class_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub tax_class_id: Option<i64>,
+    pub tax_class_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Type"##,
         description = r##"The type of the fee. One of: custom_fee."##
@@ -5778,9 +5820,10 @@ pub struct OrderFeesResp {
     #[serde(
         rename = "tax_class_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub tax_class_id: Option<i64>,
+    pub tax_class_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Type"##,
         description = r##"The type of the fee. One of: custom_fee."##
@@ -5925,9 +5968,10 @@ pub struct OrderPost {
     #[serde(
         rename = "backorder_shipping_expectation_message",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub backorder_shipping_expectation_message: Option<String>,
+    pub backorder_shipping_expectation_message: Option<Option<String>>,
     #[field(
         display_name = r##"Base Handling Cost"##,
         description = r##"The value of the base handling cost. The value can't be negative. (Float, Float-As-String, Integer)"##
@@ -6064,9 +6108,10 @@ pub struct OrderPost {
     #[serde(
         rename = "external_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub external_id: Option<String>,
+    pub external_id: Option<Option<String>>,
     #[field(
         display_name = r##"External Merchant ID"##,
         description = r##"The merchant ID represents an upstream order from an external system. It is the source of truth for orders. After setting it, you cannot write to or update the `external_merchant_id`. For example, you can update the Facebook by Meta page ID in a POST request, but a PUT request to update the order will return a 400 error. Please remove it from your request before trying again."##
@@ -6074,9 +6119,10 @@ pub struct OrderPost {
     #[serde(
         rename = "external_merchant_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub external_merchant_id: Option<String>,
+    pub external_merchant_id: Option<Option<String>>,
     #[field(
         display_name = r##"External Order ID"##,
         description = r##"The order ID in another system, such as the Amazon Order ID if this is an Amazon order. After setting it, you can update this field using a POST or PUT request."##
@@ -6097,9 +6143,10 @@ pub struct OrderPost {
     #[serde(
         rename = "external_source",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub external_source: Option<String>,
+    pub external_source: Option<Option<String>>,
     #[field(display_name = r##"Fees"##)]
     #[serde(rename = "fees", default, skip_serializing_if = "Option::is_none")]
     pub fees: Option<Vec<OrderFeesPost>>,
@@ -6467,8 +6514,13 @@ pub struct OrderProductAppliedDiscounts {
         description = r##"Coupon Code.
 There is no code when creating a manual discount."##
     )]
-    #[serde(rename = "code", default, skip_serializing_if = "Option::is_none")]
-    pub code: Option<String>,
+    #[serde(
+        rename = "code",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub code: Option<Option<String>>,
     #[field(
         display_name = r##"ID"##,
         description = r##"Name of the coupon applied to order."##
@@ -6646,9 +6698,10 @@ pub struct OrderProducts {
     #[serde(
         rename = "backorder_message",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub backorder_message: Option<String>,
+    pub backorder_message: Option<Option<String>>,
     #[field(
         display_name = r##"Base Cost Price"##,
         description = r##"The product’s cost price.  This can be set using the Catalog API. (Float, Float-As-String, Integer)"##
@@ -6794,9 +6847,10 @@ This field includes all types of discounts (automatic, coupon, manual) and there
     #[serde(
         rename = "event_date",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub event_date: Option<String>,
+    pub event_date: Option<Option<String>>,
     #[field(
         display_name = r##"Event Name"##,
         description = r##"Name of promotional event/delivery date."##
@@ -6804,9 +6858,10 @@ This field includes all types of discounts (automatic, coupon, manual) and there
     #[serde(
         rename = "event_name",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub event_name: Option<String>,
+    pub event_name: Option<Option<String>>,
     #[field(
         display_name = r##"External ID"##,
         description = r##"(Read-only) ID of the order in another system. For example, the Amazon order ID if this is an Amazon order."##
@@ -6814,9 +6869,10 @@ This field includes all types of discounts (automatic, coupon, manual) and there
     #[serde(
         rename = "external_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub external_id: Option<String>,
+    pub external_id: Option<Option<String>>,
     #[field(
         display_name = r##"Fixed Shipping Cost"##,
         description = r##"Fixed shipping cost for this product. (Float, Float-As-String, Integer)"##
@@ -6834,9 +6890,10 @@ This field includes all types of discounts (automatic, coupon, manual) and there
     #[serde(
         rename = "gift_certificate_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub gift_certificate_id: Option<i64>,
+    pub gift_certificate_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Height"##,
         description = r##"Product height. The value can't be negative."##
@@ -6902,9 +6959,10 @@ This field includes all types of discounts (automatic, coupon, manual) and there
     #[serde(
         rename = "option_set_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub option_set_id: Option<i64>,
+    pub option_set_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Order Address ID"##,
         description = r##"Numeric ID of the associated order address. Value is `0` for items that are not fulfilled by a pickup method."##
@@ -6942,9 +7000,10 @@ Use it to read the price of a picklist item, whose `base_price` is `0`.
     #[serde(
         rename = "original_price",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub original_price: Option<String>,
+    pub original_price: Option<Option<String>>,
     #[field(
         display_name = r##"Parent Order Product ID"##,
         description = r##"ID of a parent product."##
@@ -6952,9 +7011,10 @@ Use it to read the price of a picklist item, whose `base_price` is `0`.
     #[serde(
         rename = "parent_order_product_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub parent_order_product_id: Option<i64>,
+    pub parent_order_product_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Price Ex Tax"##,
         description = r##"The product’s price excluding tax. The value can't be negative. (Float, Float-As-String, Integer)"##
@@ -7186,9 +7246,10 @@ If there is a manual discount applied total_tax is calculated as the following:
     #[serde(
         rename = "wrapping_name",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub wrapping_name: Option<String>,
+    pub wrapping_name: Option<Option<String>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -7355,9 +7416,10 @@ pub struct OrderPut {
     #[serde(
         rename = "external_order_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub external_order_id: Option<String>,
+    pub external_order_id: Option<Option<String>>,
     #[field(
         display_name = r##"External Source"##,
         description = r##"This value identifies an external system that generated the order and submitted it to BigCommerce with the Orders API.
@@ -7368,9 +7430,10 @@ pub struct OrderPut {
     #[serde(
         rename = "external_source",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub external_source: Option<String>,
+    pub external_source: Option<Option<String>>,
     #[field(display_name = r##"Fees"##)]
     #[serde(rename = "fees", default, skip_serializing_if = "Option::is_none")]
     pub fees: Option<Vec<OrderFeesPut>>,
@@ -7818,9 +7881,10 @@ pub struct OrderResp {
     #[serde(
         rename = "backorder_shipping_expectation_message",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub backorder_shipping_expectation_message: Option<String>,
+    pub backorder_shipping_expectation_message: Option<Option<String>>,
     #[field(
         display_name = r##"Base Handling Cost"##,
         description = r##"The value of the base handling cost. The value can't be negative. (Float, Float-As-String, Integer)"##
@@ -8037,9 +8101,10 @@ pub struct OrderResp {
     #[serde(
         rename = "external_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub external_id: Option<String>,
+    pub external_id: Option<Option<String>>,
     #[field(
         display_name = r##"External Merchant ID"##,
         description = r##"The merchant ID represents an upstream order from an external system. It is the source of truth for orders. After setting it, you cannot write to or update the `external_merchant_id`. For example, you can update the Facebook by Meta page ID in a POST request, but a PUT request to update the order will return a 400 error. Please remove it from your request before trying again."##
@@ -8047,9 +8112,10 @@ pub struct OrderResp {
     #[serde(
         rename = "external_merchant_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub external_merchant_id: Option<String>,
+    pub external_merchant_id: Option<Option<String>>,
     #[field(
         display_name = r##"External Order ID"##,
         description = r##"The order ID in another system, such as the Amazon Order ID if this is an Amazon order. After setting it, you can update this field using a POST or PUT request."##
@@ -8070,9 +8136,10 @@ pub struct OrderResp {
     #[serde(
         rename = "external_source",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub external_source: Option<String>,
+    pub external_source: Option<Option<String>>,
     #[field(display_name = r##"Fees"##)]
     #[serde(rename = "fees", default, skip_serializing_if = "Option::is_none")]
     pub fees: Option<OrderRespOnlyFees>,
@@ -10517,9 +10584,10 @@ control panel or using the API. Using the API set `availability` to `available`.
     #[serde(
         rename = "preorder_release_date",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub preorder_release_date: Option<String>,
+    pub preorder_release_date: Option<Option<String>>,
     #[field(
         display_name = r##"Price"##,
         description = r##"The price of the product. The price should include or exclude tax, based on the store settings.
@@ -11447,9 +11515,10 @@ control panel or using the API. Using the API set `availability` to `available`.
     #[serde(
         rename = "preorder_release_date",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub preorder_release_date: Option<String>,
+    pub preorder_release_date: Option<Option<String>>,
     #[field(
         display_name = r##"Price"##,
         description = r##"The price of the product. The price should include or exclude tax, based on the store settings.
@@ -11930,8 +11999,13 @@ pub struct ProductOptionBase {
         description = r##"The unique numerical ID of the option, increments sequentially.
 "##
     )]
-    #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<i64>,
+    #[serde(
+        rename = "id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub id: Option<Option<i64>>,
     #[field(display_name = r##"Option Values"##)]
     #[serde(
         rename = "option_values",
@@ -12765,9 +12839,10 @@ control panel or using the API. Using the API set `availability` to `available`.
     #[serde(
         rename = "preorder_release_date",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub preorder_release_date: Option<String>,
+    pub preorder_release_date: Option<Option<String>>,
     #[field(
         display_name = r##"Price"##,
         description = r##"The price of the product. The price should include or exclude tax, based on the store settings.
@@ -13184,9 +13259,10 @@ pub struct ProductsProductVariantFull {
     #[serde(
         rename = "bin_picking_number",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub bin_picking_number: Option<String>,
+    pub bin_picking_number: Option<Option<String>>,
     #[field(
         display_name = r##"Calculated Price"##,
         description = r##"The price of the variant as seen on the storefront. This price takes into account `sale_price` and any price adjustment rules that are applicable to this variant.
@@ -13212,16 +13288,22 @@ pub struct ProductsProductVariantFull {
     #[serde(
         rename = "cost_price",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub cost_price: Option<f64>,
+    pub cost_price: Option<Option<f64>>,
     #[field(
         display_name = r##"Depth"##,
         description = r##"Depth of the variant, which can be used when calculating shipping costs. If this value is `null`, the productʼs default depth (set in the Product resourceʼs `depth` field) will be used as the base depth.
 "##
     )]
-    #[serde(rename = "depth", default, skip_serializing_if = "Option::is_none")]
-    pub depth: Option<f64>,
+    #[serde(
+        rename = "depth",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub depth: Option<Option<f64>>,
     #[field(
         display_name = r##"Fixed Cost Shipping Price"##,
         description = r##"A fixed shipping cost for the variant. If defined, this value will be used during checkout instead of normal shipping-cost calculation.
@@ -13230,9 +13312,10 @@ pub struct ProductsProductVariantFull {
     #[serde(
         rename = "fixed_cost_shipping_price",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub fixed_cost_shipping_price: Option<f64>,
+    pub fixed_cost_shipping_price: Option<Option<f64>>,
     #[field(display_name = r##"GTIN"##)]
     #[serde(rename = "gtin", default, skip_serializing_if = "Option::is_none")]
     pub gtin: Option<String>,
@@ -13241,8 +13324,13 @@ pub struct ProductsProductVariantFull {
         description = r##"Height of the variant, which can be used when calculating shipping costs. If this value is `null`, the productʼs default height (set in the Product resourceʼs `height` field) will be used as the base height.
 "##
     )]
-    #[serde(rename = "height", default, skip_serializing_if = "Option::is_none")]
-    pub height: Option<f64>,
+    #[serde(
+        rename = "height",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub height: Option<Option<f64>>,
     #[field(display_name = r##"ID"##, description = r##"Variant ID"##)]
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>,
@@ -13266,9 +13354,10 @@ The Catalog API handles limits in a different way than the Inventory API. For mo
     #[serde(
         rename = "inventory_level",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub inventory_level: Option<i64>,
+    pub inventory_level: Option<Option<i64>>,
     #[field(
         display_name = r##"Inventory Warning Level"##,
         description = r##"When the variant hits this inventory level, it is considered low stock."##
@@ -13276,9 +13365,10 @@ The Catalog API handles limits in a different way than the Inventory API. For mo
     #[serde(
         rename = "inventory_warning_level",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub inventory_warning_level: Option<i64>,
+    pub inventory_warning_level: Option<Option<i64>>,
     #[field(
         display_name = r##"Is Free Shipping"##,
         description = r##"Flag used to indicate whether the variant has free shipping. If `true`, the shipping cost for the variant will be zero.
@@ -13316,8 +13406,13 @@ The Catalog API handles limits in a different way than the Inventory API. For mo
         display_name = r##"Price"##,
         description = r##"This variant’s base price on the storefront. If a Price List ID is used, the Price List value will be used. If a Price List ID is not used, and this value is `null`, the product’s default price (set in the Product resource’s `price` field) will be used as the base price."##
     )]
-    #[serde(rename = "price", default, skip_serializing_if = "Option::is_none")]
-    pub price: Option<f64>,
+    #[serde(
+        rename = "price",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub price: Option<Option<f64>>,
     #[field(display_name = r##"Product ID"##, description = r##"Product ID"##)]
     #[serde(
         rename = "product_id",
@@ -13352,9 +13447,10 @@ The Catalog API handles limits in a different way than the Inventory API. For mo
     #[serde(
         rename = "retail_price",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub retail_price: Option<f64>,
+    pub retail_price: Option<Option<f64>>,
     #[field(
         display_name = r##"Sale Price"##,
         description = r##"This variant’s sale price on the storefront. If a Price List ID is used, the Price List value will be used. If a Price List ID is not used, and this value is null, the product’s sale price (set in the Product resource’s `price` field) will be used as the sale price."##
@@ -13362,9 +13458,10 @@ The Catalog API handles limits in a different way than the Inventory API. For mo
     #[serde(
         rename = "sale_price",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub sale_price: Option<f64>,
+    pub sale_price: Option<Option<f64>>,
     #[field(
         display_name = r##"SKU"##,
         description = r##"A unique user-defined alphanumeric product code/stock keeping unit (SKU). The SKU is always unique regardless of the letter case for both products and variants."##
@@ -13384,15 +13481,25 @@ The Catalog API handles limits in a different way than the Inventory API. For mo
         display_name = r##"Weight"##,
         description = r##"This variant’s base weight on the storefront. If this value is null, the product’s default weight (set in the Product resource’s weight field) will be used as the base weight."##
     )]
-    #[serde(rename = "weight", default, skip_serializing_if = "Option::is_none")]
-    pub weight: Option<f64>,
+    #[serde(
+        rename = "weight",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub weight: Option<Option<f64>>,
     #[field(
         display_name = r##"Width"##,
         description = r##"Width of the variant, which can be used when calculating shipping costs. If this value is `null`, the productʼs default width (set in the Product resourceʼs `width` field) will be used as the base width.
 "##
     )]
-    #[serde(rename = "width", default, skip_serializing_if = "Option::is_none")]
-    pub width: Option<f64>,
+    #[serde(
+        rename = "width",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub width: Option<Option<f64>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -14418,9 +14525,10 @@ pub struct Transaction {
     #[serde(
         rename = "payment_instrument_token",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub payment_instrument_token: Option<String>,
+    pub payment_instrument_token: Option<Option<String>>,
     #[field(
         display_name = r##"Payment Method ID"##,
         description = r##"The payment method ID used for this transaction.
@@ -14442,9 +14550,10 @@ pub struct Transaction {
     #[serde(
         rename = "provider_customer_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub provider_customer_id: Option<String>,
+    pub provider_customer_id: Option<Option<String>>,
     #[field(
         display_name = r##"Provider Instrument Token"##,
         description = r##"The payment provider's instrument token associated with the stored instrument used to process this transaction, if applicable.
@@ -14455,9 +14564,10 @@ pub struct Transaction {
     #[serde(
         rename = "provider_instrument_token",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub provider_instrument_token: Option<String>,
+    pub provider_instrument_token: Option<Option<String>>,
     #[field(
         display_name = r##"Reference Transaction ID"##,
         description = r##"Identifier for an existing transaction upon which this transaction acts.
@@ -14566,9 +14676,10 @@ pub struct TransactionCustomProviderFieldResult {
     #[serde(
         rename = "amount_received",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub amount_received: Option<f64>,
+    pub amount_received: Option<Option<f64>>,
     #[field(
         display_name = r##"Authorization Code"##,
         description = r##"Authorization code for the transaction.
@@ -14577,9 +14688,10 @@ pub struct TransactionCustomProviderFieldResult {
     #[serde(
         rename = "authorization_code",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub authorization_code: Option<String>,
+    pub authorization_code: Option<Option<String>>,
     #[field(
         display_name = r##"Fraud Response"##,
         description = r##"The fraud response associated with the transaction.
@@ -14588,9 +14700,10 @@ pub struct TransactionCustomProviderFieldResult {
     #[serde(
         rename = "fraud_response",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub fraud_response: Option<String>,
+    pub fraud_response: Option<Option<String>>,
     #[field(
         display_name = r##"Receipt Number"##,
         description = r##"The receipt number associated with the transaction.
@@ -14599,9 +14712,10 @@ pub struct TransactionCustomProviderFieldResult {
     #[serde(
         rename = "receipt_number",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub receipt_number: Option<String>,
+    pub receipt_number: Option<Option<String>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -14887,9 +15001,10 @@ pub struct VariantsProductVariantFull {
     #[serde(
         rename = "bin_picking_number",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub bin_picking_number: Option<String>,
+    pub bin_picking_number: Option<Option<String>>,
     #[field(
         display_name = r##"Calculated Price"##,
         description = r##"The price of the variant as seen on the storefront. This price takes into account `sale_price` and any price adjustment rules that are applicable to this variant.
@@ -14915,16 +15030,22 @@ pub struct VariantsProductVariantFull {
     #[serde(
         rename = "cost_price",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub cost_price: Option<f64>,
+    pub cost_price: Option<Option<f64>>,
     #[field(
         display_name = r##"Depth"##,
         description = r##"Depth of the variant, which can be used when calculating shipping costs. If this value is `null`, the productʼs default depth (set in the Product resourceʼs `depth` field) will be used as the base depth.
 "##
     )]
-    #[serde(rename = "depth", default, skip_serializing_if = "Option::is_none")]
-    pub depth: Option<f64>,
+    #[serde(
+        rename = "depth",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub depth: Option<Option<f64>>,
     #[field(
         display_name = r##"Fixed Cost Shipping Price"##,
         description = r##"A fixed shipping cost for the variant. If defined, this value will be used during checkout instead of normal shipping-cost calculation.
@@ -14933,19 +15054,30 @@ pub struct VariantsProductVariantFull {
     #[serde(
         rename = "fixed_cost_shipping_price",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub fixed_cost_shipping_price: Option<f64>,
+    pub fixed_cost_shipping_price: Option<Option<f64>>,
     #[field(display_name = r##"GTIN"##)]
-    #[serde(rename = "gtin", default, skip_serializing_if = "Option::is_none")]
-    pub gtin: Option<String>,
+    #[serde(
+        rename = "gtin",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub gtin: Option<Option<String>>,
     #[field(
         display_name = r##"Height"##,
         description = r##"Height of the variant, which can be used when calculating shipping costs. If this value is `null`, the productʼs default height (set in the Product resourceʼs `height` field) will be used as the base height.
 "##
     )]
-    #[serde(rename = "height", default, skip_serializing_if = "Option::is_none")]
-    pub height: Option<f64>,
+    #[serde(
+        rename = "height",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub height: Option<Option<f64>>,
     #[field(display_name = r##"ID"##)]
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>,
@@ -14968,9 +15100,10 @@ The Catalog API handles limits in a different way than the Inventory API. For mo
     #[serde(
         rename = "inventory_level",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub inventory_level: Option<i64>,
+    pub inventory_level: Option<Option<i64>>,
     #[field(
         display_name = r##"Inventory Warning Level"##,
         description = r##"When the variant hits this inventory level, it is considered low stock."##
@@ -14978,9 +15111,10 @@ The Catalog API handles limits in a different way than the Inventory API. For mo
     #[serde(
         rename = "inventory_warning_level",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub inventory_warning_level: Option<i64>,
+    pub inventory_warning_level: Option<Option<i64>>,
     #[field(
         display_name = r##"Is Free Shipping"##,
         description = r##"Flag used to indicate whether the variant has free shipping. If `true`, the shipping cost for the variant will be zero.
@@ -14996,8 +15130,13 @@ The Catalog API handles limits in a different way than the Inventory API. For mo
         display_name = r##"Mpn"##,
         description = r##"The Manufacturer Part Number (MPN) for the variant."##
     )]
-    #[serde(rename = "mpn", default, skip_serializing_if = "Option::is_none")]
-    pub mpn: Option<String>,
+    #[serde(
+        rename = "mpn",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub mpn: Option<Option<String>>,
     #[field(
         display_name = r##"Option Values"##,
         description = r##"Array of option and option values IDs that make up this variant. Will be empty if the variant is the productʼs base variant."##
@@ -15012,8 +15151,13 @@ The Catalog API handles limits in a different way than the Inventory API. For mo
         display_name = r##"Price"##,
         description = r##"This variant’s base price on the storefront. If a Price List ID is used, the Price List value will be used. If a Price List ID is not used, and this value is `null`, the product’s default price (set in the Product resource’s `price` field) will be used as the base price."##
     )]
-    #[serde(rename = "price", default, skip_serializing_if = "Option::is_none")]
-    pub price: Option<f64>,
+    #[serde(
+        rename = "price",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub price: Option<Option<f64>>,
     #[field(display_name = r##"Product ID"##)]
     #[serde(
         rename = "product_id",
@@ -15048,9 +15192,10 @@ The Catalog API handles limits in a different way than the Inventory API. For mo
     #[serde(
         rename = "retail_price",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub retail_price: Option<f64>,
+    pub retail_price: Option<Option<f64>>,
     #[field(
         display_name = r##"Sale Price"##,
         description = r##"This variant’s sale price on the storefront. If a Price List ID is used, the Price List value will be used. If a Price List ID is not used, and this value is null, the product’s sale price (set in the Product resource’s `price` field) will be used as the sale price."##
@@ -15058,9 +15203,10 @@ The Catalog API handles limits in a different way than the Inventory API. For mo
     #[serde(
         rename = "sale_price",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub sale_price: Option<f64>,
+    pub sale_price: Option<Option<f64>>,
     #[field(display_name = r##"SKU"##)]
     #[serde(rename = "sku", default, skip_serializing_if = "Option::is_none")]
     pub sku: Option<String>,
@@ -15068,27 +15214,47 @@ The Catalog API handles limits in a different way than the Inventory API. For mo
         display_name = r##"SKU ID"##,
         description = r##"Read-only reference to v2 APIʼs SKU ID. Null if it is a base variant."##
     )]
-    #[serde(rename = "sku_id", default, skip_serializing_if = "Option::is_none")]
-    pub sku_id: Option<i64>,
+    #[serde(
+        rename = "sku_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub sku_id: Option<Option<i64>>,
     #[field(
         display_name = r##"UPC"##,
         description = r##"The UPC code used in feeds for shopping comparison sites and external channel integrations."##
     )]
-    #[serde(rename = "upc", default, skip_serializing_if = "Option::is_none")]
-    pub upc: Option<String>,
+    #[serde(
+        rename = "upc",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub upc: Option<Option<String>>,
     #[field(
         display_name = r##"Weight"##,
         description = r##"This variant’s base weight on the storefront. If this value is null, the product’s default weight (set in the Product resource’s weight field) will be used as the base weight."##
     )]
-    #[serde(rename = "weight", default, skip_serializing_if = "Option::is_none")]
-    pub weight: Option<f64>,
+    #[serde(
+        rename = "weight",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub weight: Option<Option<f64>>,
     #[field(
         display_name = r##"Width"##,
         description = r##"Width of the variant, which can be used when calculating shipping costs. If this value is `null`, the productʼs default width (set in the Product resourceʼs `width` field) will be used as the base width.
 "##
     )]
-    #[serde(rename = "width", default, skip_serializing_if = "Option::is_none")]
-    pub width: Option<f64>,
+    #[serde(
+        rename = "width",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub width: Option<Option<f64>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -16316,9 +16482,10 @@ pub struct OrdersCreateOrderInput {
     #[serde(
         rename = "backorder_shipping_expectation_message",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub backorder_shipping_expectation_message: Option<String>,
+    pub backorder_shipping_expectation_message: Option<Option<String>>,
     #[field(
         display_name = r##"Base Handling Cost"##,
         description = r##"The value of the base handling cost. The value can't be negative. (Float, Float-As-String, Integer)"##
@@ -16455,9 +16622,10 @@ pub struct OrdersCreateOrderInput {
     #[serde(
         rename = "external_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub external_id: Option<String>,
+    pub external_id: Option<Option<String>>,
     #[field(
         display_name = r##"External Merchant ID"##,
         description = r##"The merchant ID represents an upstream order from an external system. It is the source of truth for orders. After setting it, you cannot write to or update the `external_merchant_id`. For example, you can update the Facebook by Meta page ID in a POST request, but a PUT request to update the order will return a 400 error. Please remove it from your request before trying again."##
@@ -16465,9 +16633,10 @@ pub struct OrdersCreateOrderInput {
     #[serde(
         rename = "external_merchant_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub external_merchant_id: Option<String>,
+    pub external_merchant_id: Option<Option<String>>,
     #[field(
         display_name = r##"External Order ID"##,
         description = r##"The order ID in another system, such as the Amazon Order ID if this is an Amazon order. After setting it, you can update this field using a POST or PUT request."##
@@ -16488,9 +16657,10 @@ pub struct OrdersCreateOrderInput {
     #[serde(
         rename = "external_source",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub external_source: Option<String>,
+    pub external_source: Option<Option<String>>,
     #[field(display_name = r##"Fees"##)]
     #[serde(rename = "fees", default, skip_serializing_if = "Option::is_none")]
     pub fees: Option<Vec<OrderFeesPost>>,
@@ -17315,9 +17485,10 @@ pub struct OrdersUpdateOrderInput {
     #[serde(
         rename = "external_order_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub external_order_id: Option<String>,
+    pub external_order_id: Option<Option<String>>,
     #[field(
         display_name = r##"External Source"##,
         description = r##"This value identifies an external system that generated the order and submitted it to BigCommerce with the Orders API.
@@ -17328,9 +17499,10 @@ pub struct OrdersUpdateOrderInput {
     #[serde(
         rename = "external_source",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub external_source: Option<String>,
+    pub external_source: Option<Option<String>>,
     #[field(display_name = r##"Fees"##)]
     #[serde(rename = "fees", default, skip_serializing_if = "Option::is_none")]
     pub fees: Option<Vec<OrderFeesPut>>,
@@ -18475,9 +18647,10 @@ control panel or using the API. Using the API set `availability` to `available`.
     #[serde(
         rename = "preorder_release_date",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub preorder_release_date: Option<String>,
+    pub preorder_release_date: Option<Option<String>>,
     #[field(
         display_name = r##"Price"##,
         description = r##"The price of the product. The price should include or exclude tax, based on the store settings.
@@ -20047,9 +20220,10 @@ control panel or using the API. Using the API set `availability` to `available`.
     #[serde(
         rename = "preorder_release_date",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub preorder_release_date: Option<String>,
+    pub preorder_release_date: Option<Option<String>>,
     #[field(
         display_name = r##"Price"##,
         description = r##"The price of the product. The price should include or exclude tax, based on the store settings.

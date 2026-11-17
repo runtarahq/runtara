@@ -1942,6 +1942,26 @@ def property_name_mappings(sliced: dict) -> dict:
     return mappings
 
 
+def nullable_as_type_lists(sliced: dict) -> dict:
+    """A copy of a 3.1 slice with each `nullable: true` beside a single `type`
+    written as 3.1 writes it, `type: [<type>, "null"]`."""
+    copied = copy.deepcopy(sliced)
+
+    def visit(node):
+        if isinstance(node, list):
+            for value in node:
+                visit(value)
+        elif isinstance(node, dict):
+            if node.get("nullable") is True and isinstance(node.get("type"), str):
+                node["type"] = [node["type"], "null"]
+                del node["nullable"]
+            for value in node.values():
+                visit(value)
+
+    visit(copied)
+    return copied
+
+
 def render(crate: Path) -> str:
     """Render `generated.rs` for `crate` and return its rustfmt-ed text."""
     config = load_config(crate)
@@ -1950,6 +1970,13 @@ def render(crate: Path) -> str:
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "out"
         out.mkdir()
+        # `fetch` writes a nullable field as `nullable: true`, which
+        # openapi-generator ignores in a 3.1 document: there it is handed the
+        # 3.1 form, a type list with "null".
+        spec_path = crate / "spec.slice.json"
+        if str(sliced.get("openapi", "")).startswith("3.1"):
+            spec_path = Path(tmp) / "spec.slice.json"
+            spec_path.write_text(json.dumps(nullable_as_type_lists(sliced)))
         # Only the single generated file is wanted from the run.
         (out / ".openapi-generator-ignore").write_text("*\n**/*\n!src/generated.rs\n")
         config_path = Path(tmp) / "config.json"
@@ -1976,7 +2003,7 @@ def render(crate: Path) -> str:
         }))
         result = subprocess.run(
             [generator_cli(), "generate", "-c", str(config_path),
-             "-i", str(crate / "spec.slice.json"), "-o", str(out)],
+             "-i", str(spec_path), "-o", str(out)],
             capture_output=True, text=True,
         )
         generated = out / "src" / "generated.rs"

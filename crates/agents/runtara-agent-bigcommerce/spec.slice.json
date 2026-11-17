@@ -1552,14 +1552,14 @@
           "cost_price": {
             "description": "The cost price of the variant. It is not affected by Price List prices. This value displays as null in the control panel when `cost_price` equals zero.",
             "format": "double",
-            "minimum": 0,
+            "nullable": true,
             "type": "number",
             "x-runtara-label": "Cost Price"
           },
           "depth": {
             "description": "Depth of the variant, which can be used when calculating shipping costs. If this value is `null`, the productʼs default depth (set in the Product resourceʼs `depth` field) will be used as the base depth.\n",
             "format": "double",
-            "minimum": 0,
+            "nullable": true,
             "type": "number",
             "x-runtara-label": "Depth"
           },
@@ -1573,7 +1573,7 @@
           "height": {
             "description": "Height of the variant, which can be used when calculating shipping costs. If this value is `null`, the productʼs default height (set in the Product resourceʼs `height` field) will be used as the base height.\n",
             "format": "double",
-            "minimum": 0,
+            "nullable": true,
             "type": "number",
             "x-runtara-label": "Height"
           },
@@ -1604,7 +1604,7 @@
           "price": {
             "description": "This variant’s base price on the storefront. If a Price List ID is used, the Price List value will be used. If a Price List ID is not used, and this value is `null`, the product’s default price (set in the Product resource’s `price` field) will be used as the base price.",
             "format": "double",
-            "minimum": 0,
+            "nullable": true,
             "type": "number",
             "x-runtara-label": "Price"
           },
@@ -1623,14 +1623,14 @@
           "retail_price": {
             "description": "This variant’s retail price on the storefront. If a Price List ID is used, the Price List value will be used. If a Price List ID is not used, and this value is null, the product’s retail price (set in the Product resource’s `price` field) will be used as the retail price.",
             "format": "double",
-            "minimum": 0,
+            "nullable": true,
             "type": "number",
             "x-runtara-label": "Retail Price"
           },
           "sale_price": {
             "description": "This variant’s sale price on the storefront. If a Price List ID is used, the Price List value will be used. If a Price List ID is not used, and this value is null, the product’s sale price (set in the Product resource’s `price` field) will be used as the sale price.",
             "format": "double",
-            "minimum": 0,
+            "nullable": true,
             "type": "number",
             "x-runtara-label": "Sale Price"
           },
@@ -1645,14 +1645,14 @@
           "weight": {
             "description": "This variant’s base weight on the storefront. If this value is null, the product’s default weight (set in the Product resource’s weight field) will be used as the base weight.",
             "format": "double",
-            "minimum": 0,
+            "nullable": true,
             "type": "number",
             "x-runtara-label": "Weight"
           },
           "width": {
             "description": "Width of the variant, which can be used when calculating shipping costs. If this value is `null`, the productʼs default width (set in the Product resourceʼs `width` field) will be used as the base width.\n",
             "format": "double",
-            "minimum": 0,
+            "nullable": true,
             "type": "number",
             "x-runtara-label": "Width"
           }

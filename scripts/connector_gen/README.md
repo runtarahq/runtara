@@ -458,6 +458,15 @@ crates/agents/runtara-agent-<id>/
 - An optional body field the spec marks `nullable` is an `Option<Option<T>>`
   (deserialized with `kit::nullable`): omitted is not sent, an explicit `null`
   is sent as `null` (to clear the vendor's value), and a value is sent as is.
+  So is a nullable field of a model, as in a body that is an array of records
+  (BigCommerce's batch of variants, where `price: null` falls back to the
+  product's price); a model read from a response keeps a `null` the same way.
+  openapi-generator ignores `nullable` in a 3.1 document, so a 3.1 slice is
+  rendered with each nullable field that has a `type` written as
+  `type: [<type>, "null"]`; one that is only a `$ref` or an `allOf` has no
+  type to list and stays an `Option<T>` there. Where the vendor's spec does
+  not mark a field nullable that takes `null`, mark it with `field_types`
+  (`nullable: true`).
 - `<OperationId>Input::request()` builds the exact request without sending it,
   so tests can check the method, path, query and body; the capability function
   only adds the connection.

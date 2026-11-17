@@ -1060,6 +1060,26 @@ class TitleTypesTest(unittest.TestCase):
         self.assertIn("['double']", str(raised.exception))
 
 
+class NullableAsTypeListsTest(unittest.TestCase):
+    """openapi-generator ignores `nullable` in a 3.1 document, so a 3.1 slice
+    is rendered with its nullable fields written as 3.1 writes them."""
+
+    def test_a_nullable_type_becomes_a_type_list(self):
+        sliced = {"openapi": "3.1.0", "components": {"schemas": {"Variant": {"type": "object", "properties": {
+            "price": {"type": "number", "nullable": True, "description": "Falls back when null."},
+            "sku": {"type": "string"},
+            "owner": {"allOf": [{"$ref": "#/components/schemas/Owner"}], "nullable": True},
+        }}}}}
+        copied = cg.nullable_as_type_lists(sliced)
+        properties = copied["components"]["schemas"]["Variant"]["properties"]
+        self.assertEqual(properties["price"], {"type": ["number", "null"], "description": "Falls back when null."})
+        self.assertEqual(properties["sku"], {"type": "string"})
+        # Without a type of its own there is no list to write it in.
+        self.assertEqual(properties["owner"], {"allOf": [{"$ref": "#/components/schemas/Owner"}], "nullable": True})
+        # The slice itself is left as `fetch` wrote it.
+        self.assertIs(sliced["components"]["schemas"]["Variant"]["properties"]["price"]["nullable"], True)
+
+
 class CommaQueryArraysTest(unittest.TestCase):
     """`comma_separated_query_arrays` sends every array query parameter as
     `ids=1,2` (BigCommerce's `id:in=4,5,6`), whatever the spec says."""
@@ -1756,6 +1776,50 @@ class ArrayBodyRenderTest(unittest.TestCase):
             text = cg.render(crate)
         self.assertIn("pub body: Option<Vec<Patch>>,", text)
         self.assertNotIn("models::", text)
+
+
+@unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
+class NullableModelRenderTest(unittest.TestCase):
+    """A nullable field keeps an explicit null apart from an absent one inside
+    a model too, as in BigCommerce's batch of variants, where `price: null`
+    falls back to the product's price; in a 3.1 spec as in a 3.0 one."""
+
+    @staticmethod
+    def spec(version: str, nullable_number: dict) -> dict:
+        variant = {"type": "object", "properties": {
+            "id": {"type": "integer"},
+            "price": nullable_number,
+            "sku": {"type": "string"},
+        }}
+        return {"openapi": version, "info": {"title": "t", "version": "1"},
+                "servers": [{"url": "https://api.example.com"}], "paths": {
+                    "/variants": {"put": {
+                        "operationId": "updateVariants",
+                        **json_body({"type": "array", "items": {"$ref": "#/components/schemas/Variant"}}),
+                        "responses": {"200": {"description": "Updated"}}}},
+                    "/products/{id}": {"put": {
+                        "operationId": "updateProduct",
+                        "parameters": [{"in": "path", "name": "id", "required": True,
+                                        "schema": {"type": "integer"}}],
+                        **json_body({"type": "object", "properties": {"weight": nullable_number}}),
+                        "responses": {"204": {"description": "Updated"}}}}},
+                "components": {"schemas": {"Variant": variant}}}
+
+    def rendered(self, version: str, nullable_number: dict) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            crate = Path(tmp)
+            write_crate(crate, self.spec(version, nullable_number), ["updateVariants", "updateProduct"])
+            return cg.render(crate)
+
+    def test_a_nullable_model_field_tells_null_from_absent(self):
+        for version, nullable_number in (("3.0.1", {"type": "number", "nullable": True}),
+                                         ("3.1.0", {"type": ["number", "null"]})):
+            with self.subTest(version):
+                text = self.rendered(version, nullable_number)
+                self.assertIn("pub price: Option<Option<f64>>,", text)
+                self.assertIn("pub weight: Option<Option<f64>>,", text)
+                self.assertIn('deserialize_with = "kit::nullable"', text)
+                self.assertIn("pub sku: Option<String>,", text)
 
 
 @unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
