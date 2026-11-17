@@ -58,10 +58,10 @@ zeroize = "1.8"
 
 # Sealed credentials: seal stores each secret with the rules for using it, and
 # sends requests itself. `in-process` links seal into this process (library mode).
-seal-broker = { git = "https://github.com/runtarahq/seal", rev = "be7563252e3210ef29e906acd62478cfa3dee73c" }
-seal-client = { git = "https://github.com/runtarahq/seal", rev = "be7563252e3210ef29e906acd62478cfa3dee73c", features = ["in-process"] }
-seal-format = { git = "https://github.com/runtarahq/seal", rev = "be7563252e3210ef29e906acd62478cfa3dee73c" }
-seal-keys = { git = "https://github.com/runtarahq/seal", rev = "be7563252e3210ef29e906acd62478cfa3dee73c" }
+seal-broker = { git = "https://github.com/runtarahq/seal", rev = "8d41cb4511cdf79eb54e77c05cc0fba3a3f3f25b" }
+seal-client = { git = "https://github.com/runtarahq/seal", rev = "8d41cb4511cdf79eb54e77c05cc0fba3a3f3f25b", features = ["in-process"] }
+seal-format = { git = "https://github.com/runtarahq/seal", rev = "8d41cb4511cdf79eb54e77c05cc0fba3a3f3f25b" }
+seal-keys = { git = "https://github.com/runtarahq/seal", rev = "8d41cb4511cdf79eb54e77c05cc0fba3a3f3f25b" }
 # Certificates a deployment has seal trust besides the public roots.
 rustls-pki-types = { version = "1", features = ["std"] }
 # The request and response types seal's client takes and returns.
