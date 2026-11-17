@@ -1412,6 +1412,18 @@ async fn start_as_platform(
                 std::process::exit(1);
             }
         };
+    // A seal of its own is asked before anything depends on it: a server
+    // that cannot reach it, or that seal does not know, can use no
+    // connection, and says so now instead of at the first run that needs one.
+    if sealed_credentials.mode() != "in_process"
+        && let Err(error) = sealed_credentials.reach().await
+    {
+        eprintln!(
+            "❌ seal ({}) cannot be reached, or does not take this server's calls: {error}",
+            sealed_credentials.mode()
+        );
+        std::process::exit(1);
+    }
     tracing::info!(
         mode = sealed_credentials.mode(),
         "Connection secrets are held by seal"

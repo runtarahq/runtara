@@ -92,3 +92,6 @@ wiremock = "0.6"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
 tower = { version = "0.5", features = ["util"] }
+# seal's service, run inside a test as the process a deployment would run.
+seal = { git = "https://github.com/runtarahq/seal", rev = "8d41cb4511cdf79eb54e77c05cc0fba3a3f3f25b" }
+tempfile = "3"

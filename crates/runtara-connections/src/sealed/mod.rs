@@ -1,8 +1,9 @@
 //! Sealed credentials: secrets held by seal, each with the rules for using it.
 //!
-//! seal runs in this process (library mode). The server can still open every
-//! credential; what changes is that a secret is stored with the one place it
-//! may go, and seal attaches it and sends the request.
+//! A secret is stored with the one place it may go, and seal attaches it and
+//! sends the request. Where seal runs is the deployment's choice
+//! ([`mode::SealMode`]): in this process, where the server can still open
+//! every credential, or as a process of its own, where it cannot.
 //!
 //! A sealed connection's parameters hold, for each secret, a marker in place
 //! of the value: `{"$sealed": {"envelope": …, "policy": "<sha-256>"}}`. The
@@ -11,6 +12,7 @@
 //! without opening anything.
 
 pub mod keys;
+pub mod mode;
 pub(crate) mod oauth;
 pub mod policy;
 #[cfg(any(test, feature = "test-util"))]
@@ -95,7 +97,9 @@ pub enum SendError {
 /// seal, and what this deployment needs to use it for connections.
 pub struct SealedCredentials {
     client: Arc<dyn SealClient>,
-    keys: Arc<dyn TenantKeySource>,
+    /// Where this process keeps tenants' keys, when seal runs in it. A seal of
+    /// its own keeps them itself.
+    keys: Option<Arc<dyn TenantKeySource>>,
     allowances: Allowances,
 }
 
@@ -146,9 +150,27 @@ impl SealedCredentials {
             .map_err(|error| error.to_string())?;
         Ok(Self {
             client: Arc::new(seal_client::in_process(broker, Some(keyring), buffer_cap)),
-            keys,
+            keys: Some(keys),
             allowances,
         })
+    }
+
+    /// seal as a process of its own, reached through `client`. It holds the
+    /// keys and this process none: what it will reach (private destinations,
+    /// a database with no TLS, extra roots) is its own configuration's to
+    /// say, and `allowances` only decide what this deployment seals for.
+    pub fn remote(client: Arc<dyn SealClient>, allowances: Allowances) -> Self {
+        Self {
+            client,
+            keys: None,
+            allowances,
+        }
+    }
+
+    /// Asks seal how it runs: answers only if seal can be reached, and takes
+    /// this process's calls.
+    pub async fn reach(&self) -> Result<seal_client::Info, SealError> {
+        self.client.info().await
     }
 
     /// How seal runs: `in_process`, `unix` or `mtls`.
@@ -162,7 +184,11 @@ impl SealedCredentials {
         &self,
         tenant_id: &str,
     ) -> Result<(KeysetId, KeyId, PublicKey), SealError> {
-        self.current_key(self.keys.expect_tenant(tenant_id)).await
+        let keyset = match &self.keys {
+            Some(keys) => keys.expect_tenant(tenant_id),
+            None => keys::keyset_for_tenant(tenant_id),
+        };
+        self.current_key(keyset).await
     }
 
     /// A keyset's current public key, making its first key if it has none.
@@ -959,13 +985,29 @@ pub fn wrapping_key(
     Ok(keys::wrapping_key_from_encryption_key(&bytes))
 }
 
-/// seal for this deployment, from its environment. Tenants' keys are kept in
-/// `pool`, wrapped by [`WRAPPING_KEY_ENV`] or, without it, a key derived
-/// from the credential encryption key. Needs a Tokio runtime.
+/// seal for this deployment, from its environment ([`mode::SealMode`]).
+///
+/// In this process, tenants' keys are kept in `pool`, wrapped by
+/// [`WRAPPING_KEY_ENV`] or, without it, a key derived from the credential
+/// encryption key. As a process of its own, seal keeps the keys and the key
+/// that wraps them: this process is then refused one, since holding it would
+/// undo what a separate seal is for. Needs a Tokio runtime.
 pub fn from_env(
     pool: sqlx::PgPool,
     allowances: Allowances,
 ) -> Result<Arc<SealedCredentials>, String> {
+    let mode = mode::SealMode::from_env()?;
+    if let Some(client) = mode.client()? {
+        let given = std::env::var(WRAPPING_KEY_ENV).is_ok_and(|value| !value.trim().is_empty());
+        if given {
+            return Err(format!(
+                "{WRAPPING_KEY_ENV} is set, and seal is a process of its own ({}): the key \
+                 that wraps tenants' keys is seal's to hold. Move it to seal's host and unset it",
+                mode::MODE_ENV
+            ));
+        }
+        return Ok(Arc::new(SealedCredentials::remote(client, allowances)));
+    }
     let key = wrapping_key(
         std::env::var(WRAPPING_KEY_ENV).ok().as_deref(),
         std::env::var(crate::crypto::ENCRYPTION_KEY_ENV)
@@ -991,6 +1033,11 @@ pub fn from_env(
 /// to do here.
 pub async fn follow_encryption_key_rotation(pool: &sqlx::PgPool) -> Result<usize, String> {
     use base64::Engine;
+    // A seal of its own holds the keys and the key that wraps them, which
+    // the encryption key has nothing to do with.
+    if mode::SealMode::from_env()?.is_remote() {
+        return Ok(0);
+    }
     let set = |name: &str| {
         std::env::var(name)
             .ok()
