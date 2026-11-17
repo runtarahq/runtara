@@ -5528,6 +5528,7 @@ dependencies = [
  "runtara-core",
  "runtara-environment",
  "runtara-executor",
+ "runtara-tenant-scope",
  "runtara-workflow-api",
  "serde_json",
  "sha2 0.10.9",

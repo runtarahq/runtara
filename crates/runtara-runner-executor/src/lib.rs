@@ -439,7 +439,15 @@ pub async fn prepare(config: Config) -> Result<Prepared, String> {
         launches
             .credentialed_router()
             .merge(workflow_router(launches.clone(), workflows.clone()))
-            .merge(registry::router(executors.clone())),
+            .merge(registry::router(executors.clone()))
+            // A run's calls arrive on connections of their own, in no scope.
+            // What they do in the database is the platform's work for that
+            // run, as it is when the run is in this process.
+            .layer(axum::middleware::from_fn(
+                |request: axum::extract::Request, next: axum::middleware::Next| {
+                    runtara_tenant_scope::system(next.run(request))
+                },
+            )),
     ));
     let provider = Arc::new(ExecutorProvider::new(executors.clone()));
     let limit = config.runner_limit;
