@@ -19,6 +19,11 @@
 //!   of the task that makes it, which does not leave the process;
 //! - nothing is handed across but values: no pool, no client, no callback.
 
+pub mod listener;
+pub mod remote;
+mod wire;
+
+use std::future::Future;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -85,6 +90,39 @@ pub enum Served {
     /// The same, asked by a caller the API authenticated, whose role is held
     /// to what it may run.
     EventsForCallers,
+}
+
+impl Served {
+    /// Every part.
+    pub(crate) const ALL: &'static [Served] = &[
+        Served::Connections,
+        Served::OAuthCallbacks,
+        Served::ObjectModel,
+        Served::Channels,
+        Served::Agents,
+        Served::Triggers,
+        Served::Events,
+        Served::EventsForCallers,
+    ];
+
+    /// The part's name, as it is written between two processes.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Served::Connections => "connections",
+            Served::OAuthCallbacks => "o-auth-callbacks",
+            Served::ObjectModel => "object-model",
+            Served::Channels => "channels",
+            Served::Agents => "agents",
+            Served::Triggers => "triggers",
+            Served::Events => "events",
+            Served::EventsForCallers => "events-for-callers",
+        }
+    }
+
+    /// The part of that name.
+    pub(crate) fn named(name: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|part| part.name() == name)
+    }
 }
 
 /// What the API asks of the engine. See the module.
