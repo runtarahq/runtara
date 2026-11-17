@@ -149,6 +149,13 @@ impl Unanswered for () {
     }
 }
 
+impl<T> Unanswered for Vec<T> {
+    fn unanswered(away: Away) -> Self {
+        tracing::warn!(%away, "A call to the engine was not answered");
+        Vec::new()
+    }
+}
+
 impl<T> Unanswered for Option<T> {
     fn unanswered(away: Away) -> Self {
         tracing::warn!(%away, "A call to the engine was not answered");
@@ -210,6 +217,10 @@ pub struct RemoteEngine {
     /// What the engine last said of itself. Until it has, it is taken to be
     /// able to do what it is asked, and a call it cannot answer says why.
     facts: RwLock<Option<EngineFacts>>,
+    /// Whether what the engine says it compiles by and runs becomes what
+    /// this process judges compiled workflows by: so for the API role's one
+    /// engine, and not for an engine a test stands beside its own.
+    judges_by_it: bool,
 }
 
 impl RemoteEngine {
@@ -223,13 +234,19 @@ impl RemoteEngine {
         let identity = tls::Identity::load(tls_dir)?;
         let config = identity.client_config(&identity.ca_pem, None)?;
         let client = tls::client(config, runtara_executor::protocol::SERVER_NAME)?;
-        Ok(Self::over(Arc::new(Mtls { client, engine })))
+        Ok(Arc::new(Self {
+            transport: Arc::new(Mtls { client, engine }),
+            facts: RwLock::new(None),
+            judges_by_it: true,
+        }))
     }
 
+    #[cfg(test)]
     pub(crate) fn over(transport: Arc<dyn Transport>) -> Arc<Self> {
         Arc::new(Self {
             transport,
             facts: RwLock::new(None),
+            judges_by_it: false,
         })
     }
 
@@ -258,6 +275,16 @@ impl RemoteEngine {
     pub async fn learn(&self) -> bool {
         match self.try_ask(wire::Facts {}, Duration::from_secs(10)).await {
             Ok(facts) => {
+                // What this process judges compiled workflows by is the
+                // engine's compiler and what the engine runs, not its own.
+                if self.judges_by_it {
+                    crate::api::repositories::workflows::set_installed_trusted_pins(
+                        facts.trusted_pins.iter().cloned(),
+                    );
+                    crate::api::repositories::workflows::set_engine_compiles_by(
+                        facts.compiles_by.clone(),
+                    );
+                }
                 *self
                     .facts
                     .write()
@@ -269,10 +296,10 @@ impl RemoteEngine {
     }
 
     fn facts(&self) -> Option<EngineFacts> {
-        *self
-            .facts
+        self.facts
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     async fn try_ask<O: Operation>(
@@ -922,6 +949,21 @@ impl Engine for RemoteEngine {
         .await
     }
 
+    async fn workflow_agents(&self, tenant_id: &str) -> Vec<runtara_dsl::agent_meta::AgentInfo> {
+        self.ask(wire::WorkflowAgents {
+            tenant_id: tenant_id.to_owned(),
+        })
+        .await
+    }
+
+    async fn unstage_workflow_agent(&self, tenant_id: &str, slug: &str) -> Result<(), String> {
+        self.ask(wire::UnstageWorkflowAgent {
+            tenant_id: tenant_id.to_owned(),
+            slug: slug.to_owned(),
+        })
+        .await
+    }
+
     async fn tenant_connections(&self, tenant_id: &str) -> Result<Vec<ConnectionRef>, String> {
         self.ask(wire::TenantConnections {
             tenant_id: tenant_id.to_owned(),
@@ -1325,6 +1367,17 @@ mod tests {
         assert!(body.contains("ENGINE_UNAVAILABLE"), "{body}");
     }
 
+    /// An engine reached over mutual TLS, which a test stands beside its own
+    /// and so does not judge by.
+    fn connected(engine: &str, tls_dir: &std::path::Path) -> Arc<RemoteEngine> {
+        let connected = RemoteEngine::connect(engine, tls_dir).unwrap();
+        Arc::new(RemoteEngine {
+            transport: connected.transport.clone(),
+            facts: RwLock::new(None),
+            judges_by_it: false,
+        })
+    }
+
     /// The certificates of a deployment, in three directories.
     struct Certificates {
         _held: tempfile::TempDir,
@@ -1362,7 +1415,7 @@ mod tests {
         let serving = tokio::spawn(serving);
         let engine = format!("https://{address}");
 
-        let api_role = RemoteEngine::connect(&engine, &certificates.api).unwrap();
+        let api_role = connected(&engine, &certificates.api);
         assert!(
             api_role.learn().await,
             "the API role's certificate is accepted"
@@ -1381,13 +1434,13 @@ mod tests {
         assert!(seen.ends_with("body=over the wire"), "{seen}");
 
         // An executor's certificate is from the same CA, and is not the API's.
-        let executor = RemoteEngine::connect(&engine, &certificates.executor).unwrap();
+        let executor = connected(&engine, &certificates.executor);
         assert!(
             !executor.learn().await,
             "an executor's certificate is refused"
         );
         // Nor is the engine's own.
-        let itself = RemoteEngine::connect(&engine, &certificates.engine).unwrap();
+        let itself = connected(&engine, &certificates.engine);
         assert!(!itself.learn().await);
         serving.abort();
     }
@@ -1408,7 +1461,7 @@ mod tests {
         ));
         let engine = format!("https://{address}");
         let ask = |directory: &std::path::Path| {
-            let remote = RemoteEngine::connect(&engine, directory).unwrap();
+            let remote = connected(&engine, directory);
             async move {
                 let request = http::Request::get("/anything").body(Bytes::new()).unwrap();
                 remote
@@ -1432,8 +1485,7 @@ mod tests {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.local_addr().unwrap().port()
         };
-        let remote =
-            RemoteEngine::connect(&format!("https://127.0.0.1:{port}"), &certificates.api).unwrap();
+        let remote = connected(&format!("https://127.0.0.1:{port}"), &certificates.api);
         let away = remote
             .try_ask(wire::Facts {}, Duration::from_secs(10))
             .await

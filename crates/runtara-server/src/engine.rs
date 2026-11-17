@@ -389,6 +389,16 @@ pub trait Engine: Send + Sync {
         image_id: &str,
     ) -> Result<Option<ImageSummary>, RuntimeError>;
 
+    // ---- Workflows published as agents -----------------------------------
+
+    /// The agents a tenant published from its workflows, which its other
+    /// workflows may use beside the built-in ones.
+    async fn workflow_agents(&self, tenant_id: &str) -> Vec<runtara_dsl::agent_meta::AgentInfo>;
+
+    /// Takes a published workflow-agent out of use, when its workflow is
+    /// deleted.
+    async fn unstage_workflow_agent(&self, tenant_id: &str, slug: &str) -> Result<(), String>;
+
     // ---- Connections, as a workflow names them ----------------------------
 
     /// The connections a tenant has: what a workflow's steps may name. Their
@@ -1001,6 +1011,16 @@ impl Engine for LocalEngine {
         image_id: &str,
     ) -> Result<Option<ImageSummary>, RuntimeError> {
         self.runtime()?.get_image(image_id, tenant_id).await
+    }
+
+    async fn workflow_agents(&self, tenant_id: &str) -> Vec<runtara_dsl::agent_meta::AgentInfo> {
+        crate::workflow_agents::staged_tenant_agents(tenant_id)
+    }
+
+    async fn unstage_workflow_agent(&self, tenant_id: &str, slug: &str) -> Result<(), String> {
+        crate::workflow_agents::unstage(tenant_id, slug)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     async fn tenant_connections(&self, tenant_id: &str) -> Result<Vec<ConnectionRef>, String> {

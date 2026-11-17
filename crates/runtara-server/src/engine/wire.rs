@@ -42,11 +42,17 @@ pub(crate) trait Operation: Serialize + DeserializeOwned + Send + 'static {
 }
 
 /// What the engine says of itself, which does not change while it runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct EngineFacts {
     pub available: bool,
     pub queues_compilations: bool,
     pub tests_agents: bool,
+    /// The trusted built-in versions it runs, by which the API tells whether
+    /// a compiled workflow can still run.
+    pub trusted_pins: Vec<String>,
+    /// What it compiles by, by which the API tells whether a compiled
+    /// workflow is current.
+    pub compiles_by: crate::api::repositories::workflows::CompilesBy,
 }
 
 macro_rules! operations {
@@ -109,6 +115,8 @@ operations! {
         available: engine.available(),
         queues_compilations: engine.queues_compilations(),
         tests_agents: engine.tests_agents(),
+        trusted_pins: crate::api::repositories::workflows::installed_trusted_pins(),
+        compiles_by: crate::api::repositories::workflows::own_compiles_by(),
     };
 
     // ---- Launch ---------------------------------------------------------------
@@ -395,6 +403,13 @@ operations! {
     ReconcileChannelWebhooks { tenant_id: String, removed: Vec<InvocationTrigger> } -> (),
     |engine, op| for Some(&op.tenant_id) =>
         engine.reconcile_channel_webhooks(&op.tenant_id, &op.removed).await;
+
+    WorkflowAgents { tenant_id: String } -> Vec<runtara_dsl::agent_meta::AgentInfo>,
+    |engine, op| for Some(&op.tenant_id) => engine.workflow_agents(&op.tenant_id).await;
+
+    UnstageWorkflowAgent { tenant_id: String, slug: String } -> Result<(), String>,
+    |engine, op| for Some(&op.tenant_id) =>
+        engine.unstage_workflow_agent(&op.tenant_id, &op.slug).await;
 
     // ---- Compilation, through the queue ------------------------------------------
     EnqueueCompilation {
