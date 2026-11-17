@@ -1044,6 +1044,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Row-level security refuses a connection that names no scope.** A
+  connection that named no tenant was the system path and saw every tenant's
+  rows, so work that forgot its scope read and wrote across tenants without a
+  sign. Reaching every tenant is now asked for by name: the server's own
+  work runs in a scope of its own and sets `runtara.all_tenants` on its
+  connections, a request works as its tenant, and a connection that names
+  neither is refused with `runtara: no tenant scope`. Once a role named
+  `runtara_system` exists, only its members may ask for every tenant.
+  **Upgrading:** a forward migration in each database rewrites the policies,
+  and an older release still running on them as a plain role has its own
+  cross-tenant work (its workers) refused until it is stopped. A `psql`
+  session of a plain role sets `runtara.all_tenants = on` or a tenant before
+  it reads a policed table. `RUNTARA_ROW_SECURITY_UNSCOPED=system` gives work
+  in no scope every tenant's rows with a warning that says where it ran, to
+  find such a path before refusing it. A superuser or `BYPASSRLS` role is
+  bound by none of this, as before. See `docs/install.md`.
+
 - **BREAKING: connection credentials are always encrypted at rest.**
   `runtara-server` (and `reencrypt-connections`) refuse to start unless
   `RUNTARA_CONNECTIONS_ENCRYPTION_KEY` holds a valid base64 32-byte key; a

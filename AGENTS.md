@@ -75,6 +75,14 @@ scoped README files, examples.
   connection of the tenant's, entered with `runtara-server object-model set`
   and sealed; do not add a database URL to the server's configuration for
   tenants' data.
+- Work that reaches the server or runtime database runs in a scope
+  (`runtara-tenant-scope`): a tenant's (`scoped`), or the platform's own
+  across tenants (`system`), and only what is no one tenant's is the
+  platform's. Work in neither is refused its rows by row-level security.
+  A spawned task leaves the scope: spawn with `tenant_scope::spawn`, or wrap
+  the work in `inherit`. The test databases connect as a superuser, which
+  row-level security does not bind, so CI does not catch a missing scope;
+  `e2e/test_served_tenants.sh` runs the server as a plain role and does.
 - Never read, print, log, or commit credential values. Treat `.env*`, tokens,
   connection parameters, and database URLs as sensitive.
 - Do not hand-edit generated artifacts or ignored build outputs.
