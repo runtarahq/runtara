@@ -856,6 +856,634 @@ async fn my_tenants_handler(
 /// 96 MB leaves headroom above the base64-encoded size of a 50 MB file.
 const TENANT_REQUEST_BODY_LIMIT_BYTES: usize = 96 * 1024 * 1024;
 
+/// What the API's routes are built from. None of it is the engine's but the
+/// interface to it.
+struct ApiParts {
+    pool: PgPool,
+    engine: Arc<dyn crate::engine::Engine>,
+    agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
+    events: product_events::ProductEventSink,
+    valkey_conn: Option<redis::aio::ConnectionManager>,
+    auth_state: auth::AuthState,
+    mcp_auth_state: auth::AuthState,
+    auth_providers: auth::AuthProviders,
+    oidc_cache: Arc<api::handlers::oidc_discovery::OidcDiscoveryCache>,
+    mcp_session_store: Option<Arc<dyn SessionStore>>,
+    membership_policy: auth::MembershipPolicy,
+    tenant_id: String,
+}
+
+/// Everything the public listener answers: the API's own routes, the routes
+/// that hand the engine what it serves, and MCP.
+fn api_app(parts: ApiParts) -> Router {
+    let ApiParts {
+        pool,
+        engine: engine_api,
+        agent_catalog,
+        events: product_event_sink,
+        valkey_conn,
+        auth_state,
+        mcp_auth_state,
+        auth_providers,
+        oidc_cache,
+        mcp_session_store,
+        membership_policy,
+        tenant_id,
+    } = parts;
+
+    // CORS — configured via CORS_ALLOWED_ORIGINS env var.
+    // Supports: "*" (any origin), comma-separated origins, or defaults to localhost for dev.
+    let cors = middleware::cors::build_cors_layer();
+
+    // Entitlement-gated sub-routers: each one is mounted with a route-layer
+    // that short-circuits with 403 ENTITLEMENT_REQUIRED when the corresponding
+    // feature is disabled for the running tenant. Built separately so the gate
+    // is colocated with the routes it protects; merged into tenant_routes
+    // below so they pick up the same JWT auth layer and AppState.
+    let api_keys_router: Router<AppState> = Router::new()
+        .route(
+            "/api/runtime/api-keys",
+            post(api::handlers::api_keys::create_api_key)
+                .get(api::handlers::api_keys::list_api_keys),
+        )
+        .route(
+            "/api/runtime/api-keys/{id}",
+            delete(api::handlers::api_keys::revoke_api_key),
+        )
+        .route(
+            "/api/runtime/api-keys/users/{user_id}/revoke",
+            post(api::handlers::api_keys::revoke_user_keys),
+        )
+        .route_layer(from_fn(middleware::entitlement::require_api));
+
+    // Create router for tenant-scoped endpoints (requires JWT authentication)
+    let tenant_routes = Router::new()
+        // Execution listing endpoint
+        .route(
+            "/api/runtime/executions",
+            get(api::handlers::executions::list_all_executions_handler),
+        )
+        .route(
+            "/api/runtime/operations/views",
+            get(api::handlers::operations::list_operation_views)
+                .post(api::handlers::operations::create_operation_view),
+        )
+        .route(
+            "/api/runtime/operations/views/{id}",
+            put(api::handlers::operations::update_operation_view)
+                .delete(api::handlers::operations::delete_operation_view),
+        )
+        .route(
+            "/api/runtime/operations/processes",
+            get(api::handlers::operations::operation_processes),
+        )
+        .route(
+            "/api/runtime/operations/queues",
+            get(api::handlers::operations::operation_queues),
+        )
+        .route(
+            "/api/runtime/operations/requests/query",
+            post(api::handlers::operations::query_operation_requests),
+        )
+        .route(
+            "/api/runtime/executions/query",
+            post(api::handlers::executions::query_executions_handler),
+        )
+        .route(
+            "/api/runtime/executions/summary",
+            post(api::handlers::executions::execution_summary_handler),
+        )
+        // Workflow endpoints (refactored - using 3-layer architecture)
+        .route(
+            "/api/runtime/workflows/create",
+            post(api::handlers::workflows::create_workflow_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/update",
+            post(api::handlers::workflows::update_workflow_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/versions/{version}/graph",
+            put(api::handlers::workflows::patch_version_graph_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/versions/{version}/track-events",
+            put(api::handlers::workflows::toggle_track_events_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/slug",
+            put(api::handlers::workflows::update_workflow_slug_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/publish-agent",
+            post(api::handlers::workflows::publish_workflow_agent_handler),
+        )
+        .route(
+            "/api/runtime/workflows",
+            get(api::handlers::workflows::list_workflows_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}",
+            get(api::handlers::workflows::get_workflow_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/versions",
+            get(api::handlers::workflows::list_workflow_versions_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/versions/{version}/compile",
+            post(api::handlers::workflows::compile_workflow_handler)
+                .route_layer(from_fn(crate::tenant_quota::limit_compilations)),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/versions/{version}/compilation-progress",
+            get(api::handlers::workflows::compilation_progress_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/execute",
+            post(api::handlers::workflows::execute_workflow_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/chat",
+            post(api::handlers::chat::chat_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/chat/start",
+            post(api::handlers::chat::chat_start_handler),
+        )
+        // Session endpoints (session-based event handling for WaitForSignal)
+        .route(
+            "/api/runtime/workflows/{id}/sessions",
+            post(api::handlers::sessions::create_session),
+        )
+        .route(
+            "/api/runtime/sessions/{sessionId}/events",
+            post(api::handlers::sessions::submit_event)
+                .get(api::handlers::sessions::session_event_stream),
+        )
+        .route(
+            "/api/runtime/sessions/{sessionId}/deliveries",
+            get(api::handlers::sessions::list_session_deliveries),
+        )
+        .route(
+            "/api/runtime/sessions/{sessionId}/deliveries/{messageId}",
+            get(api::handlers::sessions::get_session_delivery),
+        )
+        .route(
+            "/api/runtime/sessions/{sessionId}/deliveries/{messageId}/resolve",
+            post(api::handlers::sessions::resolve_session_delivery),
+        )
+        .route(
+            "/api/runtime/sessions/{sessionId}/pending-input",
+            get(api::handlers::sessions::session_pending_input),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/instances",
+            get(api::handlers::workflows::list_instances_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/instances/{instanceId}",
+            get(api::handlers::workflows::get_instance_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/instances/{instanceId}/checkpoints",
+            get(api::handlers::workflows::list_instance_checkpoints_handler),
+        )
+        .route(
+            "/api/runtime/workflows/instances/{instanceId}",
+            get(api::handlers::workflows::get_execution_metrics_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/delete",
+            post(api::handlers::workflows::delete_workflow_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/clone",
+            post(api::handlers::workflows::clone_workflow_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/schedule",
+            post(api::handlers::workflows::schedule_workflow_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/versions/{versionNumber}/set-current",
+            post(api::handlers::workflows::set_current_version_handler),
+        )
+        .route(
+            "/api/runtime/workflows/instances/{instanceId}/stop",
+            post(api::handlers::workflows::stop_instance_handler),
+        )
+        .route(
+            "/api/runtime/workflows/instances/{instanceId}/pause",
+            post(api::handlers::workflows::pause_instance_handler),
+        )
+        .route(
+            "/api/runtime/workflows/instances/{instanceId}/resume",
+            post(api::handlers::workflows::resume_instance_handler),
+        )
+        .route(
+            "/api/runtime/workflows/instances/{instanceId}/replay",
+            post(api::handlers::workflows::replay_instance_handler),
+        )
+        .route(
+            "/api/runtime/workflows/graph/validate",
+            post(api::handlers::workflows::validate_graph_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{workflowId}/validate-mappings",
+            post(api::handlers::workflows::validate_mappings_handler),
+        )
+        .route(
+            "/api/runtime/workflows/instances/{instanceId}/steps/{stepId}/subinstances",
+            get(api::handlers::workflows::get_step_subinstances_handler),
+        )
+        // Step Events endpoint (track-events mode - raw events)
+        .route(
+            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/step-events",
+            get(api::handlers::step_events::get_step_events),
+        )
+        // Step Summaries endpoint (paired step records)
+        .route(
+            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/steps",
+            get(api::handlers::step_summaries::get_step_summaries),
+        )
+        // Scope ancestors endpoint (for hierarchical step execution call stack)
+        .route(
+            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/scopes/{scopeId}/ancestors",
+            get(api::handlers::step_events::get_scope_ancestors),
+        )
+        // Pending human input endpoint (for AI Agent human-in-the-loop)
+        .route(
+            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/pending-input",
+            get(api::handlers::step_events::get_pending_input),
+        )
+        // Workflow runtime actions (generic action surface; currently backed by signals)
+        .route(
+            "/api/runtime/workflows/{workflowId}/actions",
+            get(api::handlers::step_events::list_workflow_open_actions),
+        )
+        .route(
+            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions",
+            get(api::handlers::step_events::list_workflow_instance_open_actions),
+        )
+        .route(
+            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions/{actionId}/submit",
+            post(api::handlers::step_events::submit_workflow_action),
+        )
+        // Signal delivery endpoint (submit human input to waiting AI Agent)
+        .route(
+            "/api/runtime/signals/{instanceId}",
+            post(api::handlers::step_events::submit_signal),
+        )
+        // Dependency tracking endpoints
+        .route(
+            "/api/runtime/workflows/{id}/dependencies",
+            get(api::handlers::workflows::get_workflow_dependencies_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/dependents",
+            get(api::handlers::workflows::get_workflow_dependents_handler),
+        )
+        // Version-aware schema endpoint (reads from execution_graph)
+        .route(
+            "/api/runtime/workflows/{id}/versions/{version}/schemas",
+            get(api::handlers::workflows::get_version_schemas_handler),
+        )
+        // Folder management endpoints
+        .route(
+            "/api/runtime/workflows/folders",
+            get(api::handlers::workflows::list_folders_handler),
+        )
+        .route(
+            "/api/runtime/workflows/folders/rename",
+            put(api::handlers::workflows::rename_folder_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/move",
+            put(api::handlers::workflows::move_workflow_handler),
+        )
+        // NOTE: Connection CRUD, OAuth authorize, and type discovery routes are now
+        // served by runtara-connections crate — see connections_tenant_routes below.
+        // Metrics endpoints
+        .route(
+            "/api/runtime/metrics/workflows/{workflow_id}",
+            get(api::metrics::get_workflow_metrics),
+        )
+        .route(
+            "/api/runtime/metrics/workflows/{workflow_id}/stats",
+            get(api::metrics::get_workflow_stats),
+        )
+        .route(
+            "/api/runtime/metrics/tenant",
+            get(api::metrics::get_tenant_metrics),
+        )
+        // Analytics endpoints
+        .route(
+            "/api/runtime/analytics/system",
+            get(api::analytics::get_system_analytics_handler),
+        )
+        // Reporting endpoints are mounted through reports_router.
+        // Rate limit analytics are served by runtara-connections.
+        // Triggers are served by the engine: see `triggers_served` below.
+        // API Key management endpoints — defined in `api_keys_router` above and merged below.
+        // Entitlements snapshot endpoint
+        .route(
+            "/api/runtime/entitlements",
+            get(api::handlers::entitlements::get_entitlements_handler),
+        )
+        // Agents are served by the engine: see `Served::Agents` below.
+        // Step type endpoints
+        .route(
+            "/api/runtime/steps",
+            get(api::handlers::workflows::list_step_types_handler),
+        )
+        // Metadata endpoints
+        .route(
+            "/api/runtime/metadata/workflow/step-types",
+            get(api::metadata::get_workflow_step_types_handler),
+        )
+        .route(
+            "/api/runtime/metadata/llm-models",
+            get(api::metadata::get_llm_models_handler),
+        )
+        // Specification endpoints (serve pre-generated specs)
+        .route(
+            "/api/runtime/specs/versions",
+            get(api::handlers::specs::get_spec_versions),
+        )
+        .route(
+            "/api/runtime/specs/dsl",
+            get(api::handlers::specs::get_dsl_spec),
+        )
+        .route(
+            "/api/runtime/specs/dsl/steps",
+            get(api::handlers::specs::list_step_types),
+        )
+        .route(
+            "/api/runtime/specs/dsl/steps/{stepType}",
+            get(api::handlers::specs::get_step_type_schema),
+        )
+        .route(
+            "/api/runtime/specs/dsl/changelog",
+            get(api::handlers::specs::get_dsl_changelog),
+        )
+        .route(
+            "/api/runtime/specs/dsl/{version}",
+            get(api::handlers::specs::get_dsl_spec_version),
+        )
+        // Entitlement-gated sub-router: carries its own ENTITLEMENT_REQUIRED
+        // layer (see `api_keys_router` above) so disabling `api`
+        // short-circuits before the inner handlers run.
+        .merge(api_keys_router)
+        .with_state(AppState {
+            pool: pool.clone(),
+            valkey_conn: valkey_conn.clone(),
+            engine: engine_api.clone(),
+            agent_catalog: agent_catalog.clone(),
+            events: product_event_sink.clone(),
+        })
+        // Reject API-key-authenticated requests when the `api` feature is
+        // off. Sits *between* auth (outermost) and the per-feature gates
+        // (innermost), so the AuthContext is already populated when this
+        // runs but feature gates haven't yet decided whether the route
+        // itself is open. Session/JWT users on the same routes are
+        // unaffected.
+        .route_layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
+        // Enforce the per-route role permission map (no-op unless membership is Required).
+        // Inside auth so AuthContext (role) and the matched route are populated when it runs.
+        .route_layer(from_fn(crate::middleware::authorization::authorize(
+            membership_policy,
+        )))
+        // Apply JWT authentication middleware to all tenant-scoped routes
+        .route_layer(from_fn_with_state(
+            auth_state.clone(),
+            crate::middleware::auth::authenticate,
+        ))
+        // Raise the body limit above Axum's 2 MB default so base64-encoded
+        // file inputs (workflow `file` fields) are not rejected with 413
+        // (SYN-457). See TENANT_REQUEST_BODY_LIMIT_BYTES.
+        .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES));
+
+    let agent_routes = {
+        let to_agents = || {
+            crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Agents).layer(
+                from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
+            )
+        };
+        Router::new()
+            .nest("/api/runtime/agents", to_agents())
+            .nest("/api/runtime/_internal", to_agents())
+    };
+
+    let trigger_routes = Router::new().nest(
+        "/api/runtime/triggers",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Triggers).layer(
+            from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
+        ),
+    );
+
+    // Whatever under `/api/runtime` is not one of the API's own routes.
+    let connections_tenant_routes = Router::new().nest(
+        "/api/runtime",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Connections).layer(
+            from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
+        ),
+    );
+
+    let object_model_routes = Router::new().nest(
+        "/api/runtime/object-model",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::ObjectModel).layer(
+            from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
+        ),
+    );
+
+    // Create router for public/global endpoints (no tenant auth required)
+    let readiness_providers = auth_providers.clone();
+
+    let public_routes = Router::new()
+        .route("/health", get(health_handler))
+        .route(
+            "/ready",
+            get(move || {
+                let providers = readiness_providers.clone();
+                async move { readiness_handler(providers).await }
+            }),
+        )
+        // Unauthenticated: the permission map is static and the same for every tenant.
+        .route("/api/runtime/permissions", get(permissions_handler));
+
+    let event_routes = Router::new().nest(
+        "/api/runtime/events",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Events),
+    );
+
+    // A chat channel's webhook is the engine's, which answers that there is
+    // none if it serves no channels.
+    let channel_routes = Router::new().nest(
+        "/api/runtime/events/webhook",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Channels),
+    );
+
+    // Build internal router for MCP in-process calls (no network hop).
+    // MCP tools pre-inject AuthContext into extensions, so auth middleware
+    // detects it and skips JWT validation.
+    //
+    // The connections routes must be nested under `/api/runtime` here exactly
+    // as they are in `public_app` below — otherwise MCP connection-discovery
+    // tools (list_connections, list_integrations, get_integration) 404 because
+    // their `/api/runtime/connections*` targets exist only on the public app.
+    //
+    // `event_routes` is merged here too so the `execute_workflow_sync` MCP tool
+    // (which POSTs to `/api/runtime/events/http-sync/{workflow_id}`) resolves
+    // in-process instead of hitting the router fallback and returning a bare 404
+    // in every deployment. `event_routes` is moved into `public_app` below, so
+    // clone it here.
+    // `event_routes` is the one group that carries no authorization layer on the public app —
+    // webhook ingest is authenticated by the unguessable id in the URL, not by a caller. In
+    // process, though, `execute_workflow_sync` reaches it as a real identity, so the internal
+    // copy gets the same gate every other MCP-reachable route has. Without it that single tool
+    // would run a workflow for a caller whose role or credential scope forbids executing one.
+    let internal_event_routes = Router::new().nest(
+        "/api/runtime/events",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::EventsForCallers),
+    );
+
+    let internal_router = Router::new()
+        .merge(tenant_routes.clone())
+        .merge(object_model_routes.clone())
+        .merge(connections_tenant_routes.clone())
+        .merge(trigger_routes.clone())
+        .merge(agent_routes.clone())
+        .merge(public_routes.clone())
+        .merge(internal_event_routes);
+
+    // Build MCP (Model Context Protocol) router with JWT authentication.
+    // Uses .layer() (not .route_layer()) because the MCP transport is a
+    // fallback_service, which route_layer would skip.
+    let mcp_router = mcp::create_mcp_router(
+        pool.clone(),
+        engine_api.clone(),
+        tenant_id.clone(),
+        internal_router,
+        config::mcp_allowed_hosts().to_vec(),
+        mcp_session_store,
+    )
+    // Innermost, after auth: MCP session state is kept under the caller's
+    // tenant (see `mcp::scope_session_tenant`).
+    .layer(from_fn(crate::mcp::scope_session_tenant))
+    // Apply the `mcp` entitlement gate at the transport entry. Disabling
+    // the feature short-circuits with 403 ENTITLEMENT_REQUIRED before any
+    // MCP tool handler is reached. Per-tool gates also exist as a second
+    // line of defense — see `mcp::entitlement`. Uses .layer() (not
+    // .route_layer()) for the same reason as auth above: the MCP transport
+    // is a fallback_service that route_layer would skip.
+    .layer(from_fn(crate::middleware::entitlement::require_mcp))
+    // Entitlement invariant: MCP requires the `api` feature (SYN-523).
+    // Without this gate, `mcp=true, api=false` behaved asymmetrically —
+    // API-key MCP clients were rejected by `api_key_auth_guard` below while
+    // JWT MCP clients sailed through. Gating the transport on `api` makes
+    // the invariant uniform for every auth method. Uses .layer() (not
+    // .route_layer()) for the same fallback_service reason as `require_mcp`.
+    .layer(from_fn(crate::middleware::entitlement::require_api))
+    // Reject API-key-authenticated MCP requests when `api` is off. Between
+    // `mcp` gate (inner) and auth (outer); same shape as on tenant and
+    // object-model routes.
+    .layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
+    .layer(from_fn_with_state(
+        mcp_auth_state,
+        crate::middleware::auth::authenticate,
+    ));
+
+    let oauth_callback_routes = Router::new().nest(
+        "/api/oauth",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::OAuthCallbacks),
+    );
+
+    // =========================================================================
+    // Public API server — accessible externally / via API gateway
+    // =========================================================================
+    // OIDC discovery routes (public, no auth) — serves OAuth/OIDC metadata for MCP clients
+    let oidc_routes = Router::new()
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(api::handlers::oidc_discovery::oauth_protected_resource_handler),
+        )
+        .route(
+            "/.well-known/openid-configuration",
+            get(api::handlers::oidc_discovery::openid_configuration_handler),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(api::handlers::oidc_discovery::openid_configuration_handler),
+        )
+        .with_state(oidc_cache);
+
+    // `/me` — authenticated identity/role view for the SPA. Only the auth middleware
+    // (which attaches AuthContext incl. the Valkey role); no per-resource authorization
+    // gate, since every authenticated caller may read their own identity.
+    let me_routes = Router::new()
+        .route("/api/runtime/me", get(me_handler))
+        .route_layer(from_fn_with_state(
+            auth_state.clone(),
+            crate::middleware::auth::authenticate,
+        ));
+
+    // `/me/tenants` — where the caller may act. Authenticated without the membership
+    // check of the tenant the request resolves to: it checks every served tenant itself.
+    let my_tenants_routes = Router::new()
+        .route(
+            "/api/runtime/me/tenants",
+            get({
+                let auth_state = auth_state.clone();
+                move |axum::Extension(auth): axum::Extension<crate::auth::AuthContext>| {
+                    my_tenants_handler(auth_state.clone(), auth)
+                }
+            }),
+        )
+        .route_layer(from_fn_with_state(
+            auth_state.clone(),
+            crate::middleware::auth::authenticate_identity,
+        ));
+
+    let public_app = Router::new()
+        .merge(tenant_routes)
+        .merge(connections_tenant_routes)
+        .merge(trigger_routes)
+        .merge(agent_routes)
+        .merge(oauth_callback_routes)
+        .merge(object_model_routes)
+        .merge(me_routes)
+        .merge(my_tenants_routes)
+        .merge(public_routes)
+        .merge(event_routes)
+        .merge(channel_routes)
+        .merge(oidc_routes)
+        .nest("/mcp", mcp_router);
+
+    // Only expose OpenAPI docs when explicitly enabled (disabled in production)
+    let public_app = if std::env::var("ENABLE_OPENAPI_DOCS").is_ok() {
+        public_app.route(
+            "/api/runtime/openapi/docs.json",
+            get(|| async { Json(ApiDoc::openapi()) }),
+        )
+    } else {
+        public_app
+    };
+
+    let public_app = public_app
+        .layer(from_fn(
+            middleware::security_headers::security_headers_middleware,
+        ))
+        .layer(cors)
+        .layer(TraceLayer::new_for_http())
+        .layer(from_fn(middleware::http_metrics::http_metrics_middleware))
+        // Outermost: credential headers are marked sensitive before any
+        // layer or handler can log them.
+        .layer(middleware::sensitive_headers::layer());
+
+    public_app
+}
+
 /// How a host composes the server beyond its environment configuration.
 #[derive(Default, Clone)]
 pub struct ServerOptions {
@@ -2416,379 +3044,6 @@ async fn start_as_platform(
     }
     println!("✓ Cron scheduler started (durable outbox)");
 
-    // CORS — configured via CORS_ALLOWED_ORIGINS env var.
-    // Supports: "*" (any origin), comma-separated origins, or defaults to localhost for dev.
-    let cors = middleware::cors::build_cors_layer();
-
-    // Entitlement-gated sub-routers: each one is mounted with a route-layer
-    // that short-circuits with 403 ENTITLEMENT_REQUIRED when the corresponding
-    // feature is disabled for the running tenant. Built separately so the gate
-    // is colocated with the routes it protects; merged into tenant_routes
-    // below so they pick up the same JWT auth layer and AppState.
-    let api_keys_router: Router<AppState> = Router::new()
-        .route(
-            "/api/runtime/api-keys",
-            post(api::handlers::api_keys::create_api_key)
-                .get(api::handlers::api_keys::list_api_keys),
-        )
-        .route(
-            "/api/runtime/api-keys/{id}",
-            delete(api::handlers::api_keys::revoke_api_key),
-        )
-        .route(
-            "/api/runtime/api-keys/users/{user_id}/revoke",
-            post(api::handlers::api_keys::revoke_user_keys),
-        )
-        .route_layer(from_fn(middleware::entitlement::require_api));
-
-    // Create router for tenant-scoped endpoints (requires JWT authentication)
-    let tenant_routes = Router::new()
-        // Execution listing endpoint
-        .route(
-            "/api/runtime/executions",
-            get(api::handlers::executions::list_all_executions_handler),
-        )
-        .route(
-            "/api/runtime/operations/views",
-            get(api::handlers::operations::list_operation_views)
-                .post(api::handlers::operations::create_operation_view),
-        )
-        .route(
-            "/api/runtime/operations/views/{id}",
-            put(api::handlers::operations::update_operation_view)
-                .delete(api::handlers::operations::delete_operation_view),
-        )
-        .route(
-            "/api/runtime/operations/processes",
-            get(api::handlers::operations::operation_processes),
-        )
-        .route(
-            "/api/runtime/operations/queues",
-            get(api::handlers::operations::operation_queues),
-        )
-        .route(
-            "/api/runtime/operations/requests/query",
-            post(api::handlers::operations::query_operation_requests),
-        )
-        .route(
-            "/api/runtime/executions/query",
-            post(api::handlers::executions::query_executions_handler),
-        )
-        .route(
-            "/api/runtime/executions/summary",
-            post(api::handlers::executions::execution_summary_handler),
-        )
-        // Workflow endpoints (refactored - using 3-layer architecture)
-        .route(
-            "/api/runtime/workflows/create",
-            post(api::handlers::workflows::create_workflow_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/update",
-            post(api::handlers::workflows::update_workflow_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/versions/{version}/graph",
-            put(api::handlers::workflows::patch_version_graph_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/versions/{version}/track-events",
-            put(api::handlers::workflows::toggle_track_events_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/slug",
-            put(api::handlers::workflows::update_workflow_slug_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/publish-agent",
-            post(api::handlers::workflows::publish_workflow_agent_handler),
-        )
-        .route(
-            "/api/runtime/workflows",
-            get(api::handlers::workflows::list_workflows_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}",
-            get(api::handlers::workflows::get_workflow_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/versions",
-            get(api::handlers::workflows::list_workflow_versions_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/versions/{version}/compile",
-            post(api::handlers::workflows::compile_workflow_handler)
-                .route_layer(from_fn(crate::tenant_quota::limit_compilations)),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/versions/{version}/compilation-progress",
-            get(api::handlers::workflows::compilation_progress_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/execute",
-            post(api::handlers::workflows::execute_workflow_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/chat",
-            post(api::handlers::chat::chat_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/chat/start",
-            post(api::handlers::chat::chat_start_handler),
-        )
-        // Session endpoints (session-based event handling for WaitForSignal)
-        .route(
-            "/api/runtime/workflows/{id}/sessions",
-            post(api::handlers::sessions::create_session),
-        )
-        .route(
-            "/api/runtime/sessions/{sessionId}/events",
-            post(api::handlers::sessions::submit_event)
-                .get(api::handlers::sessions::session_event_stream),
-        )
-        .route(
-            "/api/runtime/sessions/{sessionId}/deliveries",
-            get(api::handlers::sessions::list_session_deliveries),
-        )
-        .route(
-            "/api/runtime/sessions/{sessionId}/deliveries/{messageId}",
-            get(api::handlers::sessions::get_session_delivery),
-        )
-        .route(
-            "/api/runtime/sessions/{sessionId}/deliveries/{messageId}/resolve",
-            post(api::handlers::sessions::resolve_session_delivery),
-        )
-        .route(
-            "/api/runtime/sessions/{sessionId}/pending-input",
-            get(api::handlers::sessions::session_pending_input),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/instances",
-            get(api::handlers::workflows::list_instances_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/instances/{instanceId}",
-            get(api::handlers::workflows::get_instance_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/instances/{instanceId}/checkpoints",
-            get(api::handlers::workflows::list_instance_checkpoints_handler),
-        )
-        .route(
-            "/api/runtime/workflows/instances/{instanceId}",
-            get(api::handlers::workflows::get_execution_metrics_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/delete",
-            post(api::handlers::workflows::delete_workflow_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/clone",
-            post(api::handlers::workflows::clone_workflow_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/schedule",
-            post(api::handlers::workflows::schedule_workflow_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/versions/{versionNumber}/set-current",
-            post(api::handlers::workflows::set_current_version_handler),
-        )
-        .route(
-            "/api/runtime/workflows/instances/{instanceId}/stop",
-            post(api::handlers::workflows::stop_instance_handler),
-        )
-        .route(
-            "/api/runtime/workflows/instances/{instanceId}/pause",
-            post(api::handlers::workflows::pause_instance_handler),
-        )
-        .route(
-            "/api/runtime/workflows/instances/{instanceId}/resume",
-            post(api::handlers::workflows::resume_instance_handler),
-        )
-        .route(
-            "/api/runtime/workflows/instances/{instanceId}/replay",
-            post(api::handlers::workflows::replay_instance_handler),
-        )
-        .route(
-            "/api/runtime/workflows/graph/validate",
-            post(api::handlers::workflows::validate_graph_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{workflowId}/validate-mappings",
-            post(api::handlers::workflows::validate_mappings_handler),
-        )
-        .route(
-            "/api/runtime/workflows/instances/{instanceId}/steps/{stepId}/subinstances",
-            get(api::handlers::workflows::get_step_subinstances_handler),
-        )
-        // Step Events endpoint (track-events mode - raw events)
-        .route(
-            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/step-events",
-            get(api::handlers::step_events::get_step_events),
-        )
-        // Step Summaries endpoint (paired step records)
-        .route(
-            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/steps",
-            get(api::handlers::step_summaries::get_step_summaries),
-        )
-        // Scope ancestors endpoint (for hierarchical step execution call stack)
-        .route(
-            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/scopes/{scopeId}/ancestors",
-            get(api::handlers::step_events::get_scope_ancestors),
-        )
-        // Pending human input endpoint (for AI Agent human-in-the-loop)
-        .route(
-            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/pending-input",
-            get(api::handlers::step_events::get_pending_input),
-        )
-        // Workflow runtime actions (generic action surface; currently backed by signals)
-        .route(
-            "/api/runtime/workflows/{workflowId}/actions",
-            get(api::handlers::step_events::list_workflow_open_actions),
-        )
-        .route(
-            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions",
-            get(api::handlers::step_events::list_workflow_instance_open_actions),
-        )
-        .route(
-            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions/{actionId}/submit",
-            post(api::handlers::step_events::submit_workflow_action),
-        )
-        // Signal delivery endpoint (submit human input to waiting AI Agent)
-        .route(
-            "/api/runtime/signals/{instanceId}",
-            post(api::handlers::step_events::submit_signal),
-        )
-        // Dependency tracking endpoints
-        .route(
-            "/api/runtime/workflows/{id}/dependencies",
-            get(api::handlers::workflows::get_workflow_dependencies_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/dependents",
-            get(api::handlers::workflows::get_workflow_dependents_handler),
-        )
-        // Version-aware schema endpoint (reads from execution_graph)
-        .route(
-            "/api/runtime/workflows/{id}/versions/{version}/schemas",
-            get(api::handlers::workflows::get_version_schemas_handler),
-        )
-        // Folder management endpoints
-        .route(
-            "/api/runtime/workflows/folders",
-            get(api::handlers::workflows::list_folders_handler),
-        )
-        .route(
-            "/api/runtime/workflows/folders/rename",
-            put(api::handlers::workflows::rename_folder_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/move",
-            put(api::handlers::workflows::move_workflow_handler),
-        )
-        // NOTE: Connection CRUD, OAuth authorize, and type discovery routes are now
-        // served by runtara-connections crate — see connections_tenant_routes below.
-        // Metrics endpoints
-        .route(
-            "/api/runtime/metrics/workflows/{workflow_id}",
-            get(api::metrics::get_workflow_metrics),
-        )
-        .route(
-            "/api/runtime/metrics/workflows/{workflow_id}/stats",
-            get(api::metrics::get_workflow_stats),
-        )
-        .route(
-            "/api/runtime/metrics/tenant",
-            get(api::metrics::get_tenant_metrics),
-        )
-        // Analytics endpoints
-        .route(
-            "/api/runtime/analytics/system",
-            get(api::analytics::get_system_analytics_handler),
-        )
-        // Reporting endpoints are mounted through reports_router.
-        // Rate limit analytics are served by runtara-connections.
-        // Triggers are served by the engine: see `triggers_served` below.
-        // API Key management endpoints — defined in `api_keys_router` above and merged below.
-        // Entitlements snapshot endpoint
-        .route(
-            "/api/runtime/entitlements",
-            get(api::handlers::entitlements::get_entitlements_handler),
-        )
-        // Agents are served by the engine: see `Served::Agents` below.
-        // Step type endpoints
-        .route(
-            "/api/runtime/steps",
-            get(api::handlers::workflows::list_step_types_handler),
-        )
-        // Metadata endpoints
-        .route(
-            "/api/runtime/metadata/workflow/step-types",
-            get(api::metadata::get_workflow_step_types_handler),
-        )
-        .route(
-            "/api/runtime/metadata/llm-models",
-            get(api::metadata::get_llm_models_handler),
-        )
-        // Specification endpoints (serve pre-generated specs)
-        .route(
-            "/api/runtime/specs/versions",
-            get(api::handlers::specs::get_spec_versions),
-        )
-        .route(
-            "/api/runtime/specs/dsl",
-            get(api::handlers::specs::get_dsl_spec),
-        )
-        .route(
-            "/api/runtime/specs/dsl/steps",
-            get(api::handlers::specs::list_step_types),
-        )
-        .route(
-            "/api/runtime/specs/dsl/steps/{stepType}",
-            get(api::handlers::specs::get_step_type_schema),
-        )
-        .route(
-            "/api/runtime/specs/dsl/changelog",
-            get(api::handlers::specs::get_dsl_changelog),
-        )
-        .route(
-            "/api/runtime/specs/dsl/{version}",
-            get(api::handlers::specs::get_dsl_spec_version),
-        )
-        // Entitlement-gated sub-router: carries its own ENTITLEMENT_REQUIRED
-        // layer (see `api_keys_router` above) so disabling `api`
-        // short-circuits before the inner handlers run.
-        .merge(api_keys_router)
-        .with_state(AppState {
-            pool: pool.clone(),
-            valkey_conn: valkey_conn.clone(),
-            engine: engine_api.clone(),
-            agent_catalog: agent_catalog.clone(),
-            events: product_event_sink.clone(),
-        })
-        // Reject API-key-authenticated requests when the `api` feature is
-        // off. Sits *between* auth (outermost) and the per-feature gates
-        // (innermost), so the AuthContext is already populated when this
-        // runs but feature gates haven't yet decided whether the route
-        // itself is open. Session/JWT users on the same routes are
-        // unaffected.
-        .route_layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
-        // Enforce the per-route role permission map (no-op unless membership is Required).
-        // Inside auth so AuthContext (role) and the matched route are populated when it runs.
-        .route_layer(from_fn(crate::middleware::authorization::authorize(
-            membership_policy,
-        )))
-        // Apply JWT authentication middleware to all tenant-scoped routes
-        .route_layer(from_fn_with_state(
-            auth_state.clone(),
-            crate::middleware::auth::authenticate,
-        ))
-        // Raise the body limit above Axum's 2 MB default so base64-encoded
-        // file inputs (workflow `file` fields) are not rejected with 413
-        // (SYN-457). See TENANT_REQUEST_BODY_LIMIT_BYTES.
-        .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES));
-
     // Agents are the engine's: it is the engine that loaded them, and that runs
     // one on request. What agents there are, what each can do, and whether
     // their components loaded is asked of it.
@@ -2836,16 +3091,6 @@ async fn start_as_platform(
             )))
             .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES)),
     );
-    let agent_routes = {
-        let to_agents = || {
-            crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Agents).layer(
-                from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
-            )
-        };
-        Router::new()
-            .nest("/api/runtime/agents", to_agents())
-            .nest("/api/runtime/_internal", to_agents())
-    };
 
     // Triggers are the engine's: making or changing one may register a webhook
     // at its provider, with the connection's sealed secret. The API
@@ -2882,12 +3127,6 @@ async fn start_as_platform(
             )))
             .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES)),
     );
-    let trigger_routes = Router::new().nest(
-        "/api/runtime/triggers",
-        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Triggers).layer(
-            from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
-        ),
-    );
 
     // Connections crate routes (CRUD, OAuth authorize, type discovery, rate limit analytics)
     // Mounted as a separate router with tenant bridge middleware.
@@ -2916,13 +3155,6 @@ async fn start_as_platform(
                 .layer(from_fn(crate::middleware::authorization::authorize(
                     membership_policy,
                 ))),
-        ),
-    );
-    // Whatever under `/api/runtime` is not one of the API's own routes.
-    let connections_tenant_routes = Router::new().nest(
-        "/api/runtime",
-        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Connections).layer(
-            from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
         ),
     );
 
@@ -3051,30 +3283,11 @@ async fn start_as_platform(
         // handler already reads up to 50 MB via to_bytes, but Axum's 2 MB
         // default body limit rejected them first with 413 (SYN-457).
         .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES));
+
     // The engine serves a tenant's object model: its database is reached
     // with a sealed password. The API authenticates the caller and hands the
     // request over.
     local_engine.serves(crate::engine::Served::ObjectModel, object_model_served);
-    let object_model_routes = Router::new().nest(
-        "/api/runtime/object-model",
-        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::ObjectModel).layer(
-            from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
-        ),
-    );
-
-    // Create router for public/global endpoints (no tenant auth required)
-    let readiness_providers = auth_providers.clone();
-    let public_routes = Router::new()
-        .route("/health", get(health_handler))
-        .route(
-            "/ready",
-            get(move || {
-                let providers = readiness_providers.clone();
-                async move { readiness_handler(providers).await }
-            }),
-        )
-        // Unauthenticated: the permission map is static and the same for every tenant.
-        .route("/api/runtime/permissions", get(permissions_handler));
 
     // Event capture routes (webhook endpoints — no JWT auth required).
     // These are called by external services (Shopify, etc.) and use the
@@ -3114,6 +3327,7 @@ async fn start_as_platform(
         .layer(DefaultBodyLimit::max(
             api::handlers::events::webhook_max_body_bytes(),
         ));
+
     // A trigger's HTTP events are the engine's: each is checked against its
     // connection's sealed secret before a run is accepted. Whoever sends one
     // is not authenticated, so the API hands it over as it arrived. The same
@@ -3127,123 +3341,41 @@ async fn start_as_platform(
                 membership_policy,
             ))),
     );
+
     local_engine.serves(crate::engine::Served::Events, events_served);
-    let event_routes = Router::new().nest(
-        "/api/runtime/events",
-        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Events),
-    );
 
-    // Initialize channel router for conversational triggers (Telegram, Slack, Teams).
-    // The router is always available — it looks up connection + trigger from DB per request.
-    let channel_routes =
-        if let (Some(rc), Some(_ts), Some(vc)) = (&runtime_client, &trigger_stream, &valkey_conn) {
-            let channel_router = Arc::new(channels::session::ChannelRouter::new(
-                rc.clone(),
-                pool.clone(),
-                connections_facade.clone(),
-                execution_engine.clone(),
-                vc.clone(),
-            ));
-            // Dispatches messages a previous process acknowledged but did not
-            // finish, retries pending ones, and purges handled ones.
-            workers.detached(
-                crate::roles::Role::Engine,
-                "channel intake",
-                channel_router.clone().run_intake_worker(),
-            );
-            println!("✓ Channel router initialized");
-
-            // The engine serves a channel's webhook: the call is checked
-            // against its connection's sealed secret, and the conversation it
-            // belongs to runs there. The API hands it over as it arrived.
-            local_engine.serves(
-                crate::engine::Served::Channels,
-                channels::routes(channel_router)
-                    // Defense in depth: these public, unauthenticated channel-ingest
-                    // routes buffer the whole body (Bytes extractor) before auth, so
-                    // cap it. Bot Framework / chat activities are a few KB; the
-                    // shared webhook cap is generous enough for mailgun payloads.
-                    .layer(DefaultBodyLimit::max(
-                        api::handlers::events::webhook_max_body_bytes(),
-                    )),
-            );
-            Router::new().nest(
-                "/api/runtime/events/webhook",
-                crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Channels),
-            )
-        } else {
-            Router::new()
-        };
-
-    // Build internal router for MCP in-process calls (no network hop).
-    // MCP tools pre-inject AuthContext into extensions, so auth middleware
-    // detects it and skips JWT validation.
-    //
-    // The connections routes must be nested under `/api/runtime` here exactly
-    // as they are in `public_app` below — otherwise MCP connection-discovery
-    // tools (list_connections, list_integrations, get_integration) 404 because
-    // their `/api/runtime/connections*` targets exist only on the public app.
-    //
-    // `event_routes` is merged here too so the `execute_workflow_sync` MCP tool
-    // (which POSTs to `/api/runtime/events/http-sync/{workflow_id}`) resolves
-    // in-process instead of hitting the router fallback and returning a bare 404
-    // in every deployment. `event_routes` is moved into `public_app` below, so
-    // clone it here.
-    // `event_routes` is the one group that carries no authorization layer on the public app —
-    // webhook ingest is authenticated by the unguessable id in the URL, not by a caller. In
-    // process, though, `execute_workflow_sync` reaches it as a real identity, so the internal
-    // copy gets the same gate every other MCP-reachable route has. Without it that single tool
-    // would run a workflow for a caller whose role or credential scope forbids executing one.
-    let internal_event_routes = Router::new().nest(
-        "/api/runtime/events",
-        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::EventsForCallers),
-    );
-
-    let internal_router = Router::new()
-        .merge(tenant_routes.clone())
-        .merge(object_model_routes.clone())
-        .merge(connections_tenant_routes.clone())
-        .merge(trigger_routes.clone())
-        .merge(agent_routes.clone())
-        .merge(public_routes.clone())
-        .merge(internal_event_routes);
-
-    // Build MCP (Model Context Protocol) router with JWT authentication.
-    // Uses .layer() (not .route_layer()) because the MCP transport is a
-    // fallback_service, which route_layer would skip.
-    let mcp_router = mcp::create_mcp_router(
-        pool.clone(),
-        engine_api.clone(),
-        tenant_id.clone(),
-        internal_router,
-        config::mcp_allowed_hosts().to_vec(),
-        mcp_session_store,
-    )
-    // Innermost, after auth: MCP session state is kept under the caller's
-    // tenant (see `mcp::scope_session_tenant`).
-    .layer(from_fn(crate::mcp::scope_session_tenant))
-    // Apply the `mcp` entitlement gate at the transport entry. Disabling
-    // the feature short-circuits with 403 ENTITLEMENT_REQUIRED before any
-    // MCP tool handler is reached. Per-tool gates also exist as a second
-    // line of defense — see `mcp::entitlement`. Uses .layer() (not
-    // .route_layer()) for the same reason as auth above: the MCP transport
-    // is a fallback_service that route_layer would skip.
-    .layer(from_fn(crate::middleware::entitlement::require_mcp))
-    // Entitlement invariant: MCP requires the `api` feature (SYN-523).
-    // Without this gate, `mcp=true, api=false` behaved asymmetrically —
-    // API-key MCP clients were rejected by `api_key_auth_guard` below while
-    // JWT MCP clients sailed through. Gating the transport on `api` makes
-    // the invariant uniform for every auth method. Uses .layer() (not
-    // .route_layer()) for the same fallback_service reason as `require_mcp`.
-    .layer(from_fn(crate::middleware::entitlement::require_api))
-    // Reject API-key-authenticated MCP requests when `api` is off. Between
-    // `mcp` gate (inner) and auth (outer); same shape as on tenant and
-    // object-model routes.
-    .layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
-    .layer(from_fn_with_state(
-        mcp_auth_state,
-        crate::middleware::auth::authenticate,
-    ));
+    // Chat channels (conversational triggers). The engine serves a channel's
+    // webhook: the call is checked against its connection's sealed secret, and
+    // the conversation it belongs to runs there. The API hands it over as it
+    // arrived.
+    if let (Some(rc), Some(_ts), Some(vc)) = (&runtime_client, &trigger_stream, &valkey_conn) {
+        let channel_router = Arc::new(channels::session::ChannelRouter::new(
+            rc.clone(),
+            pool.clone(),
+            connections_facade.clone(),
+            execution_engine.clone(),
+            vc.clone(),
+        ));
+        // Dispatches messages a previous process acknowledged but did not
+        // finish, retries pending ones, and purges handled ones.
+        workers.detached(
+            crate::roles::Role::Engine,
+            "channel intake",
+            channel_router.clone().run_intake_worker(),
+        );
+        println!("✓ Channel router initialized");
+        local_engine.serves(
+            crate::engine::Served::Channels,
+            channels::routes(channel_router)
+                // Defense in depth: these public, unauthenticated channel-ingest
+                // routes buffer the whole body (Bytes extractor) before auth, so
+                // cap it. Bot Framework / chat activities are a few KB; the
+                // shared webhook cap is generous enough for mailgun payloads.
+                .layer(DefaultBodyLimit::max(
+                    api::handlers::events::webhook_max_body_bytes(),
+                )),
+        );
+    }
 
     // OAuth2 callback route (public, no JWT — called by OAuth provider redirect)
     // Now served by the runtara-connections crate
@@ -3254,92 +3386,23 @@ async fn start_as_platform(
             runtara_connections::oauth_callback_router(connections_config.clone()),
         ),
     );
-    let oauth_callback_routes = Router::new().nest(
-        "/api/oauth",
-        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::OAuthCallbacks),
-    );
 
-    // =========================================================================
-    // Public API server — accessible externally / via API gateway
-    // =========================================================================
-    // OIDC discovery routes (public, no auth) — serves OAuth/OIDC metadata for MCP clients
-    let oidc_routes = Router::new()
-        .route(
-            "/.well-known/oauth-protected-resource",
-            get(api::handlers::oidc_discovery::oauth_protected_resource_handler),
-        )
-        .route(
-            "/.well-known/openid-configuration",
-            get(api::handlers::oidc_discovery::openid_configuration_handler),
-        )
-        .route(
-            "/.well-known/oauth-authorization-server",
-            get(api::handlers::oidc_discovery::openid_configuration_handler),
-        )
-        .with_state(oidc_cache);
-
-    // `/me` — authenticated identity/role view for the SPA. Only the auth middleware
-    // (which attaches AuthContext incl. the Valkey role); no per-resource authorization
-    // gate, since every authenticated caller may read their own identity.
-    let me_routes = Router::new()
-        .route("/api/runtime/me", get(me_handler))
-        .route_layer(from_fn_with_state(
-            auth_state.clone(),
-            crate::middleware::auth::authenticate,
-        ));
-
-    // `/me/tenants` — where the caller may act. Authenticated without the membership
-    // check of the tenant the request resolves to: it checks every served tenant itself.
-    let my_tenants_routes = Router::new()
-        .route(
-            "/api/runtime/me/tenants",
-            get({
-                let auth_state = auth_state.clone();
-                move |axum::Extension(auth): axum::Extension<crate::auth::AuthContext>| {
-                    my_tenants_handler(auth_state.clone(), auth)
-                }
-            }),
-        )
-        .route_layer(from_fn_with_state(
-            auth_state.clone(),
-            crate::middleware::auth::authenticate_identity,
-        ));
-
-    let public_app = Router::new()
-        .merge(tenant_routes)
-        .merge(connections_tenant_routes)
-        .merge(trigger_routes)
-        .merge(agent_routes)
-        .merge(oauth_callback_routes)
-        .merge(object_model_routes)
-        .merge(me_routes)
-        .merge(my_tenants_routes)
-        .merge(public_routes)
-        .merge(event_routes)
-        .merge(channel_routes)
-        .merge(oidc_routes)
-        .nest("/mcp", mcp_router);
-
-    // Only expose OpenAPI docs when explicitly enabled (disabled in production)
-    let public_app = if std::env::var("ENABLE_OPENAPI_DOCS").is_ok() {
-        public_app.route(
-            "/api/runtime/openapi/docs.json",
-            get(|| async { Json(ApiDoc::openapi()) }),
-        )
-    } else {
-        public_app
-    };
-
-    let public_app = public_app
-        .layer(from_fn(
-            middleware::security_headers::security_headers_middleware,
-        ))
-        .layer(cors)
-        .layer(TraceLayer::new_for_http())
-        .layer(from_fn(middleware::http_metrics::http_metrics_middleware))
-        // Outermost: credential headers are marked sensitive before any
-        // layer or handler can log them.
-        .layer(middleware::sensitive_headers::layer());
+    // The API's routes: its own, and the mounts that hand the engine what it
+    // serves.
+    let public_app = api_app(ApiParts {
+        pool: pool.clone(),
+        engine: engine_api.clone(),
+        agent_catalog: agent_catalog.clone(),
+        events: product_event_sink.clone(),
+        valkey_conn: valkey_conn.clone(),
+        auth_state,
+        mcp_auth_state,
+        auth_providers: auth_providers.clone(),
+        oidc_cache,
+        mcp_session_store,
+        membership_policy,
+        tenant_id: tenant_id.clone(),
+    });
 
     // Get port/host from environment variables or use defaults
     let port = std::env::var("SERVER_PORT")
