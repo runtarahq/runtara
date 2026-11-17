@@ -168,10 +168,11 @@ fn agent_metadata(
     // "azure_blob_storage", and `agent_info_of("azure-blob-storage")`
     // returns None while `agent_ids()` yields it.
     info.id = agent_id.to_owned();
-    let extensions = runtara_dsl::derived_connection::AgentMetaExtensions::from_meta_json(
-        meta_bytes,
-    )
-    .with_context(|| format!("agent `{agent_id}`: failed to parse declared connection types"))?;
+    let extensions =
+        runtara_dsl::derived_connection::AgentMetaExtensions::from_meta_json(meta_bytes)
+            .with_context(|| {
+                format!("agent `{agent_id}`: failed to parse declared connection types")
+            })?;
     let declared = extensions
         .connection_types
         .into_iter()
@@ -773,6 +774,46 @@ mod tests {
     use super::*;
     use std::sync::OnceLock;
     use wasmtime::component::Component;
+
+    /// A process that describes agents reads what the dispatcher would have
+    /// read, without a component beside any description.
+    #[test]
+    fn descriptions_are_read_without_their_components() {
+        let dir = tempfile::tempdir().unwrap();
+        let describe = |file: &str, id: &str| {
+            let meta = serde_json::json!({
+                "id": id,
+                "name": id,
+                "description": "test",
+                "hasSideEffects": false,
+                "supportsConnections": false,
+                "integrationIds": [],
+                "capabilities": [],
+            });
+            std::fs::write(dir.path().join(file), meta.to_string()).unwrap();
+        };
+        // A file is named in snake case and its agent in either.
+        describe("runtara_agent_object_model.meta.json", "object_model");
+        describe("runtara_agent_crypto.meta.json", "crypto");
+        std::fs::write(dir.path().join("runtara_workflow_stdlib.wasm"), b"").unwrap();
+        std::fs::write(dir.path().join("notes.json"), b"{}").unwrap();
+
+        let described = metadata_from_dir(dir.path()).unwrap();
+        let ids: Vec<&str> = described
+            .catalog
+            .agents()
+            .iter()
+            .map(|agent| agent.id.as_str())
+            .collect();
+        assert_eq!(ids, ["crypto", "object-model"]);
+        assert!(described.declared_connection_types.is_empty());
+
+        // A description that names another agent than its file is refused, as
+        // it is when the agent is loaded.
+        describe("runtara_agent_http.meta.json", "crypto");
+        let error = metadata_from_dir(dir.path()).err().unwrap().to_string();
+        assert!(error.contains("agent id mismatch"), "{error}");
+    }
 
     /// One engine with a ticker running, shared across the guard tests so we
     /// don't leak a ticker thread per test. The epoch ring only fires when the
