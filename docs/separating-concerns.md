@@ -94,7 +94,8 @@ references are where to start reading, to be confirmed as each phase begins.
 
 ## Phase 0: done
 
-Independent of the split. Implemented on `feature/row-security-fails-closed`.
+Independent of the split. Implemented on `feature/row-security-fails-closed`,
+with one bug found and fixed on the way.
 
 ### Row-level security that fails closed
 
@@ -136,6 +137,24 @@ What it left as it was, and what follows from it:
   neither is in CI.
 - **A host that embeds the server** and reads policed tables from tasks of
   its own gives that work a scope too.
+
+### API keys revoked at every start (found on the way, fixed)
+
+Not row-level security, but found while running the server as a plain role.
+At start the server revokes the API keys of users who are no longer members
+of their tenant, and it took a missing membership record in Valkey for that.
+Nothing writes those records in `local` and `trust_proxy` auth, and under
+`oidc` the gate every request passes ignores them unless
+`RUNTARA_AUTH_MEMBERSHIP_POLICY=required`, which is not the default. So
+each start revoked every key a user had made.
+
+The sweep now follows the gate: it revokes under `oidc` with `required`,
+says what it would revoke under `logging`, and otherwise does nothing.
+
+What it means for the split: the sweep and the gate are two readers of one
+rule, and they had drifted apart. In Phase 4 the engine is the one that
+verifies a key, so both belong on the engine side, reading the rule from
+one place.
 
 ### The synchronous HTTP trigger (accepted as it is)
 
