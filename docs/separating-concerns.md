@@ -1,7 +1,7 @@
 # Separating the public API from the engine
 
 A plan. Phases 0 (branch `feature/row-security-fails-closed`), 1 (branch
-`feature/seal-out-of-process`, on top of it) and most of 2 (branch
+`feature/seal-out-of-process`, on top of it) and 2 (branch
 `feature/engine-interface`, on top of that) are implemented; the rest is not. This file is removed when the work lands and `docs/`
 describes the result instead.
 
@@ -218,7 +218,7 @@ What it left, and what follows from it:
   key in a KMS) is seal's own configuration and needs nothing more from
   Runtara; it was not run here.
 
-## Phase 2: done, but for what is listed last
+## Phase 2: done
 
 One interface between the code that takes requests and the engine, in one
 process, with no change in behaviour. Implemented on
@@ -237,48 +237,61 @@ process, with no change in behaviour. Implemented on
   | Lifecycle | stop, pause, resume |
   | Reads | runs as the API shows them; a run's info, events, step summaries, scope ancestors, checkpoints; tenant metrics; operation queues and requests |
   | Signals and input | list and get input requests, answer one, the pending-input page, a workflow's open actions and submitting one |
-  | Compilation | compile now, publish as an agent, what an image was built from |
+  | Compilation | compile now, publish as an agent, what an image was built from; queue a compile, wait for it, and read its progress |
+  | Connections, as a workflow names them | which connections a tenant has (ids, kinds, titles); take down a removed trigger's webhook |
   | On request | run an agent's capability |
 
 - **Parts of the API the engine serves itself** (`Engine::serve`). What is
-  answered with a connection's credentials is the engine's: connections,
-  the OAuth redirect, a tenant's object model, chat channels' webhooks,
-  triggers, and a trigger's HTTP events. Each is a router the engine holds;
-  the API authenticates the caller and hands the request over as it
-  arrived. What the caller's role may do there is decided on the engine's
-  side, where the route is known. The chat channel router, with its
-  conversations, is then the engine's alone.
+  answered with a connection's credentials, or by what the engine loaded,
+  is the engine's: connections, the OAuth redirect, a tenant's object
+  model, chat channels' webhooks, triggers, a trigger's HTTP events, and
+  agents. Each is a router the engine holds; the API authenticates the
+  caller and hands the request over as it arrived. The engine answers it in
+  the scope of the tenant it is for, which it enters itself, and decides
+  there what the caller's role may do, where the route is known. The chat
+  channel router, with its conversations, is the engine's alone.
 - **The boundary is held.** The server's state hands handlers the interface
-  and neither the runtime client nor the execution engine, and a test reads
-  the handlers' and MCP tools' sources and fails if one names them.
+  and neither the runtime client nor the execution engine. A test reads the
+  sources of the API's handlers and MCP tools and fails if one names the
+  engine's own types, the connections facade, seal, the webhook manager,
+  the component dispatcher or the compile queue. The handlers of the parts
+  the engine serves live beside the API's and are named in that test as the
+  engine's.
 - **A run's records are read in its tenant's scope**, entered on the
   engine's side from the tenant the call names, instead of relying on the
   scope the handler happened to run in.
+- **Background work is started for the role it belongs to**
+  (`crates/runtara-server/src/roles.rs`). Every worker is started through
+  one helper that names its role, and the server logs what it started for
+  each. One process runs both roles, so what runs is unchanged.
 
-What is left of this phase:
+  | Role | Work |
+  |---|---|
+  | Engine | trigger workers, compilation worker, execution outbox relay, admission reconcilers, control children, session delivery, cron, channel intake, unconfirmed OAuth sweep, platform OAuth apps reload, artifact restaging, invocation and trigger stream clean-up, object model pool monitor, and everything `runtara-environment` starts |
+  | API | member control events (revoking a removed member's API keys), product events, the database pool monitor, the heartbeat log |
 
-- **Workflow handlers still hold the connections facade**, to check that a
-  workflow's steps name connections that exist. It can do more than that
-  (it is the way to seal), so the API side is not yet free of it. It needs
-  a narrower question: "which connections does this tenant have".
-- **Compiling through the queue is still the API's**: it writes the compile
-  request to Valkey and reads its progress, and the engine's worker takes
-  it from there. That is a queue already, so it crosses a process boundary
-  as it is; it moves behind `Engine` when the API's Valkey user loses the
-  queue (Phase 4).
-- **The engine is not yet sorted out of the server's start-up.** Every
-  worker is started in one function, and `ExecutionEngine` still holds the
-  outbox and admission beside what `Engine` exposes. Phase 3 needs them
-  apart to start one role without the other.
-- **What crosses is not yet only values.** A forwarded request carries the
-  caller the API authenticated as a request extension, and some operations
-  take the caller's `AuthContext`; both are in-process shapes. Phase 3 puts
-  them on the wire, and Phase 4 replaces them with the token itself.
+What Phase 3 takes from here, none of it left undone by this phase:
 
-Two small differences in answers, both for requests that were refused
-anyway: an unknown path under `/api/runtime/object-model` or
-`/api/runtime/triggers` is now refused as unauthenticated before it is not
-found, and a wrong method on those routes is answered by the engine.
+- **What a call carries.** Each operation names its tenant, and the ones a
+  signed-in caller answers for carry that caller as the API verified it; a
+  forwarded request carries the same as a request extension. That is the
+  verified identity this phase set out to pass. Phase 3 writes it on the
+  wire, and Phase 4 replaces it with the token itself, which the engine
+  verifies.
+- **Roles are declared and not yet chosen.** `Roles::all()` is the one
+  value used. Phase 3 reads it from `RUNTARA_ROLE`, and has the set-up
+  around each worker (the clients it builds before it starts) follow the
+  role as the start already does.
+- **Agents are served whole by the engine.** The decision to list them on
+  the API's side from the `.meta.json` files without loading components is
+  still open to Phase 3; until then the API's side simply does not hold
+  them.
+
+Small differences in answers, all for requests that were refused anyway: an
+unknown path under `/api/runtime/object-model`, `/api/runtime/triggers`,
+`/api/runtime/agents` or `/api/runtime/_internal` is now refused as
+unauthenticated before it is not found, and a wrong method on those routes
+is answered by the engine.
 
 ## Phase 3: two roles and the wire between them
 
@@ -401,7 +414,7 @@ tenant, or a certificate an executor or the run channel accepts.
 
 ## Order and size
 
-Phases 0 and 1 are done, and Phase 2 but for its last items. Phase 2 was the
+Phases 0, 1 and 2 are done. Phase 2 was the
 bulk: about 25 to 30 operations and 50 to 60 call sites, done in the six
 groups above. Phase 3 is mostly transport once Phase 2 holds. Phase 4 changes
 who verifies, and needs Phase 3. Each phase leaves a server that runs as one
