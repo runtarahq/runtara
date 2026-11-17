@@ -1061,6 +1061,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   find such a path before refusing it. A superuser or `BYPASSRLS` role is
   bound by none of this, as before. See `docs/install.md`.
 
+- **The evaluation stack's server is not its database's administrator.**
+  `docker-compose.yml` connected the server as the Postgres image's own
+  user, a superuser that row-level security does not bind. A `db-setup`
+  step now makes a plain role, `runtara_server`, gives it the server's two
+  databases and what is in them, and makes the extensions the migrations
+  ask for; the server connects as that role with
+  `RUNTARA_REQUIRE_ROW_SECURITY=true`. The step runs on every `up` and
+  repeats nothing, so an existing volume is brought over by the next `up`.
+
 - **BREAKING: connection credentials are always encrypted at rest.**
   `runtara-server` (and `reencrypt-connections`) refuse to start unless
   `RUNTARA_CONNECTIONS_ENCRYPTION_KEY` holds a valid base64 32-byte key; a
