@@ -35,6 +35,14 @@ input_types:
   tax_class_id: {type: integer, format: int64}
   limit: {type: integer, format: int64}
   page: {type: integer, format: int64}
+  # The inventory spec types its `:in` filters as one value; they take a
+  # comma-separated list, as everywhere else.
+  "variant_id:in": {type: array, items: {type: integer, format: int64}}
+  "product_id:in": {type: array, items: {type: integer, format: int64}}
+  "location_id:in": {type: array, items: {type: integer, format: int64}}
+  "sku:in": {type: array, items: {type: string}}
+  "location_code:in": {type: array, items: {type: string}}
+  "type_id:in": {type: array, items: {type: string}}
 # The same in the records BigCommerce returns and in refund items; a workflow
 # would otherwise read an order's customer as `5.0`.
 field_types:

@@ -15686,54 +15686,74 @@
         "parameters": [
           {
             "description": "List of `sku` separated by comma.",
+            "explode": false,
             "in": "query",
             "name": "sku:in",
             "required": false,
             "schema": {
-              "type": "string"
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             },
             "x-runtara-label": "Sku:in"
           },
           {
             "description": "List of `variant_id` separated by comma.",
+            "explode": false,
             "in": "query",
             "name": "variant_id:in",
             "required": false,
             "schema": {
-              "format": "int64",
-              "type": "integer"
+              "items": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "type": "array"
             },
             "x-runtara-label": "Variant Id:in"
           },
           {
             "description": "List of `product_id` separated by comma.",
+            "explode": false,
             "in": "query",
             "name": "product_id:in",
             "required": false,
             "schema": {
-              "format": "int64",
-              "type": "integer"
+              "items": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "type": "array"
             },
             "x-runtara-label": "Product Id:in"
           },
           {
             "description": "Comma separated list of `location_id`.",
+            "explode": false,
             "in": "query",
             "name": "location_id:in",
             "required": false,
             "schema": {
-              "format": "int64",
-              "type": "integer"
+              "items": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "type": "array"
             },
             "x-runtara-label": "Location Id:in"
           },
           {
             "description": "Comma separated list of `location_code`.",
+            "explode": false,
             "in": "query",
             "name": "location_code:in",
             "required": false,
             "schema": {
-              "type": "string"
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             },
             "x-runtara-label": "Location Code:in"
           },
@@ -15791,32 +15811,44 @@
         "parameters": [
           {
             "description": "Comma separated list of `location_id`.",
+            "explode": false,
             "in": "query",
             "name": "location_id:in",
             "required": false,
             "schema": {
-              "format": "int64",
-              "type": "integer"
+              "items": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "type": "array"
             },
             "x-runtara-label": "Location Id:in"
           },
           {
             "description": "Comma separated list of `location_code`.",
+            "explode": false,
             "in": "query",
             "name": "location_code:in",
             "required": false,
             "schema": {
-              "type": "string"
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             },
             "x-runtara-label": "Location Code:in"
           },
           {
             "description": "Comma separated list of locations type codes.",
+            "explode": false,
             "in": "query",
             "name": "type_id:in",
             "required": false,
             "schema": {
-              "type": "string"
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             },
             "x-runtara-label": "Type Id:in"
           },

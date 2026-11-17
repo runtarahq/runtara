@@ -15588,7 +15588,7 @@ pub struct ItemsGetInventoryItemsInput {
         description = r##"List of `sku` separated by comma."##
     )]
     #[serde(rename = "sku:in", default, skip_serializing_if = "Option::is_none")]
-    pub sku_colon_in: Option<String>,
+    pub sku_colon_in: Option<Vec<String>>,
     #[field(
         display_name = r##"Variant Id:in"##,
         description = r##"List of `variant_id` separated by comma."##
@@ -15598,7 +15598,7 @@ pub struct ItemsGetInventoryItemsInput {
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub variant_id_colon_in: Option<i64>,
+    pub variant_id_colon_in: Option<Vec<i64>>,
     #[field(
         display_name = r##"Product Id:in"##,
         description = r##"List of `product_id` separated by comma."##
@@ -15608,7 +15608,7 @@ pub struct ItemsGetInventoryItemsInput {
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub product_id_colon_in: Option<i64>,
+    pub product_id_colon_in: Option<Vec<i64>>,
     #[field(
         display_name = r##"Location Id:in"##,
         description = r##"Comma separated list of `location_id`."##
@@ -15618,7 +15618,7 @@ pub struct ItemsGetInventoryItemsInput {
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub location_id_colon_in: Option<i64>,
+    pub location_id_colon_in: Option<Vec<i64>>,
     #[field(
         display_name = r##"Location Code:in"##,
         description = r##"Comma separated list of `location_code`."##
@@ -15628,7 +15628,7 @@ pub struct ItemsGetInventoryItemsInput {
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub location_code_colon_in: Option<String>,
+    pub location_code_colon_in: Option<Vec<String>>,
     #[field(
         display_name = r##"Page"##,
         description = r##"Specifies the page number in a limited (paginated) list."##
@@ -15691,7 +15691,7 @@ pub struct LocationsGetLocationsInput {
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub location_id_colon_in: Option<i64>,
+    pub location_id_colon_in: Option<Vec<i64>>,
     #[field(
         display_name = r##"Location Code:in"##,
         description = r##"Comma separated list of `location_code`."##
@@ -15701,7 +15701,7 @@ pub struct LocationsGetLocationsInput {
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub location_code_colon_in: Option<String>,
+    pub location_code_colon_in: Option<Vec<String>>,
     #[field(
         display_name = r##"Type Id:in"##,
         description = r##"Comma separated list of locations type codes."##
@@ -15711,7 +15711,7 @@ pub struct LocationsGetLocationsInput {
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub type_id_colon_in: Option<String>,
+    pub type_id_colon_in: Option<Vec<String>>,
     #[field(
         display_name = r##"Managed By External Source"##,
         description = r##"Filter whether an external source manages location inventory levels."##

@@ -1083,6 +1083,18 @@ class CommaQueryArraysTest(unittest.TestCase):
         self.assertIs(parameters["include"]["explode"], False)
         self.assertNotIn("explode", parameters["sku"])
 
+    def test_a_parameter_input_types_makes_a_list_is_sent_as_one(self):
+        # BigCommerce's inventory spec types `variant_id:in` as one integer,
+        # though it takes "a list of `variant_id` separated by comma".
+        variants = {"in": "query", "name": "variant_id:in", "schema": {"type": "integer"}}
+        sliced = cg.slice_specs([({"operations": ["list"]}, self.spec(variants))], {
+            "comma_separated_query_arrays": True,
+            "input_types": {"variant_id:in": {"type": "array", "items": {"type": "integer"}}},
+        })
+        parameter = operation(sliced, "list")["parameters"][0]
+        self.assertEqual(parameter["schema"]["type"], "array")
+        self.assertIs(parameter["explode"], False)
+
     def test_it_needs_an_array_query_parameter(self):
         sku = {"in": "query", "name": "sku", "schema": {"type": "string"}}
         with self.assertRaises(SystemExit):

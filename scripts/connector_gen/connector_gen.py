@@ -1310,10 +1310,11 @@ def slice_specs(specs: list, config: dict) -> dict:
         check_names(sliced, [op for source, _ in specs for op in source["operations"]], model_names)
     make_optional(sliced, config.get("optional_fields") or {})
     retype_titled(sliced, config.get("title_types") or {})
-    if config.get("comma_separated_query_arrays"):
-        unexplode_query_arrays(sliced)
     retype_fields(sliced, config.get("field_types") or {})
     retype_inputs(sliced, config.get("input_types") or {})
+    # After `input_types`, so a parameter it makes a list is sent as one.
+    if config.get("comma_separated_query_arrays"):
+        unexplode_query_arrays(sliced)
     if config.get("html_descriptions"):
         plain_descriptions(sliced)
     return sliced

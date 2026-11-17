@@ -12,12 +12,12 @@
 #![recursion_limit = "256"]
 
 use runtara_agent_bigcommerce::{
-    AdjustmentsPutAbsoluteAdjustmentInput, CustomersGetCustomersResponse200, OrderProducts,
-    OrderResp, OrderShipment, OrderShipmentsCreateOrderShipmentsInput, OrderStatusBase,
-    OrdersCreateOrderInput, OrdersGetOrdersInput, OrdersUpdateOrderInput,
-    PaymentActionsCreateOrderRefundQuotesResponse200, ProductsCreateProductInput,
-    ProductsGetProductsInput, ProductsGetProductsResponse200, SimpleTransactionResponse,
-    VariantsBatchUpdateVariantsBatchInput,
+    AdjustmentsPutAbsoluteAdjustmentInput, CustomersGetCustomersResponse200,
+    ItemsGetInventoryItemsInput, OrderProducts, OrderResp, OrderShipment,
+    OrderShipmentsCreateOrderShipmentsInput, OrderStatusBase, OrdersCreateOrderInput,
+    OrdersGetOrdersInput, OrdersUpdateOrderInput, PaymentActionsCreateOrderRefundQuotesResponse200,
+    ProductsCreateProductInput, ProductsGetProductsInput, ProductsGetProductsResponse200,
+    SimpleTransactionResponse, VariantsBatchUpdateVariantsBatchInput,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -659,6 +659,28 @@ fn a_list_filter_is_sent_comma_separated() {
     };
     assert_eq!(sent("id:in"), ["77,78"]);
     assert_eq!(sent("include"), ["variants,images"]);
+}
+
+#[test]
+fn inventory_is_filtered_by_lists_of_variants_and_skus() {
+    // The inventory spec types these as one value; BigCommerce takes a
+    // comma-separated list.
+    let input: ItemsGetInventoryItemsInput = serde_json::from_value(json!({
+        "variant_id:in": [77, 78],
+        "sku:in": ["MUG-1", "MUG-2"],
+    }))
+    .unwrap();
+    let request = input.request().unwrap();
+    assert_eq!(request.path(), "/v3/inventory/items");
+    let mut query = request.query_pairs().to_vec();
+    query.sort();
+    assert_eq!(
+        query,
+        [
+            ("sku:in".to_string(), "MUG-1,MUG-2".to_string()),
+            ("variant_id:in".to_string(), "77,78".to_string()),
+        ]
+    );
 }
 
 #[test]
