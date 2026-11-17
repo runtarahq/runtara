@@ -459,6 +459,9 @@ struct AppState {
     connections: Arc<runtara_connections::ConnectionsFacade>,
     /// Unified execution engine — single orchestrator for all execution paths
     engine: Arc<workers::execution_engine::ExecutionEngine>,
+    /// What code that takes requests may ask of the engine. Handlers hold
+    /// this, and are moving off the two fields above it.
+    engine_api: Arc<dyn crate::engine::Engine>,
     /// Metadata service for agent listings — pre-built with the component
     /// dispatcher so component-backed agents override the legacy registry.
     agents: api::services::operators::AgentsService,
@@ -470,6 +473,12 @@ struct AppState {
     /// background drain batches the events and ships them to Valkey for smo-management's
     /// per-tenant consumer to persist into its `product_events` table.
     events: product_events::ProductEventSink,
+}
+
+impl axum::extract::FromRef<AppState> for Arc<dyn crate::engine::Engine> {
+    fn from_ref(state: &AppState) -> Self {
+        state.engine_api.clone()
+    }
 }
 
 // Implement FromRef to allow extracting PgPool from AppState
@@ -2229,6 +2238,11 @@ async fn start_as_platform(
         product_event_sink.clone(),
     ));
     println!("✓ Execution engine initialized");
+    // The whole of what code that takes requests may ask of the engine.
+    let engine_api: Arc<dyn crate::engine::Engine> = Arc::new(crate::engine::LocalEngine::new(
+        runtime_client.clone(),
+        execution_engine.clone(),
+    ));
     native_control.install_engine(execution_engine.clone());
     {
         let limit = crate::middleware::entitlement::effective_limit(
@@ -2683,6 +2697,7 @@ async fn start_as_platform(
             valkey_conn: valkey_conn.clone(),
             connections: connections_facade.clone(),
             engine: execution_engine.clone(),
+            engine_api: engine_api.clone(),
             agents: agents_service.clone(),
             agent_catalog: agent_catalog.clone(),
             events: product_event_sink.clone(),
@@ -2907,6 +2922,7 @@ async fn start_as_platform(
             valkey_conn: valkey_conn.clone(),
             connections: connections_facade.clone(),
             engine: execution_engine.clone(),
+            engine_api: engine_api.clone(),
             agents: agents_service.clone(),
             agent_catalog: agent_catalog.clone(),
             events: product_event_sink.clone(),

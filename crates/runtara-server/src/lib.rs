@@ -18,6 +18,7 @@ pub mod destroy_seal_keys;
 pub mod dsl;
 pub mod egress_client;
 pub mod embedded_runtara;
+pub mod engine;
 pub mod entitlement_error;
 pub mod entitlements;
 pub mod environment_client;
