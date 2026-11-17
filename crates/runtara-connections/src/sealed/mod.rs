@@ -1035,7 +1035,7 @@ pub async fn follow_encryption_key_rotation(pool: &sqlx::PgPool) -> Result<usize
         let derived = keys::wrapping_key_from_encryption_key(&bytes);
         wraps.push(keys::key_wrap(derived.as_ref()).map_err(|error| error.to_string())?);
     }
-    keys::rewrap_retired(pool, current.as_ref(), &wraps).await
+    keys::rewrap_retired(pool, current, &wraps).await
 }
 
 #[cfg(any(test, feature = "test-util"))]
