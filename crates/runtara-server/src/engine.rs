@@ -75,6 +75,8 @@ pub enum Served {
     ObjectModel,
     /// Webhooks of chat channels, each checked against its connection.
     Channels,
+    /// Agents: what there are, what each can do, and running one on request.
+    Agents,
     /// Triggers: registering one may register a webhook at its provider.
     Triggers,
     /// A trigger's HTTP events, each checked against its connection, from
@@ -1234,6 +1236,8 @@ mod boundary {
         "WebhookManager",
         "webhook_verification::",
         "AgentTestingService",
+        "AgentsService",
+        "ComponentDispatcher",
         "compilation_worker::",
         "compilation_queue::",
         "compilation_progress::",
@@ -1247,6 +1251,8 @@ mod boundary {
         "api/handlers/triggers.rs",
         "api/handlers/object_model.rs",
         "api/handlers/csv_import_export.rs",
+        "api/handlers/operators.rs",
+        "api/handlers/agent_testing.rs",
     ];
 
     fn sources(dir: &Path, found: &mut Vec<PathBuf>) {

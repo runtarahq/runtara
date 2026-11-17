@@ -2672,31 +2672,7 @@ async fn start_as_platform(
             "/api/runtime/entitlements",
             get(api::handlers::entitlements::get_entitlements_handler),
         )
-        // Agent endpoints (global metadata)
-        .route(
-            "/api/runtime/agents",
-            get(api::handlers::operators::list_agents_handler),
-        )
-        .route(
-            "/api/runtime/agents/{name}",
-            get(api::handlers::operators::get_agent_handler),
-        )
-        .route(
-            "/api/runtime/agents/{name}/capabilities/{capability_id}",
-            get(api::handlers::operators::get_capability_handler),
-        )
-        .route(
-            "/api/runtime/agents/{name}/connection-schema",
-            get(api::handlers::operators::get_agent_connection_schema_handler),
-        )
-        .route(
-            "/api/runtime/_internal/components/status",
-            get(api::handlers::operators::components_status_handler),
-        )
-        .route(
-            "/api/runtime/agents/{name}/capabilities/{capability_id}/test",
-            post(api::handlers::agent_testing::test_agent_handler),
-        )
+        // Agents are served by the engine: see `Served::Agents` below.
         // Step type endpoints
         .route(
             "/api/runtime/steps",
@@ -2772,6 +2748,64 @@ async fn start_as_platform(
         // file inputs (workflow `file` fields) are not rejected with 413
         // (SYN-457). See TENANT_REQUEST_BODY_LIMIT_BYTES.
         .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES));
+
+    // Agents are the engine's: it is the engine that loaded them, and that runs
+    // one on request. What agents there are, what each can do, and whether
+    // their components loaded is asked of it.
+    local_engine.serves(
+        crate::engine::Served::Agents,
+        Router::new()
+            .route(
+                "/api/runtime/agents",
+                get(api::handlers::operators::list_agents_handler),
+            )
+            .route(
+                "/api/runtime/agents/{name}",
+                get(api::handlers::operators::get_agent_handler),
+            )
+            .route(
+                "/api/runtime/agents/{name}/capabilities/{capability_id}",
+                get(api::handlers::operators::get_capability_handler),
+            )
+            .route(
+                "/api/runtime/agents/{name}/connection-schema",
+                get(api::handlers::operators::get_agent_connection_schema_handler),
+            )
+            .route(
+                "/api/runtime/_internal/components/status",
+                get(api::handlers::operators::components_status_handler),
+            )
+            .route(
+                "/api/runtime/agents/{name}/capabilities/{capability_id}/test",
+                post(api::handlers::agent_testing::test_agent_handler),
+            )
+            .with_state(AppState {
+                pool: pool.clone(),
+                object_store_manager: object_store_manager.clone(),
+                trigger_stream: trigger_stream.clone(),
+                valkey_conn: valkey_conn.clone(),
+                connections: connections_facade.clone(),
+                engine: engine_api.clone(),
+                agents: agents_service.clone(),
+                agent_catalog: agent_catalog.clone(),
+                events: product_event_sink.clone(),
+            })
+            .route_layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
+            .route_layer(from_fn(crate::middleware::authorization::authorize(
+                membership_policy,
+            )))
+            .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES)),
+    );
+    let agent_routes = {
+        let to_agents = || {
+            crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Agents).layer(
+                from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
+            )
+        };
+        Router::new()
+            .nest("/api/runtime/agents", to_agents())
+            .nest("/api/runtime/_internal", to_agents())
+    };
 
     // Triggers are the engine's: making or changing one may register a webhook
     // at its provider, with the connection's sealed secret. The API
@@ -3130,6 +3164,7 @@ async fn start_as_platform(
         .merge(object_model_routes.clone())
         .merge(connections_tenant_routes.clone())
         .merge(trigger_routes.clone())
+        .merge(agent_routes.clone())
         .merge(public_routes.clone())
         .merge(internal_event_routes);
 
@@ -3235,6 +3270,7 @@ async fn start_as_platform(
         .merge(tenant_routes)
         .merge(connections_tenant_routes)
         .merge(trigger_routes)
+        .merge(agent_routes)
         .merge(oauth_callback_routes)
         .merge(object_model_routes)
         .merge(me_routes)
