@@ -4,6 +4,8 @@ members = [
     "crates/runtara-core",
     # PostgreSQL implementation of core's Persistence contract
     "crates/runtara-store-postgres",
+    # The tenant, or every tenant, that a piece of work is for
+    "crates/runtara-tenant-scope",
     "crates/runtara-environment",
     # Workflow compilation library
     "crates/runtara-dsl",

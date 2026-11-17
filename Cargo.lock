@@ -5257,6 +5257,7 @@ dependencies = [
  "runtara-database-contract",
  "runtara-dsl",
  "runtara-object-store",
+ "runtara-tenant-scope",
  "runtara-wit",
  "runtara-workflow-api",
  "serde",
@@ -5624,6 +5625,7 @@ dependencies = [
  "chrono",
  "runtara-core",
  "runtara-dsl",
+ "runtara-tenant-scope",
  "serde_json",
  "sqlx",
  "testcontainers",
@@ -5631,6 +5633,13 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "runtara-tenant-scope"
+version = "10.0.0"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]

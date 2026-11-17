@@ -1,12 +1,20 @@
 // Copyright (C) 2026 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Work for one tenant on a pool every tenant shares (C11): inside
-//! [`scoped`], each connection the pool hands out names the tenant
-//! (`runtara.tenant_id`), so row-level security confines that work to the
-//! tenant's rows, while outside a scope the same pool is the system path and
-//! sees every tenant.
+//! Whose rows a piece of work may reach, on a pool every tenant shares (C11).
 //!
-//! The tenant is set on the connection as it is handed out, whether it was
+//! Work runs in one of two scopes. Inside [`scoped`], each connection the pool
+//! hands out names one tenant (`runtara.tenant_id`), and row-level security
+//! confines the work to that tenant's rows. Inside [`system`], each names
+//! every tenant (`runtara.all_tenants`): the platform's own work, such as a
+//! worker that sweeps all of them, or the lookup that finds which tenant an
+//! unauthenticated request is for.
+//!
+//! Work in neither scope reaches no tenant's rows: the database refuses its
+//! reads and writes of a tenant-bearing table, so a path that forgot its scope
+//! fails where it runs instead of reading across tenants. (A superuser or a
+//! `BYPASSRLS` role is bound by none of this; see [`require_row_security`].)
+//!
+//! The scope is set on the connection as it is handed out, whether it was
 //! idle (`before_acquire`) or newly opened (`after_connect`), so every query
 //! and transaction on it runs under the scope it was acquired in. That costs
 //! one statement per acquire, and no call site changes. The statement also
@@ -14,38 +22,13 @@
 //! pool's own ping before each acquire is turned off: one round trip, not two.
 //!
 //! The scope is a task-local: work spawned onto another task
-//! (`tokio::spawn`, `spawn_blocking`) leaves it and runs as the system path.
-
-use std::future::Future;
+//! (`tokio::spawn`, `spawn_blocking`) leaves it, and is in no scope unless it
+//! is given one ([`inherit`], [`scoped`], [`system`]).
 
 use sqlx::postgres::PgPoolOptions;
 
-tokio::task_local! {
-    static TENANT: String;
-}
-
-/// Runs `work` for `tenant`: connections it takes from a pool built with
-/// [`scoping`] see only that tenant's rows.
-pub async fn scoped<F: Future>(tenant: impl Into<String>, work: F) -> F::Output {
-    TENANT.scope(tenant.into(), work).await
-}
-
-/// The tenant of the current scope, if any.
-pub fn current() -> Option<String> {
-    TENANT.try_with(Clone::clone).ok()
-}
-
-/// `work` in the current scope, wherever it is later run: for work spawned
-/// onto another task, which would otherwise leave the scope.
-pub fn inherit<F: Future>(work: F) -> impl Future<Output = F::Output> {
-    let tenant = current();
-    async move {
-        match tenant {
-            Some(tenant) => scoped(tenant, work).await,
-            None => work.await,
-        }
-    }
-}
+use runtara_tenant_scope::Named;
+pub use runtara_tenant_scope::{current, inherit, is_system, locating, scoped, spawn, system};
 
 /// Whether `pool`'s role escapes row level security (a superuser or a
 /// BYPASSRLS role), so a tenant's scope would not confine it.
@@ -106,45 +89,88 @@ pub async fn check_enum_index_use(pool: &sqlx::PgPool, database: &str) {
     }
 }
 
-async fn name_tenant(connection: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT set_config('runtara.tenant_id', $1, false)")
-        .bind(current().unwrap_or_default())
-        .execute(connection)
-        .await
-        .map(|_| ())
+/// What work in no scope is given, from `RUNTARA_ROW_SECURITY_UNSCOPED`:
+/// nothing (`refuse`, the default), or every tenant's rows with a warning
+/// that says where it ran (`system`), for finding the paths that have no
+/// scope yet before refusing them.
+fn unscoped_is_system() -> bool {
+    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MODE.get_or_init(
+        || match std::env::var("RUNTARA_ROW_SECURITY_UNSCOPED").as_deref() {
+            Ok("system") => true,
+            Ok("refuse") | Err(_) => false,
+            Ok(other) => {
+                tracing::warn!(
+                    value = other,
+                    "RUNTARA_ROW_SECURITY_UNSCOPED is `refuse` or `system`; refusing"
+                );
+                false
+            }
+        },
+    )
 }
 
-/// `options` for a pool whose connections take the tenant of the scope they
-/// are handed out in ([`scoped`]), or none.
+/// Says once per place that work there took a connection in no scope.
+fn warn_unscoped() {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let trace = std::backtrace::Backtrace::force_capture().to_string();
+    // The frames above the pool's own, which are the same for every caller.
+    let place: String = trace
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("at ") && line.contains("/crates/"))
+        .filter(|line| !line.contains("tenant_scope.rs"))
+        .take(6)
+        .collect::<Vec<_>>()
+        .join(" < ");
+    let seen = SEEN.get_or_init(Default::default);
+    let new = seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(place.clone());
+    if new {
+        tracing::warn!(
+            place,
+            "a database connection was taken in no tenant scope; it is given every \
+             tenant's rows because RUNTARA_ROW_SECURITY_UNSCOPED=system, and is refused \
+             otherwise"
+        );
+    }
+}
+
+/// Names the current scope on `connection`: its tenant, or every tenant, or
+/// neither.
+async fn name_scope(connection: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
+    let (tenant, all_tenants) = match runtara_tenant_scope::named() {
+        Named::Tenant(tenant) => (tenant, false),
+        Named::System => (String::new(), true),
+        Named::Nobody if unscoped_is_system() => {
+            warn_unscoped();
+            (String::new(), true)
+        }
+        Named::Nobody => (String::new(), false),
+    };
+    sqlx::query(
+        "SELECT set_config('runtara.tenant_id', $1, false), \
+                set_config('runtara.all_tenants', $2, false)",
+    )
+    .bind(tenant)
+    .bind(if all_tenants { "on" } else { "off" })
+    .execute(connection)
+    .await
+    .map(|_| ())
+}
+
+/// `options` for a pool whose connections take the scope they are handed out
+/// in ([`scoped`], [`system`]), or none.
 pub fn scoping(options: PgPoolOptions) -> PgPoolOptions {
     options
         .test_before_acquire(false)
-        .after_connect(|connection, _| Box::pin(name_tenant(connection)))
+        .after_connect(|connection, _| Box::pin(name_scope(connection)))
         .before_acquire(|connection, _| {
-            Box::pin(async move { name_tenant(connection).await.map(|_| true) })
+            Box::pin(async move { name_scope(connection).await.map(|_| true) })
         })
-}
-
-#[cfg(test)]
-mod scope_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn spawned_work_keeps_the_scope_only_when_it_inherits_it() {
-        let (kept, left) = scoped("acme", async {
-            let kept = tokio::spawn(inherit(async { current() }));
-            let left = tokio::spawn(async { current() });
-            (kept.await.unwrap(), left.await.unwrap())
-        })
-        .await;
-        assert_eq!(kept.as_deref(), Some("acme"));
-        assert_eq!(left, None);
-        // Outside any scope there is nothing to inherit.
-        assert_eq!(
-            tokio::spawn(inherit(async { current() })).await.unwrap(),
-            None
-        );
-    }
 }
 
 #[cfg(all(test, feature = "db-integration-tests"))]
