@@ -5,16 +5,21 @@
 //! provider.
 //!
 //! With `RUNTARA_RUNNER=executor` no workflow runs in the server's process.
-//! Each launch's workflow is staged with the executor and placed there; its
+//! Each launch is placed with one of the executors that told this server
+//! they are here ([`registry`]): the one with the most room, and the next if
+//! that one is full or cannot be reached. The executor fetches the launch's
+//! workflow from the run channel's listener if it does not hold it; the
 //! guest reaches the workflow API over the run channel this process serves,
 //! each call carrying the credential minted for its launch; and the run ends
 //! on the outcome it posts. The executor says when a run's process ended
-//! without one, and a run whose executor cannot be reached is handed to
-//! recovery.
+//! without one, and a run whose executor is gone or cannot be reached is
+//! handed to recovery.
 //!
 //! Both connections are mutual TLS between the server's and the executor's
 //! certificates (`runtara-executor init-pki`): this process accepts on its
 //! run channel only the executor's, and places runs only with it.
+
+pub mod registry;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -23,16 +28,24 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use axum::Router;
+use axum::extract::Path;
+use axum::response::IntoResponse;
+use axum::routing::get;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use runtara_component_host::api_launches::ApiLaunches;
 use runtara_environment::runner::{
-    LaunchOptions, Provider, ProviderEnd, ProviderRunner, RunChannel, Runner, RunnerFactory,
+    LaunchOptions, LaunchWorkflows, Provider, ProviderEnd, ProviderRunner, RunChannel, Runner,
+    RunnerFactory,
 };
 use runtara_executor::protocol::{
-    EXECUTOR_NAME, Placed, Refusal, RunState, SERVER_NAME, valid_tenant,
+    ARTIFACTS_PATH, EXECUTOR_NAME, Placed, Refusal, RunState, SERVER_NAME, valid_digest,
+    valid_tenant,
 };
 use runtara_executor::tls::{self, Identity};
+
+use crate::registry::{Executor, Registry};
 use runtara_workflow_api::Binding;
 use serde_json::{Value, json};
 use sha2::Digest;
@@ -43,26 +56,31 @@ const DEFAULT_MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
 /// An executor unreachable this long has lost its runs: runtara recovers
 /// them.
 const LOST_AFTER: Duration = Duration::from_secs(30);
-/// How long one call to the executor may take, staging aside.
+/// How long one call to an executor about a run may take: a status call is
+/// held open for up to 30 seconds.
 const CALL_TIMEOUT: Duration = Duration::from_secs(40);
-/// How long staging a workflow may take: the executor compiles it.
-const STAGE_TIMEOUT: Duration = Duration::from_secs(330);
+/// How long placing a run may take: an executor answers at once, or waits
+/// up to 5 seconds for a slot.
+const PLACE_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long an executor that was full is offered no run.
+const FULL_FOR: Duration = Duration::from_secs(2);
+/// How long an executor that could not be reached is offered no run.
+const UNREACHABLE_FOR: Duration = Duration::from_secs(5);
 
-/// How the server reaches its executor, and the executor the server.
+/// How executors reach the server. Which executors there are is not
+/// configured: they say so ([`registry`]).
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// `https://host:port` of the executor (`RUNTARA_EXECUTOR_URL`).
-    pub executor_url: String,
     /// `ca.pem`, `tls.pem` and `tls.key`: the server's certificate
     /// (`RUNTARA_EXECUTOR_TLS_DIR`).
     pub tls_dir: PathBuf,
     /// Where the run channel listens (`RUNTARA_RUN_CHANNEL_LISTEN`).
     pub run_channel_listen: SocketAddr,
-    /// `https://host:port` at which the executor reaches it
+    /// `https://host:port` at which executors reach it
     /// (`RUNTARA_RUN_CHANNEL_ENDPOINT`).
     pub run_channel_endpoint: String,
     /// Runs being placed at once (`RUNTARA_EXECUTOR_RUNNER_LIMIT`). What runs
-    /// at once is the executor's capacity and the tenants' limits.
+    /// at once is the executors' capacity and the tenants' limits.
     pub runner_limit: usize,
 }
 
@@ -90,7 +108,6 @@ impl Config {
             Ok(url)
         };
         Ok(Some(Self {
-            executor_url: https("RUNTARA_EXECUTOR_URL")?,
             tls_dir: required("RUNTARA_EXECUTOR_TLS_DIR")?.into(),
             run_channel_listen: var("RUNTARA_RUN_CHANNEL_LISTEN")
                 .unwrap_or_else(|| "0.0.0.0:7444".to_owned())
@@ -123,66 +140,78 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// An executor as a capacity provider.
+/// Why a call to an executor was not answered.
+struct Unanswered {
+    why: String,
+    /// The connection was never made, so the call was never sent.
+    never_sent: bool,
+}
+
+/// One call to `executor`; its status and body.
+async fn call(
+    executor: &Executor,
+    method: http::Method,
+    path: &str,
+    body: Bytes,
+    timeout: Duration,
+) -> Result<(http::StatusCode, Bytes), Unanswered> {
+    let sent = |why: String| Unanswered {
+        why,
+        never_sent: false,
+    };
+    let request = http::Request::builder()
+        .method(method)
+        .uri(format!("{}{path}", executor.address))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(Full::new(body))
+        .map_err(|error| sent(error.to_string()))?;
+    let exchange = async {
+        let response = executor
+            .client
+            .request(request)
+            .await
+            .map_err(|error| Unanswered {
+                why: format!("the executor could not be reached: {error}"),
+                never_sent: error.is_connect(),
+            })?;
+        let status = response.status();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .map_err(|error| sent(format!("the executor's answer broke off: {error}")))?
+            .to_bytes();
+        Ok((status, body))
+    };
+    tokio::time::timeout(timeout, exchange)
+        .await
+        .map_err(|_| sent("the executor did not answer in time".to_owned()))?
+}
+
+fn refusal(status: http::StatusCode, body: &[u8]) -> String {
+    match serde_json::from_slice::<Refusal>(body) {
+        Ok(refusal) => format!(
+            "the executor refused ({}): {}",
+            refusal.error, refusal.message
+        ),
+        Err(_) => format!("the executor answered {status}"),
+    }
+}
+
+/// The registered executors as a capacity provider. A run it placed is named
+/// `<boot>:<run>`: the executor that holds it, and that executor's id for it.
 pub struct ExecutorProvider {
-    client: tls::Client,
-    url: String,
+    executors: Arc<Registry>,
     /// When each run's executor first failed to answer.
     unreachable: Mutex<HashMap<String, Instant>>,
 }
 
 impl ExecutorProvider {
-    /// The executor at `url`, reached as `identity`.
-    pub fn new(identity: &Identity, url: String) -> Result<Self, String> {
-        let config = identity.client_config(&identity.ca_pem, None)?;
-        Ok(Self {
-            client: tls::client(config, EXECUTOR_NAME)?,
-            url,
+    /// Places runs with the executors in `executors`.
+    pub fn new(executors: Arc<Registry>) -> Self {
+        Self {
+            executors,
             unreachable: Mutex::default(),
-        })
-    }
-
-    /// One call; its status and body, or why it could not be made.
-    async fn call(
-        &self,
-        method: http::Method,
-        path: &str,
-        body: Bytes,
-        timeout: Duration,
-    ) -> Result<(http::StatusCode, Bytes), String> {
-        let request = http::Request::builder()
-            .method(method)
-            .uri(format!("{}{path}", self.url))
-            .header(http::header::CONTENT_TYPE, "application/json")
-            .body(Full::new(body))
-            .map_err(|error| error.to_string())?;
-        let exchange = async {
-            let response = self
-                .client
-                .request(request)
-                .await
-                .map_err(|error| format!("the executor could not be reached: {error}"))?;
-            let status = response.status();
-            let body = response
-                .into_body()
-                .collect()
-                .await
-                .map_err(|error| format!("the executor's answer broke off: {error}"))?
-                .to_bytes();
-            Ok((status, body))
-        };
-        tokio::time::timeout(timeout, exchange)
-            .await
-            .map_err(|_| "the executor did not answer in time".to_owned())?
-    }
-
-    fn refusal(status: http::StatusCode, body: &[u8]) -> String {
-        match serde_json::from_slice::<Refusal>(body) {
-            Ok(refusal) => format!(
-                "the executor refused ({}): {}",
-                refusal.error, refusal.message
-            ),
-            Err(_) => format!("the executor answered {status}"),
         }
     }
 
@@ -191,6 +220,12 @@ impl ExecutorProvider {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(run);
+    }
+
+    /// The executor that holds `run`, while it is known, and its id for it.
+    fn holder<'run>(&self, run: &'run str) -> Option<(Executor, &'run str)> {
+        let (boot, id) = run.split_once(':')?;
+        Some((self.executors.get(boot)?, id))
     }
 }
 
@@ -210,73 +245,95 @@ impl Provider for ExecutorProvider {
         })
     }
 
-    async fn stage(&self, tenant: &str, bytes: &[u8]) -> Result<String, String> {
-        let digest = hex(&sha2::Sha256::digest(bytes));
-        let path = format!("/v1/artifacts/{}/{digest}", tenant_segment(tenant));
-        let (status, _) = self
-            .call(http::Method::GET, &path, Bytes::new(), CALL_TIMEOUT)
-            .await?;
-        if status == http::StatusCode::NO_CONTENT {
-            return Ok(digest);
-        }
-        let (status, body) = self
-            .call(
-                http::Method::PUT,
-                &path,
-                Bytes::copy_from_slice(bytes),
-                STAGE_TIMEOUT,
-            )
-            .await?;
-        if status == http::StatusCode::NO_CONTENT {
-            Ok(digest)
-        } else {
-            Err(Self::refusal(status, &body))
-        }
+    /// Nothing is sent: the executor fetches a workflow it does not hold
+    /// when a run of it is placed ([`workflow_router`]).
+    async fn stage(&self, _tenant: &str, bytes: &[u8]) -> Result<String, String> {
+        Ok(hex(&sha2::Sha256::digest(bytes)))
     }
 
+    /// Places the run with the executor that has the most room, and with
+    /// the next if that one is full or was never reached. An executor that
+    /// may have taken the run is not followed by another: a run must not
+    /// start twice.
     async fn place(
         &self,
         spec: Value,
         artifact: &str,
         binding: &Binding,
     ) -> Result<String, String> {
-        let place = json!({
-            "tenant": tenant_segment(&binding.tenant_id),
-            "artifact": artifact,
-            "spec": spec,
-        });
-        let (status, body) = self
-            .call(
+        let candidates = self.executors.candidates();
+        let mut refused = "no executor is here to place a run with".to_owned();
+        for (index, executor) in candidates.iter().enumerate() {
+            let mut place = json!({
+                "tenant": tenant_segment(&binding.tenant_id),
+                "artifact": artifact,
+                "spec": spec,
+            });
+            // With another to try, a full executor says so at once.
+            if index + 1 < candidates.len() {
+                place["slot_wait_ms"] = json!(0);
+            }
+            let answer = call(
+                executor,
                 http::Method::POST,
                 "/v1/runs",
                 Bytes::from(place.to_string()),
-                CALL_TIMEOUT,
+                PLACE_TIMEOUT,
             )
-            .await?;
-        if !status.is_success() {
-            return Err(Self::refusal(status, &body));
+            .await;
+            match answer {
+                Ok((status, body)) if status.is_success() => {
+                    let placed = serde_json::from_slice::<Placed>(&body)
+                        .map_err(|_| "the executor's answer is not a placed run".to_owned())?;
+                    self.executors.placed(&executor.boot);
+                    return Ok(format!("{}:{}", executor.boot, placed.run));
+                }
+                Ok((http::StatusCode::SERVICE_UNAVAILABLE, body)) => {
+                    self.executors.pass_over(&executor.boot, FULL_FOR);
+                    refused = refusal(http::StatusCode::SERVICE_UNAVAILABLE, &body);
+                }
+                Ok((status, body)) => return Err(refusal(status, &body)),
+                Err(unanswered) if unanswered.never_sent => {
+                    self.executors.pass_over(&executor.boot, UNREACHABLE_FOR);
+                    refused = unanswered.why;
+                }
+                Err(unanswered) => {
+                    self.executors.pass_over(&executor.boot, UNREACHABLE_FOR);
+                    return Err(unanswered.why);
+                }
+            }
         }
-        serde_json::from_slice::<Placed>(&body)
-            .map(|placed| placed.run)
-            .map_err(|_| "the executor's answer is not a placed run".to_owned())
+        Err(refused)
     }
 
     async fn stop(&self, run: &str) {
-        let _ = self
-            .call(
+        if let Some((executor, id)) = self.holder(run) {
+            let _ = call(
+                &executor,
                 http::Method::DELETE,
-                &format!("/v1/runs/{run}"),
+                &format!("/v1/runs/{id}"),
                 Bytes::new(),
                 CALL_TIMEOUT,
             )
             .await;
+        }
     }
 
     async fn ended(&self, run: &str, timeout: Duration) -> Option<ProviderEnd> {
-        let path = format!("/v1/runs/{run}?wait_ms={}", timeout.as_millis());
-        match self
-            .call(http::Method::GET, &path, Bytes::new(), CALL_TIMEOUT)
-            .await
+        // An executor that left, or started again, holds none of its runs.
+        let Some((executor, id)) = self.holder(run) else {
+            self.reached(run);
+            return Some(ProviderEnd::Lost("its executor is gone".to_owned()));
+        };
+        let path = format!("/v1/runs/{id}?wait_ms={}", timeout.as_millis());
+        match call(
+            &executor,
+            http::Method::GET,
+            &path,
+            Bytes::new(),
+            CALL_TIMEOUT,
+        )
+        .await
         {
             Ok((status, body)) if status.is_success() => {
                 self.reached(run);
@@ -289,7 +346,6 @@ impl Provider for ExecutorProvider {
                     )),
                 }
             }
-            // An executor that started again holds none of its earlier runs.
             Ok((http::StatusCode::NOT_FOUND, _)) => {
                 self.reached(run);
                 Some(ProviderEnd::Lost(
@@ -307,7 +363,7 @@ impl Provider for ExecutorProvider {
                     self.reached(run);
                     let why = match unanswered {
                         Ok((status, _)) => format!("its executor answers {status}"),
-                        Err(error) => error,
+                        Err(unanswered) => unanswered.why,
                     };
                     return Some(ProviderEnd::Lost(format!("lost with its executor: {why}")));
                 }
@@ -319,44 +375,88 @@ impl Provider for ExecutorProvider {
     }
 }
 
-/// Serves the run channel and connects to the executor; the factory of the
-/// runner over them. Called once, at boot, on the server's runtime.
-pub async fn prepare(config: Config) -> Result<RunnerFactory, String> {
+/// What an executor fetches a launch's workflow from, on the run channel's
+/// listener: `GET /executor/v1/artifacts/{sha256}` with the launch's
+/// credential answers with that launch's workflow component, and with nothing
+/// for any other digest. It is outside `/v1`, which is all an executor relays
+/// from a guest, and it is answered before the launch's start is confirmed:
+/// a workflow being fetched is not a guest acting.
+pub fn workflow_router(launches: Arc<ApiLaunches>, workflows: Arc<LaunchWorkflows>) -> Router {
+    let fetch = move |Path(digest): Path<String>, headers: http::HeaderMap| {
+        let (launches, workflows) = (launches.clone(), workflows.clone());
+        async move {
+            let Some(binding) = launches.credential_launch(&headers) else {
+                return http::StatusCode::UNAUTHORIZED.into_response();
+            };
+            if !valid_digest(&digest) {
+                return http::StatusCode::NOT_FOUND.into_response();
+            }
+            match workflows.get(&binding.launch_id, &digest).await {
+                Ok(Some(component)) => component.into_response(),
+                Ok(None) => http::StatusCode::NOT_FOUND.into_response(),
+                Err(error) => {
+                    tracing::error!(%error, launch = %binding.launch_id, "reading a launch's workflow failed");
+                    http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                }
+            }
+        }
+    };
+    Router::new().route(&format!("{ARTIFACTS_PATH}/{{digest}}"), get(fetch))
+}
+
+/// What [`prepare`] made: the runner's factory, and the executors that have
+/// said they are here.
+pub struct Prepared {
+    pub factory: RunnerFactory,
+    pub executors: Arc<Registry>,
+}
+
+/// Serves the run channel, where executors also say they are here and fetch
+/// workflows; the factory of the runner over the executors that do. Called
+/// once, at boot, on the server's runtime.
+pub async fn prepare(config: Config) -> Result<Prepared, String> {
     let identity = Identity::load(&config.tls_dir)?;
     let launches = Arc::new(ApiLaunches::default());
+    let workflows = Arc::new(LaunchWorkflows::default());
     let listener = tls::bind(config.run_channel_listen).await?;
     tracing::info!(
         listen = %config.run_channel_listen,
         endpoint = %config.run_channel_endpoint,
-        executor = %config.executor_url,
-        "workflows run on an executor; run channel listening"
+        "workflows run on the executors that register here; run channel listening"
     );
-    tokio::spawn(tls::serve(
-        listener,
-        identity.server_config()?,
-        EXECUTOR_NAME,
-        launches.credentialed_router(),
-    ));
+    let server_config = identity.server_config()?;
     let channel = RunChannel {
         endpoint: config.run_channel_endpoint,
         ca_pem: identity.ca_pem.clone(),
         pin: None,
         server_name: Some(SERVER_NAME.to_owned()),
     };
-    let provider = Arc::new(ExecutorProvider::new(&identity, config.executor_url)?);
+    let executors = Arc::new(Registry::new(identity));
+    tokio::spawn(tls::serve(
+        listener,
+        server_config,
+        EXECUTOR_NAME,
+        launches
+            .credentialed_router()
+            .merge(workflow_router(launches.clone(), workflows.clone()))
+            .merge(registry::router(executors.clone())),
+    ));
+    let provider = Arc::new(ExecutorProvider::new(executors.clone()));
     let limit = config.runner_limit;
-    Ok(Arc::new(move |parts| {
+    let factory: RunnerFactory = Arc::new(move |parts| {
         Ok(Arc::new(
             ProviderRunner::new(provider.clone(), parts, launches.clone(), limit)
-                .with_run_channel(channel.clone()),
+                .with_run_channel(channel.clone())
+                .with_launch_workflows(workflows.clone()),
         ) as Arc<dyn Runner>)
-    }))
+    });
+    Ok(Prepared { factory, executors })
 }
 
 /// [`prepare`] from the environment: `None` unless `RUNTARA_RUNNER=executor`.
 pub async fn from_env() -> Result<Option<RunnerFactory>, String> {
     match Config::from_env()? {
-        Some(config) => prepare(config).await.map(Some),
+        Some(config) => prepare(config).await.map(|prepared| Some(prepared.factory)),
         None => Ok(None),
     }
 }

@@ -3,11 +3,12 @@
 #
 # Builds `runtara-server`, `runtara-executor` and `runtara-run`, makes the
 # deployment's certificates, starts an executor, and runs the given e2e
-# suites against a server with RUNTARA_RUNNER=executor. Every workflow of the
-# suites is then compiled by the server, staged with the executor over mutual
-# TLS and run in a `runtara-run` process of its own (sandboxed on Linux),
-# its workflow API calls coming back over the run channel. Checks that the
-# suites' launches went through the executor.
+# suites against a server with RUNTARA_RUNNER=executor. The executor tells
+# the server it is here; every workflow of the suites is then compiled by the
+# server, fetched by the executor over mutual TLS and run in a `runtara-run`
+# process of its own (sandboxed on Linux), its workflow API calls coming back
+# over the run channel. Checks that the suites' launches went through the
+# executor. Executors coming and going: e2e/test_scalable_executors.sh.
 #
 # Usage: e2e/test_executor_runner.sh [suite ...]
 #   suites are e2e/test_<suite>.sh names; default: workflow_agent_parity
@@ -60,6 +61,7 @@ UNSANDBOXED=false
 [ "$(uname -s)" = "Linux" ] || UNSANDBOXED=true
 
 RUNTARA_EXECUTOR_LISTEN="127.0.0.1:${EXECUTOR_PORT}" \
+RUNTARA_EXECUTOR_SERVER_URL="https://127.0.0.1:${RUN_CHANNEL_PORT}" \
 RUNTARA_EXECUTOR_TLS_DIR="${WORK_DIR}/pki-executor" \
 RUNTARA_EXECUTOR_STATE_DIR="${WORK_DIR}/executor-state" \
 RUNTARA_EXECUTOR_UNSANDBOXED="${UNSANDBOXED}" \
@@ -80,7 +82,6 @@ WRAPPER="${WORK_DIR}/runtara-server"
 cat > "${WRAPPER}" <<WRAP
 #!/bin/bash
 export RUNTARA_RUNNER=executor
-export RUNTARA_EXECUTOR_URL="https://127.0.0.1:${EXECUTOR_PORT}"
 export RUNTARA_EXECUTOR_TLS_DIR="${WORK_DIR}/pki-server"
 export RUNTARA_RUN_CHANNEL_LISTEN="127.0.0.1:${RUN_CHANNEL_PORT}"
 export RUNTARA_RUN_CHANNEL_ENDPOINT="https://127.0.0.1:${RUN_CHANNEL_PORT}"

@@ -1,10 +1,11 @@
 // Copyright (C) 2026 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Staged workflows: each component the server uploads is compiled once, by
-//! a sandboxed `runtara-run compile`, and kept as what a run loads.
+//! The workflows this executor holds: each component is fetched from the
+//! server when a run of it is first placed, compiled once by a sandboxed
+//! `runtara-run compile`, and kept as what a run loads.
 //!
 //! The cache is per tenant: a run loads compiled code without checking it, so
-//! one tenant's upload must never become what another tenant's run loads,
+//! one tenant's workflow must never become what another tenant's run loads,
 //! even if a compile of it went wrong in the worst way.
 
 use std::collections::HashMap;
@@ -14,6 +15,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bytes::Bytes;
 use sha2::Digest;
 
 use crate::protocol::{valid_digest, valid_tenant};
@@ -88,10 +90,13 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Why a workflow was not staged.
+/// Why a workflow is not held.
 #[derive(Debug)]
 pub enum StageError {
-    /// The request is wrong: a bad name, bytes that are not the digest's.
+    /// It could not be fetched.
+    Fetch(String),
+    /// What was named or fetched is wrong: a bad name, bytes that are not
+    /// the digest's.
     Invalid(String),
     /// The component is not a workflow this executor can run.
     Compile(String),
@@ -99,7 +104,7 @@ pub enum StageError {
     Internal(String),
 }
 
-/// The staged workflows of every tenant.
+/// The compiled workflows of every tenant.
 pub struct Artifacts {
     root: PathBuf,
     runner: Runner,
@@ -126,7 +131,7 @@ impl Artifacts {
         })
     }
 
-    /// Whether `tenant`'s workflow `digest` is staged.
+    /// Whether `tenant`'s workflow `digest` is held.
     pub fn has(&self, tenant: &str, digest: &str) -> bool {
         self.compiled(tenant, digest)
             .is_some_and(|path| path.exists())
@@ -137,21 +142,22 @@ impl Artifacts {
         std::fs::File::open(self.compiled(tenant, digest)?).ok()
     }
 
-    /// Stages `component` as `tenant`'s workflow `digest`.
-    pub async fn put(
+    /// Holds `tenant`'s workflow `digest`: as it is, or else what `fetch`
+    /// answers, checked against the digest and compiled. However many runs
+    /// of a workflow wait here, it is fetched and compiled once.
+    pub async fn ensure<F, Fetched>(
         &self,
         tenant: &str,
         digest: &str,
-        component: &[u8],
-    ) -> Result<(), StageError> {
+        fetch: F,
+    ) -> Result<(), StageError>
+    where
+        F: FnOnce() -> Fetched,
+        Fetched: Future<Output = Result<Bytes, String>>,
+    {
         let compiled = self
             .compiled(tenant, digest)
             .ok_or_else(|| StageError::Invalid("not a tenant and a SHA-256".to_owned()))?;
-        if hex(&sha2::Sha256::digest(component)) != digest {
-            return Err(StageError::Invalid(
-                "the bytes are not the digest's".to_owned(),
-            ));
-        }
         let lock = self
             .compiling
             .lock()
@@ -160,16 +166,22 @@ impl Artifacts {
             .or_default()
             .clone();
         let _one_at_a_time = lock.lock().await;
-        let staged = if compiled.exists() {
+        let held = if compiled.exists() {
             Ok(())
         } else {
-            self.compile(&compiled, component).await
+            match fetch().await {
+                Err(error) => Err(StageError::Fetch(error)),
+                Ok(component) if hex(&sha2::Sha256::digest(&component)) != digest => Err(
+                    StageError::Invalid("the bytes are not the digest's".to_owned()),
+                ),
+                Ok(component) => self.compile(&compiled, &component).await,
+            }
         };
         self.compiling
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&compiled);
-        staged
+        held
     }
 
     async fn compile(&self, compiled: &Path, component: &[u8]) -> Result<(), StageError> {

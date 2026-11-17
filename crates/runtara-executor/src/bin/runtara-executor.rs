@@ -7,8 +7,9 @@ use std::path::PathBuf;
 
 const USAGE: &str = "usage:
   runtara-executor
-      serve, configured by RUNTARA_EXECUTOR_LISTEN, RUNTARA_EXECUTOR_TLS_DIR,
-      RUNTARA_EXECUTOR_STATE_DIR, RUNTARA_EXECUTOR_MAX_RUNS, RUNTARA_EXECUTOR_RUN_BIN
+      serve, configured by RUNTARA_EXECUTOR_SERVER_URL, RUNTARA_EXECUTOR_TLS_DIR,
+      RUNTARA_EXECUTOR_STATE_DIR, RUNTARA_EXECUTOR_LISTEN, RUNTARA_EXECUTOR_ADVERTISE_URL,
+      RUNTARA_EXECUTOR_MAX_RUNS, RUNTARA_EXECUTOR_RUN_BIN
   runtara-executor init-pki --server-dir <dir> --executor-dir <dir> [--replace]
       make a CA and a certificate for each side; each directory is given
       ca.pem, tls.pem and tls.key";
@@ -48,8 +49,10 @@ async fn serve() -> Result<(), String> {
     tracing::info!(
         address = %executor.address(),
         max_runs = config.max_runs,
+        server = %config.server_url,
         "executor listening"
     );
+    let registrar = executor.registrar();
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|error| error.to_string())?;
     tokio::select! {
@@ -57,8 +60,9 @@ async fn serve() -> Result<(), String> {
         _ = terminate.recv() => {}
         _ = tokio::signal::ctrl_c() => {}
     }
-    // Its runs end with it: each run's process exits when its socket closes,
-    // and the server recovers a run whose executor went away.
+    // Its runs end with it: each run's process exits when its socket closes.
+    // Told, the server recovers them at once instead of when it notices.
+    registrar.leave().await;
     Ok(())
 }
 

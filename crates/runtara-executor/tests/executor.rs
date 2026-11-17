@@ -1,20 +1,22 @@
 // Copyright (C) 2026 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! An executor as a server uses it: the probe workflow staged and placed over
-//! the placement API, its run in a real `runtara-run` (sandboxed on Linux),
-//! its workflow API calls arriving at a run channel served here.
+//! An executor as a server uses it: the probe workflow placed over the
+//! placement API and fetched by the executor from the run channel served
+//! here, its run in a real `runtara-run` (sandboxed on Linux), its workflow
+//! API calls arriving at that run channel.
 //!
 //! Needs the probe component (`scripts/build-agent-components.sh`) and the
 //! runner: `cargo build -p runtara-run`.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use runtara_executor::protocol::{EXECUTOR_NAME, Placed, RunState, SERVER_NAME};
@@ -78,6 +80,51 @@ struct Outcome {
 struct RunChannel {
     mode: Arc<Mutex<Value>>,
     outcomes: Arc<Mutex<Vec<Outcome>>>,
+    /// What a fetch of each digest is answered with.
+    workflows: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    /// Each fetch: the digest asked for and the credential it carried.
+    fetches: Arc<Mutex<Vec<(String, String)>>>,
+    /// Each time an executor said it was here (`PUT`) or leaving (`DELETE`):
+    /// the method, its boot, what it said.
+    registrations: Arc<Mutex<Vec<(String, String, Value)>>>,
+}
+
+async fn here(
+    State(channel): State<RunChannel>,
+    Path(boot): Path<String>,
+    axum::Json(said): axum::Json<Value>,
+) -> impl IntoResponse {
+    channel
+        .registrations
+        .lock()
+        .unwrap()
+        .push(("PUT".to_owned(), boot, said));
+    axum::Json(json!({"heartbeat_ms": 100, "away_after_ms": 300}))
+}
+
+async fn leaving(State(channel): State<RunChannel>, Path(boot): Path<String>) -> StatusCode {
+    channel
+        .registrations
+        .lock()
+        .unwrap()
+        .push(("DELETE".to_owned(), boot, Value::Null));
+    StatusCode::NO_CONTENT
+}
+
+async fn workflow(
+    State(channel): State<RunChannel>,
+    Path(digest): Path<String>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    channel
+        .fetches
+        .lock()
+        .unwrap()
+        .push((digest.clone(), header(&headers, "authorization")));
+    match channel.workflows.lock().unwrap().get(&digest) {
+        Some(component) => component.clone().into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 fn header(headers: &HeaderMap, name: &str) -> String {
@@ -126,7 +173,9 @@ struct Deployment {
     client: tls::Client,
     /// The executor's own certificate, as a client: not the server's.
     impostor: tls::Client,
-    _state: tempfile::TempDir,
+    registrar: Arc<runtara_executor::registration::Registrar>,
+    serving: tokio::task::JoinHandle<()>,
+    state: tempfile::TempDir,
 }
 
 impl Deployment {
@@ -150,6 +199,8 @@ impl Deployment {
             .route("/v1/run", get(run_info))
             .route("/v1/run/input", get(input))
             .route("/v1/run/outcome", post(outcome))
+            .route("/executor/v1/artifacts/{digest}", get(workflow))
+            .route("/executor/v1/executors/{boot}", put(here).delete(leaving))
             .with_state(channel.clone());
         let listener = tls::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let endpoint = format!("https://{}", listener.local_addr().unwrap());
@@ -163,6 +214,8 @@ impl Deployment {
         let executor = runtara_executor::Executor::bind(&runtara_executor::Config {
             listen: "127.0.0.1:0".parse().unwrap(),
             tls_dir: tls_dir.clone(),
+            server_url: endpoint.clone(),
+            advertise_url: None,
             state_dir: state.path().join("state"),
             max_runs,
             run_binary: runner(),
@@ -172,7 +225,8 @@ impl Deployment {
         .await
         .unwrap();
         let address = format!("https://{}", executor.address());
-        tokio::spawn(executor.serve());
+        let registrar = executor.registrar();
+        let serving = tokio::spawn(executor.serve());
 
         let client = tls::client(
             server.client_config(&for_server.ca_pem, None).unwrap(),
@@ -194,7 +248,9 @@ impl Deployment {
             executor: address,
             client,
             impostor,
-            _state: state,
+            registrar,
+            serving,
+            state,
         }
     }
 
@@ -211,17 +267,47 @@ impl Deployment {
         (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
     }
 
-    async fn stage(&self, tenant: &str) -> String {
+    /// Has the run channel answer a fetch of `digest` with `component`.
+    fn offer_as(&self, digest: &str, component: Vec<u8>) {
+        self.channel
+            .workflows
+            .lock()
+            .unwrap()
+            .insert(digest.to_owned(), component);
+    }
+
+    /// Has the run channel hold the probe; its digest.
+    fn offer_probe(&self) -> String {
         let probe = probe();
         let digest = digest(&probe);
-        let path = format!("/v1/artifacts/{tenant}/{digest}");
-        let (status, body) = self.call("PUT", &path, probe).await;
-        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
-        assert_eq!(
-            self.call("GET", &path, Vec::new()).await.0,
-            StatusCode::NO_CONTENT
-        );
+        self.offer_as(&digest, probe);
         digest
+    }
+
+    fn fetches(&self) -> Vec<(String, String)> {
+        self.channel.fetches.lock().unwrap().clone()
+    }
+
+    /// The compiled workflows the executor holds for `tenant`.
+    fn held(&self, tenant: &str) -> usize {
+        std::fs::read_dir(self.state.path().join("state/compiled").join(tenant))
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_name().to_string_lossy().ends_with(".cwasm"))
+                    .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Places a run of `artifact` for `tenant`; its id.
+    async fn place_run(&self, tenant: &str, artifact: &str) -> String {
+        let (status, body) = self
+            .call("POST", "/v1/runs", self.place_body(tenant, artifact, 60))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_value::<Placed>(body).unwrap().run
     }
 
     fn place_body(&self, tenant: &str, artifact: &str, lifetime_seconds: u64) -> Vec<u8> {
@@ -245,10 +331,10 @@ impl Deployment {
         .into_bytes()
     }
 
-    /// Stages the probe and places a run of it in `mode`; the run's id.
+    /// Places a run of the probe in `mode`; the run's id.
     async fn place(&self, mode: Value, lifetime_seconds: u64) -> String {
         *self.channel.mode.lock().unwrap() = mode;
-        let artifact = self.stage("tenant-1").await;
+        let artifact = self.offer_probe();
         let (status, body) = self
             .call(
                 "POST",
@@ -348,7 +434,7 @@ async fn a_stopped_run_ends_without_an_outcome() {
 async fn a_full_executor_refuses_a_run_for_now() {
     let deployment = Deployment::start(1).await;
     let first = deployment.place(json!({"mode": "spin"}), 60).await;
-    let artifact = deployment.stage("tenant-1").await;
+    let artifact = deployment.offer_probe();
     let (status, body) = deployment
         .call(
             "POST",
@@ -358,6 +444,20 @@ async fn a_full_executor_refuses_a_run_for_now() {
         .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "capacity");
+    // Asked not to wait for a slot, it says so at once.
+    let mut at_once: Value =
+        serde_json::from_slice(&deployment.place_body("tenant-1", &artifact, 60)).unwrap();
+    at_once["slot_wait_ms"] = json!(0);
+    let asked = std::time::Instant::now();
+    let (status, _) = deployment
+        .call("POST", "/v1/runs", at_once.to_string().into_bytes())
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        asked.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        asked.elapsed()
+    );
     deployment
         .call("DELETE", &format!("/v1/runs/{first}"), Vec::new())
         .await;
@@ -379,7 +479,7 @@ async fn a_full_executor_refuses_a_run_for_now() {
 async fn runs_placed_at_once_all_end() {
     let deployment = Deployment::start(16).await;
     *deployment.channel.mode.lock().unwrap() = json!({"mode": "complete"});
-    let artifact = deployment.stage("tenant-1").await;
+    let artifact = deployment.offer_probe();
     for _round in 0..4 {
         let placed = futures_all((0..12).map(|_| {
             deployment.call(
@@ -398,6 +498,8 @@ async fn runs_placed_at_once_all_end() {
         }
     }
     assert_eq!(deployment.outcomes().len(), 48);
+    // Twelve runs wanted the workflow at once: it was fetched once.
+    assert_eq!(deployment.fetches().len(), 1);
 }
 
 /// Every future's output, all of them driven at once.
@@ -425,38 +527,155 @@ async fn futures_all<F: std::future::Future>(futures: impl Iterator<Item = F>) -
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_workflow_is_staged_for_its_tenant_only_and_checked() {
+async fn a_workflow_is_fetched_as_the_run_and_kept_for_its_tenant_only() {
     let deployment = Deployment::start(4).await;
-    let artifact = deployment.stage("tenant-1").await;
-    // Another tenant has not staged it.
-    let (status, body) = deployment
+    *deployment.channel.mode.lock().unwrap() = json!({"mode": "complete"});
+    let artifact = deployment.offer_probe();
+    let run = deployment.place_run("tenant-1", &artifact).await;
+    assert_eq!(deployment.ended(&run).await, RunState::Exited { code: 0 });
+    assert_eq!(
+        deployment.fetches(),
+        vec![(artifact.clone(), format!("Bearer {CREDENTIAL}"))]
+    );
+    // Held now: a second run fetches nothing.
+    let run = deployment.place_run("tenant-1", &artifact).await;
+    assert_eq!(deployment.ended(&run).await, RunState::Exited { code: 0 });
+    assert_eq!(deployment.fetches().len(), 1);
+    // What one tenant holds is not another's: it is fetched and compiled
+    // again for the other.
+    let run = deployment.place_run("tenant-2", &artifact).await;
+    assert_eq!(deployment.ended(&run).await, RunState::Exited { code: 0 });
+    assert_eq!(deployment.fetches().len(), 2);
+    assert_eq!(deployment.held("tenant-1"), 1);
+    assert_eq!(deployment.held("tenant-2"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workflow_lost_from_the_cache_is_fetched_again() {
+    let deployment = Deployment::start(4).await;
+    *deployment.channel.mode.lock().unwrap() = json!({"mode": "complete"});
+    let artifact = deployment.offer_probe();
+    let run = deployment.place_run("tenant-1", &artifact).await;
+    assert_eq!(deployment.ended(&run).await, RunState::Exited { code: 0 });
+    std::fs::remove_dir_all(deployment.state.path().join("state/compiled/tenant-1")).unwrap();
+    let run = deployment.place_run("tenant-1", &artifact).await;
+    assert_eq!(deployment.ended(&run).await, RunState::Exited { code: 0 });
+    assert_eq!(deployment.fetches().len(), 2);
+}
+
+/// A run whose workflow cannot be had is placed, and ends as failed with the
+/// executor posting why.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_whose_workflow_cannot_be_had_fails() {
+    let deployment = Deployment::start(4).await;
+    let failed = |state: RunState| match state {
+        RunState::Failed { reason } => reason,
+        other => panic!("expected a failed run, got {other:?}"),
+    };
+    // The server does not have it.
+    let missing = "0".repeat(64);
+    let run = deployment.place_run("tenant-1", &missing).await;
+    let reason = failed(deployment.ended(&run).await);
+    assert!(reason.contains("could not be fetched"), "{reason}");
+    // Bytes that are not the digest's.
+    let wrong = "1".repeat(64);
+    deployment.offer_as(&wrong, b"x".to_vec());
+    let run = deployment.place_run("tenant-1", &wrong).await;
+    let reason = failed(deployment.ended(&run).await);
+    assert!(reason.contains("not the digest's"), "{reason}");
+    // Bytes that are not a workflow.
+    let garbage = b"not a component".to_vec();
+    let named = digest(&garbage);
+    deployment.offer_as(&named, garbage);
+    let run = deployment.place_run("tenant-1", &named).await;
+    let reason = failed(deployment.ended(&run).await);
+    assert!(reason.contains("was refused"), "{reason}");
+    assert_eq!(deployment.held("tenant-1"), 0);
+
+    let outcomes = deployment.outcomes();
+    assert_eq!(outcomes.len(), 3, "{outcomes:?}");
+    for outcome in outcomes {
+        assert_eq!(outcome.kind, "failed");
+        assert_eq!(outcome.body["code"], "LAUNCH_FAILED");
+    }
+    // A name that is not a tenant or a digest is refused outright.
+    let (status, _) = deployment
         .call(
             "POST",
             "/v1/runs",
-            deployment.place_body("tenant-2", &artifact, 60),
+            deployment.place_body("../tenant", &missing, 60),
         )
         .await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-    // Bytes that are not the digest's.
-    let (status, body) = deployment
-        .call(
-            "PUT",
-            &format!("/v1/artifacts/tenant-1/{}", "0".repeat(64)),
-            b"x".to_vec(),
-        )
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// A run stopped while its workflow is fetched ends as stopped.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_whose_workflow_is_never_had_can_be_stopped() {
+    let deployment = Deployment::start(1).await;
+    let missing = "2".repeat(64);
+    let run = deployment.place_run("tenant-1", &missing).await;
+    deployment
+        .call("DELETE", &format!("/v1/runs/{run}"), Vec::new())
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    // Bytes that are not a workflow.
-    let garbage = b"not a component".to_vec();
-    let (status, body) = deployment
-        .call(
-            "PUT",
-            &format!("/v1/artifacts/tenant-1/{}", digest(&garbage)),
-            garbage,
-        )
+    assert!(matches!(
+        deployment.ended(&run).await,
+        RunState::Failed { .. }
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_executor_tells_its_server_it_is_here_until_it_stops() {
+    let deployment = Deployment::start(4).await;
+    let said = || deployment.channel.registrations.lock().unwrap().clone();
+    // At start, and again at the interval the server answered with.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while said().len() < 3 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the executor keeps calling");
+    let boot = deployment.registrar.boot().to_owned();
+    let port: u16 = deployment
+        .executor
+        .rsplit(':')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    for (method, from, registration) in said() {
+        assert_eq!((method.as_str(), from.as_str()), ("PUT", boot.as_str()));
+        assert_eq!(
+            registration,
+            json!({"address": null, "port": port, "max_runs": 4, "running": 0})
+        );
+    }
+    // It says what it holds.
+    let run = deployment.place(json!({"mode": "spin"}), 60).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while said().last().unwrap().2["running"] != 1 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the executor says it holds a run");
+    deployment
+        .call("DELETE", &format!("/v1/runs/{run}"), Vec::new())
         .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-    assert_eq!(body["error"], "compile");
+    // Stopped, it calls no more; and it says so when it is asked to.
+    deployment.serving.abort();
+    let _ = (&mut { deployment.serving }).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let before = said().len();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(said().len(), before);
+    deployment.registrar.leave().await;
+    let last = said().pop().unwrap();
+    assert_eq!(
+        (last.0.as_str(), last.1.as_str()),
+        ("DELETE", boot.as_str())
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

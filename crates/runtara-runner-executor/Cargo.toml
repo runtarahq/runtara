@@ -22,6 +22,7 @@ runtara-component-host = { path = "../runtara-component-host" }
 runtara-workflow-api = { path = "../runtara-workflow-api" }
 runtara-executor = { path = "../runtara-executor" }
 async-trait = "0.1"
+axum = { version = "0.8", default-features = false, features = ["tokio", "json"] }
 tokio = { version = "1", features = ["net", "rt", "time", "sync"] }
 http = "1"
 http-body-util = "0.1"

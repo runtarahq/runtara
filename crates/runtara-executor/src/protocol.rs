@@ -4,13 +4,20 @@
 //!
 //! | Call | Purpose |
 //! |---|---|
-//! | `HEAD /v1/artifacts/{tenant}/{sha256}` | whether the workflow is staged |
-//! | `PUT /v1/artifacts/{tenant}/{sha256}` | stage it: the component's bytes, checked against the digest and compiled |
 //! | `POST /v1/runs` | place a run: [`Place`] → [`Placed`] |
 //! | `GET /v1/runs/{id}?wait_ms=` | the run's [`RunState`], waiting up to `wait_ms` for it to end |
 //! | `DELETE /v1/runs/{id}` | stop it |
 //!
 //! A refusal is a [`Refusal`] with a 4xx or 5xx status.
+//!
+//! And what an executor asks of the server, on the run channel's listener
+//! and besides the workflow API it relays for its runs:
+//!
+//! | Call | Purpose |
+//! |---|---|
+//! | `GET /executor/v1/artifacts/{sha256}` | the workflow component of the launch whose credential the call carries |
+//! | `PUT /executor/v1/executors/{boot}` | this executor is here: [`Registration`] → [`Registered`]. Sent at start and again at the interval answered |
+//! | `DELETE /executor/v1/executors/{boot}` | this executor is stopping |
 
 use std::collections::BTreeMap;
 
@@ -18,10 +25,52 @@ use serde::{Deserialize, Serialize};
 
 /// The run protocol a spec speaks (`runtara-environment`'s `RUN_PROTOCOL`).
 pub const RUN_PROTOCOL: u64 = 1;
-/// The largest component staged.
+/// The largest workflow component an executor fetches.
 pub const MAX_ARTIFACT_BYTES: usize = 128 * 1024 * 1024;
+/// Where, at a run channel's endpoint, an executor fetches a launch's
+/// workflow: `{ARTIFACTS_PATH}/{sha256}`.
+pub const ARTIFACTS_PATH: &str = "/executor/v1/artifacts";
 /// The longest a status call is held open.
 pub const MAX_WAIT_MS: u64 = 30_000;
+
+/// Where, at the server's run channel, an executor says it is here:
+/// `{EXECUTORS_PATH}/{boot}`.
+pub const EXECUTORS_PATH: &str = "/executor/v1/executors";
+
+/// An executor's id for as long as it runs: 1 to 64 of `[A-Za-z0-9_-]`, new
+/// each time it starts.
+pub fn valid_boot(boot: &str) -> bool {
+    (1..=64).contains(&boot.len())
+        && boot
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// `PUT /executor/v1/executors/{boot}`: an executor as it is now. Each call
+/// says everything, so a server that started again learns its executors from
+/// their next call.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Registration {
+    /// `https://host:port` at which the server places runs with it. Left
+    /// out, the server uses the address the call came from, with `port`.
+    #[serde(default)]
+    pub address: Option<String>,
+    /// The port its placement API listens on.
+    pub port: u16,
+    /// Runs it takes at once.
+    pub max_runs: usize,
+    /// Runs it holds now.
+    pub running: usize,
+}
+
+/// The server's answer to a [`Registration`].
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct Registered {
+    /// How long until the executor calls again.
+    pub heartbeat_ms: u64,
+    /// How long without a call until no run is placed with it.
+    pub away_after_ms: u64,
+}
 
 /// The name in the server's certificate. Connections are verified against
 /// these names, not against the hosts they were reached at, so a deployment
@@ -50,9 +99,14 @@ pub fn valid_digest(digest: &str) -> bool {
 #[derive(Serialize, Deserialize)]
 pub struct Place {
     pub tenant: String,
-    /// The staged workflow's digest.
+    /// The workflow's digest: the SHA-256 of its component.
     pub artifact: String,
     pub spec: RunSpec,
+    /// How long, at most, to wait for a slot before refusing for capacity;
+    /// left out, the executor's own wait. A server with another executor to
+    /// try sends 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_wait_ms: Option<u64>,
 }
 
 /// A placed run.
@@ -80,7 +134,7 @@ pub enum RunState {
 /// Why a call was refused.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Refusal {
-    /// `invalid`, `not_found`, `capacity`, `compile` or `internal`.
+    /// `invalid`, `not_found`, `capacity` or `internal`.
     pub error: String,
     pub message: String,
 }
@@ -148,6 +202,14 @@ mod tests {
         assert!(!valid_tenant("a/b"));
         assert!(!valid_tenant(".."));
         assert!(!valid_tenant(&"a".repeat(129)));
+    }
+
+    #[test]
+    fn a_boot_is_a_plain_path_segment_without_a_colon() {
+        assert!(valid_boot("0a1b-2c_3d"));
+        assert!(!valid_boot(""));
+        assert!(!valid_boot("a:b"));
+        assert!(!valid_boot(&"a".repeat(65)));
     }
 
     #[test]

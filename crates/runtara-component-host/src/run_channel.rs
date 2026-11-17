@@ -134,6 +134,22 @@ impl RunCredentials {
             })
     }
 
+    /// The launch a request's credential names, whether or not its start is
+    /// confirmed, and without counting as the credential's first use. For
+    /// what a launch's runner needs before the guest starts (its workflow):
+    /// nothing the guest does is served on this.
+    pub fn launch(&self, headers: &HeaderMap) -> Option<Binding> {
+        let credential = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))?;
+        self.by_digest
+            .lock()
+            .expect("run credentials poisoned")
+            .get(&digest(credential))
+            .map(|entry| entry.binding.clone())
+    }
+
     /// When `launch_id`'s credential was first presented.
     pub fn first_used(&self, launch_id: &str) -> Option<std::time::Instant> {
         self.by_digest
@@ -318,5 +334,25 @@ mod tests {
         credentials.revoke("launch-1");
         assert_eq!(call(&app, &second).await.0, StatusCode::UNAUTHORIZED);
         assert_eq!(credentials.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_credential_names_its_launch_before_its_start_and_without_starting_it() {
+        let credentials = RunCredentials::default();
+        let credential = credentials.mint(binding("launch-1"));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {credential}").parse().unwrap(),
+        );
+        // Its start is still pending.
+        assert_eq!(
+            credentials.launch(&headers).map(|b| b.launch_id),
+            Some("launch-1".to_owned())
+        );
+        assert!(credentials.first_used("launch-1").is_none());
+        credentials.revoke("launch-1");
+        assert!(credentials.launch(&headers).is_none());
+        assert!(credentials.launch(&HeaderMap::new()).is_none());
     }
 }
