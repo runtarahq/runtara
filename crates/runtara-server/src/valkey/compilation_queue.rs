@@ -502,7 +502,7 @@ impl CompilationQueue {
 }
 
 /// Errors that can occur with the compilation queue
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum CompilationQueueError {
     /// Failed to connect to Redis
     ConnectionError(String),

@@ -34,7 +34,7 @@ pub const DEFAULT_STOP_GRACE_SECONDS: u32 = 5;
 pub const MAX_STOP_GRACE_SECONDS: u32 = 3600;
 
 /// Errors that can occur when interacting with the runtime
-#[derive(Debug, Error)]
+#[derive(Debug, Error, serde::Serialize, serde::Deserialize)]
 pub enum RuntimeError {
     #[error("Connection failed: {0}")]
     ConnectionFailed(String),

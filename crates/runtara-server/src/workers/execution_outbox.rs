@@ -156,7 +156,7 @@ pub fn source_idempotency_key(source: &str, identity: &str) -> String {
 }
 
 /// A result returned by the durable source transaction.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EnqueuedExecution {
     pub request_id: Uuid,
     pub instance_id: String,

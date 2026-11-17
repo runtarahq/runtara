@@ -1982,7 +1982,7 @@ impl CompilationService {
 }
 
 /// DTO for compilation result
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct CompilationResultDto {
     pub workflow_id: String,
     pub version: i32,
@@ -1994,7 +1994,7 @@ pub struct CompilationResultDto {
 }
 
 /// Service-level errors for compilation operations
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[allow(dead_code)]
 pub enum ServiceError {
     NotFound(String),

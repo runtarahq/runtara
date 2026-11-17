@@ -82,7 +82,7 @@ pub struct ExecutionResult {
 /// This is a superset of the previous `ExecutionError` (engine), the
 /// `ServiceError` in `api/services/executions.rs`, and the `ServiceError`
 /// from `api/services/workflows.rs` that was reused by the sync path.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[allow(dead_code)] // A few variants are reserved for handler migrations.
 pub enum ExecutionError {
     ValidationError(String),
@@ -203,7 +203,7 @@ impl ExecutionError {
 
 /// Trigger source classification used to dispatch to the matching
 /// `TriggerEvent::*` factory.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[allow(dead_code)] // Future trigger sources carried for parity with existing factories.
 pub enum TriggerSource {
     HttpApi,
@@ -237,7 +237,7 @@ pub struct QueueRequest<'a> {
 }
 
 /// Result of queuing an execution.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct QueuedExecution {
     pub instance_id: Uuid,
     pub status: String,
@@ -275,7 +275,7 @@ pub struct SyncRequest<'a> {
 }
 
 /// Metrics reported for a synchronous execution.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SyncExecutionMetrics {
     pub execution_duration_seconds: f64,
     pub max_memory_mb: f64,
@@ -284,7 +284,7 @@ pub struct SyncExecutionMetrics {
 
 /// Result of `ExecutionEngine::run_sync` — the full synchronous execution
 /// output. Handlers adapt this into their own wire types.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SyncExecution {
     pub success: bool,
     pub outputs: Value,
@@ -296,7 +296,7 @@ pub struct SyncExecution {
 /// What a lifecycle command did: the public API's `data.outcome` and
 /// control's `command-outcome`. Acceptance is not arrival: `requested` means
 /// the target applies it at its next checkpoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CommandEffect {
     /// The target applies it at its next checkpoint.
     Requested,
@@ -322,7 +322,7 @@ impl CommandEffect {
 }
 
 /// Result of `ExecutionEngine::stop`.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum StopOutcome {
     AlreadyStopped {
         status: String,
@@ -334,7 +334,7 @@ pub enum StopOutcome {
 }
 
 /// Result of `ExecutionEngine::pause`.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum PauseOutcome {
     Paused {
         previous_status: String,
@@ -347,7 +347,7 @@ pub enum PauseOutcome {
 }
 
 /// Result of `ExecutionEngine::resume`.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum ResumeOutcome {
     Resumed {
         previous_status: String,

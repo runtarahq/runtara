@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use utoipa::ToSchema;
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, ToSchema, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingInputResponse {
     pub request_id: String,
@@ -22,7 +22,7 @@ pub struct PendingInputResponse {
     pub requested_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, ToSchema, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingInputPage {
     pub instance_id: String,

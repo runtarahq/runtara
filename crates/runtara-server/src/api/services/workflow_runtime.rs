@@ -10,7 +10,7 @@ use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::{ExecutionEngine, ExecutionError};
 use runtara_core::persistence::inputs::{InputError, InputReceipt, InputRequest};
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, serde::Serialize, serde::Deserialize)]
 pub enum WorkflowRuntimeError {
     #[error(transparent)]
     Managed(#[from] InputError),
@@ -92,7 +92,7 @@ pub struct InputSubmissionErrorResponse {
     pub data: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowRuntimeAction {
     pub id: String,
@@ -121,7 +121,7 @@ pub struct WorkflowRuntimeAction {
     pub runtime: Value,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, ToSchema, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowRuntimeActionPage {
     pub workflow_id: String,
@@ -129,7 +129,7 @@ pub struct WorkflowRuntimeActionPage {
     pub page: WorkflowRuntimeActionPageInfo,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, ToSchema, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowRuntimeActionPageInfo {
     pub offset: i64,
@@ -147,7 +147,7 @@ pub struct SubmitWorkflowActionRequest {
 }
 
 /// Public acknowledgement deliberately omits the accepted response payload.
-#[derive(Debug, Clone, Serialize, ToSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, ToSchema, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowActionReceipt {
     pub receipt_id: String,

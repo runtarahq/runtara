@@ -19,7 +19,7 @@ use runtara_component_host::{
 use crate::api::dto::agent_testing::TestEngine;
 use crate::observability::metrics;
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum ServiceError {
     NotEnabled,
     RateLimitExceeded(Duration),
@@ -81,7 +81,7 @@ impl RateLimiter {
 }
 
 /// Response from agent test execution
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct TestResult {
     pub success: bool,
     pub output: Option<Value>,
