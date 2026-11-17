@@ -37,7 +37,9 @@ scoped README files, examples.
   schemas, and rate limiting. A connection's secrets are stored and used
   sealed only (its `sealed` module, over
   [seal](https://github.com/runtarahq/seal)): seal attaches them to the
-  requests it sends, and nothing else reads them.
+  requests it sends, and nothing else reads them. seal runs in the server
+  or as a process of its own (`RUNTARA_SEAL_MODE`, `docs/seal.md`); code
+  reaches it through `SealedCredentials` either way, never through the keys.
 - `crates/runtara-object-store` owns schema-driven tenant object storage.
 - The console (React/Vite) lives in
   [runtarahq/runtara-frontend](https://github.com/runtarahq/runtara-frontend)

@@ -1,7 +1,7 @@
 # Separating the public API from the engine
 
-A plan. Phase 0 is implemented (branch `feature/row-security-fails-closed`);
-the rest is not. This file is removed when the work lands and `docs/`
+A plan. Phases 0 (branch `feature/row-security-fails-closed`) and 1 (branch
+`feature/seal-out-of-process`, on top of it) are implemented; the rest is not. This file is removed when the work lands and `docs/`
 describes the result instead.
 
 ## The goal
@@ -169,83 +169,53 @@ more.
 listeners are for the deployment's network only, and that mutual TLS is the
 last barrier, not the only one.
 
-## Phase 1: seal in a process of its own
+## Phase 1: done
 
-seal already runs three ways behind one client interface: in the
-application, as a process on the same host over a Unix socket, or on another
-machine over mutual TLS. This phase lets Runtara use the second and third.
+seal runs as a process of its own when the deployment says so. Implemented
+on `feature/seal-out-of-process`; `docs/seal.md` describes the result.
 
-As a process of its own, seal keeps its wrapped keys in a directory on its
-own host (`<dir>/<keyset>/<kid>.json`) or in a bucket of an S3-compatible
-object store, with the same names, that several seal instances share. The
-wrapping key is a file on seal's host, or a key that stays in a KMS. seal
-has no key service to read from any more. (Read at seal `02bd886`; the
-client, protocol and sealed format are unchanged from the revision Runtara
-pins.)
+- **`RUNTARA_SEAL_MODE`** is `in_process` (the default), `unix` or `mtls`.
+  The server builds a client for seal's socket or address instead of seal
+  itself, and every keyset operation (make one, read its public keys,
+  destroy it) is one of seal's calls.
+- **The server holds no wrapping key** beside a seal of its own, and is
+  refused one. It does not start if seal does not answer, or does not know
+  it.
+- **The keys are handed over, not copied by hand.** `seal-keys export`
+  writes the database's keys in seal's directory layout, with seal's own
+  code, and the key that wraps them as seal reads a wrapping key file.
+  A server does not start on a seal that lacks a key its database still
+  holds, so a switch of mode cannot orphan what is already sealed.
+  `seal-keys forget` deletes the database's copy once seal answers for
+  every key.
+- **Re-wrapping is seal's.** Runtara's own loop for wrapping tenants' keys
+  again after an encryption key rotation is gone; the database key source
+  lists and replaces its keys, and seal's `rewrap` does the rest.
+- **seal is at its current revision**, which changed what a policy holds:
+  where a credential may go, and no longer what it may do there.
+- **The evaluation stack** has `docker-compose.seal.yml`: seal on a socket
+  the two containers share.
 
-0. **Move to seal's current revision.** Nothing Runtara calls changed
-   shape: `Keyring::new` now takes one wrapping key or several, and takes
-   the one Runtara gives it as before. Build and run the `sealed` tests
-   against it before anything else.
-1. **Choose the mode by configuration.** `RUNTARA_SEAL_MODE` is
-   `in_process` (default for a single process), `unix` or `mtls`, with a
-   socket path or an address and certificates. `SealedCredentials` is built
-   from `seal_client::unix` or `seal_client::mtls` instead of
-   `seal_client::in_process`; it already reports its mode.
-2. **Move what in-process mode did around the client.** Three things today
-   reach into the keyring directly and must go through seal's calls instead:
-   - creating a tenant's keyset (`GenerateKeyset`, an admin caller; seal
-     stores the wrapped key in its key source),
-   - reading a tenant's public key to seal a new secret (`PublicKeys`,
-     cached; sealing needs no private key),
-   - destroying a tenant's keys (`DestroyKeyset`, a caller with
-     `destroy_keysets`; seal deletes them from its key source, and in a
-     bucket every version of them).
-3. **Move the keys.** In-process, the keys stay where they are: wrapped, in
-   `seal_wrapped_key` in the server database. For a separate seal, a command
-   (`runtara-server seal-keys export --out <dir>`) writes them from that
-   table in the layout seal's directory reads, with seal's own
-   `DirKeySource` so the layout is seal's and not a copy of it. A bucket
-   holds the same files, so a deployment that uses one copies the
-   directory into it. The keys and the wrapping key go to seal; the
-   wrapping key leaves the server's environment, and with a separate seal
-   the server refuses to start if it is still given one. Once seal answers for every
-   keyset the table held, its rows are deleted: a copy left in the database
-   is a copy the wrapping key still opens.
-4. **Say what running seal now asks of the operator.** seal is the only
-   place the keys are, so:
-   - **one seal, self-hosted:** a key directory and a wrapping key file on
-     its host. The directory is backed up; a lost directory is every sealed
-     secret lost.
-   - **several seals, or a hosted deployment:** the keys in a bucket with
-     versioning on, and the wrapping key in a KMS, so that no machine holds
-     a wrapping key file and a copy of the bucket opens nothing. The store
-     must support conditional writes.
-   - **replacing the wrapping key** is seal's own procedure, while seal
-     runs: the new key becomes `keys.wrap`, the old one stays in
-     `keys.unwrap_also`, and `seal rewrap` wraps every key again in place.
-     The same steps move from a file to a KMS.
-5. **Use seal's re-wrapping in-process too.** seal's `rewrap` now works on
-   any key source that can list and replace its keys. Runtara's database
-   key source gains those two operations, and Runtara's own re-wrapping
-   after an encryption key rotation (`follow_encryption_key_rotation`,
-   `rewrap_retired`) is replaced by seal's, with the retired keys given as
-   the older wrapping keys.
-6. **Audit and limits follow seal.** In-process, Runtara writes seal's audit
-   records to its log and sets the buffer caps. A separate seal writes its
-   own; Runtara reads the caps from `Info`.
-7. **Ship it.** A `seal` service in `docker-compose.executor.yml` (or a
-   sibling overlay), its certificates issued by the existing PKI step, and a
-   page in `docs/`.
+Tested against seal's own service inside the crate's tests, and end to end
+(`e2e/test_seal_process.sh`): one connection sealed in the server keeps
+working as the keys are handed over, on a socket, over mutual TLS, and
+until its tenant's keys are destroyed.
 
-**After this phase** a broken server can ask seal to *use* a credential,
-toward the destination sealed into it, and every use is in seal's audit log.
-It cannot read one. It still has both databases.
+What it left, and what follows from it:
 
-**Tests:** seal's client behaves the same in all three modes by its own
-suite; Runtara's `sealed` tests run against a seal process as well as
-in-process, and one e2e script saves a connection, runs a workflow that uses
-it, and shows the server process holds no wrapping key.
+- **What a separate seal may reach is its own configuration.** In the
+  server's process, seal's network allowances followed the server's
+  settings. A separate seal is told itself (`[network]`), and the two can
+  disagree: the server seals a secret for a private address that seal then
+  refuses to go to. `docs/seal.md` says so; nothing checks it at start.
+- **Audit and limits are seal's**, as planned: the server no longer writes
+  seal's audit records, and seal's own caps apply.
+- **The server is one caller, for every tenant.** seal knows it as
+  `runtara-server` with every keyset. In Phase 3 the engine is that caller
+  and the API role is none, which is where this starts to matter.
+- **The hosted setup** (several seal instances on a bucket, the wrapping
+  key in a KMS) is seal's own configuration and needs nothing more from
+  Runtara; it was not run here.
 
 ## Phase 2: one interface between handlers and the engine
 
@@ -410,7 +380,7 @@ tenant, or a certificate an executor or the run channel accepts.
 
 ## Order and size
 
-Phase 0 is done. Phase 1 is independent of the rest. Phase 2 is the
+Phases 0 and 1 are done. Phase 2 is the
 bulk: about 25 to 30 operations and 50 to 60 call sites, done in the six
 groups above. Phase 3 is mostly transport once Phase 2 holds. Phase 4 changes
 who verifies, and needs Phase 3. Each phase leaves a server that runs as one
