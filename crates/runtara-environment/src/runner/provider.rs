@@ -728,7 +728,7 @@ impl Runner for ProviderRunner {
         };
         let (tasks, metrics_for_task, id) =
             (self.tasks.clone(), metrics.clone(), handle_id.clone());
-        tokio::spawn(async move {
+        runtara_store_postgres::tenant_scope::spawn(async move {
             let ran =
                 run_launch_lifecycle(lifecycle, host, move |_lease| run_placed(placement, slot))
                     .await;

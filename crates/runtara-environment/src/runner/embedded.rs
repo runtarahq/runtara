@@ -103,7 +103,7 @@ impl InstanceTask {
     fn spawn_abort_timer(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let deadline = self.abort_deadline.subscribe();
         let task = Arc::downgrade(self);
-        tokio::spawn(async move {
+        runtara_store_postgres::tenant_scope::spawn(async move {
             if wait_for_abort_deadline(deadline).await
                 && let Some(task) = task.upgrade()
                 && !task.finished.load(Ordering::SeqCst)
@@ -2127,7 +2127,7 @@ impl Runner for EmbeddedWasmRunner {
             requires_root_lease: false,
             exit_reports,
         };
-        tokio::spawn(async move {
+        runtara_store_postgres::tenant_scope::spawn(async move {
             let _completion = completion;
             let lifecycle_host = Arc::clone(&runtime_host);
             let ran =

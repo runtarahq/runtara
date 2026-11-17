@@ -1765,7 +1765,7 @@ pub fn spawn_container_monitor(
             }
         }
     };
-    tokio::spawn(async move {
+    runtara_store_postgres::tenant_scope::spawn(async move {
         tokio::pin!(monitoring);
         let Some(lease) = execution_lease else {
             monitoring.await;

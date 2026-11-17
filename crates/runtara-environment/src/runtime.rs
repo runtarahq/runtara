@@ -550,7 +550,7 @@ impl Worker {
         Self {
             name,
             shutdown,
-            handle: tokio::spawn(task),
+            handle: runtara_store_postgres::tenant_scope::spawn(task),
             enabled,
         }
     }

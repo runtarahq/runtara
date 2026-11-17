@@ -447,11 +447,12 @@ impl ApiLaunches {
         let receipts = Arc::clone(&self.receipts);
         let forgotten = launch_id.to_string();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
+            // Receipts are kept per launch across tenants: the platform's work.
+            runtime.spawn(runtara_tenant_scope::system(async move {
                 if let Err(error) = receipts.forget_launch(&forgotten).await {
                     tracing::warn!(%error, launch_id = %forgotten, "forgetting workflow API receipts");
                 }
-            });
+            }));
         }
         slot.outcome
             .lock()

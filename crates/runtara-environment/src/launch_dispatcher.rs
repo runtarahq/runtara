@@ -117,7 +117,7 @@ impl LaunchLifecycleObservers {
         let tenant_id = tenant_id.into();
         let instance_id = instance_id.into();
         let reason = reason.into();
-        tokio::spawn(async move {
+        runtara_store_postgres::tenant_scope::spawn(async move {
             let observer = observers.observer.read().await.clone();
             let Some(observer) = observer else {
                 return;
@@ -557,7 +557,7 @@ impl LaunchDispatcher {
                 }
             };
             let dispatcher = self.clone();
-            tokio::spawn(async move {
+            runtara_store_postgres::tenant_scope::spawn(async move {
                 // Hold this through the Core/image read, runner preparation,
                 // and promotion/handoff. It is intentionally independent
                 // from the runner's own preparation permit.
