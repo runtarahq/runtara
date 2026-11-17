@@ -131,6 +131,8 @@ SERVED=$(IFS=,; echo "${TENANTS[*]:1}")
 # (M7.16). Their own databases are local here, which the guard would refuse.
 RUNTARA_SERVER_DATABASE_URL="${SERVER_DB_URL}" \
 RUNTARA_DATABASE_CONNECTION_GUARD=off \
+RUNTARA_PROXY_ALLOWED_HOSTS="${POSTGRES_HOST}" \
+RUNTARA_PROXY_ALLOW_HTTP_HOSTS="${POSTGRES_HOST}" \
 RUNTARA_DATABASE_URL="postgresql://${RUNTIME_ROLE}:${RUNTIME_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_RUNTIME}" \
 RUNTARA_RUNTIME_MAX_CONNECTIONS="${RUNTIME_MAX}" \
 OBJECT_MODEL_POOL_CACHE_MAX="${POOL_CACHE_MAX}" \
@@ -171,7 +173,9 @@ RESP=$(curl -sS -X POST -H "Content-Type: application/json" -d '{"name": "e2e"}'
 KEY_ID=$(echo "${RESP}" | jq -r '.id // .data.id // empty')
 [ -n "${KEY_ID}" ] || { print_error "api key create failed"; exit 1; }
 GRAPH='{"name":"Answer","steps":{"finish":{"stepType":"Finish","id":"finish","inputMapping":{"answer":{"valueType":"immediate","value":42}}}},"entryPoint":"finish","executionPlan":[],"variables":{},"inputSchema":{},"outputSchema":{}}'
-declare -A KEYS WFS CONNS
+# Indexed by the tenant's number, as TENANTS is: plain arrays, which the bash
+# that macOS ships has.
+KEYS=() WFS=() CONNS=()
 for i in $(seq 0 $((TENANTS_COUNT - 1))); do
     tenant="${TENANTS[$i]}"
     token="rt_${tenant}_$(openssl rand -hex 24)"
@@ -191,7 +195,7 @@ for i in $(seq 0 $((TENANTS_COUNT - 1))); do
     [ "$(echo "${resp}" | jq -r '.success // false')" = true ] \
         || { print_error "${tenant}: compile failed: $(echo "${resp}" | head -c 300)"; exit 1; }
     WFS[$i]="${wf}"
-    ext="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${EXT_PREFIX}_${i}"
+    ext="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${EXT_PREFIX}_${i}?sslmode=disable"
     resp=$(as -X POST -d "{\"title\":\"own-${i}\",\"integrationId\":\"postgres\",\"connectionParameters\":{\"database_url\":\"${ext}\"}}" "${API}/connections")
     conn=$(echo "${resp}" | jq -r '.connection_id // .connectionId // empty')
     [ -n "${conn}" ] || { print_error "${tenant}: connection create failed: $(echo "${resp}" | sed -E 's#postgres(ql)?://[^ "]*#<url>#g' | head -c 300)"; exit 1; }
