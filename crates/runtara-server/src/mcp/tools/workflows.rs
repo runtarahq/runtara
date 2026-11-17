@@ -74,11 +74,7 @@ async fn compile_workflow_for_mcp(
             .await
             .map_err(|e| err(format!("Failed to check compilation freshness: {}", e)))?
         && closure
-            .may_reuse_cached_image(
-                server.runtime_client.as_deref(),
-                &server.tenant(),
-                &image_id,
-            )
+            .may_reuse_cached_image(server.engine.as_ref(), &server.tenant(), &image_id)
             .await
     {
         return Ok(McpCompileResult {
@@ -2088,7 +2084,7 @@ mod tests {
         let server = SmoMcpServer::new(
             pool,
             Arc::new(ObjectStoreManager::new()),
-            None,
+            crate::engine::without_runtime(),
             "deploy-validation-tenant".into(),
             router,
         );
@@ -2197,7 +2193,7 @@ mod tests {
         let server = SmoMcpServer::new(
             pool,
             Arc::new(ObjectStoreManager::new()),
-            None,
+            crate::engine::without_runtime(),
             "deploy-version-tenant".into(),
             router,
         );

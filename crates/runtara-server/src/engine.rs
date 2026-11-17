@@ -32,6 +32,9 @@ use crate::api::dto::executions::{ExecutionFilters, ExecutionSummary};
 use crate::api::dto::operations::OperationQueue;
 use crate::api::dto::trigger_event::TriggerEvent;
 use crate::api::dto::workflows::{PageWorkflowInstanceHistoryDto, WorkflowInstanceDto};
+use crate::api::services::compilation::{
+    CompilationResultDto, CompilationService, ServiceError as CompilationError,
+};
 use crate::api::services::pending_inputs::PendingInputPage;
 use crate::api::services::workflow_runtime::{
     WorkflowActionReceipt, WorkflowRuntimeAction, WorkflowRuntimeActionPage, WorkflowRuntimeError,
@@ -40,7 +43,7 @@ use crate::runtime_client::{
     GetTenantMetricsOptions, InstanceInfo, RuntimeClient, RuntimeError, TenantMetricsResult,
 };
 use crate::runtime_types::{
-    ListCheckpointsResult, ListEventsOptions, ListEventsResult, ListInstancesOptions,
+    ImageSummary, ListCheckpointsResult, ListEventsOptions, ListEventsResult, ListInstancesOptions,
     ListStepSummariesOptions, ListStepSummariesResult, ScopeInfo,
 };
 use crate::workers::execution_engine::{
@@ -286,6 +289,33 @@ pub trait Engine: Send + Sync {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<OperationQueue>, WorkflowRuntimeError>;
+
+    // ---- Compilation --------------------------------------------------------
+
+    /// Compiles a version of a workflow and registers what it built, now.
+    async fn compile_workflow(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+        force_recompile: bool,
+    ) -> Result<CompilationResultDto, CompilationError>;
+
+    /// Compiles a version of a workflow as an agent other workflows may use.
+    async fn publish_workflow_agent(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+        slug: String,
+    ) -> Result<Value, CompilationError>;
+
+    /// What was built for an image, if the engine has it.
+    async fn get_image(
+        &self,
+        tenant_id: &str,
+        image_id: &str,
+    ) -> Result<Option<ImageSummary>, RuntimeError>;
 }
 
 /// The engine in this process.
@@ -295,6 +325,8 @@ pub struct LocalEngine {
     executions: Arc<ExecutionEngine>,
     /// The server database, which the engine reads definitions from.
     pool: sqlx::PgPool,
+    /// The agents a compiled workflow may use.
+    agent_catalog: Option<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 }
 
 impl LocalEngine {
@@ -307,6 +339,32 @@ impl LocalEngine {
             runtime,
             executions,
             pool,
+            agent_catalog: None,
+        }
+    }
+
+    /// With the agents this server loaded, which a compile checks a workflow
+    /// against.
+    #[must_use]
+    pub fn with_agent_catalog(
+        mut self,
+        agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
+    ) -> Self {
+        self.agent_catalog = Some(agent_catalog);
+        self
+    }
+
+    fn compiler(&self) -> CompilationService {
+        let repository = Arc::new(
+            crate::api::repositories::workflows::WorkflowRepository::new(self.pool.clone()),
+        );
+        let service = CompilationService::new(repository, self.runtime.clone())
+            .with_direct_compilation(
+                crate::api::services::compilation::direct_compilation_settings_from_config(),
+            );
+        match &self.agent_catalog {
+            Some(agent_catalog) => service.with_agent_catalog(agent_catalog.clone()),
+            None => service,
         }
     }
 
@@ -693,4 +751,54 @@ impl Engine for LocalEngine {
         )
         .await
     }
+
+    async fn compile_workflow(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+        force_recompile: bool,
+    ) -> Result<CompilationResultDto, CompilationError> {
+        self.compiler()
+            .compile_workflow(tenant_id, workflow_id, version, force_recompile)
+            .await
+    }
+
+    async fn publish_workflow_agent(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+        slug: String,
+    ) -> Result<Value, CompilationError> {
+        self.compiler()
+            .publish_workflow_agent(tenant_id, workflow_id, version, slug)
+            .await
+    }
+
+    async fn get_image(
+        &self,
+        tenant_id: &str,
+        image_id: &str,
+    ) -> Result<Option<ImageSummary>, RuntimeError> {
+        self.runtime()?.get_image(image_id, tenant_id).await
+    }
+}
+
+/// An engine with no runtime, for a test of code that holds one and asks it
+/// nothing a runtime answers.
+#[cfg(test)]
+pub(crate) fn without_runtime() -> Arc<dyn Engine> {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused/unused")
+        .expect("a lazy pool connects to nothing");
+    let (events, _dropped) = tokio::sync::mpsc::channel(1);
+    let executions = Arc::new(ExecutionEngine::new(
+        pool.clone(),
+        Arc::new(crate::api::repositories::workflows::WorkflowRepository::new(pool.clone())),
+        None,
+        None,
+        crate::product_events::ProductEventSink::new(events),
+    ));
+    Arc::new(LocalEngine::new(None, executions, pool))
 }

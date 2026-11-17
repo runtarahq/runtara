@@ -708,13 +708,12 @@ pub async fn update_workflow_slug_handler(
     tag = "workflow-controller"
 )]
 #[allow(clippy::too_many_arguments)]
-#[instrument(skip(pool, runtime_client, agent_catalog, user_id, role), fields(workflow_id = %workflow_id))]
+#[instrument(skip(pool, engine, user_id, role), fields(workflow_id = %workflow_id))]
 pub async fn publish_workflow_agent_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
     State(pool): State<PgPool>,
-    State(runtime_client): State<Option<Arc<crate::runtime_client::RuntimeClient>>>,
-    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path(workflow_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
@@ -778,14 +777,7 @@ pub async fn publish_workflow_agent_handler(
         }
     };
 
-    let compilation_service =
-        crate::api::services::compilation::CompilationService::new(repository, runtime_client)
-            .with_agent_catalog(agent_catalog)
-            .with_direct_compilation(
-                crate::api::services::compilation::direct_compilation_settings_from_config(),
-            );
-
-    match compilation_service
+    match engine
         .publish_workflow_agent(&tenant_id, &workflow_id, version, slug)
         .await
     {
@@ -1146,12 +1138,12 @@ pub async fn clone_workflow_handler(
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(pool, runtime_client, _connections, ctx, source, events), fields(workflow_id = %workflow_id, version = %version))]
+#[instrument(skip(pool, engine, _connections, ctx, source, events), fields(workflow_id = %workflow_id, version = %version))]
 #[allow(clippy::too_many_arguments)]
 pub async fn compile_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(runtime_client): State<Option<Arc<crate::runtime_client::RuntimeClient>>>,
+    State(engine): State<Arc<dyn Engine>>,
     State(_connections): State<Arc<ConnectionsFacade>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     State(events): State<ProductEventSink>,
@@ -1215,7 +1207,7 @@ pub async fn compile_workflow_handler(
         force_recompile = match cached_image {
             Ok(Some(image_id)) => {
                 !closure
-                    .may_reuse_cached_image(runtime_client.as_deref(), &tenant_id, &image_id)
+                    .may_reuse_cached_image(engine.as_ref(), &tenant_id, &image_id)
                     .await
             }
             Ok(None) => false,
@@ -1383,17 +1375,10 @@ pub async fn compile_workflow_handler(
 
     // Fallback: Valkey not configured, compile directly (still protected by semaphore)
     tracing::warn!("Valkey not configured, compiling directly (no queue)");
-    let repository = Arc::new(WorkflowRepository::new(pool));
-    // Same catalog as the queued path: rate-limited retry defaults, suspends
-    // and workflow-agent classification all come from it.
-    let compilation_service =
-        crate::api::services::compilation::CompilationService::new(repository, runtime_client)
-            .with_agent_catalog(agent_catalog)
-            .with_direct_compilation(
-                crate::api::services::compilation::direct_compilation_settings_from_config(),
-            );
-
-    match compilation_service
+    // The engine compiles with the same catalog as the queued path:
+    // rate-limited retry defaults, suspends and workflow-agent classification
+    // all come from it.
+    match engine
         .compile_workflow(&tenant_id, &workflow_id, version_num, force_recompile)
         .await
     {

@@ -2239,11 +2239,14 @@ async fn start_as_platform(
     ));
     println!("✓ Execution engine initialized");
     // The whole of what code that takes requests may ask of the engine.
-    let engine_api: Arc<dyn crate::engine::Engine> = Arc::new(crate::engine::LocalEngine::new(
-        runtime_client.clone(),
-        execution_engine.clone(),
-        pool.clone(),
-    ));
+    let engine_api: Arc<dyn crate::engine::Engine> = Arc::new(
+        crate::engine::LocalEngine::new(
+            runtime_client.clone(),
+            execution_engine.clone(),
+            pool.clone(),
+        )
+        .with_agent_catalog(agent_catalog.clone()),
+    );
     native_control.install_engine(execution_engine.clone());
     {
         let limit = crate::middleware::entitlement::effective_limit(
@@ -3003,7 +3006,7 @@ async fn start_as_platform(
     let mcp_router = mcp::create_mcp_router(
         pool.clone(),
         object_store_manager.clone(),
-        runtime_client.clone(),
+        engine_api.clone(),
         tenant_id.clone(),
         internal_router,
         config::mcp_allowed_hosts().to_vec(),

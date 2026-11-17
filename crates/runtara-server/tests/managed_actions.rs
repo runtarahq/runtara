@@ -50,8 +50,9 @@ fn mcp_server(
     client: Option<Arc<RuntimeClient>>,
     tenant: &str,
 ) -> runtara_server::mcp::server::SmoMcpServer {
-    let discovery = engine_api(&pool, &engine, client.clone());
+    let discovery = engine_api(&pool, &engine, client);
     let signals = discovery.clone();
+    let tools = discovery.clone();
     let router = axum::Router::new()
         .route(
             "/api/runtime/workflows/{workflow}/instances/{instance}/pending-input",
@@ -77,7 +78,7 @@ fn mcp_server(
     runtara_server::mcp::server::SmoMcpServer::new(
         pool,
         Arc::new(runtara_server::api::repositories::object_model::ObjectStoreManager::new()),
-        client,
+        tools,
         tenant.into(),
         router,
     )

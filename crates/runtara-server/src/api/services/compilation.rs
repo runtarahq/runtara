@@ -575,17 +575,17 @@ impl AllowedClosure {
     /// including an image the runtime cannot read, is rebuilt.
     pub async fn may_reuse_cached_image(
         &self,
-        runtime_client: Option<&RuntimeClient>,
+        engine: &dyn crate::engine::Engine,
         tenant_id: &str,
         image_id: &str,
     ) -> bool {
         if self.children.is_empty() {
             return true;
         }
-        let Some(runtime_client) = runtime_client else {
+        if !engine.available() {
             return false;
-        };
-        match runtime_client.get_image(image_id, tenant_id).await {
+        }
+        match engine.get_image(tenant_id, image_id).await {
             Ok(image) => self.built_from_these_children(image.as_ref()),
             Err(error) => {
                 warn!(

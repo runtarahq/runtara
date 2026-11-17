@@ -253,7 +253,7 @@ mod tests {
             SmoMcpServer::new(
                 pool.clone(),
                 Arc::new(ObjectStoreManager::new()),
-                None,
+                crate::engine::without_runtime(),
                 tenant.into(),
                 crate::api::handlers::operators::agent_lookup_routes(),
             )
