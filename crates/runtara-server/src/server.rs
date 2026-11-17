@@ -878,6 +878,9 @@ async fn start_as_platform(
     pool: PgPool,
     mut options: ServerOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // One process runs both of the server's roles. Each piece of background
+    // work below is started for the role it belongs to.
+    let workers = crate::roles::Workers::new(crate::roles::Roles::all());
     if let Some(source) = options.entitlements.clone() {
         config::install_entitlement_source(source);
     }
@@ -1459,16 +1462,20 @@ async fn start_as_platform(
             // An app entered, changed or removed (`runtara-server oauth-apps`)
             // is seen by every instance within a minute.
             let (apps, sealed) = (stored.clone(), sealed_credentials.clone());
-            runtara_store_postgres::tenant_scope::spawn(async move {
-                let mut every = tokio::time::interval(std::time::Duration::from_secs(60));
-                every.tick().await;
-                loop {
+            workers.detached(
+                crate::roles::Role::Engine,
+                "platform OAuth apps reload",
+                async move {
+                    let mut every = tokio::time::interval(std::time::Duration::from_secs(60));
                     every.tick().await;
-                    if let Err(error) = apps.reload(&sealed).await {
-                        tracing::warn!(%error, "The platform's OAuth apps were not read again");
+                    loop {
+                        every.tick().await;
+                        if let Err(error) = apps.reload(&sealed).await {
+                            tracing::warn!(%error, "The platform's OAuth apps were not read again");
+                        }
                     }
-                }
-            });
+                },
+            );
             Some(stored)
         }
     };
@@ -1535,29 +1542,33 @@ async fn start_as_platform(
 
     // Spawn background task to warn when pool usage is high
     let pool_monitor = pool.clone();
-    runtara_store_postgres::tenant_scope::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-        loop {
-            interval.tick().await;
-            let size = pool_monitor.size();
-            let idle = pool_monitor.num_idle();
-            let active = size as usize - idle;
-            let usage_pct = if size > 0 {
-                (active * 100) / size as usize
-            } else {
-                0
-            };
-            if usage_pct >= 75 {
-                tracing::warn!(
-                    pool_size = size,
-                    pool_idle = idle,
-                    pool_active = active,
-                    usage_pct,
-                    "Database pool under pressure"
-                );
+    workers.detached(
+        crate::roles::Role::Api,
+        "database pool monitor",
+        async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                let size = pool_monitor.size();
+                let idle = pool_monitor.num_idle();
+                let active = size as usize - idle;
+                let usage_pct = if size > 0 {
+                    (active * 100) / size as usize
+                } else {
+                    0
+                };
+                if usage_pct >= 75 {
+                    tracing::warn!(
+                        pool_size = size,
+                        pool_idle = idle,
+                        pool_active = active,
+                        usage_pct,
+                        "Database pool under pressure"
+                    );
+                }
             }
-        }
-    });
+        },
+    );
 
     let object_model_pool_config = config::object_model_pool_config();
 
@@ -1587,39 +1598,43 @@ async fn start_as_platform(
 
     // Spawn background task to report object-model pool stats / warn on pressure.
     let object_model_pool_monitor = object_store_manager.clone();
-    runtara_store_postgres::tenant_scope::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-        loop {
-            interval.tick().await;
-            let stats = object_model_pool_monitor.pool_stats();
-            if stats.pools == 0 {
-                continue;
+    workers.detached(
+        crate::roles::Role::Engine,
+        "object model pool monitor",
+        async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                let stats = object_model_pool_monitor.pool_stats();
+                if stats.pools == 0 {
+                    continue;
+                }
+                let usage_pct = (stats.active * 100)
+                    .checked_div(stats.capacity)
+                    .unwrap_or(0);
+                if usage_pct >= 75 {
+                    tracing::warn!(
+                        pools = stats.pools,
+                        connections = stats.connections,
+                        idle = stats.idle,
+                        active = stats.active,
+                        capacity = stats.capacity,
+                        usage_pct,
+                        "Object model pools under pressure"
+                    );
+                } else {
+                    tracing::debug!(
+                        pools = stats.pools,
+                        connections = stats.connections,
+                        idle = stats.idle,
+                        active = stats.active,
+                        capacity = stats.capacity,
+                        "Object model pool stats"
+                    );
+                }
             }
-            let usage_pct = (stats.active * 100)
-                .checked_div(stats.capacity)
-                .unwrap_or(0);
-            if usage_pct >= 75 {
-                tracing::warn!(
-                    pools = stats.pools,
-                    connections = stats.connections,
-                    idle = stats.idle,
-                    active = stats.active,
-                    capacity = stats.capacity,
-                    usage_pct,
-                    "Object model pools under pressure"
-                );
-            } else {
-                tracing::debug!(
-                    pools = stats.pools,
-                    connections = stats.connections,
-                    idle = stats.idle,
-                    active = stats.active,
-                    capacity = stats.capacity,
-                    "Object model pool stats"
-                );
-            }
-        }
-    });
+        },
+    );
 
     // Webhook secrets earlier releases stored readable in Channel triggers
     // are sealed: nothing checks a call against a readable one any more.
@@ -1806,28 +1821,32 @@ async fn start_as_platform(
         .with_direct_compilation(
             api::services::compilation::direct_compilation_settings_from_config(),
         );
-        runtara_store_postgres::tenant_scope::spawn(async move {
-            for tenant_id in config::served_tenants() {
-                let (rebuilt, failed) = service.restage_missing_artifacts(tenant_id).await;
-                if rebuilt + failed > 0 {
-                    tracing::info!(
-                        %tenant_id,
-                        rebuilt,
-                        failed,
-                        "rebuilt missing workflow artifacts"
-                    );
+        workers.detached(
+            crate::roles::Role::Engine,
+            "artifact restaging",
+            async move {
+                for tenant_id in config::served_tenants() {
+                    let (rebuilt, failed) = service.restage_missing_artifacts(tenant_id).await;
+                    if rebuilt + failed > 0 {
+                        tracing::info!(
+                            %tenant_id,
+                            rebuilt,
+                            failed,
+                            "rebuilt missing workflow artifacts"
+                        );
+                    }
+                    let (restaged, failed) = service.restage_stale_workflow_agents(tenant_id).await;
+                    if restaged + failed > 0 {
+                        tracing::info!(
+                            %tenant_id,
+                            restaged,
+                            failed,
+                            "restaged workflow-agents for this lowering"
+                        );
+                    }
                 }
-                let (restaged, failed) = service.restage_stale_workflow_agents(tenant_id).await;
-                if restaged + failed > 0 {
-                    tracing::info!(
-                        %tenant_id,
-                        restaged,
-                        failed,
-                        "restaged workflow-agents for this lowering"
-                    );
-                }
-            }
-        });
+            },
+        );
     }
 
     // Install before any Valkey worker is started. Environment commits its
@@ -1861,7 +1880,12 @@ async fn start_as_platform(
             runtime_client,
         );
         let reconcile_shutdown = shutdown_signal.clone();
-        shutdown_coordinator.spawn_intake(async move { reconciler.run(reconcile_shutdown).await });
+        workers.intake(
+            crate::roles::Role::Engine,
+            "execution admission reconciler",
+            &shutdown_coordinator,
+            async move { reconciler.run(reconcile_shutdown).await },
+        );
         println!("✓ Execution admission reconciler started");
     }
 
@@ -1876,7 +1900,12 @@ async fn start_as_platform(
             runtime_client,
         );
         let publisher_shutdown = shutdown_signal.clone();
-        shutdown_coordinator.spawn_intake(async move { publisher.run(publisher_shutdown).await });
+        workers.intake(
+            crate::roles::Role::Engine,
+            "control children publisher",
+            &shutdown_coordinator,
+            async move { publisher.run(publisher_shutdown).await },
+        );
         println!("✓ Control children publisher started");
     }
 
@@ -1885,15 +1914,21 @@ async fn start_as_platform(
     {
         let cleanup_pool = pool.clone();
         let cleanup_shutdown = shutdown_signal.clone();
-        shutdown_coordinator.spawn_intake(async move {
-            let cfg = workers::invocation_cleanup_worker::InvocationCleanupWorkerConfig::from_env();
-            let worker = workers::invocation_cleanup_worker::InvocationCleanupWorker::new(
-                cleanup_pool,
-                cfg,
-                cleanup_shutdown,
-            );
-            worker.run().await;
-        });
+        workers.intake(
+            crate::roles::Role::Engine,
+            "invocation cleanup",
+            &shutdown_coordinator,
+            async move {
+                let cfg =
+                    workers::invocation_cleanup_worker::InvocationCleanupWorkerConfig::from_env();
+                let worker = workers::invocation_cleanup_worker::InvocationCleanupWorker::new(
+                    cleanup_pool,
+                    cfg,
+                    cleanup_shutdown,
+                );
+                worker.run().await;
+            },
+        );
     }
 
     // Unconfirmed OAuth authorizations: a flow started without a browser whose
@@ -1903,28 +1938,33 @@ async fn start_as_platform(
     {
         let state = runtara_connections::ConnectionsState::from_config(connections_config.clone());
         let pending_shutdown = shutdown_signal.clone();
-        shutdown_coordinator.spawn_intake(async move {
-            let service = runtara_connections::service::oauth::OAuthService::from_state(&state);
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = pending_shutdown.clone().wait() => return,
-                    _ = interval.tick() => {}
+        workers.intake(
+            crate::roles::Role::Engine,
+            "unconfirmed OAuth sweep",
+            &shutdown_coordinator,
+            async move {
+                let service = runtara_connections::service::oauth::OAuthService::from_state(&state);
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = pending_shutdown.clone().wait() => return,
+                        _ = interval.tick() => {}
+                    }
+                    match service.expire_pending(config::served_tenants()).await {
+                        Ok(0) => {}
+                        Ok(dropped) => tracing::info!(
+                            dropped,
+                            "dropped OAuth authorizations no member confirmed in time"
+                        ),
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "sweeping unconfirmed OAuth authorizations failed"
+                        ),
+                    }
                 }
-                match service.expire_pending(config::served_tenants()).await {
-                    Ok(0) => {}
-                    Ok(dropped) => tracing::info!(
-                        dropped,
-                        "dropped OAuth authorizations no member confirmed in time"
-                    ),
-                    Err(error) => tracing::warn!(
-                        %error,
-                        "sweeping unconfirmed OAuth authorizations failed"
-                    ),
-                }
-            }
-        });
+            },
+        );
     }
 
     // Product-analytics pipeline: spawn the single drain (consumer) now that the shutdown
@@ -1941,7 +1981,12 @@ async fn start_as_platform(
                 product_events_config,
                 shutdown_signal.clone(),
             );
-            shutdown_coordinator.spawn_intake(drain.run());
+            workers.intake(
+                crate::roles::Role::Api,
+                "product events drain",
+                &shutdown_coordinator,
+                drain.run(),
+            );
         }
         None => {
             println!(
@@ -2036,25 +2081,30 @@ async fn start_as_platform(
             // A tenant's consumers act for it alone: row level security keeps
             // their database work to its rows, as a request's is.
             let scope = trigger_worker_tenant_id.clone();
-            shutdown_coordinator.spawn_intake(scoped(scope, async move {
-                let worker_config = workers::trigger_worker::TriggerWorkerConfig {
-                    tenant_id: trigger_worker_tenant_id,
-                    batch_size: trigger_batch_size,
-                    block_timeout_ms: 5000,
-                    ..Default::default()
-                };
+            workers.intake(
+                crate::roles::Role::Engine,
+                "trigger worker",
+                &shutdown_coordinator,
+                scoped(scope, async move {
+                    let worker_config = workers::trigger_worker::TriggerWorkerConfig {
+                        tenant_id: trigger_worker_tenant_id,
+                        batch_size: trigger_batch_size,
+                        block_timeout_ms: 5000,
+                        ..Default::default()
+                    };
 
-                workers::trigger_worker::run(
-                    pool_for_worker,
-                    client_for_worker,
-                    cfg_for_worker,
-                    worker_config,
-                    trigger_shutdown,
-                    trigger_events,
-                    permits_for_worker,
-                )
-                .await;
-            }));
+                    workers::trigger_worker::run(
+                        pool_for_worker,
+                        client_for_worker,
+                        cfg_for_worker,
+                        worker_config,
+                        trigger_shutdown,
+                        trigger_events,
+                        permits_for_worker,
+                    )
+                    .await;
+                }),
+            );
         }
 
         // Control-event consumer, one per served tenant (SYN-939): revokes a removed/disabled
@@ -2071,16 +2121,21 @@ async fn start_as_platform(
                 membership_policy,
             );
             let scope = control_tenant.clone();
-            shutdown_coordinator.spawn_intake(scoped(scope, async move {
-                crate::valkey::control_events::run(
-                    control_pool,
-                    control_config,
-                    control_tenant,
-                    control_sweep,
-                    control_shutdown,
-                )
-                .await;
-            }));
+            workers.intake(
+                crate::roles::Role::Api,
+                "member control events",
+                &shutdown_coordinator,
+                scoped(scope, async move {
+                    crate::valkey::control_events::run(
+                        control_pool,
+                        control_config,
+                        control_tenant,
+                        control_sweep,
+                        control_shutdown,
+                    )
+                    .await;
+                }),
+            );
         }
 
         // Start compilation worker (processes compilation queue)
@@ -2092,21 +2147,26 @@ async fn start_as_platform(
         let compilation_shutdown = shutdown_signal.clone();
         let compilation_agent_catalog = Some(agent_catalog.clone());
         let compilation_events = product_event_sink.clone();
-        shutdown_coordinator.spawn_intake(async move {
-            let worker_config = workers::compilation_worker::CompilationWorkerConfig::from_env(
-                compilation_worker_config.connection_url(),
-            );
+        workers.intake(
+            crate::roles::Role::Engine,
+            "compilation worker",
+            &shutdown_coordinator,
+            async move {
+                let worker_config = workers::compilation_worker::CompilationWorkerConfig::from_env(
+                    compilation_worker_config.connection_url(),
+                );
 
-            workers::compilation_worker::run(
-                compilation_pool,
-                compilation_runtime_client,
-                compilation_agent_catalog,
-                worker_config,
-                compilation_shutdown,
-                compilation_events,
-            )
-            .await;
-        });
+                workers::compilation_worker::run(
+                    compilation_pool,
+                    compilation_runtime_client,
+                    compilation_agent_catalog,
+                    worker_config,
+                    compilation_shutdown,
+                    compilation_events,
+                )
+                .await;
+            },
+        );
 
         // Keep the admission counter honest against the durable rows while the
         // process runs. Startup seeding alone left a slot leaked by a crash
@@ -2115,9 +2175,15 @@ async fn start_as_platform(
         {
             let reconcile_pool = pool.clone();
             let reconcile_shutdown = shutdown_signal.clone();
-            shutdown_coordinator.spawn_intake(async move {
-                workers::admission_counter::run_reconciler(reconcile_pool, reconcile_shutdown).await
-            });
+            workers.intake(
+                crate::roles::Role::Engine,
+                "admission counter reconciler",
+                &shutdown_coordinator,
+                async move {
+                    workers::admission_counter::run_reconciler(reconcile_pool, reconcile_shutdown)
+                        .await
+                },
+            );
         }
 
         // Relay source requests after their transaction commits. A publish
@@ -2129,7 +2195,12 @@ async fn start_as_platform(
                 publisher,
             );
             let relay_shutdown = shutdown_signal.clone();
-            shutdown_coordinator.spawn_intake(async move { relay.run(relay_shutdown).await });
+            workers.intake(
+                crate::roles::Role::Engine,
+                "execution outbox relay",
+                &shutdown_coordinator,
+                async move { relay.run(relay_shutdown).await },
+            );
         } else {
             tracing::warn!("Execution outbox relay not started: Valkey publisher unavailable");
         }
@@ -2141,17 +2212,21 @@ async fn start_as_platform(
         // not `spawn_intake`: it trims streams on its own interval and never
         // reads the shutdown flag, so waiting for it would spend the whole
         // intake grace on every shutdown for a task that cannot exit.
-        runtara_store_postgres::tenant_scope::spawn(async move {
-            let redis_url = cleanup_config.connection_url();
-            match valkey::open_client(redis_url.as_str()) {
-                Ok(redis_client) => {
-                    valkey::cleanup::start_cleanup_task(redis_client, cleanup_config).await;
+        workers.detached(
+            crate::roles::Role::Engine,
+            "trigger stream cleanup",
+            async move {
+                let redis_url = cleanup_config.connection_url();
+                match valkey::open_client(redis_url.as_str()) {
+                    Ok(redis_client) => {
+                        valkey::cleanup::start_cleanup_task(redis_client, cleanup_config).await;
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to create Redis client for cleanup task: {}", e);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("Failed to create Redis client for cleanup task: {}", e);
-                }
-            }
-        });
+            },
+        );
 
         println!("✓ Trigger worker started (stream-based execution)");
         println!("✓ Compilation worker started (async compilation queue)");
@@ -2249,16 +2324,21 @@ async fn start_as_platform(
             let shutdown = shutdown_signal.clone();
             let delivery_pool = pool.clone();
             let scope = delivery_tenant_id.clone();
-            shutdown_coordinator.spawn_intake(scoped(scope, async move {
-                workers::session_delivery_worker::run(
-                    connection,
-                    client,
-                    delivery_pool,
-                    delivery_tenant_id,
-                    shutdown,
-                )
-                .await;
-            }));
+            workers.intake(
+                crate::roles::Role::Engine,
+                "session delivery",
+                &shutdown_coordinator,
+                scoped(scope, async move {
+                    workers::session_delivery_worker::run(
+                        connection,
+                        client,
+                        delivery_pool,
+                        delivery_tenant_id,
+                        shutdown,
+                    )
+                    .await;
+                }),
+            );
         }
     }
 
@@ -2271,14 +2351,24 @@ async fn start_as_platform(
         let cron_engine = Arc::clone(&execution_engine);
         let cron_shutdown = shutdown_signal.clone();
         let scope = cron_tenant_id.clone();
-        shutdown_coordinator.spawn_intake(scoped(scope, async move {
-            let scheduler_config = workers::cron_scheduler::CronSchedulerConfig {
-                tenant_id: cron_tenant_id,
-                check_interval_secs: 60,
-            };
-            workers::cron_scheduler::run(cron_pool, cron_engine, scheduler_config, cron_shutdown)
+        workers.intake(
+            crate::roles::Role::Engine,
+            "cron scheduler",
+            &shutdown_coordinator,
+            scoped(scope, async move {
+                let scheduler_config = workers::cron_scheduler::CronSchedulerConfig {
+                    tenant_id: cron_tenant_id,
+                    check_interval_secs: 60,
+                };
+                workers::cron_scheduler::run(
+                    cron_pool,
+                    cron_engine,
+                    scheduler_config,
+                    cron_shutdown,
+                )
                 .await;
-        }));
+            }),
+        );
     }
     println!("✓ Cron scheduler started (durable outbox)");
 
@@ -2982,7 +3072,11 @@ async fn start_as_platform(
             ));
             // Dispatches messages a previous process acknowledged but did not
             // finish, retries pending ones, and purges handled ones.
-            runtara_store_postgres::tenant_scope::spawn(channel_router.clone().run_intake_worker());
+            workers.detached(
+                crate::roles::Role::Engine,
+                "channel intake",
+                channel_router.clone().run_intake_worker(),
+            );
             println!("✓ Channel router initialized");
 
             // The engine serves a channel's webhook: the call is checked
@@ -3222,8 +3316,27 @@ async fn start_as_platform(
         println!("    Health:  {origin}/health\n");
     }
 
+    // Which background work this process started, by role.
+    {
+        let names = |role: crate::roles::Role| {
+            let mut names: Vec<&str> = workers
+                .started()
+                .into_iter()
+                .filter(|(started, _)| *started == role)
+                .map(|(_, name)| name)
+                .collect();
+            names.sort_unstable();
+            names.dedup();
+            names.join(", ")
+        };
+        tracing::info!(
+            engine = %names(crate::roles::Role::Engine),
+            api = %names(crate::roles::Role::Api),
+            "Background work started"
+        );
+    }
     // Spawn heartbeat task for log pipeline monitoring
-    runtara_store_postgres::tenant_scope::spawn(async {
+    workers.detached(crate::roles::Role::Api, "heartbeat log", async {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600)); // 1 hour
         loop {
             interval.tick().await;

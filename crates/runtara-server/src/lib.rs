@@ -33,6 +33,7 @@ pub mod plan_check;
 pub mod product_events;
 pub mod publish_release;
 pub mod reencrypt;
+pub mod roles;
 pub mod runtime_client;
 pub mod runtime_types;
 pub mod seal_connections;
