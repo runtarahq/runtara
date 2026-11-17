@@ -146,7 +146,7 @@ pub async fn run(pool: PgPool, args: KeysArgs) -> Result<(), String> {
             Ok(())
         }
         KeysArgs::Forget => {
-            let seal = sealed::from_env(pool.clone(), crate::seal_allowances())?;
+            let seal = sealed::ready_from_env(pool.clone(), crate::seal_allowances()).await?;
             let forgotten = sealed::forget_keys_seal_holds(&pool, &seal).await?;
             println!(
                 "Deleted {forgotten} seal key(s) from this database: seal ({}) holds them.",

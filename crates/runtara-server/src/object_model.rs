@@ -160,7 +160,8 @@ pub async fn set(
                 .map_err(|error| format!("the server's configuration is not valid: {error}"))?,
         );
     }
-    let sealed = runtara_connections::sealed::from_env(pool.clone(), crate::seal_allowances())?;
+    let sealed =
+        runtara_connections::sealed::ready_from_env(pool.clone(), crate::seal_allowances()).await?;
     runtara_connections::facade::set_default_connection(
         &ConnectionRepository::new(pool, cipher),
         &sealed,

@@ -1022,6 +1022,40 @@ pub fn from_env(
     Ok(Arc::new(sealed))
 }
 
+/// [`from_env`], once seal answers. A seal of its own may be starting beside
+/// this process, so it is given a little while (ten seconds) before this
+/// gives up: a process that cannot reach it, or that seal does not know, can
+/// use no connection, and says so now instead of at the first use.
+pub async fn ready_from_env(
+    pool: sqlx::PgPool,
+    allowances: Allowances,
+) -> Result<Arc<SealedCredentials>, String> {
+    const TRIES: u32 = 20;
+    let sealed = from_env(pool, allowances)?;
+    if sealed.keys.is_some() {
+        return Ok(sealed);
+    }
+    let mut tried = 0;
+    loop {
+        tried += 1;
+        match sealed.reach().await {
+            Ok(_) => return Ok(sealed),
+            Err(error) if tried < TRIES => {
+                if tried == 1 {
+                    tracing::info!(%error, "Waiting for seal to answer");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "seal ({}) cannot be reached, or does not take this server's calls: {error}",
+                    sealed.mode()
+                ));
+            }
+        }
+    }
+}
+
 /// What became of the seal keys a deployment kept in its database, once seal
 /// is a process of its own.
 #[derive(Debug, Clone, PartialEq, Eq)]

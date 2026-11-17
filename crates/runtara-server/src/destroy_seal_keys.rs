@@ -79,7 +79,8 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<DestroyArgs
 /// Destroy the tenant's keys. Errors when seal cannot start or the keys
 /// could not be deleted.
 pub async fn run(pool: PgPool, args: DestroyArgs) -> Result<(), String> {
-    let sealed = runtara_connections::sealed::from_env(pool, crate::seal_allowances())?;
+    let sealed =
+        runtara_connections::sealed::ready_from_env(pool, crate::seal_allowances()).await?;
     println!("Destroying the seal keys of tenant '{}'...", args.tenant_id);
     sealed
         .destroy_tenant_keys(&args.tenant_id)

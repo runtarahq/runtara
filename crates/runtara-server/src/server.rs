@@ -1404,26 +1404,17 @@ async fn start_as_platform(
             std::process::exit(1);
         }
     }
+    // A seal of its own is asked before anything depends on it.
     let sealed_credentials =
-        match runtara_connections::sealed::from_env(pool.clone(), crate::seal_allowances()) {
+        match runtara_connections::sealed::ready_from_env(pool.clone(), crate::seal_allowances())
+            .await
+        {
             Ok(sealed) => sealed,
             Err(msg) => {
                 eprintln!("❌ Configuration error: {msg}");
                 std::process::exit(1);
             }
         };
-    // A seal of its own is asked before anything depends on it: a server
-    // that cannot reach it, or that seal does not know, can use no
-    // connection, and says so now instead of at the first run that needs one.
-    if sealed_credentials.mode() != "in_process"
-        && let Err(error) = sealed_credentials.reach().await
-    {
-        eprintln!(
-            "❌ seal ({}) cannot be reached, or does not take this server's calls: {error}",
-            sealed_credentials.mode()
-        );
-        std::process::exit(1);
-    }
     // A deployment that ran seal in this server has its tenants' keys in
     // this database. A seal of its own that was not given them would make new
     // ones, and everything sealed so far would stop opening: refuse to start
