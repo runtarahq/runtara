@@ -12,6 +12,12 @@
     "fnv1a64": "b8f430a26d056579"
   },
   {
+    "integrationId": "bigcommerce_api_token",
+    "fieldCount": 2,
+    "serializedBytes": 1058,
+    "fnv1a64": "6e9c6f1f3970d863"
+  },
+  {
     "integrationId": "ebay_oauth",
     "fieldCount": 5,
     "serializedBytes": 2283,

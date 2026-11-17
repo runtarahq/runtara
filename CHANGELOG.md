@@ -34,6 +34,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `http_api_key` can fix the format, so its users enter the key alone
   (`docs/adding-an-agent.md`).
 
+- **BigCommerce agent, generated from BigCommerce's OpenAPI files.**
+  Twenty-seven capabilities: list, read, create and update orders, read their
+  products and shipping addresses, read the order statuses, create, list and
+  update shipments (with tracking), read transactions, quote, issue and list
+  refunds; list, read, create and update products, list their variants and
+  update variants in a batch; set or adjust stock per location, list
+  inventory and locations; and list, create and update customers. The new
+  `bigcommerce_api_token` connection type takes a store-level API account's
+  access token and the store hash (or the API path it is shown with), sends
+  every request under that store's path on `api.bigcommerce.com`, and is
+  limited by default to 4 requests/s with a burst of 10, as the store's quota
+  is shared with its other apps; a 429 waits the quota's reset time. A request
+  that is not a read and gets no answer, a 5xx or an answer it cannot read
+  fails with `BIGCOMMERCE_OUTCOME_UNKNOWN` instead of being retried:
+  BigCommerce documents no idempotency key, and an order, a refund or a stock
+  adjustment sent again is made twice. A V2 list with no matches, which
+  BigCommerce answers with 204, is an empty list.
+
+- **`connector_gen` takes BigCommerce's specs.** `connection_path_prefix`
+  cuts the start every path shares (`/stores/{store_hash}`) and its
+  parameters, which the connection's base URL carries. `title_types` gives a
+  string schema the type its title names (BigCommerce's numbers are strings
+  titled `float`), and `comma_separated_query_arrays` sends array query
+  parameters as `id:in=4,5,6`.
+
 - **PayPal agent, generated from PayPal's REST API OpenAPI files.** Twenty-one
   capabilities: create, read, update, authorize and capture orders and add or
   update their shipment tracking; read, capture, reauthorize and void

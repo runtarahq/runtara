@@ -223,6 +223,17 @@ pub fn get_default_rate_limit_config(integration_id: &str) -> Option<RateLimitCo
             max_retries: 3,
             max_wait_ms: 60000,
         }),
+        // BigCommerce: the quota is the store's, shared by every app that calls
+        // it: 150 requests per 30 s on Growth and Core, 450 on Scale. 4 req/s
+        // with burst 10 leaves the smallest plans room for the store's other
+        // apps; a 429 is retried after the quota's reset time.
+        "bigcommerce_api_token" => Some(RateLimitConfigDto {
+            requests_per_second: 4,
+            burst_size: 10,
+            retry_on_limit: true,
+            max_retries: 3,
+            max_wait_ms: 60000,
+        }),
         // Mailgun: per-plan sending/API limits vary; 5 req/s with burst 10 is a
         // conservative floor that suits transactional sending without 429s.
         "mailgun" => Some(RateLimitConfigDto {
@@ -353,6 +364,14 @@ mod tests {
         let config = get_default_rate_limit_config("shippo_api_token").unwrap();
         // At most burst + rate × 60 requests in any minute; live writes allow 500.
         assert!(config.burst_size + config.requests_per_second * 60 <= 500);
+        assert!(config.retry_on_limit);
+    }
+
+    #[test]
+    fn test_bigcommerce_defaults_stay_under_the_smallest_plans_quota() {
+        let config = get_default_rate_limit_config("bigcommerce_api_token").unwrap();
+        // At most burst + rate × 30 requests in any 30 s; Growth and Core allow 150.
+        assert!(config.burst_size + config.requests_per_second * 30 < 150);
         assert!(config.retry_on_limit);
     }
 

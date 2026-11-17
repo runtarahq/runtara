@@ -907,6 +907,107 @@ fn test_shippo_connection_type_is_registered() {
 }
 
 // ============================================================================
+// BigCommerceExtractor Tests
+// ============================================================================
+
+#[test]
+fn test_bigcommerce_extractor_sends_the_token_to_the_stores_api() {
+    let config = extract_http_config(
+        "bigcommerce_api_token",
+        &json!({ "store_hash": "abc123", "access_token": "token-value" }),
+        None,
+    )
+    .expect("Should extract config");
+
+    assert_eq!(
+        config.headers.get("X-Auth-Token"),
+        Some(&"token-value".to_string())
+    );
+    assert_eq!(
+        config.url_prefix,
+        "https://api.bigcommerce.com/stores/abc123"
+    );
+}
+
+#[test]
+fn test_bigcommerce_extractor_refuses_an_invalid_store_hash() {
+    let err = extract_http_config(
+        "bigcommerce_api_token",
+        &json!({ "store_hash": "abc/../xyz", "access_token": "token-value" }),
+        None,
+    )
+    .expect_err("an invalid store hash should fail");
+    assert!(err.contains("store hash"), "{err}");
+    let err = extract_http_config("bigcommerce_api_token", &json!({}), None)
+        .expect_err("missing parameters should fail");
+    assert!(err.contains("bigcommerce_api_token"), "{err}");
+}
+
+#[test]
+fn test_bigcommerce_base_url_accepts_a_store_hash_or_its_api_path() {
+    use connection_types::bigcommerce_base_url;
+    for input in [
+        "abc123",
+        " abc123 ",
+        "stores/abc123",
+        "api.bigcommerce.com/stores/abc123",
+        "https://api.bigcommerce.com/stores/abc123",
+        "https://api.bigcommerce.com/stores/abc123/",
+        "https://api.bigcommerce.com/stores/abc123/v3/",
+        "https://api.bigcommerce.com/stores/abc123/v2",
+    ] {
+        assert_eq!(
+            bigcommerce_base_url(input).as_deref(),
+            Ok("https://api.bigcommerce.com/stores/abc123"),
+            "{input:?}"
+        );
+    }
+}
+
+#[test]
+fn test_bigcommerce_base_url_cannot_leave_the_stores_path() {
+    use connection_types::bigcommerce_base_url;
+    for input in [
+        "",
+        "/",
+        "..",
+        "abc.123",
+        "abc%2F..",
+        "ABC123",
+        "abc123?x=1",
+        "abc123#x",
+        "abc123/../other",
+        "abc123/v3/catalog",
+        "https://evil.example/stores/abc123",
+        "https://api.bigcommerce.com.evil.example/stores/abc123",
+        "http://api.bigcommerce.com/stores/abc123",
+        "https://api.bigcommerce.com/other/abc123",
+        &"a".repeat(65),
+    ] {
+        assert!(
+            bigcommerce_base_url(input).is_err(),
+            "{input:?} was accepted"
+        );
+    }
+}
+
+#[test]
+fn test_bigcommerce_connection_type_is_registered() {
+    assert!(get_http_extractor_ids().contains(&"bigcommerce_api_token"));
+    let meta = crate::registry::find_connection_type("bigcommerce_api_token")
+        .expect("bigcommerce_api_token is in the static registry");
+    assert_eq!(meta.display_name, "BigCommerce");
+    let token = meta
+        .fields
+        .iter()
+        .find(|f| f.name == "access_token")
+        .unwrap();
+    assert!(token.is_secret);
+    let hash = meta.fields.iter().find(|f| f.name == "store_hash").unwrap();
+    assert!(!hash.is_secret);
+}
+
+// ============================================================================
 // Jira Extractor Tests
 // ============================================================================
 

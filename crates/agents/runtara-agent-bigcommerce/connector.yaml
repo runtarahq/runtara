@@ -1,0 +1,123 @@
+# Input to scripts/connector_gen/connector_gen.py; see its README.md.
+agent:
+  id: bigcommerce
+  name: BigCommerce
+  description: BigCommerce — orders, shipments, refunds, products, variants, inventory and customers.
+  integration_id: bigcommerce_api_token
+  error_prefix: BIGCOMMERCE
+# Every path starts with the store. The bigcommerce_api_token connection's base
+# URL is https://api.bigcommerce.com/stores/<store hash>, so no step names it.
+connection_path_prefix: /stores/{store_hash}
+# The specs declare `Accept` as a parameter; the kit always sends
+# `Accept: application/json`.
+omit_parameters:
+  - Accept
+# BigCommerce reads a list filter comma-separated (`id:in=4,5,6`); the products
+# and customers specs leave theirs exploded.
+comma_separated_query_arrays: true
+# The specs write a number as a string titled `float` (a product's `price`, a
+# transaction's `amount`); the API sends and takes numbers. V2 order amounts,
+# which really are strings, carry no such title.
+title_types:
+  float: {type: number, format: double}
+# The specs type these ids and counts as `number`; a body would send `5.0`.
+input_types:
+  customer_id: {type: integer, format: int64}
+  items_shipped: {type: integer, format: int64}
+  items_total: {type: integer, format: int64}
+  tax_class_id: {type: integer, format: int64}
+  limit: {type: integer, format: int64}
+  page: {type: integer, format: int64}
+# The same in the records BigCommerce returns and in refund items; a workflow
+# would otherwise read an order's customer as `5.0`.
+field_types:
+  order_Resp:
+    customer_id: {type: integer, format: int64}
+    items_shipped: {type: integer, format: int64}
+    items_total: {type: integer, format: int64}
+    shipping_address_count: {type: integer, format: int64}
+  orderProducts:
+    quantity_refunded: {type: integer, format: int64}
+    quantity_shipped: {type: integer, format: int64}
+    return_id: {type: integer, format: int64}
+  orderShippingAddress:
+    items_shipped: {type: integer, format: int64}
+    items_total: {type: integer, format: int64}
+    shipping_zone_id: {type: integer, format: int64}
+  shippingConsignment_Get:
+    items_shipped: {type: integer, format: int64}
+    items_total: {type: integer, format: int64}
+    shipping_zone_id: {type: integer, format: int64}
+  FeeItem:
+    item_id: {type: integer, format: int64}
+  TaxExemptItem:
+    item_id: {type: integer, format: int64}
+  # A product's categories are ids too, in what a step sends and what it reads.
+  ProductBasePost:
+    categories: {type: array, items: {type: integer, format: int64}}
+  product_Put:
+    categories: {type: array, items: {type: integer, format: int64}}
+  product_Full:
+    tax_class_id: {type: integer, format: int64}
+    categories: {type: array, items: {type: integer, format: int64}}
+  CatalogProductsGetResponsesContentApplicationJsonSchemaDataItems:
+    tax_class_id: {type: integer, format: int64}
+    categories: {type: array, items: {type: integer, format: int64}}
+  CatalogProductsProductIdGetResponsesContentApplicationJsonSchemaData:
+    tax_class_id: {type: integer, format: int64}
+    categories: {type: array, items: {type: integer, format: int64}}
+specs:
+  - name: Orders
+    url: https://docs.bigcommerce.com/openapi/admin-management-orders.json
+    sha256: 10b62847d1c84e6ba31a29e802e2f2ab9ed13adeebc5eb776544eac997575ad0
+    operations:
+      - orders_getOrders
+      - orders_getOrder
+      - orders_createOrder
+      - orders_updateOrder
+      - orderProducts_getOrderProducts
+      - orderShippingAddresses_getOrderShippingAddresses
+      - orderShipments_getOrderShipments
+      - orderShipments_createOrderShipments
+      - orderShipments_updateOrderShipment
+      - orderStatus_getOrderStatuses
+  - name: OrderOperations
+    url: https://docs.bigcommerce.com/openapi/admin-management-order-operations.json
+    sha256: 31ba0df0b7055a3e665b530b4b9bdf7dedcc78208bd9b38e9057c8843abdc2ff
+    operations:
+      - transactions_getOrderTransactions
+      - paymentActions_createOrderRefundQuotes
+      - paymentActions_createOrderRefund
+      - paymentActions_getOrderRefunds
+  - name: Products
+    url: https://docs.bigcommerce.com/openapi/admin-catalog-products.json
+    sha256: e8fa8297e9ba9a58cf21c3110132c6a0b055aae81f8a6e6dfdc8e268395dcdd9
+    operations:
+      - products_getProducts
+      - products_getProduct
+      - products_createProduct
+      - products_updateProduct
+  # Updating one variant is not listed: its body's `product_id` would be a
+  # second input named like the path parameter. The batch update takes the
+  # variant's id instead.
+  - name: Variants
+    url: https://docs.bigcommerce.com/openapi/admin-catalog-product-variants.json
+    sha256: 0fce2c720f4a15b3c40ed8c45f205d939a7fb2ce042c9d87e5901ff6ff6f7dc9
+    operations:
+      - productVariants_getProductVariants
+      - variantsBatch_updateVariantsBatch
+  - name: Inventory
+    url: https://docs.bigcommerce.com/openapi/admin-management-inventory.json
+    sha256: fef0c9bde181a58cb2c26c147e48dac10499ad176a04f208da6c45120d43186e
+    operations:
+      - adjustments_put-absolute-adjustment
+      - adjustments_post-relative-adjustment
+      - items_get-inventory-items
+      - locations_getLocations
+  - name: Customers
+    url: https://docs.bigcommerce.com/openapi/admin-management-customers-v3.json
+    sha256: 5576697361ae159a2e6e18c10feca7ec8420912652c97456414cdbf40da1518f
+    operations:
+      - customers_getCustomers
+      - customers_createCustomers
+      - customers_updateCustomers

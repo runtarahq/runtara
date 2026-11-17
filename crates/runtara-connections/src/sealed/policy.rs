@@ -19,8 +19,8 @@ use seal_format::{FieldName, PolicyName};
 use serde_json::{Value, json};
 
 use crate::auth::provider_auth::{
-    first_string_param, jira_account_url, normalize_endpoint, openai_proxy_base_url,
-    resolve_azure_blob_base_url, resolve_named_endpoint,
+    bigcommerce_store_url, first_string_param, jira_account_url, normalize_endpoint,
+    openai_proxy_base_url, resolve_azure_blob_base_url, resolve_named_endpoint,
 };
 
 /// Destinations a deployment lets credentials go to that seal refuses by
@@ -1225,6 +1225,12 @@ fn secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
             SHIPPO_API_BASE_URL,
             header("Authorization", "ShippoToken {}"),
         ),
+        // Sent only under the store's own path on BigCommerce's host.
+        "bigcommerce_api_token" => one(
+            "access_token",
+            &bigcommerce_store_url(params)?,
+            header("X-Auth-Token", "{}"),
+        ),
         "jira_api_token" => one(
             "api_token",
             &jira_account_url(params)?,
@@ -1601,6 +1607,7 @@ pub const SEALABLE_TYPES: &[&str] = &[
     "stripe_api_key",
     "pipedrive_api_token",
     "shippo_api_token",
+    "bigcommerce_api_token",
     "jira_api_token",
     "telegram_bot",
     "slack_bot",
@@ -1879,6 +1886,13 @@ mod tests {
                 json!({"header": {"name": "Authorization", "format": "ShippoToken {}"}}),
             ),
             (
+                "bigcommerce_api_token",
+                json!({"access_token": "s", "store_hash": "abc123"}),
+                "access_token",
+                json!({"scheme": "https", "host": "api.bigcommerce.com", "path_prefix": "/stores/abc123"}),
+                json!({"header": {"name": "X-Auth-Token", "format": "{}"}}),
+            ),
+            (
                 "http_bearer",
                 json!({"token": "s", "base_url": "https://api.example.com/v2/"}),
                 "token",
@@ -1964,6 +1978,21 @@ mod tests {
     }
 
     #[test]
+    fn a_bigcommerce_token_without_a_valid_store_is_not_sealed() {
+        for store_hash in [
+            json!("abc/../other"),
+            json!("https://evil.example/stores/abc"),
+        ] {
+            let params = json!({"access_token": "s", "store_hash": store_hash});
+            assert_eq!(
+                policies("bigcommerce_api_token", &params, &Allowances::default()),
+                None,
+                "{store_hash}"
+            );
+        }
+    }
+
+    #[test]
     fn every_listed_type_is_one_the_registry_knows() {
         for integration_id in SEALABLE_TYPES {
             assert!(
@@ -1988,7 +2017,7 @@ mod tests {
             "account_name": "account",
             "client_certificate_pem": "-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----",
             "client_id": "client", "client_secret": "s", "app_id": "app", "app_password": "s",
-            "tenant_id": "tenant", "scope": "read", "subdomain": "acme",
+            "tenant_id": "tenant", "scope": "read", "subdomain": "acme", "store_hash": "abc123",
             "token_url": "https://auth.example.com/token",
             "database_target": "postgres://app@db.example.com:5432/orders",
         });

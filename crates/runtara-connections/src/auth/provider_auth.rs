@@ -1,6 +1,7 @@
 use runtara_agents::extractors::connection_types::{
     GEMINI_API_BASE_URL, SHIPPO_API_BASE_URL, SHIPPO_API_VERSION, ZENDESK_DEFAULT_SCOPE,
-    connection_environment, jira_base_url, paypal_base_url, ups_base_url, zendesk_base_url,
+    bigcommerce_base_url, connection_environment, jira_base_url, paypal_base_url, ups_base_url,
+    zendesk_base_url,
 };
 use runtara_agents::registry::find_connection_type;
 use runtara_dsl::agent_meta::{OAuthConfig, TokenEndpointAuth};
@@ -243,6 +244,15 @@ pub(crate) fn describe_connection_auth(
                 deferred_auth: None,
             }
         }
+        // BigCommerce: every store's API is under its own path on one host, and
+        // the proxy keeps each request under it. An invalid store hash leaves no
+        // base URL, so a credentialed request fails closed at the pin step.
+        "bigcommerce_api_token" => ConnectionAuthDescriptor {
+            base_url: bigcommerce_store_url(params),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: None,
+        },
         // Zendesk: every account has its own host. An invalid subdomain leaves no
         // base URL, so a credentialed request fails closed at the proxy's pin step.
         "zendesk_client_credentials" => ConnectionAuthDescriptor {
@@ -457,6 +467,10 @@ fn xero_tenant_id(params: &Value) -> Option<&str> {
     params["tenant_id"]
         .as_str()
         .filter(|tenant| uuid::Uuid::parse_str(tenant).is_ok())
+}
+
+pub(crate) fn bigcommerce_store_url(params: &Value) -> Option<String> {
+    bigcommerce_base_url(params["store_hash"].as_str()?).ok()
 }
 
 fn zendesk_account_url(params: &Value) -> Option<String> {
@@ -1223,6 +1237,40 @@ mod tests {
             descriptor.base_url.as_deref(),
             Some("https://api.goshippo.com")
         );
+    }
+
+    #[test]
+    fn bigcommerce_pins_the_stores_path() {
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "bigcommerce_api_token",
+            &json!({
+                "store_hash": "https://api.bigcommerce.com/stores/abc123/v3/",
+                "access_token": "token-value"
+            }),
+            &mut headers,
+        );
+        // The credential is seal's to attach.
+        assert!(!headers.contains_key("X-Auth-Token"));
+        assert_eq!(
+            descriptor.base_url.as_deref(),
+            Some("https://api.bigcommerce.com/stores/abc123")
+        );
+    }
+
+    #[test]
+    fn bigcommerce_with_an_invalid_store_hash_has_no_base_url() {
+        for store_hash in [json!("abc/../other"), json!(""), Value::Null] {
+            let mut headers = HashMap::new();
+            let descriptor = describe_connection_auth(
+                "conn-1",
+                "bigcommerce_api_token",
+                &json!({ "store_hash": store_hash, "access_token": "token-value" }),
+                &mut headers,
+            );
+            assert_eq!(descriptor.base_url, None, "{store_hash}");
+        }
     }
 
     #[test]
