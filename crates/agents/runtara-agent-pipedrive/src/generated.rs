@@ -27,9 +27,10 @@ pub struct AddDealRequest {
     #[serde(
         rename = "archive_time",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub archive_time: Option<String>,
+    pub archive_time: Option<Option<String>>,
     #[field(
         display_name = r##"Close Time"##,
         description = r##"The date and time of closing the deal. Can only be set if deal status is won or lost."##
@@ -112,8 +113,13 @@ pub struct AddDealRequest {
         display_name = r##"Organization"##,
         description = r##"The ID of the organization linked to the deal"##
     )]
-    #[serde(rename = "org_id", default, skip_serializing_if = "Option::is_none")]
-    pub org_id: Option<i64>,
+    #[serde(
+        rename = "org_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub org_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Owner ID"##,
         description = r##"The ID of the user who owns the deal"##
@@ -124,8 +130,13 @@ pub struct AddDealRequest {
         display_name = r##"Person ID"##,
         description = r##"The ID of the person linked to the deal"##
     )]
-    #[serde(rename = "person_id", default, skip_serializing_if = "Option::is_none")]
-    pub person_id: Option<i64>,
+    #[serde(
+        rename = "person_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub person_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Pipeline ID"##,
         description = r##"The ID of the pipeline associated with the deal"##
@@ -257,9 +268,10 @@ pub struct GetDealsResponseAllOfAdditionalData {
     #[serde(
         rename = "next_cursor",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub next_cursor: Option<String>,
+    pub next_cursor: Option<Option<String>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -278,8 +290,13 @@ The Annual Contract Value of the deal
 Null if there are no products attached to the deal
 "##
     )]
-    #[serde(rename = "acv", default, skip_serializing_if = "Option::is_none")]
-    pub acv: Option<f64>,
+    #[serde(
+        rename = "acv",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub acv: Option<Option<f64>>,
     #[field(
         display_name = r##"Add Time"##,
         description = r##"The creation date and time of the deal"##
@@ -295,14 +312,24 @@ The Annual Recurring Revenue of the deal
 Null if there are no products attached to the deal
 "##
     )]
-    #[serde(rename = "arr", default, skip_serializing_if = "Option::is_none")]
-    pub arr: Option<f64>,
+    #[serde(
+        rename = "arr",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub arr: Option<Option<f64>>,
     #[field(
         display_name = r##"Channel"##,
         description = r##"The ID of your Marketing channel this Deal was created from. Recognized Marketing channels can be configured in your <a href="https://app.pipedrive.com/settings/fields" target="_blank" rel="noopener noreferrer">Company settings</a>."##
     )]
-    #[serde(rename = "channel", default, skip_serializing_if = "Option::is_none")]
-    pub channel: Option<i64>,
+    #[serde(
+        rename = "channel",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub channel: Option<Option<i64>>,
     #[field(
         display_name = r##"Channel ID"##,
         description = r##"The optional ID to further distinguish the Marketing channel."##
@@ -310,9 +337,10 @@ Null if there are no products attached to the deal
     #[serde(
         rename = "channel_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub channel_id: Option<String>,
+    pub channel_id: Option<Option<String>>,
     #[field(
         display_name = r##"Close Time"##,
         description = r##"The date and time of closing the deal"##
@@ -320,9 +348,10 @@ Null if there are no products attached to the deal
     #[serde(
         rename = "close_time",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub close_time: Option<String>,
+    pub close_time: Option<Option<String>>,
     #[field(
         display_name = r##"Currency"##,
         description = r##"The currency associated with the deal"##
@@ -346,9 +375,10 @@ Null if there are no products attached to the deal
     #[serde(
         rename = "expected_close_date",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub expected_close_date: Option<String>,
+    pub expected_close_date: Option<Option<String>>,
     #[field(display_name = r##"ID"##, description = r##"The ID of the deal"##)]
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>,
@@ -385,15 +415,21 @@ Null if there are no products attached to the deal
     #[serde(
         rename = "lost_reason",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub lost_reason: Option<String>,
+    pub lost_reason: Option<Option<String>>,
     #[field(
         display_name = r##"Lost Time"##,
         description = r##"The date and time of changing the deal status as lost"##
     )]
-    #[serde(rename = "lost_time", default, skip_serializing_if = "Option::is_none")]
-    pub lost_time: Option<String>,
+    #[serde(
+        rename = "lost_time",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub lost_time: Option<Option<String>>,
     #[field(
         display_name = r##"Mrr"##,
         description = r##"Only available in Growth and above plans
@@ -403,14 +439,24 @@ The Monthly Recurring Revenue of the deal
 Null if there are no products attached to the deal
 "##
     )]
-    #[serde(rename = "mrr", default, skip_serializing_if = "Option::is_none")]
-    pub mrr: Option<f64>,
+    #[serde(
+        rename = "mrr",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub mrr: Option<Option<f64>>,
     #[field(
         display_name = r##"Organization"##,
         description = r##"The ID of the organization linked to the deal"##
     )]
-    #[serde(rename = "org_id", default, skip_serializing_if = "Option::is_none")]
-    pub org_id: Option<i64>,
+    #[serde(
+        rename = "org_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub org_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Origin"##,
         description = r##"The way this Deal was created. `origin` field is set by Pipedrive when Deal is created and cannot be changed."##
@@ -421,8 +467,13 @@ Null if there are no products attached to the deal
         display_name = r##"Origin ID"##,
         description = r##"The optional ID to further distinguish the origin of the deal - e.g. Which API integration created this Deal."##
     )]
-    #[serde(rename = "origin_id", default, skip_serializing_if = "Option::is_none")]
-    pub origin_id: Option<String>,
+    #[serde(
+        rename = "origin_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub origin_id: Option<Option<String>>,
     #[field(
         display_name = r##"Owner ID"##,
         description = r##"The ID of the user who owns the deal"##
@@ -433,8 +484,13 @@ Null if there are no products attached to the deal
         display_name = r##"Person ID"##,
         description = r##"The ID of the person linked to the deal"##
     )]
-    #[serde(rename = "person_id", default, skip_serializing_if = "Option::is_none")]
-    pub person_id: Option<i64>,
+    #[serde(
+        rename = "person_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub person_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Pipeline ID"##,
         description = r##"The ID of the pipeline associated with the deal"##
@@ -452,9 +508,10 @@ Null if there are no products attached to the deal
     #[serde(
         rename = "probability",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub probability: Option<f64>,
+    pub probability: Option<Option<f64>>,
     #[field(
         display_name = r##"Source Lead ID"##,
         description = r##"The ID of the lead if the deal was converted from a lead. Only included when requested via include_fields parameter."##
@@ -462,9 +519,10 @@ Null if there are no products attached to the deal
     #[serde(
         rename = "source_lead_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub source_lead_id: Option<String>,
+    pub source_lead_id: Option<Option<String>>,
     #[field(
         display_name = r##"Stage Change Time"##,
         description = r##"The last updated date and time of the deal stage"##
@@ -472,9 +530,10 @@ Null if there are no products attached to the deal
     #[serde(
         rename = "stage_change_time",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub stage_change_time: Option<String>,
+    pub stage_change_time: Option<Option<String>>,
     #[field(
         display_name = r##"Stage ID"##,
         description = r##"The ID of the deal stage"##
@@ -500,9 +559,10 @@ Null if there are no products attached to the deal
     #[serde(
         rename = "update_time",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub update_time: Option<String>,
+    pub update_time: Option<Option<String>>,
     #[field(
         display_name = r##"Value"##,
         description = r##"The value of the deal"##
@@ -523,8 +583,13 @@ Null if there are no products attached to the deal
         display_name = r##"Won Time"##,
         description = r##"The date and time of changing the deal status as won"##
     )]
-    #[serde(rename = "won_time", default, skip_serializing_if = "Option::is_none")]
-    pub won_time: Option<String>,
+    #[serde(
+        rename = "won_time",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub won_time: Option<Option<String>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -541,9 +606,10 @@ pub struct UpdateDealRequest {
     #[serde(
         rename = "archive_time",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub archive_time: Option<String>,
+    pub archive_time: Option<Option<String>>,
     #[field(
         display_name = r##"Close Time"##,
         description = r##"The date and time of closing the deal. Can only be set if deal status is won or lost."##
@@ -626,8 +692,13 @@ pub struct UpdateDealRequest {
         display_name = r##"Organization"##,
         description = r##"The ID of the organization linked to the deal"##
     )]
-    #[serde(rename = "org_id", default, skip_serializing_if = "Option::is_none")]
-    pub org_id: Option<i64>,
+    #[serde(
+        rename = "org_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub org_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Owner ID"##,
         description = r##"The ID of the user who owns the deal"##
@@ -638,8 +709,13 @@ pub struct UpdateDealRequest {
         display_name = r##"Person ID"##,
         description = r##"The ID of the person linked to the deal"##
     )]
-    #[serde(rename = "person_id", default, skip_serializing_if = "Option::is_none")]
-    pub person_id: Option<i64>,
+    #[serde(
+        rename = "person_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub person_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Pipeline ID"##,
         description = r##"The ID of the pipeline associated with the deal"##
@@ -736,8 +812,13 @@ The Annual Contract Value of the deal
 Null if there are no products attached to the deal
 "##
     )]
-    #[serde(rename = "acv", default, skip_serializing_if = "Option::is_none")]
-    pub acv: Option<f64>,
+    #[serde(
+        rename = "acv",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub acv: Option<Option<f64>>,
     #[field(
         display_name = r##"Add Time"##,
         description = r##"The creation date and time of the deal"##
@@ -753,14 +834,24 @@ The Annual Recurring Revenue of the deal
 Null if there are no products attached to the deal
 "##
     )]
-    #[serde(rename = "arr", default, skip_serializing_if = "Option::is_none")]
-    pub arr: Option<f64>,
+    #[serde(
+        rename = "arr",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub arr: Option<Option<f64>>,
     #[field(
         display_name = r##"Channel"##,
         description = r##"The ID of your Marketing channel this Deal was created from. Recognized Marketing channels can be configured in your <a href="https://app.pipedrive.com/settings/fields" target="_blank" rel="noopener noreferrer">Company settings</a>."##
     )]
-    #[serde(rename = "channel", default, skip_serializing_if = "Option::is_none")]
-    pub channel: Option<i64>,
+    #[serde(
+        rename = "channel",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub channel: Option<Option<i64>>,
     #[field(
         display_name = r##"Channel ID"##,
         description = r##"The optional ID to further distinguish the Marketing channel."##
@@ -768,9 +859,10 @@ Null if there are no products attached to the deal
     #[serde(
         rename = "channel_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub channel_id: Option<String>,
+    pub channel_id: Option<Option<String>>,
     #[field(
         display_name = r##"Close Time"##,
         description = r##"The date and time of closing the deal"##
@@ -778,9 +870,10 @@ Null if there are no products attached to the deal
     #[serde(
         rename = "close_time",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub close_time: Option<String>,
+    pub close_time: Option<Option<String>>,
     #[field(
         display_name = r##"Currency"##,
         description = r##"The currency associated with the deal"##
@@ -804,9 +897,10 @@ Null if there are no products attached to the deal
     #[serde(
         rename = "expected_close_date",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub expected_close_date: Option<String>,
+    pub expected_close_date: Option<Option<String>>,
     #[field(display_name = r##"ID"##, description = r##"The ID of the deal"##)]
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>,
@@ -843,15 +937,21 @@ Null if there are no products attached to the deal
     #[serde(
         rename = "lost_reason",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub lost_reason: Option<String>,
+    pub lost_reason: Option<Option<String>>,
     #[field(
         display_name = r##"Lost Time"##,
         description = r##"The date and time of changing the deal status as lost"##
     )]
-    #[serde(rename = "lost_time", default, skip_serializing_if = "Option::is_none")]
-    pub lost_time: Option<String>,
+    #[serde(
+        rename = "lost_time",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub lost_time: Option<Option<String>>,
     #[field(
         display_name = r##"Mrr"##,
         description = r##"Only available in Growth and above plans
@@ -861,14 +961,24 @@ The Monthly Recurring Revenue of the deal
 Null if there are no products attached to the deal
 "##
     )]
-    #[serde(rename = "mrr", default, skip_serializing_if = "Option::is_none")]
-    pub mrr: Option<f64>,
+    #[serde(
+        rename = "mrr",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub mrr: Option<Option<f64>>,
     #[field(
         display_name = r##"Organization"##,
         description = r##"The ID of the organization linked to the deal"##
     )]
-    #[serde(rename = "org_id", default, skip_serializing_if = "Option::is_none")]
-    pub org_id: Option<i64>,
+    #[serde(
+        rename = "org_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub org_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Origin"##,
         description = r##"The way this Deal was created. `origin` field is set by Pipedrive when Deal is created and cannot be changed."##
@@ -879,8 +989,13 @@ Null if there are no products attached to the deal
         display_name = r##"Origin ID"##,
         description = r##"The optional ID to further distinguish the origin of the deal - e.g. Which API integration created this Deal."##
     )]
-    #[serde(rename = "origin_id", default, skip_serializing_if = "Option::is_none")]
-    pub origin_id: Option<String>,
+    #[serde(
+        rename = "origin_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub origin_id: Option<Option<String>>,
     #[field(
         display_name = r##"Owner ID"##,
         description = r##"The ID of the user who owns the deal"##
@@ -891,8 +1006,13 @@ Null if there are no products attached to the deal
         display_name = r##"Person ID"##,
         description = r##"The ID of the person linked to the deal"##
     )]
-    #[serde(rename = "person_id", default, skip_serializing_if = "Option::is_none")]
-    pub person_id: Option<i64>,
+    #[serde(
+        rename = "person_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub person_id: Option<Option<i64>>,
     #[field(
         display_name = r##"Pipeline ID"##,
         description = r##"The ID of the pipeline associated with the deal"##
@@ -910,9 +1030,10 @@ Null if there are no products attached to the deal
     #[serde(
         rename = "probability",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub probability: Option<f64>,
+    pub probability: Option<Option<f64>>,
     #[field(
         display_name = r##"Source Lead ID"##,
         description = r##"The ID of the lead if the deal was converted from a lead. Only included when requested via include_fields parameter."##
@@ -920,9 +1041,10 @@ Null if there are no products attached to the deal
     #[serde(
         rename = "source_lead_id",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub source_lead_id: Option<String>,
+    pub source_lead_id: Option<Option<String>>,
     #[field(
         display_name = r##"Stage Change Time"##,
         description = r##"The last updated date and time of the deal stage"##
@@ -930,9 +1052,10 @@ Null if there are no products attached to the deal
     #[serde(
         rename = "stage_change_time",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub stage_change_time: Option<String>,
+    pub stage_change_time: Option<Option<String>>,
     #[field(
         display_name = r##"Stage ID"##,
         description = r##"The ID of the deal stage"##
@@ -958,9 +1081,10 @@ Null if there are no products attached to the deal
     #[serde(
         rename = "update_time",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub update_time: Option<String>,
+    pub update_time: Option<Option<String>>,
     #[field(
         display_name = r##"Value"##,
         description = r##"The value of the deal"##
@@ -981,8 +1105,13 @@ Null if there are no products attached to the deal
         display_name = r##"Won Time"##,
         description = r##"The date and time of changing the deal status as won"##
     )]
-    #[serde(rename = "won_time", default, skip_serializing_if = "Option::is_none")]
-    pub won_time: Option<String>,
+    #[serde(
+        rename = "won_time",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub won_time: Option<Option<String>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]

@@ -291,6 +291,18 @@ pinned_path_parameters:
   - version
 ```
 
+**Every path starts with the account**, as BigCommerce's start with
+`/stores/{store_hash}`. Name that start, and `fetch` cuts it from every path
+(`/v2/orders`) and drops the path parameters it names; the connection type's
+base URL ends in it with the account's value
+(`https://api.bigcommerce.com/stores/<hash>`), and the proxy keeps every
+request under it. A listed operation whose path does not start with it is an
+error.
+
+```yaml
+connection_path_prefix: /stores/{store_hash}
+```
+
 **The spec requires a field the API does not.** UPS's label recovery spec
 requires `TrackingNumbers` and `ReferenceValues`, while the API needs one of
 several keys. Name the schema (as it is in `spec.slice.json`) and the fields;
@@ -330,6 +342,26 @@ field_types:
     $append_values:
       type: object
       additionalProperties: {type: boolean}
+```
+
+**The spec names a type in a title.** BigCommerce's specs write a number as
+`type: string` with the title `float` (a product's `price`, a transaction's
+`amount`), and its API sends and takes numbers there. Give the title the type
+or schema it means; every string schema with that title gets it, and loses
+the title. A title no string schema has is an error.
+
+```yaml
+title_types:
+  float: {type: number, format: double}
+```
+
+**The API reads a list in the query comma-separated**, as BigCommerce reads
+`id:in=4,5,6`, though the spec leaves its array parameters at OpenAPI's
+default (`id:in=4&id:in=5`). Every array query parameter in the `form` style
+is then sent `explode: false`:
+
+```yaml
+comma_separated_query_arrays: true
 ```
 
 **The descriptions are HTML**, as eBay's are (`<br>`, `<strong>`, links to
@@ -426,6 +458,15 @@ crates/agents/runtara-agent-<id>/
 - An optional body field the spec marks `nullable` is an `Option<Option<T>>`
   (deserialized with `kit::nullable`): omitted is not sent, an explicit `null`
   is sent as `null` (to clear the vendor's value), and a value is sent as is.
+  So is a nullable field of a model, as in a body that is an array of records
+  (BigCommerce's batch of variants, where `price: null` falls back to the
+  product's price); a model read from a response keeps a `null` the same way.
+  openapi-generator ignores `nullable` in a 3.1 document, so a 3.1 slice is
+  rendered with each nullable field that has a `type` written as
+  `type: [<type>, "null"]`; one that is only a `$ref` or an `allOf` has no
+  type to list and stays an `Option<T>` there. Where the vendor's spec does
+  not mark a field nullable that takes `null`, mark it with `field_types`
+  (`nullable: true`).
 - `<OperationId>Input::request()` builds the exact request without sending it,
   so tests can check the method, path, query and body; the capability function
   only adds the connection.

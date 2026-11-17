@@ -875,6 +875,42 @@ def is_pinned(spec: dict, parameter: dict, names: set) -> bool:
     return resolved.get("in") == "path" and resolved.get("name") in names
 
 
+def strip_path_prefix(spec: dict, path: str, op: dict, item: dict, prefix) -> tuple:
+    """`connection_path_prefix`: the start of every path, whose values the
+    connection's base URL carries, as BigCommerce's
+    `https://api.bigcommerce.com/stores/<hash>` carries `/stores/{store_hash}`.
+    It is cut from the path, and the path parameters it names are no step
+    inputs. Returns the path and the names dropped."""
+    if not prefix:
+        return path, set()
+    rest = path[len(prefix):]
+    if not path.startswith(prefix) or rest[:1] not in ("", "/"):
+        sys.exit(f"{op['operationId']}: `{path}` does not start with connection_path_prefix `{prefix}`")
+    names = set(re.findall(r"\{([^{}]+)\}", prefix))
+    declared = {
+        deref(spec, parameter).get("name")
+        for owner in (item, op)
+        for parameter in owner.get("parameters") or []
+        if deref(spec, parameter).get("in") == "path"
+    }
+    missing = names - declared
+    if missing:
+        sys.exit(f"{op['operationId']}: connection_path_prefix `{prefix}` names {sorted(missing)}, "
+                 "which are no path parameters of it")
+    if "parameters" in op:
+        op["parameters"] = [p for p in op["parameters"] if not is_pinned(spec, p, names)]
+    return rest or "/", names
+
+
+def check_path_prefix(prefix) -> None:
+    if prefix is None:
+        return
+    if (not isinstance(prefix, str) or not prefix.startswith("/") or prefix.endswith("/")
+            or "?" in prefix or "#" in prefix or not re.search(r"\{[^{}]+\}", prefix)):
+        sys.exit(f"connection_path_prefix `{prefix}` is no path starting with `/` that names a path "
+                 "parameter (`/stores/{store_hash}`)")
+
+
 def pin_path_parameters(spec: dict, path: str, op: dict, item: dict, names: list) -> tuple:
     """A path parameter listed in `pinned_path_parameters` is fixed to the
     spec's own default: UPS's `/shipments/{version}/ship` with `version`
@@ -1233,7 +1269,7 @@ def check_used(options: dict, used: dict) -> None:
 def slice_spec(spec: dict, operation_ids: list, model_names: dict = None, body_envelopes: list = (),
                connection_headers: list = (), connection_parameters: list = (),
                pinned_path_parameters: list = (), omit_parameters: list = (),
-               read_operations: list = ()) -> dict:
+               read_operations: list = (), connection_path_prefix: str = None) -> dict:
     """Keep the listed operations and every component they reference.
 
     openapi-generator's FILTER normalizer drops unlisted operations but still
@@ -1245,7 +1281,8 @@ def slice_spec(spec: dict, operation_ids: list, model_names: dict = None, body_e
                "pinned_path_parameters": pinned_path_parameters,
                "omit_parameters": omit_parameters,
                "read_operations": read_operations}
-    sliced, used = slice_one(spec, operation_ids, operation_ids[0], model_names or {}, **options)
+    sliced, used = slice_one(spec, operation_ids, operation_ids[0], model_names or {},
+                             connection_path_prefix=connection_path_prefix, **options)
     check_used(options, used)
     return sliced
 
@@ -1258,7 +1295,8 @@ def slice_specs(specs: list, config: dict) -> dict:
     first = specs[0][0]["operations"][0]
     slices, used = [], {}
     for source, spec in specs:
-        sliced, found = slice_one(spec, source["operations"], first, model_names, **options)
+        sliced, found = slice_one(spec, source["operations"], first, model_names,
+                                  connection_path_prefix=config.get("connection_path_prefix"), **options)
         for key, names in found.items():
             used.setdefault(key, set()).update(names)
         slices.append((source.get("name"), sliced))
@@ -1271,8 +1309,12 @@ def slice_specs(specs: list, config: dict) -> dict:
         sliced = merge_slices(slices)
         check_names(sliced, [op for source, _ in specs for op in source["operations"]], model_names)
     make_optional(sliced, config.get("optional_fields") or {})
+    retype_titled(sliced, config.get("title_types") or {})
     retype_fields(sliced, config.get("field_types") or {})
     retype_inputs(sliced, config.get("input_types") or {})
+    # After `input_types`, so a parameter it makes a list is sent as one.
+    if config.get("comma_separated_query_arrays"):
+        unexplode_query_arrays(sliced)
     if config.get("html_descriptions"):
         plain_descriptions(sliced)
     return sliced
@@ -1340,6 +1382,58 @@ def retype_inputs(sliced: dict, types: dict) -> None:
         sys.exit(f"input_types {sorted(unused)} are no input of the listed operations")
 
 
+def retype_titled(sliced: dict, types: dict) -> None:
+    """`title_types`: a schema title -> the type (`number`) or schema a string
+    schema with that title has. BigCommerce's specs write a number as
+    `type: string` titled `float` (a product's `price`, a transaction's
+    `amount`); its API sends and takes numbers there. The title goes, as it
+    only named the type."""
+    if not types:
+        return
+    used = set()
+
+    def visit(node):
+        if isinstance(node, list):
+            for value in node:
+                visit(value)
+        elif isinstance(node, dict):
+            title = node.get("title")
+            if isinstance(title, str) and title in types and node.get("type") == "string":
+                retyped = retyped_schema(node, types[title])
+                if retyped.get("title") == title:
+                    del retyped["title"]
+                node.clear()
+                node.update(retyped)
+                used.add(title)
+            for value in node.values():
+                visit(value)
+
+    visit(sliced)
+    unused = set(types) - used
+    if unused:
+        sys.exit(f"title_types {sorted(unused)} title no string schema of the listed operations")
+
+
+def unexplode_query_arrays(sliced: dict) -> None:
+    """`comma_separated_query_arrays`: the API reads a list in the query
+    comma-separated (BigCommerce's `id:in=4,5,6`), though its spec leaves the
+    parameters at OpenAPI's default, one `id:in=` per item. Every array query
+    parameter in the `form` style is sent `explode: false`."""
+    found = False
+    for item in sliced["paths"].values():
+        owners = [item] + [op for method, op in item.items() if method in HTTP_METHODS]
+        for owner in owners:
+            for parameter in owner.get("parameters") or []:
+                resolved = deref(sliced, parameter)
+                schema = deref(sliced, resolved.get("schema") or {})
+                if (resolved.get("in") == "query" and schema.get("type") == "array"
+                        and resolved.get("style", "form") == "form"):
+                    resolved["explode"] = False
+                    found = True
+    if not found:
+        sys.exit("comma_separated_query_arrays: no listed operation has an array query parameter")
+
+
 def make_optional(sliced: dict, fields: dict) -> None:
     """`optional_fields`: schema name -> fields the vendor's spec requires but its
     API does not (UPS's label recovery needs one of several keys; its spec
@@ -1357,9 +1451,10 @@ def make_optional(sliced: dict, fields: dict) -> None:
 
 def slice_one(spec: dict, operation_ids: list, first: str, model_names: dict, body_envelopes=(),
               connection_headers=(), connection_parameters=(), pinned_path_parameters=(),
-              omit_parameters=(), read_operations=()) -> tuple:
+              omit_parameters=(), read_operations=(), connection_path_prefix=None) -> tuple:
     """The slice of one spec, and the listed names (`NAME_LISTS`) it used.
     `first` is the operation that carries the agent's module attributes."""
+    check_path_prefix(connection_path_prefix)
     if is_swagger2(spec):
         spec = convert_swagger2(spec)
     if "openapi" not in spec:
@@ -1394,7 +1489,8 @@ def slice_one(spec: dict, operation_ids: list, first: str, model_names: dict, bo
             if op["operationId"] in read_operations:
                 op.pop("x-runtara-side-effects", None)
                 used["read_operations"].add(op["operationId"])
-            target, pinned = pin_path_parameters(spec, path, op, item, pinned_path_parameters)
+            target, stripped = strip_path_prefix(spec, path, op, item, connection_path_prefix)
+            target, pinned = pin_path_parameters(spec, target, op, item, pinned_path_parameters)
             used["pinned_path_parameters"] |= pinned
             if op["operationId"] == first:
                 op["x-runtara-first"] = True
@@ -1402,7 +1498,7 @@ def slice_one(spec: dict, operation_ids: list, first: str, model_names: dict, bo
             if method in entry:
                 sys.exit(f"{op['operationId']}: pinned, it is `{method.upper()} {target}` like another operation")
             entry[method] = op
-            targets.append((target, pinned))
+            targets.append((target, pinned | stripped))
         if "parameters" in item:
             for target, pinned in targets:
                 sliced_paths[target]["parameters"] = [
@@ -1846,6 +1942,26 @@ def property_name_mappings(sliced: dict) -> dict:
     return mappings
 
 
+def nullable_as_type_lists(sliced: dict) -> dict:
+    """A copy of a 3.1 slice with each `nullable: true` beside a single `type`
+    written as 3.1 writes it, `type: [<type>, "null"]`."""
+    copied = copy.deepcopy(sliced)
+
+    def visit(node):
+        if isinstance(node, list):
+            for value in node:
+                visit(value)
+        elif isinstance(node, dict):
+            if node.get("nullable") is True and isinstance(node.get("type"), str):
+                node["type"] = [node["type"], "null"]
+                del node["nullable"]
+            for value in node.values():
+                visit(value)
+
+    visit(copied)
+    return copied
+
+
 def render(crate: Path) -> str:
     """Render `generated.rs` for `crate` and return its rustfmt-ed text."""
     config = load_config(crate)
@@ -1854,6 +1970,13 @@ def render(crate: Path) -> str:
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "out"
         out.mkdir()
+        # `fetch` writes a nullable field as `nullable: true`, which
+        # openapi-generator ignores in a 3.1 document: there it is handed the
+        # 3.1 form, a type list with "null".
+        spec_path = crate / "spec.slice.json"
+        if str(sliced.get("openapi", "")).startswith("3.1"):
+            spec_path = Path(tmp) / "spec.slice.json"
+            spec_path.write_text(json.dumps(nullable_as_type_lists(sliced)))
         # Only the single generated file is wanted from the run.
         (out / ".openapi-generator-ignore").write_text("*\n**/*\n!src/generated.rs\n")
         config_path = Path(tmp) / "config.json"
@@ -1880,7 +2003,7 @@ def render(crate: Path) -> str:
         }))
         result = subprocess.run(
             [generator_cli(), "generate", "-c", str(config_path),
-             "-i", str(crate / "spec.slice.json"), "-o", str(out)],
+             "-i", str(spec_path), "-o", str(out)],
             capture_output=True, text=True,
         )
         generated = out / "src" / "generated.rs"

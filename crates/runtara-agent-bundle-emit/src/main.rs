@@ -27,6 +27,7 @@ fn agents() -> Vec<(&'static str, AgentInfo)> {
             runtara_agent_azure_blob_storage::agent_info(),
         ),
         ("bedrock", runtara_agent_bedrock::agent_info()),
+        ("bigcommerce", runtara_agent_bigcommerce::agent_info()),
         ("compression", runtara_agent_compression::agent_info()),
         ("control", runtara_agent_control::agent_info()),
         ("crypto", runtara_agent_crypto::agent_info()),

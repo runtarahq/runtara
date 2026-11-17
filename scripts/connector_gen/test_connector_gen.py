@@ -711,6 +711,75 @@ class ConnectionPartsTest(unittest.TestCase):
             cg.slice_spec(self.spec(), ["void"], connection_headers=["id"])
 
 
+class ConnectionPathPrefixTest(unittest.TestCase):
+    """`connection_path_prefix`: the start of every path, whose values the
+    connection's base URL carries (BigCommerce's `/stores/{store_hash}`)."""
+
+    PREFIX = "/stores/{store_hash}"
+
+    @staticmethod
+    def spec() -> dict:
+        def path(name):
+            return {"in": "path", "name": name, "required": True, "schema": {"type": "string"}}
+
+        ok = {"200": {"description": "ok"}}
+        return {"openapi": "3.0.1", "info": {"title": "t", "version": "1"}, "paths": {
+            # Declared on the path item, as BigCommerce does.
+            "/stores/{store_hash}/v2/orders/{order_id}": {
+                "parameters": [path("store_hash"), path("order_id")],
+                "get": {"operationId": "getOrder", "responses": ok}},
+            # Declared on the operation.
+            "/stores/{store_hash}/v3/catalog/products": {
+                "get": {"operationId": "getProducts", "responses": ok, "parameters": [
+                    path("store_hash"), {"in": "query", "name": "sku", "schema": {"type": "string"}}]}},
+            "/stores/{store_hash}": {"get": {"operationId": "getStore", "responses": ok,
+                                             "parameters": [path("store_hash")]}},
+            "/v2/time": {"get": {"operationId": "getTime", "responses": ok}},
+            "/stores/{store_hash}x/v2/time": {"get": {"operationId": "getOther", "responses": ok,
+                                                      "parameters": [path("store_hash")]}},
+        }}
+
+    def test_the_prefix_is_cut_and_names_no_input(self):
+        sliced = cg.slice_spec(self.spec(), ["getOrder", "getProducts", "getStore"],
+                               connection_path_prefix=self.PREFIX)
+        self.assertEqual(sorted(sliced["paths"]), ["/", "/v2/orders/{order_id}", "/v3/catalog/products"])
+        self.assertEqual([p["name"] for p in sliced["paths"]["/v2/orders/{order_id}"]["parameters"]],
+                         ["order_id"])
+        self.assertEqual([p["name"] for p in operation(sliced, "getProducts")["parameters"]], ["sku"])
+        self.assertEqual(operation(sliced, "getStore")["parameters"], [])
+
+    def test_every_path_must_start_with_it(self):
+        for op in ("getTime", "getOther"):
+            with self.assertRaises(SystemExit) as raised:
+                cg.slice_spec(self.spec(), [op], connection_path_prefix=self.PREFIX)
+            self.assertIn("does not start with connection_path_prefix", str(raised.exception))
+
+    def test_its_names_must_be_path_parameters(self):
+        spec = self.spec()
+        del spec["paths"]["/stores/{store_hash}"]["get"]["parameters"]
+        with self.assertRaises(SystemExit) as raised:
+            cg.slice_spec(spec, ["getStore"], connection_path_prefix=self.PREFIX)
+        self.assertIn("['store_hash'], which are no path parameters", str(raised.exception))
+
+    def test_it_must_be_a_path_naming_a_parameter(self):
+        for prefix in ("stores/{store_hash}", "/stores/{store_hash}/", "/stores", "/stores/{store_hash}?x=1"):
+            with self.assertRaises(SystemExit) as raised:
+                cg.slice_spec(self.spec(), ["getOrder"], connection_path_prefix=prefix)
+            self.assertIn("is no path starting with", str(raised.exception))
+
+    def test_it_applies_to_every_spec(self):
+        store = {"in": "path", "name": "store_hash", "required": True, "schema": {"type": "string"}}
+        reply = {"Reply": {"type": "object", "properties": {"id": {"type": "integer"}}}}
+        sliced = merge(("Orders", "getOrders", merge_spec("/stores/{store_hash}/v2/orders", "getOrders", reply,
+                                                          servers=("https://api.example.com",), parameters=[store])),
+                       ("Products", "getProducts", merge_spec("/stores/{store_hash}/v3/products", "getProducts",
+                                                              reply, servers=("https://api.example.com",),
+                                                              parameters=[store])),
+                       connection_path_prefix=self.PREFIX)
+        self.assertEqual(sorted(sliced["paths"]), ["/v2/orders", "/v3/products"])
+        self.assertEqual(operation(sliced, "getOrders")["parameters"], [])
+
+
 class HtmlDescriptionsTest(unittest.TestCase):
     """`html_descriptions` turns a vendor's HTML descriptions (eBay's) into the
     plain text the step editor shows."""
@@ -949,6 +1018,107 @@ class FieldTypesTest(unittest.TestCase):
             with self.subTest(named), self.assertRaises(SystemExit) as raised:
                 self.slice(field_types)
             self.assertIn(named, str(raised.exception))
+
+
+class TitleTypesTest(unittest.TestCase):
+    """`title_types` gives a string schema the type its title names
+    (BigCommerce's `type: string, title: float`)."""
+
+    @staticmethod
+    def spec() -> dict:
+        def amount(**extra):
+            return {"type": "string", "title": "float", "description": "Money.", **extra}
+
+        product = {"type": "object", "properties": {
+            "price": amount(),
+            "sale_price": amount(nullable=True),
+            "name": {"type": "string", "title": "Product name"},
+            "sku": {"type": "string", "title": "float label kept on another type"},
+        }}
+        return {"openapi": "3.0.1", "info": {"title": "t", "version": "1"}, "paths": {
+            "/products": {"get": {
+                "operationId": "list",
+                "parameters": [{"in": "query", "name": "min_price", "schema": amount()}],
+                **ok_json({"$ref": "#/components/schemas/Product"})}},
+        }, "components": {"schemas": {"Product": product}}}
+
+    def sliced(self, title_types: dict) -> dict:
+        return cg.slice_specs([({"operations": ["list"]}, self.spec())], {"title_types": title_types})
+
+    def test_every_string_with_the_title_gets_the_type(self):
+        sliced = self.sliced({"float": {"type": "number", "format": "double"}})
+        properties = sliced["components"]["schemas"]["Product"]["properties"]
+        self.assertEqual(properties["price"], {"type": "number", "format": "double", "description": "Money."})
+        self.assertEqual(properties["sale_price"], {"type": "number", "format": "double", "description": "Money.",
+                                                    "nullable": True})
+        self.assertEqual(properties["name"], {"type": "string", "title": "Product name"})
+        self.assertEqual(operation(sliced, "list")["parameters"][0]["schema"]["type"], "number")
+
+    def test_a_title_no_schema_has_fails(self):
+        with self.assertRaises(SystemExit) as raised:
+            self.sliced({"double": "number"})
+        self.assertIn("['double']", str(raised.exception))
+
+
+class NullableAsTypeListsTest(unittest.TestCase):
+    """openapi-generator ignores `nullable` in a 3.1 document, so a 3.1 slice
+    is rendered with its nullable fields written as 3.1 writes them."""
+
+    def test_a_nullable_type_becomes_a_type_list(self):
+        sliced = {"openapi": "3.1.0", "components": {"schemas": {"Variant": {"type": "object", "properties": {
+            "price": {"type": "number", "nullable": True, "description": "Falls back when null."},
+            "sku": {"type": "string"},
+            "owner": {"allOf": [{"$ref": "#/components/schemas/Owner"}], "nullable": True},
+        }}}}}
+        copied = cg.nullable_as_type_lists(sliced)
+        properties = copied["components"]["schemas"]["Variant"]["properties"]
+        self.assertEqual(properties["price"], {"type": ["number", "null"], "description": "Falls back when null."})
+        self.assertEqual(properties["sku"], {"type": "string"})
+        # Without a type of its own there is no list to write it in.
+        self.assertEqual(properties["owner"], {"allOf": [{"$ref": "#/components/schemas/Owner"}], "nullable": True})
+        # The slice itself is left as `fetch` wrote it.
+        self.assertIs(sliced["components"]["schemas"]["Variant"]["properties"]["price"]["nullable"], True)
+
+
+class CommaQueryArraysTest(unittest.TestCase):
+    """`comma_separated_query_arrays` sends every array query parameter as
+    `ids=1,2` (BigCommerce's `id:in=4,5,6`), whatever the spec says."""
+
+    @staticmethod
+    def spec(*parameters) -> dict:
+        return {"openapi": "3.0.1", "info": {"title": "t", "version": "1"}, "paths": {
+            "/products": {"get": {"operationId": "list", "parameters": list(parameters),
+                                  "responses": {"200": {"description": "ok"}}}},
+        }}
+
+    def test_array_query_parameters_are_not_exploded(self):
+        ids = {"in": "query", "name": "id:in", "schema": {"type": "array", "items": {"type": "integer"}}}
+        include = {"in": "query", "name": "include", "explode": True,
+                   "schema": {"type": "array", "items": {"type": "string"}}}
+        sku = {"in": "query", "name": "sku", "schema": {"type": "string"}}
+        sliced = cg.slice_specs([({"operations": ["list"]}, self.spec(ids, include, sku))],
+                                {"comma_separated_query_arrays": True})
+        parameters = {p["name"]: p for p in operation(sliced, "list")["parameters"]}
+        self.assertIs(parameters["id:in"]["explode"], False)
+        self.assertIs(parameters["include"]["explode"], False)
+        self.assertNotIn("explode", parameters["sku"])
+
+    def test_a_parameter_input_types_makes_a_list_is_sent_as_one(self):
+        # BigCommerce's inventory spec types `variant_id:in` as one integer,
+        # though it takes "a list of `variant_id` separated by comma".
+        variants = {"in": "query", "name": "variant_id:in", "schema": {"type": "integer"}}
+        sliced = cg.slice_specs([({"operations": ["list"]}, self.spec(variants))], {
+            "comma_separated_query_arrays": True,
+            "input_types": {"variant_id:in": {"type": "array", "items": {"type": "integer"}}},
+        })
+        parameter = operation(sliced, "list")["parameters"][0]
+        self.assertEqual(parameter["schema"]["type"], "array")
+        self.assertIs(parameter["explode"], False)
+
+    def test_it_needs_an_array_query_parameter(self):
+        sku = {"in": "query", "name": "sku", "schema": {"type": "string"}}
+        with self.assertRaises(SystemExit):
+            cg.slice_specs([({"operations": ["list"]}, self.spec(sku))], {"comma_separated_query_arrays": True})
 
 
 class Swagger2Test(unittest.TestCase):
@@ -1606,6 +1776,50 @@ class ArrayBodyRenderTest(unittest.TestCase):
             text = cg.render(crate)
         self.assertIn("pub body: Option<Vec<Patch>>,", text)
         self.assertNotIn("models::", text)
+
+
+@unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
+class NullableModelRenderTest(unittest.TestCase):
+    """A nullable field keeps an explicit null apart from an absent one inside
+    a model too, as in BigCommerce's batch of variants, where `price: null`
+    falls back to the product's price; in a 3.1 spec as in a 3.0 one."""
+
+    @staticmethod
+    def spec(version: str, nullable_number: dict) -> dict:
+        variant = {"type": "object", "properties": {
+            "id": {"type": "integer"},
+            "price": nullable_number,
+            "sku": {"type": "string"},
+        }}
+        return {"openapi": version, "info": {"title": "t", "version": "1"},
+                "servers": [{"url": "https://api.example.com"}], "paths": {
+                    "/variants": {"put": {
+                        "operationId": "updateVariants",
+                        **json_body({"type": "array", "items": {"$ref": "#/components/schemas/Variant"}}),
+                        "responses": {"200": {"description": "Updated"}}}},
+                    "/products/{id}": {"put": {
+                        "operationId": "updateProduct",
+                        "parameters": [{"in": "path", "name": "id", "required": True,
+                                        "schema": {"type": "integer"}}],
+                        **json_body({"type": "object", "properties": {"weight": nullable_number}}),
+                        "responses": {"204": {"description": "Updated"}}}}},
+                "components": {"schemas": {"Variant": variant}}}
+
+    def rendered(self, version: str, nullable_number: dict) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            crate = Path(tmp)
+            write_crate(crate, self.spec(version, nullable_number), ["updateVariants", "updateProduct"])
+            return cg.render(crate)
+
+    def test_a_nullable_model_field_tells_null_from_absent(self):
+        for version, nullable_number in (("3.0.1", {"type": "number", "nullable": True}),
+                                         ("3.1.0", {"type": ["number", "null"]})):
+            with self.subTest(version):
+                text = self.rendered(version, nullable_number)
+                self.assertIn("pub price: Option<Option<f64>>,", text)
+                self.assertIn("pub weight: Option<Option<f64>>,", text)
+                self.assertIn('deserialize_with = "kit::nullable"', text)
+                self.assertIn("pub sku: Option<String>,", text)
 
 
 @unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")

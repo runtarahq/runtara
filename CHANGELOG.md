@@ -43,6 +43,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `http_api_key` can fix the format, so its users enter the key alone
   (`docs/adding-an-agent.md`).
 
+- **BigCommerce agent, generated from BigCommerce's OpenAPI files.**
+  Twenty-seven capabilities: list, read, create and update orders, read their
+  products and shipping addresses, read the order statuses, create, list and
+  update shipments (with tracking), read transactions, quote, issue and list
+  refunds; list, read, create and update products, list their variants and
+  update variants in a batch; set or adjust stock per location, list
+  inventory and locations; and list, create and update customers. The new
+  `bigcommerce_api_token` connection type takes a store-level API account's
+  access token and the store hash (or the API path it is shown with), sends
+  every request under that store's path on `api.bigcommerce.com`, and is
+  limited by default to 4 requests/s with a burst of 10, as the store's quota
+  is shared with its other apps; a 429 waits the quota's reset time. A request
+  that is not a read and gets no answer, a 5xx or an answer it cannot read
+  fails with `BIGCOMMERCE_OUTCOME_UNKNOWN` instead of being retried:
+  BigCommerce documents no idempotency key, and an order, a refund or a stock
+  adjustment sent again is made twice. A refund quote only calculates, so it
+  is retried like a read. A V2 list with no matches, which BigCommerce answers
+  with 204, is an empty list.
+
+- **`connector_gen` takes BigCommerce's specs.** `connection_path_prefix`
+  cuts the start every path shares (`/stores/{store_hash}`) and its
+  parameters, which the connection's base URL carries. `title_types` gives a
+  string schema the type its title names (BigCommerce's numbers are strings
+  titled `float`), and `comma_separated_query_arrays` sends array query
+  parameters as `id:in=4,5,6`.
+
+- **A nullable field inside a generated agent's model keeps an explicit
+  `null`.** A field of a record sent in a batch, or of an object input, was
+  an `Option<T>`, so `null` was dropped and the vendor kept the old value:
+  BigCommerce kept a variant's price override, Zoho CRM a record field a
+  workflow meant to clear. It is now told apart from an absent field, as a
+  top-level body field already was, and a `null` read from a response is
+  kept. Specs in OpenAPI 3.1 (BigCommerce, Shippo, Zoho CRM) had their
+  nullable fields ignored altogether, top-level ones included; they now
+  render too. This regenerates the BigCommerce, Jira, PayPal, Pipedrive,
+  Shippo, Slack, Zendesk and Zoho CRM agents (a template change).
+
 - **PayPal agent, generated from PayPal's REST API OpenAPI files.** Twenty-one
   capabilities: create, read, update, authorize and capture orders and add or
   update their shipment tracking; read, capture, reauthorize and void

@@ -33,9 +33,12 @@ pub type {{#lambda.pascalcase}}{{name}}{{/lambda.pascalcase}} = Value;
 #[capability_output(display_name = "{{#lambda.pascalcase}}{{name}}{{/lambda.pascalcase}}")]
 pub struct {{#lambda.pascalcase}}{{name}}{{/lambda.pascalcase}} {
 {{#vars}}
+{{! A nullable field keeps an explicit null apart from an absent one, as a
+    flattened body field does: a model sent inside a request (a batch of
+    records) can clear a value with null. }}
     #[field({{>field_output_attrs}})]
-    #[serde(rename = "{{baseName}}", default, skip_serializing_if = "Option::is_none")]
-    pub {{name}}: Option<{{#isCircularReference}}Box<{{/isCircularReference}}{{>rt_type}}{{#isCircularReference}}>{{/isCircularReference}}>,
+    #[serde(rename = "{{baseName}}", default, skip_serializing_if = "Option::is_none"{{#isNullable}}, deserialize_with = "kit::nullable"{{/isNullable}})]
+    pub {{name}}: Option<{{#isNullable}}Option<{{/isNullable}}{{#isCircularReference}}Box<{{/isCircularReference}}{{>rt_type}}{{#isCircularReference}}>{{/isCircularReference}}{{#isNullable}}>{{/isNullable}}>,
 {{/vars}}
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]

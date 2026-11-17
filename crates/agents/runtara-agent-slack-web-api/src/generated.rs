@@ -1033,15 +1033,21 @@ pub struct ConversationImChannelObjectFromConversationsMethods {
     #[serde(rename = "last_read", default, skip_serializing_if = "Option::is_none")]
     pub last_read: Option<String>,
     #[field(display_name = r##"latest"##)]
-    #[serde(rename = "latest", default, skip_serializing_if = "Option::is_none")]
-    pub latest: Option<ObjsMessage>,
+    #[serde(
+        rename = "latest",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub latest: Option<Option<ObjsMessage>>,
     #[field(display_name = r##"parent_conversation"##)]
     #[serde(
         rename = "parent_conversation",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub parent_conversation: Option<String>,
+    pub parent_conversation: Option<Option<String>>,
     #[field(display_name = r##"Pin Count"##)]
     #[serde(rename = "pin_count", default, skip_serializing_if = "Option::is_none")]
     pub pin_count: Option<i64>,
@@ -1259,8 +1265,13 @@ pub struct ConversationMpimObject {
     #[serde(rename = "last_read", default, skip_serializing_if = "Option::is_none")]
     pub last_read: Option<String>,
     #[field(display_name = r##"latest"##)]
-    #[serde(rename = "latest", default, skip_serializing_if = "Option::is_none")]
-    pub latest: Option<ObjsMessage>,
+    #[serde(
+        rename = "latest",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub latest: Option<Option<ObjsMessage>>,
     #[field(display_name = r##"Members"##)]
     #[serde(rename = "members", default, skip_serializing_if = "Option::is_none")]
     pub members: Option<Vec<String>>,
@@ -1285,9 +1296,10 @@ pub struct ConversationMpimObject {
     #[serde(
         rename = "parent_conversation",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub parent_conversation: Option<String>,
+    pub parent_conversation: Option<Option<String>>,
     #[field(display_name = r##"Pending Connected Team IDs"##)]
     #[serde(
         rename = "pending_connected_team_ids",
@@ -1552,8 +1564,13 @@ pub struct ConversationObject {
     #[serde(rename = "last_read", default, skip_serializing_if = "Option::is_none")]
     pub last_read: Option<String>,
     #[field(display_name = r##"latest"##)]
-    #[serde(rename = "latest", default, skip_serializing_if = "Option::is_none")]
-    pub latest: Option<ObjsMessage>,
+    #[serde(
+        rename = "latest",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub latest: Option<Option<ObjsMessage>>,
     #[field(display_name = r##"Members"##)]
     #[serde(rename = "members", default, skip_serializing_if = "Option::is_none")]
     pub members: Option<Vec<String>>,
@@ -1578,9 +1595,10 @@ pub struct ConversationObject {
     #[serde(
         rename = "parent_conversation",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub parent_conversation: Option<String>,
+    pub parent_conversation: Option<Option<String>>,
     #[field(display_name = r##"Pending Connected Team IDs"##)]
     #[serde(
         rename = "pending_connected_team_ids",
@@ -1923,9 +1941,10 @@ pub struct ConversationsHistorySuccessSchema {
     #[serde(
         rename = "channel_actions_ts",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub channel_actions_ts: Option<i64>,
+    pub channel_actions_ts: Option<Option<i64>>,
     #[field(display_name = r##"Has More"##)]
     #[serde(rename = "has_more", default, skip_serializing_if = "Option::is_none")]
     pub has_more: Option<bool>,
@@ -2954,9 +2973,10 @@ pub struct FilesInfoSchema {
     #[serde(
         rename = "content_html",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub content_html: Option<Value>,
+    pub content_html: Option<Option<Value>>,
     #[field(display_name = r##"Editor"##)]
     #[serde(rename = "editor", default, skip_serializing_if = "Option::is_none")]
     pub editor: Option<String>,
@@ -3668,8 +3688,13 @@ pub struct ObjsMessage {
     #[serde(rename = "blocks", default, skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<BlocksInner>>,
     #[field(display_name = r##"bot_id"##)]
-    #[serde(rename = "bot_id", default, skip_serializing_if = "Option::is_none")]
-    pub bot_id: Option<String>,
+    #[serde(
+        rename = "bot_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub bot_id: Option<Option<String>>,
     #[field(display_name = r##"Bot Profile"##)]
     #[serde(
         rename = "bot_profile",
@@ -3993,16 +4018,18 @@ pub struct ObjsTeam {
     #[serde(
         rename = "description",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub description: Option<String>,
+    pub description: Option<Option<String>>,
     #[field(display_name = r##"discoverable"##)]
     #[serde(
         rename = "discoverable",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub discoverable: Option<String>,
+    pub discoverable: Option<Option<String>>,
     #[field(display_name = r##"Domain"##)]
     #[serde(rename = "domain", default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
@@ -4145,9 +4172,10 @@ pub struct ObjsTeamProfileField {
     #[serde(
         rename = "field_name",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub field_name: Option<String>,
+    pub field_name: Option<Option<String>>,
     #[field(display_name = r##"Hint"##)]
     #[serde(rename = "hint", default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
@@ -4161,8 +4189,13 @@ pub struct ObjsTeamProfileField {
     #[serde(rename = "label", default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[field(display_name = r##"options"##)]
-    #[serde(rename = "options", default, skip_serializing_if = "Option::is_none")]
-    pub options: Option<ObjsTeamProfileFieldOption>,
+    #[serde(
+        rename = "options",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub options: Option<Option<ObjsTeamProfileFieldOption>>,
     #[field(display_name = r##"Ordering"##)]
     #[serde(rename = "ordering", default, skip_serializing_if = "Option::is_none")]
     pub ordering: Option<f64>,
@@ -4170,9 +4203,10 @@ pub struct ObjsTeamProfileField {
     #[serde(
         rename = "possible_values",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub possible_values: Option<Vec<String>>,
+    pub possible_values: Option<Option<Vec<String>>>,
     #[field(
         display_name = r##"Type"##,
         description = r##"One of: text, date, link, mailto, options_list, user."##
@@ -4189,25 +4223,37 @@ pub struct ObjsTeamProfileField {
 #[capability_output(display_name = "ObjsTeamProfileFieldOption")]
 pub struct ObjsTeamProfileFieldOption {
     #[field(display_name = r##"Is Custom"##)]
-    #[serde(rename = "is_custom", default, skip_serializing_if = "Option::is_none")]
-    pub is_custom: Option<bool>,
+    #[serde(
+        rename = "is_custom",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub is_custom: Option<Option<bool>>,
     #[field(display_name = r##"Is Multiple Entry"##)]
     #[serde(
         rename = "is_multiple_entry",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub is_multiple_entry: Option<bool>,
+    pub is_multiple_entry: Option<Option<bool>>,
     #[field(display_name = r##"Is Protected"##)]
     #[serde(
         rename = "is_protected",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub is_protected: Option<bool>,
+    pub is_protected: Option<Option<bool>>,
     #[field(display_name = r##"Is Scim"##)]
-    #[serde(rename = "is_scim", default, skip_serializing_if = "Option::is_none")]
-    pub is_scim: Option<bool>,
+    #[serde(
+        rename = "is_scim",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub is_scim: Option<Option<bool>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -4358,8 +4404,13 @@ pub struct ObjsUserAnyOf {
     )]
     pub two_factor_type: Option<String>,
     #[field(display_name = r##"tz"##)]
-    #[serde(rename = "tz", default, skip_serializing_if = "Option::is_none")]
-    pub tz: Option<String>,
+    #[serde(
+        rename = "tz",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub tz: Option<Option<String>>,
     #[field(display_name = r##"Tz Label"##)]
     #[serde(rename = "tz_label", default, skip_serializing_if = "Option::is_none")]
     pub tz_label: Option<String>,
@@ -4494,8 +4545,13 @@ pub struct ObjsUserAnyOf1 {
     )]
     pub two_factor_type: Option<String>,
     #[field(display_name = r##"tz"##)]
-    #[serde(rename = "tz", default, skip_serializing_if = "Option::is_none")]
-    pub tz: Option<String>,
+    #[serde(
+        rename = "tz",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub tz: Option<Option<String>>,
     #[field(display_name = r##"Tz Label"##)]
     #[serde(rename = "tz_label", default, skip_serializing_if = "Option::is_none")]
     pub tz_label: Option<String>,
@@ -4565,64 +4621,109 @@ pub struct ObjsUserProfile {
     )]
     pub display_name_normalized: Option<String>,
     #[field(display_name = r##"Email"##)]
-    #[serde(rename = "email", default, skip_serializing_if = "Option::is_none")]
-    pub email: Option<String>,
+    #[serde(
+        rename = "email",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub email: Option<Option<String>>,
     #[field(display_name = r##"Fields"##)]
-    #[serde(rename = "fields", default, skip_serializing_if = "Option::is_none")]
-    pub fields: Option<ObjsUserProfileFields>,
+    #[serde(
+        rename = "fields",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub fields: Option<Option<ObjsUserProfileFields>>,
     #[field(display_name = r##"First Name"##)]
     #[serde(
         rename = "first_name",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub first_name: Option<String>,
+    pub first_name: Option<Option<String>>,
     #[field(display_name = r##"Guest Expiration Ts"##)]
     #[serde(
         rename = "guest_expiration_ts",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub guest_expiration_ts: Option<i64>,
+    pub guest_expiration_ts: Option<Option<i64>>,
     #[field(display_name = r##"Guest Invited By"##)]
     #[serde(
         rename = "guest_invited_by",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub guest_invited_by: Option<String>,
+    pub guest_invited_by: Option<Option<String>>,
     #[field(display_name = r##"Image 1024"##)]
     #[serde(
         rename = "image_1024",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub image_1024: Option<String>,
+    pub image_1024: Option<Option<String>>,
     #[field(display_name = r##"Image 192"##)]
-    #[serde(rename = "image_192", default, skip_serializing_if = "Option::is_none")]
-    pub image_192: Option<String>,
+    #[serde(
+        rename = "image_192",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub image_192: Option<Option<String>>,
     #[field(display_name = r##"Image 24"##)]
-    #[serde(rename = "image_24", default, skip_serializing_if = "Option::is_none")]
-    pub image_24: Option<String>,
+    #[serde(
+        rename = "image_24",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub image_24: Option<Option<String>>,
     #[field(display_name = r##"Image 32"##)]
-    #[serde(rename = "image_32", default, skip_serializing_if = "Option::is_none")]
-    pub image_32: Option<String>,
+    #[serde(
+        rename = "image_32",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub image_32: Option<Option<String>>,
     #[field(display_name = r##"Image 48"##)]
-    #[serde(rename = "image_48", default, skip_serializing_if = "Option::is_none")]
-    pub image_48: Option<String>,
+    #[serde(
+        rename = "image_48",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub image_48: Option<Option<String>>,
     #[field(display_name = r##"Image 512"##)]
-    #[serde(rename = "image_512", default, skip_serializing_if = "Option::is_none")]
-    pub image_512: Option<String>,
+    #[serde(
+        rename = "image_512",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub image_512: Option<Option<String>>,
     #[field(display_name = r##"Image 72"##)]
-    #[serde(rename = "image_72", default, skip_serializing_if = "Option::is_none")]
-    pub image_72: Option<String>,
+    #[serde(
+        rename = "image_72",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub image_72: Option<Option<String>>,
     #[field(display_name = r##"Image Original"##)]
     #[serde(
         rename = "image_original",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub image_original: Option<String>,
+    pub image_original: Option<Option<String>>,
     #[field(display_name = r##"Is App User"##)]
     #[serde(
         rename = "is_app_user",
@@ -4641,16 +4742,18 @@ pub struct ObjsUserProfile {
     #[serde(
         rename = "is_restricted",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub is_restricted: Option<bool>,
+    pub is_restricted: Option<Option<bool>>,
     #[field(display_name = r##"Is Ultra Restricted"##)]
     #[serde(
         rename = "is_ultra_restricted",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub is_ultra_restricted: Option<bool>,
+    pub is_ultra_restricted: Option<Option<bool>>,
     #[field(display_name = r##"Last Avatar Image Hash"##)]
     #[serde(
         rename = "last_avatar_image_hash",
@@ -4659,8 +4762,13 @@ pub struct ObjsUserProfile {
     )]
     pub last_avatar_image_hash: Option<String>,
     #[field(display_name = r##"Last Name"##)]
-    #[serde(rename = "last_name", default, skip_serializing_if = "Option::is_none")]
-    pub last_name: Option<String>,
+    #[serde(
+        rename = "last_name",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub last_name: Option<Option<String>>,
     #[field(display_name = r##"Memberships Count"##)]
     #[serde(
         rename = "memberships_count",
@@ -4669,8 +4777,13 @@ pub struct ObjsUserProfile {
     )]
     pub memberships_count: Option<i64>,
     #[field(display_name = r##"Name"##)]
-    #[serde(rename = "name", default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    #[serde(
+        rename = "name",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub name: Option<Option<String>>,
     #[field(display_name = r##"Phone"##)]
     #[serde(rename = "phone", default, skip_serializing_if = "Option::is_none")]
     pub phone: Option<String>,
@@ -4708,9 +4821,10 @@ pub struct ObjsUserProfile {
     #[serde(
         rename = "status_default_text_canonical",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub status_default_text_canonical: Option<String>,
+    pub status_default_text_canonical: Option<Option<String>>,
     #[field(display_name = r##"Status Emoji"##)]
     #[serde(
         rename = "status_emoji",
@@ -4736,9 +4850,10 @@ pub struct ObjsUserProfile {
     #[serde(
         rename = "status_text_canonical",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub status_text_canonical: Option<String>,
+    pub status_text_canonical: Option<Option<String>>,
     #[field(display_name = r##"Team"##)]
     #[serde(rename = "team", default, skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
@@ -4752,8 +4867,13 @@ pub struct ObjsUserProfile {
     #[serde(rename = "user_id", default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
     #[field(display_name = r##"Username"##)]
-    #[serde(rename = "username", default, skip_serializing_if = "Option::is_none")]
-    pub username: Option<String>,
+    #[serde(
+        rename = "username",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub username: Option<Option<String>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -4791,9 +4911,10 @@ pub struct ObjsUserProfileShort {
     #[serde(
         rename = "first_name",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub first_name: Option<String>,
+    pub first_name: Option<Option<String>>,
     #[field(display_name = r##"Image 72"##)]
     #[serde(rename = "image_72", default, skip_serializing_if = "Option::is_none")]
     pub image_72: Option<String>,

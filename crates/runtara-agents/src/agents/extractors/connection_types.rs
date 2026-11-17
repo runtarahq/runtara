@@ -1881,6 +1881,85 @@ impl HttpConnectionExtractor for ShippoExtractor {
 }
 
 // ============================================================================
+// BigCommerce Connection Type
+// ============================================================================
+
+/// The base URL of a store's API, from its store hash or from the API path
+/// BigCommerce shows with a store-level API account
+/// (`https://api.bigcommerce.com/stores/<hash>/v3/`). The hash is letters and
+/// digits only, so a value cannot leave the store's path on BigCommerce's host.
+pub fn bigcommerce_base_url(store_hash: &str) -> Result<String, String> {
+    let raw = store_hash.trim();
+    let rest = raw.strip_prefix("https://").unwrap_or(raw);
+    let rest = rest.strip_prefix("api.bigcommerce.com/").unwrap_or(rest);
+    let rest = rest.strip_prefix("stores/").unwrap_or(rest);
+    let (hash, version) = rest.split_once('/').unwrap_or((rest, ""));
+    let valid = !hash.is_empty()
+        && hash.len() <= 64
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && matches!(version.trim_end_matches('/'), "" | "v2" | "v3");
+    if !valid {
+        return Err(format!(
+            "Invalid BigCommerce store hash `{raw}`: use the part after /stores/ in the API path, e.g. `abc123` for https://api.bigcommerce.com/stores/abc123/v3/"
+        ));
+    }
+    Ok(format!("https://api.bigcommerce.com/stores/{hash}"))
+}
+
+/// Parameters for a BigCommerce store-level API account
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "bigcommerce_api_token",
+    display_name = "BigCommerce",
+    description = "Connect to a BigCommerce store with the access token of a store-level API account",
+    category = "ecommerce",
+    auth_type = "api_key"
+)]
+pub struct BigCommerceApiTokenParams {
+    /// The store's hash
+    #[field(
+        display_name = "Store Hash",
+        description = "The part after /stores/ in the API path shown when the API account is created: `abc123` for https://api.bigcommerce.com/stores/abc123/v3/. The API path itself is accepted too",
+        placeholder = "abc123"
+    )]
+    pub store_hash: String,
+
+    /// Store-level API account access token
+    #[field(
+        display_name = "Access Token",
+        description = "Access token of a store-level API account, from Settings → API → Store-level API accounts in the store's control panel. The account's OAuth scopes decide what steps can read and change",
+        secret
+    )]
+    pub access_token: String,
+}
+
+/// HTTP extractor for BigCommerce connections.
+pub struct BigCommerceExtractor;
+
+impl HttpConnectionExtractor for BigCommerceExtractor {
+    fn integration_id(&self) -> &'static str {
+        "bigcommerce_api_token"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        let p: BigCommerceApiTokenParams = serde_json::from_value(params.clone())
+            .map_err(|e| format!("Invalid bigcommerce_api_token connection parameters: {}", e))?;
+
+        let mut headers = HashMap::new();
+        headers.insert("X-Auth-Token".to_string(), p.access_token);
+
+        Ok(HttpConnectionConfig {
+            headers,
+            query_parameters: HashMap::new(),
+            url_prefix: bigcommerce_base_url(&p.store_hash)?,
+            rate_limit_config: None,
+        })
+    }
+}
+
+// ============================================================================
 // Zendesk Connection Types
 // ============================================================================
 

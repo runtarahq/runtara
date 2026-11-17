@@ -418,8 +418,13 @@ pub struct EntityProperty {
         display_name = r##"Value"##,
         description = r##"The value of the property. Required on create and update."##
     )]
-    #[serde(rename = "value", default, skip_serializing_if = "Option::is_none")]
-    pub value: Option<Value>,
+    #[serde(
+        rename = "value",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub value: Option<Option<Value>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -516,9 +521,10 @@ pub struct FieldCreateMetadata {
     #[serde(
         rename = "defaultValue",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub default_value: Option<Value>,
+    pub default_value: Option<Option<Value>>,
     #[field(display_name = r##"Field ID"##, description = r##"The field id."##)]
     #[serde(rename = "fieldId", default, skip_serializing_if = "Option::is_none")]
     pub field_id: Option<String>,
@@ -680,9 +686,10 @@ pub struct FieldMetadata {
     #[serde(
         rename = "defaultValue",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub default_value: Option<Value>,
+    pub default_value: Option<Option<Value>>,
     #[field(
         display_name = r##"Has Default Value"##,
         description = r##"Whether the field has a default value."##
@@ -738,34 +745,59 @@ pub struct FieldUpdateOperation {
         description = r##"The value to add to the field."##,
         example = r##"triaged"##
     )]
-    #[serde(rename = "add", default, skip_serializing_if = "Option::is_none")]
-    pub add: Option<Value>,
+    #[serde(
+        rename = "add",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub add: Option<Option<Value>>,
     #[field(
         display_name = r##"Copy"##,
         description = r##"The field value to copy from another issue."##
     )]
-    #[serde(rename = "copy", default, skip_serializing_if = "Option::is_none")]
-    pub copy: Option<Value>,
+    #[serde(
+        rename = "copy",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub copy: Option<Option<Value>>,
     #[field(
         display_name = r##"Edit"##,
         description = r##"The value to edit in the field."##
     )]
-    #[serde(rename = "edit", default, skip_serializing_if = "Option::is_none")]
-    pub edit: Option<Value>,
+    #[serde(
+        rename = "edit",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub edit: Option<Option<Value>>,
     #[field(
         display_name = r##"Remove"##,
         description = r##"The value to removed from the field."##,
         example = r##"blocker"##
     )]
-    #[serde(rename = "remove", default, skip_serializing_if = "Option::is_none")]
-    pub remove: Option<Value>,
+    #[serde(
+        rename = "remove",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub remove: Option<Option<Value>>,
     #[field(
         display_name = r##"Set"##,
         description = r##"The value to set in the field."##,
         example = r##"A new summary"##
     )]
-    #[serde(rename = "set", default, skip_serializing_if = "Option::is_none")]
-    pub set: Option<Value>,
+    #[serde(
+        rename = "set",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub set: Option<Option<Value>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -834,8 +866,13 @@ pub struct GroupName {
         display_name = r##"Group ID"##,
         description = r##"The ID of the group, which uniquely identifies the group across all Atlassian products. For example, *952d12c3-5b5b-4d04-bb32-44d383afc4b2*."##
     )]
-    #[serde(rename = "groupId", default, skip_serializing_if = "Option::is_none")]
-    pub group_id: Option<String>,
+    #[serde(
+        rename = "groupId",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub group_id: Option<Option<String>>,
     #[field(display_name = r##"Name"##, description = r##"The name of group."##)]
     #[serde(rename = "name", default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -3355,8 +3392,13 @@ pub struct User {
         display_name = r##"Account ID"##,
         description = r##"The account ID of the user, which uniquely identifies the user across all Atlassian products. For example, *5b10ac8d82e05b22cc7d4ef5*. Required in requests."##
     )]
-    #[serde(rename = "accountId", default, skip_serializing_if = "Option::is_none")]
-    pub account_id: Option<String>,
+    #[serde(
+        rename = "accountId",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub account_id: Option<Option<String>>,
     #[field(
         display_name = r##"Account Type"##,
         description = r##"The user account type. Can take the following values:
@@ -3803,9 +3845,10 @@ pub struct Visibility {
     #[serde(
         rename = "identifier",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
     )]
-    pub identifier: Option<String>,
+    pub identifier: Option<Option<String>>,
     #[field(
         display_name = r##"Type"##,
         description = r##"Whether visibility of this item is restricted to a group or role. One of: group, role."##
