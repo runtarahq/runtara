@@ -38,5 +38,29 @@ pub fn routes(router: Arc<session::ChannelRouter>) -> Router {
             "/api/runtime/events/webhook/mailgun/{connection_id}",
             post(mailgun_webhook::mailgun_webhook),
         )
+        .route_layer(axum::middleware::from_fn_with_state(
+            router.clone(),
+            scope_connection_tenant,
+        ))
         .with_state(router)
+}
+
+/// Runs a channel webhook in the tenant of the connection it names. The
+/// request is unauthenticated and names no tenant unless its path does, so
+/// the connection says whose it is; what the handler then reads and writes is
+/// confined to that tenant's rows. A connection that is not found is left to
+/// the handler to refuse.
+async fn scope_connection_tenant(
+    axum::extract::State(router): axum::extract::State<Arc<session::ChannelRouter>>,
+    axum::extract::Path(connection_id): axum::extract::Path<String>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if runtara_store_postgres::tenant_scope::current().is_some() {
+        return next.run(request).await;
+    }
+    match router.served_connection_tenant(&connection_id).await {
+        Ok(tenant) => runtara_store_postgres::tenant_scope::scoped(tenant, next.run(request)).await,
+        Err(_) => next.run(request).await,
+    }
 }

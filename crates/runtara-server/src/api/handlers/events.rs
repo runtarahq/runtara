@@ -128,7 +128,10 @@ pub async fn capture_http_event(
     let trigger_repo = TriggerRepository::new(pool.clone());
     // A webhook is unauthenticated: its tenant is its trigger's, and only a
     // tenant this process serves.
-    let trigger = match trigger_repo.get_by_id(&trigger_id, None).await {
+    let found =
+        runtara_store_postgres::tenant_scope::locating(trigger_repo.get_by_id(&trigger_id, None))
+            .await;
+    let trigger = match found {
         Ok(Some(t))
             if crate::config::is_served_tenant(
                 t.tenant_id.as_deref().unwrap_or(crate::config::tenant_id()),
@@ -160,13 +163,17 @@ pub async fn capture_http_event(
         .unwrap_or_else(|| crate::config::tenant_id().to_string());
 
     // Verify webhook signature if the trigger has a linked connection.
+    // From here on the work is the trigger's tenant's.
     if let Some(ref body_bytes) = raw_body_bytes
-        && let Err(e) = crate::api::services::webhook_verification::verify_webhook(
-            &connections,
-            &trigger.configuration,
-            &tenant_id,
-            &headers,
-            body_bytes,
+        && let Err(e) = runtara_store_postgres::tenant_scope::scoped(
+            tenant_id.clone(),
+            crate::api::services::webhook_verification::verify_webhook(
+                &connections,
+                &trigger.configuration,
+                &tenant_id,
+                &headers,
+                body_bytes,
+            ),
         )
         .await
     {
@@ -246,9 +253,11 @@ pub async fn capture_http_event(
         );
 
         event.run_label = metadata.run_label;
-        match engine
-            .enqueue_trigger_event(&tenant_id, event, idempotency_key)
-            .await
+        match runtara_store_postgres::tenant_scope::scoped(
+            tenant_id.clone(),
+            engine.enqueue_trigger_event(&tenant_id, event, idempotency_key),
+        )
+        .await
         {
             Ok(enqueued) => {
                 let response = json!({
