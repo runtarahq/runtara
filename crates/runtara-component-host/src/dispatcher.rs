@@ -137,6 +137,93 @@ impl Drop for TestLaunch {
     }
 }
 
+/// What one agent's `.meta.json` says: the agent, keyed on `agent_id`, and
+/// the connection types it declares.
+fn agent_metadata(
+    agent_id: &str,
+    meta_bytes: &[u8],
+) -> Result<(
+    AgentInfo,
+    Vec<(
+        String,
+        runtara_dsl::derived_connection::DerivedConnectionType,
+    )>,
+)> {
+    let mut info: AgentInfo = serde_json::from_slice(meta_bytes)
+        .with_context(|| format!("agent `{agent_id}`: failed to parse sidecar metadata"))?;
+    // Normalize both sides to kebab for the equality check —
+    // cargo-component drops snake_case filenames, but the canonical
+    // id everywhere else is kebab, so an agent crate can sensibly
+    // write either form in its `agent_info().id` literal.
+    if canonical_agent_id(&info.id) != agent_id {
+        anyhow::bail!(
+            "agent id mismatch: filename stem is `{agent_id}` but meta.id is `{}`",
+            info.id
+        );
+    }
+    // Force the catalog to key on the same kebab form `agents` uses
+    // — otherwise an agent whose `agent_info().id` literal is
+    // snake_case (e.g. "azure_blob_storage") loads into `agents` as
+    // "azure-blob-storage" but registers in the catalog as
+    // "azure_blob_storage", and `agent_info_of("azure-blob-storage")`
+    // returns None while `agent_ids()` yields it.
+    info.id = agent_id.to_owned();
+    let extensions = runtara_dsl::derived_connection::AgentMetaExtensions::from_meta_json(
+        meta_bytes,
+    )
+    .with_context(|| format!("agent `{agent_id}`: failed to parse declared connection types"))?;
+    let declared = extensions
+        .connection_types
+        .into_iter()
+        .map(|declared| (agent_id.to_owned(), declared))
+        .collect();
+    Ok((info, declared))
+}
+
+/// What a bundle's agents say of themselves, without the agents.
+pub struct AgentMetadata {
+    /// The agents, as [`ComponentDispatcherService::catalog`] has them.
+    pub catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
+    /// The connection types they declare, as
+    /// [`ComponentDispatcherService::declared_connection_types`] has them.
+    pub declared_connection_types: Vec<(
+        String,
+        runtara_dsl::derived_connection::DerivedConnectionType,
+    )>,
+}
+
+/// Reads what the agents in `component_dir` say of themselves from their
+/// `runtara_agent_*.meta.json` files alone. No component is read or loaded:
+/// this is for a process that describes agents and runs none.
+pub fn metadata_from_dir(component_dir: &Path) -> Result<AgentMetadata> {
+    let mut agents = Vec::new();
+    let mut declared_connection_types = Vec::new();
+    let entries = std::fs::read_dir(component_dir)
+        .with_context(|| format!("read component directory {}", component_dir.display()))?;
+    for entry in entries {
+        let path = entry?.path();
+        let Some(stem_id) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".meta.json"))
+            .and_then(|stem| stem.strip_prefix("runtara_agent_"))
+        else {
+            continue;
+        };
+        let agent_id = canonical_agent_id(stem_id);
+        let meta = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        let (info, declared) = agent_metadata(&agent_id, &meta)?;
+        agents.push(info);
+        declared_connection_types.extend(declared);
+    }
+    agents.sort_by(|a, b| a.id.cmp(&b.id));
+    declared_connection_types.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(AgentMetadata {
+        catalog: Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(agents)),
+        declared_connection_types,
+    })
+}
+
 impl ComponentDispatcherService {
     pub fn set_outbound_http(&self, service: Arc<dyn crate::OutboundHttpHost>) -> Result<()> {
         self.outbound_http
@@ -246,36 +333,8 @@ impl ComponentDispatcherService {
             meta: meta_bytes,
         } in sources
         {
-            let mut info: AgentInfo = serde_json::from_slice(&meta_bytes)
-                .with_context(|| format!("agent `{agent_id}`: failed to parse sidecar metadata"))?;
-            // Normalize both sides to kebab for the equality check —
-            // cargo-component drops snake_case filenames, but the canonical
-            // id everywhere else is kebab, so an agent crate can sensibly
-            // write either form in its `agent_info().id` literal.
-            if canonical_agent_id(&info.id) != agent_id {
-                anyhow::bail!(
-                    "agent id mismatch: filename stem is `{agent_id}` but meta.id is `{}`",
-                    info.id
-                );
-            }
-            // Force the catalog to key on the same kebab form `agents` uses
-            // — otherwise an agent whose `agent_info().id` literal is
-            // snake_case (e.g. "azure_blob_storage") loads into `agents` as
-            // "azure-blob-storage" but registers in the catalog as
-            // "azure_blob_storage", and `agent_info_of("azure-blob-storage")`
-            // returns None while `agent_ids()` yields it.
-            info.id = agent_id.clone();
-            let extensions =
-                runtara_dsl::derived_connection::AgentMetaExtensions::from_meta_json(&meta_bytes)
-                    .with_context(|| {
-                    format!("agent `{agent_id}`: failed to parse declared connection types")
-                })?;
-            declared_connection_types.extend(
-                extensions
-                    .connection_types
-                    .into_iter()
-                    .map(|declared| (agent_id.clone(), declared)),
-            );
+            let (info, declared) = agent_metadata(&agent_id, &meta_bytes)?;
+            declared_connection_types.extend(declared);
 
             trusted.register(&info, &bytes, &meta_bytes)?;
             let loaded = load_agent_bytes(&engine, &linker, &bytes, &agent_id)?;
