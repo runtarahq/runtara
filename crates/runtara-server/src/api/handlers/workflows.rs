@@ -7,6 +7,7 @@
 //! - Maps service errors to HTTP status codes
 //! - Returns standardized API responses
 
+use crate::engine::Engine;
 use axum::{
     extract::{Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
@@ -37,10 +38,8 @@ use crate::api::services::workflows::{ServiceError, WorkflowService};
 use crate::auth::AuthContext;
 use crate::middleware::tenant_auth::Source;
 use crate::product_events::{EventSource, EventType, ProductEvent, ProductEventSink};
-use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::{
-    CommandEffect, ExecutionEngine, PauseOutcome, QueueRequest, ResumeOutcome, StopOutcome,
-    TriggerSource,
+    CommandEffect, PauseOutcome, QueueRequest, ResumeOutcome, StopOutcome, TriggerSource,
 };
 use runtara_connections::ConnectionsFacade;
 
@@ -323,7 +322,6 @@ pub async fn update_workflow_handler(
     State(pool): State<PgPool>,
     State(connections): State<Arc<ConnectionsFacade>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
-    State(_runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path(workflow_id): Path<String>,
     State(events): State<ProductEventSink>,
     Extension(ctx): Extension<AuthContext>,
@@ -1970,7 +1968,7 @@ pub async fn validate_mappings_handler(
 #[instrument(skip(engine, request, headers), fields(workflow_id = %workflow_id))]
 pub async fn execute_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path(workflow_id): Path<String>,
     Query(query): Query<ExecuteWorkflowQuery>,
     headers: HeaderMap,
@@ -2079,7 +2077,7 @@ impl InstanceDetailQuery {
 #[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn get_execution_metrics_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path(instance_id): Path<String>,
     Query(query): Query<InstanceDetailQuery>,
 ) -> (StatusCode, Json<Value>) {
@@ -2117,7 +2115,7 @@ pub async fn get_execution_metrics_handler(
 #[instrument(skip(engine), fields(workflow_id = %workflow_id, instance_id = %instance_id))]
 pub async fn get_instance_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path((workflow_id, instance_id)): Path<(String, String)>,
     Query(query): Query<InstanceDetailQuery>,
 ) -> (StatusCode, Json<Value>) {
@@ -2172,7 +2170,7 @@ pub async fn get_instance_handler(
 #[instrument(skip(engine), fields(workflow_id = %workflow_id))]
 pub async fn list_instances_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path(workflow_id): Path<String>,
     Query(query): Query<ListInstancesQuery>,
 ) -> (StatusCode, Json<Value>) {
@@ -2215,11 +2213,11 @@ pub async fn list_instances_handler(
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(_pool, runtime_client), fields(instance_id = %instance_id))]
+#[instrument(skip(_pool, client), fields(instance_id = %instance_id))]
 pub async fn list_instance_checkpoints_handler(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(_pool): State<PgPool>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(client): State<Arc<dyn Engine>>,
     Path((_workflow_id, instance_id)): Path<(String, String)>,
     Query(query): Query<ListCheckpointsQuery>,
 ) -> (StatusCode, Json<Value>) {
@@ -2233,18 +2231,15 @@ pub async fn list_instance_checkpoints_handler(
         return (StatusCode::BAD_REQUEST, Json(error_response));
     }
 
-    // Check if runtime client is available
-    let client = match runtime_client {
-        Some(c) => c,
-        None => {
-            let error_response = json!({
-                "success": false,
-                "error": "Runtime client not configured",
-                "message": "Checkpoints require runtara-environment connection",
-            });
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(error_response));
-        }
-    };
+    // Check if the runtime is available
+    if !client.available() {
+        let error_response = json!({
+            "success": false,
+            "error": "Runtime client not configured",
+            "message": "Checkpoints require runtara-environment connection",
+        });
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(error_response));
+    }
 
     // Normalize pagination. The offset is what makes `page` mean anything:
     // a limit on its own re-reads rows `0..size` for every page asked for.
@@ -2256,7 +2251,7 @@ pub async fn list_instance_checkpoints_handler(
 
     // Fetch checkpoints via runtara management SDK
     match client
-        .list_checkpoints(&instance_id, Some(size), Some(offset))
+        .list_checkpoints(&tenant_id, &instance_id, Some(size), Some(offset))
         .await
     {
         Ok(result) => {
@@ -2329,7 +2324,7 @@ pub async fn list_instance_checkpoints_handler(
 #[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn replay_instance_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     match engine.replay(&tenant_id, &instance_id).await {
@@ -2384,7 +2379,7 @@ fn outcome_data(effect: CommandEffect) -> Value {
 #[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn stop_instance_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     match engine.stop(&tenant_id, &instance_id).await {
@@ -2438,7 +2433,7 @@ pub async fn stop_instance_handler(
 #[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn pause_instance_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     match engine.pause(&tenant_id, &instance_id).await {
@@ -2501,7 +2496,7 @@ pub async fn pause_instance_handler(
 #[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn resume_instance_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     let not_resumable = |status: String| {
@@ -3470,7 +3465,8 @@ mod create_request_wire_tests {
 mod checkpoint_pagination_tests {
     use super::*;
     use crate::middleware::tenant_auth::OrgId;
-    use crate::runtime_client::RuntimeClientConfig;
+    use crate::runtime_client::{RuntimeClient, RuntimeClientConfig};
+    use crate::workers::execution_engine::ExecutionEngine;
     use runtara_core::persistence::{Persistence, memory::InMemoryPersistence};
     use runtara_environment::execution_timeout::ExecutionTimeoutPolicy;
     use runtara_environment::handlers::EnvironmentHandlerState;
@@ -3545,10 +3541,24 @@ mod checkpoint_pagination_tests {
     }
 
     async fn checkpoints_page(client: &Arc<RuntimeClient>, page: i32, size: i32) -> Value {
+        // The handler asks the engine; this one is the runtime under test.
+        let (events, _dropped) = tokio::sync::mpsc::channel(1);
+        let executions = Arc::new(ExecutionEngine::new(
+            lazy_pool(),
+            Arc::new(WorkflowRepository::new(lazy_pool())),
+            Some(Arc::clone(client)),
+            None,
+            crate::product_events::ProductEventSink::new(events),
+        ));
+        let engine: Arc<dyn Engine> = Arc::new(crate::engine::LocalEngine::new(
+            Some(Arc::clone(client)),
+            executions,
+            lazy_pool(),
+        ));
         let (status, Json(body)) = list_instance_checkpoints_handler(
             OrgId("tenant-1".to_string()),
             State(lazy_pool()),
-            State(Some(Arc::clone(client))),
+            State(engine),
             Path(("wf-1".to_string(), INSTANCE.to_string())),
             Query(ListCheckpointsQuery {
                 page: Some(page),

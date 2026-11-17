@@ -6,6 +6,7 @@
 //! - Runs the workflow in-process on the embedded wasmtime engine
 //! - Still supports side effects (HTTP, random, timestamps)
 
+use crate::engine::Engine;
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
@@ -17,7 +18,7 @@ use std::sync::Arc;
 use tracing::instrument;
 
 use crate::api::handlers::common::execution_error_response;
-use crate::workers::execution_engine::{ExecutionEngine, SyncRequest};
+use crate::workers::execution_engine::SyncRequest;
 
 // ============================================================================
 // HTTP Handlers
@@ -65,7 +66,7 @@ pub async fn capture_http_event_sync(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     State(pool): State<sqlx::PgPool>,
     body: Bytes,
 ) -> (StatusCode, Json<Value>) {

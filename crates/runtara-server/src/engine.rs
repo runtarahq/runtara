@@ -29,8 +29,13 @@ use runtara_store_postgres::tenant_scope::scoped;
 use serde_json::Value;
 
 use crate::api::dto::executions::{ExecutionFilters, ExecutionSummary};
+use crate::api::dto::operations::OperationQueue;
 use crate::api::dto::trigger_event::TriggerEvent;
 use crate::api::dto::workflows::{PageWorkflowInstanceHistoryDto, WorkflowInstanceDto};
+use crate::api::services::pending_inputs::PendingInputPage;
+use crate::api::services::workflow_runtime::{
+    WorkflowActionReceipt, WorkflowRuntimeAction, WorkflowRuntimeActionPage, WorkflowRuntimeError,
+};
 use crate::runtime_client::{
     GetTenantMetricsOptions, InstanceInfo, RuntimeClient, RuntimeError, TenantMetricsResult,
 };
@@ -232,6 +237,55 @@ pub trait Engine: Send + Sync {
         operation: &str,
         payload: &Value,
     ) -> InputResult<InputReceipt>;
+
+    /// What a run is waiting to be told, as the API shows it.
+    async fn pending_input_page(
+        &self,
+        tenant_id: &str,
+        instance_id: &str,
+    ) -> InputResult<PendingInputPage>;
+
+    // ---- Actions a workflow offers while it waits ---------------------------
+
+    async fn list_instance_actions(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        instance_id: &str,
+    ) -> Result<Vec<WorkflowRuntimeAction>, WorkflowRuntimeError>;
+
+    async fn list_workflow_actions(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        page: Option<i32>,
+        size: Option<i32>,
+    ) -> Result<WorkflowRuntimeActionPage, WorkflowRuntimeError>;
+
+    async fn submit_workflow_action(
+        &self,
+        auth: &crate::auth::AuthContext,
+        workflow_id: &str,
+        instance_id: &str,
+        request_id: &str,
+        operation_id: &str,
+        payload: &Value,
+    ) -> Result<WorkflowActionReceipt, WorkflowRuntimeError>;
+
+    async fn submit_authenticated_input(
+        &self,
+        auth: &crate::auth::AuthContext,
+        instance_id: &str,
+        request_id: &str,
+        operation_id: &str,
+        payload: &Value,
+    ) -> Result<WorkflowActionReceipt, WorkflowRuntimeError>;
+
+    /// The operation queues a tenant's workflows have work in.
+    async fn operation_queues(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<OperationQueue>, WorkflowRuntimeError>;
 }
 
 /// The engine in this process.
@@ -239,14 +293,27 @@ pub struct LocalEngine {
     /// The workflow runtime, if this server has one.
     runtime: Option<Arc<RuntimeClient>>,
     executions: Arc<ExecutionEngine>,
+    /// The server database, which the engine reads definitions from.
+    pool: sqlx::PgPool,
 }
 
 impl LocalEngine {
-    pub fn new(runtime: Option<Arc<RuntimeClient>>, executions: Arc<ExecutionEngine>) -> Self {
+    pub fn new(
+        runtime: Option<Arc<RuntimeClient>>,
+        executions: Arc<ExecutionEngine>,
+        pool: sqlx::PgPool,
+    ) -> Self {
         Self {
             runtime,
             executions,
+            pool,
         }
+    }
+
+    fn actions(&self) -> Result<&RuntimeClient, WorkflowRuntimeError> {
+        self.runtime
+            .as_deref()
+            .ok_or(WorkflowRuntimeError::RuntimeUnavailable)
     }
 
     fn runtime(&self) -> Result<&RuntimeClient, RuntimeError> {
@@ -524,5 +591,106 @@ impl Engine for LocalEngine {
         self.inputs()?
             .submit_authenticated_input_response(auth, instance_id, request, operation, payload)
             .await
+    }
+
+    async fn pending_input_page(
+        &self,
+        tenant_id: &str,
+        instance_id: &str,
+    ) -> InputResult<PendingInputPage> {
+        crate::api::services::pending_inputs::pending_input_page(
+            self.inputs()?,
+            tenant_id,
+            instance_id,
+        )
+        .await
+    }
+
+    async fn list_instance_actions(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        instance_id: &str,
+    ) -> Result<Vec<WorkflowRuntimeAction>, WorkflowRuntimeError> {
+        crate::api::services::workflow_runtime::list_instance_actions(
+            self.actions()?,
+            tenant_id,
+            workflow_id,
+            instance_id,
+        )
+        .await
+    }
+
+    async fn list_workflow_actions(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        page: Option<i32>,
+        size: Option<i32>,
+    ) -> Result<WorkflowRuntimeActionPage, WorkflowRuntimeError> {
+        crate::api::services::workflow_runtime::list_workflow_actions(
+            &self.executions,
+            self.actions()?,
+            tenant_id,
+            workflow_id,
+            page,
+            size,
+        )
+        .await
+    }
+
+    async fn submit_workflow_action(
+        &self,
+        auth: &crate::auth::AuthContext,
+        workflow_id: &str,
+        instance_id: &str,
+        request_id: &str,
+        operation_id: &str,
+        payload: &Value,
+    ) -> Result<WorkflowActionReceipt, WorkflowRuntimeError> {
+        crate::api::services::workflow_runtime::submit_workflow_action(
+            &self.executions,
+            self.actions()?,
+            &self.pool,
+            auth,
+            workflow_id,
+            instance_id,
+            request_id,
+            operation_id,
+            payload,
+        )
+        .await
+    }
+
+    async fn submit_authenticated_input(
+        &self,
+        auth: &crate::auth::AuthContext,
+        instance_id: &str,
+        request_id: &str,
+        operation_id: &str,
+        payload: &Value,
+    ) -> Result<WorkflowActionReceipt, WorkflowRuntimeError> {
+        crate::api::services::workflow_runtime::submit_authenticated_input(
+            self.actions()?,
+            &self.pool,
+            auth,
+            instance_id,
+            request_id,
+            operation_id,
+            payload,
+        )
+        .await
+    }
+
+    async fn operation_queues(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<OperationQueue>, WorkflowRuntimeError> {
+        crate::api::services::operations::discover_queues(
+            &crate::api::repositories::operations::OperationsRepository::new(self.pool.clone()),
+            self.actions()?,
+            tenant_id,
+        )
+        .await
     }
 }

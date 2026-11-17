@@ -2242,6 +2242,7 @@ async fn start_as_platform(
     let engine_api: Arc<dyn crate::engine::Engine> = Arc::new(crate::engine::LocalEngine::new(
         runtime_client.clone(),
         execution_engine.clone(),
+        pool.clone(),
     ));
     native_control.install_engine(execution_engine.clone());
     {

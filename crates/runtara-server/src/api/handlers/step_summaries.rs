@@ -1,3 +1,4 @@
+use crate::engine::Engine;
 use crate::runtime_types::{InstanceStatus, ListStepSummariesOptions, StepSortOrder, StepStatus};
 use axum::{
     Json,
@@ -10,8 +11,6 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
-
-use crate::runtime_client::RuntimeClient;
 
 /// Query parameters for step summaries endpoint
 #[derive(Debug, Deserialize, IntoParams)]
@@ -201,10 +200,10 @@ fn step_status_and_error(
     tag = "workflow-controller"
 )]
 pub async fn get_step_summaries(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     Path((workflow_id, instance_id)): Path<(String, String)>,
     Query(query): Query<StepSummariesQuery>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(client): State<Arc<dyn Engine>>,
 ) -> (StatusCode, Json<Value>) {
     // Parse instance UUID
     let _instance_uuid = match Uuid::parse_str(&instance_id) {
@@ -219,18 +218,14 @@ pub async fn get_step_summaries(
         }
     };
 
-    // Get runtime client
-    let client = match runtime_client {
-        Some(c) => c,
-        None => {
-            let error_response = json!({
-                "success": false,
-                "message": "Runtime client not configured - step summaries are not available",
-                "data": Value::Null
-            });
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(error_response));
-        }
-    };
+    if !client.available() {
+        let error_response = json!({
+            "success": false,
+            "message": "Runtime client not configured - step summaries are not available",
+            "data": Value::Null
+        });
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(error_response));
+    }
 
     // Build options from query params
     let limit = query.limit.map(|l| l.min(1000)).unwrap_or(100);
@@ -252,7 +247,7 @@ pub async fn get_step_summaries(
 
     // The instance status decides how unfinished steps read: suspended while
     // the instance is suspended, its terminal status once it has ended.
-    let instance_status = match client.get_instance_info(&instance_id).await {
+    let instance_status = match client.get_instance_info(&tenant_id, &instance_id).await {
         Ok(info) => Some(info.status),
         Err(e) => {
             tracing::warn!(
@@ -303,7 +298,7 @@ pub async fn get_step_summaries(
 
     // Fetch step summaries from runtara-environment
     match client
-        .list_step_summaries(&instance_id, Some(options))
+        .list_step_summaries(&tenant_id, &instance_id, Some(options))
         .await
     {
         Ok(mut result) => {

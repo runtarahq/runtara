@@ -70,7 +70,7 @@ fn parse_webhook_max_body_bytes(raw: Option<&str>) -> usize {
 pub async fn capture_http_event(
     State(pool): State<PgPool>,
     State(connections): State<std::sync::Arc<runtara_connections::ConnectionsFacade>>,
-    State(engine): State<std::sync::Arc<crate::workers::execution_engine::ExecutionEngine>>,
+    State(engine): State<std::sync::Arc<dyn crate::engine::Engine>>,
     Path((trigger_id, action)): Path<(String, String)>,
     Query(metadata): Query<crate::api::dto::workflows::RunLabelQuery>,
     request: Request,

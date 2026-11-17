@@ -2,6 +2,7 @@
 use super::*;
 use crate::api::handlers::step_events::workflow_runtime_error_response;
 use crate::api::services::workflow_runtime::WorkflowRuntimeError;
+use crate::engine::Engine;
 use axum::extract::{Query, rejection::QueryRejection};
 
 type Reply = (StatusCode, Json<Value>);
@@ -120,8 +121,7 @@ pub async fn get_session_delivery(
 pub async fn resolve_session_delivery(
     crate::middleware::tenant_auth::OrgId(tenant): crate::middleware::tenant_auth::OrgId,
     State(connection): State<Option<ConnectionManager>>,
-    State(engine): State<Arc<ExecutionEngine>>,
-    State(client): State<Option<Arc<RuntimeClient>>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path((session, message)): Path<(String, String)>,
     body: Result<Json<ResolveDeliveryRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Reply {
@@ -140,9 +140,9 @@ pub async fn resolve_session_delivery(
             instance_id,
             request_id,
         } => {
-            let Some(client) = client else {
+            if !engine.available() {
                 return workflow_runtime_error_response(WorkflowRuntimeError::RuntimeUnavailable);
-            };
+            }
             if let Err(error) = engine
                 .authorize_execution(&route.workflow_id, &instance_id, &tenant)
                 .await
@@ -151,7 +151,7 @@ pub async fn resolve_session_delivery(
                     crate::api::services::workflow_runtime::map_execution_error(error),
                 );
             }
-            if let Err(error) = client
+            if let Err(error) = engine
                 .get_input_request(&tenant, &instance_id, &request_id)
                 .await
             {

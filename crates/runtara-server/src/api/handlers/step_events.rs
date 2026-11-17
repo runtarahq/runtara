@@ -1,3 +1,4 @@
+use crate::engine::Engine;
 use crate::runtime_types::{EventSortOrder, ListEventsOptions};
 use axum::{
     Extension, Json,
@@ -11,13 +12,7 @@ use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use crate::api::services::pending_inputs::pending_input_page;
-use crate::api::services::workflow_runtime::{
-    SubmitWorkflowActionRequest, WorkflowRuntimeError, list_instance_actions,
-    list_workflow_actions, submit_workflow_action as submit_runtime_workflow_action,
-};
-use crate::runtime_client::RuntimeClient;
-use crate::workers::execution_engine::ExecutionEngine;
+use crate::api::services::workflow_runtime::{SubmitWorkflowActionRequest, WorkflowRuntimeError};
 
 /// Query parameters for step events endpoint
 #[derive(Debug, Deserialize, IntoParams)]
@@ -114,10 +109,10 @@ pub struct StepEventResponse {
     tag = "workflow-controller"
 )]
 pub async fn get_step_events(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     Path((workflow_id, instance_id)): Path<(String, String)>,
     Query(query): Query<StepEventsQuery>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(engine): State<Arc<dyn Engine>>,
 ) -> (StatusCode, Json<Value>) {
     // Parse instance UUID
     let _instance_uuid = match Uuid::parse_str(&instance_id) {
@@ -132,18 +127,14 @@ pub async fn get_step_events(
         }
     };
 
-    // Get runtime client
-    let client = match runtime_client {
-        Some(c) => c,
-        None => {
-            let error_response = json!({
-                "success": false,
-                "message": "Runtime client not configured - step events are not available",
-                "data": Value::Null
-            });
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(error_response));
-        }
-    };
+    if !engine.available() {
+        let error_response = json!({
+            "success": false,
+            "message": "Runtime client not configured - step events are not available",
+            "data": Value::Null
+        });
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(error_response));
+    }
 
     // Build list events options from query params
     let limit = query.limit.map(|l| l.min(1000)).unwrap_or(100);
@@ -203,7 +194,10 @@ pub async fn get_step_events(
     }
 
     // Fetch events from runtara-environment
-    match client.list_events(&instance_id, Some(options)).await {
+    match engine
+        .list_events(&tenant_id, &instance_id, Some(options))
+        .await
+    {
         Ok(result) => {
             // Convert EventSummary to StepEventResponse
             let events: Vec<StepEventResponse> = result
@@ -329,9 +323,9 @@ pub struct ScopeAncestorsResponseData {
     tag = "workflow-controller"
 )]
 pub async fn get_scope_ancestors(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     Path((_workflow_id, instance_id, scope_id)): Path<(String, String, String)>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(engine): State<Arc<dyn Engine>>,
 ) -> (StatusCode, Json<Value>) {
     // Parse instance UUID
     let _instance_uuid = match Uuid::parse_str(&instance_id) {
@@ -346,21 +340,20 @@ pub async fn get_scope_ancestors(
         }
     };
 
-    // Get runtime client
-    let client = match runtime_client {
-        Some(c) => c,
-        None => {
-            let error_response = json!({
-                "success": false,
-                "message": "Runtime client not configured - scope ancestors are not available",
-                "data": Value::Null
-            });
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(error_response));
-        }
-    };
+    if !engine.available() {
+        let error_response = json!({
+            "success": false,
+            "message": "Runtime client not configured - scope ancestors are not available",
+            "data": Value::Null
+        });
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(error_response));
+    }
 
     // Fetch scope ancestors from runtara-environment
-    match client.get_scope_ancestors(&instance_id, &scope_id).await {
+    match engine
+        .get_scope_ancestors(&tenant_id, &instance_id, &scope_id)
+        .await
+    {
         Ok(scope_infos) => {
             // Convert SDK ScopeInfo to response format
             let ancestors: Vec<ScopeAncestorResponse> = scope_infos
@@ -436,12 +429,11 @@ pub struct WorkflowActionsQuery {
 pub async fn get_pending_input(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     Path((workflow_id, instance_id)): Path<(String, String)>,
-    State(engine): State<Arc<ExecutionEngine>>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(engine): State<Arc<dyn Engine>>,
 ) -> (StatusCode, Json<Value>) {
-    let Some(client) = runtime_client else {
+    if !engine.available() {
         return workflow_runtime_error_response(WorkflowRuntimeError::RuntimeUnavailable);
-    };
+    }
     if let Err(error) = engine
         .authorize_execution(&workflow_id, &instance_id, &tenant_id)
         .await
@@ -450,7 +442,7 @@ pub async fn get_pending_input(
             crate::api::services::workflow_runtime::map_execution_error(error),
         );
     }
-    match pending_input_page(&client, &tenant_id, &instance_id).await {
+    match engine.pending_input_page(&tenant_id, &instance_id).await {
         Ok(page) => (
             StatusCode::OK,
             Json(json!({"success":true,"message":"Pending inputs retrieved","data":page})),
@@ -474,24 +466,17 @@ pub async fn get_pending_input(
 )]
 pub async fn list_workflow_open_actions(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path(workflow_id): Path<String>,
     Query(query): Query<WorkflowActionsQuery>,
 ) -> (StatusCode, Json<Value>) {
-    let Some(client) = runtime_client else {
+    if !engine.available() {
         return workflow_runtime_error_response(WorkflowRuntimeError::RuntimeUnavailable);
-    };
+    }
 
-    match list_workflow_actions(
-        &engine,
-        &client,
-        &tenant_id,
-        &workflow_id,
-        query.page,
-        query.size,
-    )
-    .await
+    match engine
+        .list_workflow_actions(&tenant_id, &workflow_id, query.page, query.size)
+        .await
     {
         Ok(page) => (
             StatusCode::OK,
@@ -521,13 +506,12 @@ pub async fn list_workflow_open_actions(
 )]
 pub async fn list_workflow_instance_open_actions(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path((workflow_id, instance_id)): Path<(String, String)>,
 ) -> (StatusCode, Json<Value>) {
-    let Some(client) = runtime_client else {
+    if !engine.available() {
         return workflow_runtime_error_response(WorkflowRuntimeError::RuntimeUnavailable);
-    };
+    }
 
     if let Err(error) = engine
         .authorize_execution(&workflow_id, &instance_id, &tenant_id)
@@ -539,7 +523,10 @@ pub async fn list_workflow_instance_open_actions(
         );
     }
 
-    match list_instance_actions(&client, &tenant_id, &workflow_id, &instance_id).await {
+    match engine
+        .list_instance_actions(&tenant_id, &workflow_id, &instance_id)
+        .await
+    {
         Ok(actions) => {
             let count = actions.len();
             (
@@ -581,9 +568,7 @@ pub async fn list_workflow_instance_open_actions(
 pub async fn submit_workflow_action(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     Extension(auth): Extension<crate::auth::AuthContext>,
-    State(pool): State<sqlx::PgPool>,
-    State(engine): State<Arc<ExecutionEngine>>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path((workflow_id, instance_id, action_id)): Path<(String, String, String)>,
     body: Result<Json<SubmitWorkflowActionRequest>, axum::extract::rejection::JsonRejection>,
 ) -> (StatusCode, Json<Value>) {
@@ -597,9 +582,9 @@ pub async fn submit_workflow_action(
             runtara_core::persistence::inputs::InputError::InvalidRequest,
         ));
     };
-    let Some(client) = runtime_client else {
+    if !engine.available() {
         return workflow_runtime_error_response(WorkflowRuntimeError::RuntimeUnavailable);
-    };
+    }
 
     if body.request_id != action_id {
         return workflow_runtime_error_response(WorkflowRuntimeError::Managed(
@@ -607,18 +592,16 @@ pub async fn submit_workflow_action(
         ));
     }
 
-    match submit_runtime_workflow_action(
-        &engine,
-        &client,
-        &pool,
-        &auth,
-        &workflow_id,
-        &instance_id,
-        &body.request_id,
-        &body.operation_id,
-        &body.payload,
-    )
-    .await
+    match engine
+        .submit_workflow_action(
+            &auth,
+            &workflow_id,
+            &instance_id,
+            &body.request_id,
+            &body.operation_id,
+            &body.payload,
+        )
+        .await
     {
         Ok(action) => (
             StatusCode::OK,
@@ -665,9 +648,8 @@ pub(crate) fn workflow_runtime_error_response(
 pub async fn submit_signal(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     Extension(auth): Extension<crate::auth::AuthContext>,
-    State(pool): State<sqlx::PgPool>,
     Path(instance_id): Path<String>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(engine): State<Arc<dyn Engine>>,
     body: Result<Json<SubmitSignalRequest>, axum::extract::rejection::JsonRejection>,
 ) -> (StatusCode, Json<Value>) {
     if auth.org_id != tenant_id {
@@ -685,19 +667,18 @@ pub async fn submit_signal(
             runtara_core::persistence::inputs::InputError::InvalidRequest.into(),
         );
     }
-    let Some(client) = runtime_client else {
+    if !engine.available() {
         return workflow_runtime_error_response(WorkflowRuntimeError::RuntimeUnavailable);
-    };
-    match crate::api::services::workflow_runtime::submit_authenticated_input(
-        &client,
-        &pool,
-        &auth,
-        &instance_id,
-        &body.request_id,
-        &body.operation_id,
-        &body.payload,
-    )
-    .await
+    }
+    match engine
+        .submit_authenticated_input(
+            &auth,
+            &instance_id,
+            &body.request_id,
+            &body.operation_id,
+            &body.payload,
+        )
+        .await
     {
         Ok(receipt) => (
             StatusCode::OK,

@@ -1,11 +1,10 @@
+use crate::engine::Engine;
 use crate::{
     api::{
         dto::operations::*, handlers::executions::parse_query,
-        repositories::operations::OperationsRepository, services::operations::discover_queues,
+        repositories::operations::OperationsRepository,
     },
     middleware::tenant_auth::OrgId,
-    runtime_client::RuntimeClient,
-    workers::execution_engine::ExecutionEngine,
 };
 use axum::{Json, extract::State, http::StatusCode};
 use serde_json::{Value, json};
@@ -22,13 +21,12 @@ fn error(status: StatusCode, message: impl ToString) -> (StatusCode, Json<Value>
 #[utoipa::path(get, path = "/api/runtime/operations/queues", responses((status=200, body=crate::api::dto::common::ApiResponse<Vec<OperationQueue>>)), tag="operations-controller")]
 pub async fn operation_queues(
     OrgId(tenant): OrgId,
-    State(pool): State<PgPool>,
-    State(client): State<Option<Arc<RuntimeClient>>>,
+    State(engine): State<Arc<dyn Engine>>,
 ) -> (StatusCode, Json<Value>) {
-    let Some(client) = client else {
+    if !engine.available() {
         return error(StatusCode::SERVICE_UNAVAILABLE, "Runtime unavailable");
-    };
-    match discover_queues(&OperationsRepository::new(pool), &client, &tenant).await {
+    }
+    match engine.operation_queues(&tenant).await {
         Ok(queues) => (StatusCode::OK, Json(json!({"success":true,"data":queues}))),
         Err(e) => {
             tracing::error!(error=%e,"Operations queue discovery failed");
@@ -40,13 +38,12 @@ pub async fn operation_queues(
 #[utoipa::path(post, path = "/api/runtime/operations/requests/query", request_body=QueryOperationRequests, responses((status=200, body=crate::api::dto::common::ApiResponse<OperationRequestPage>)), tag="operations-controller")]
 pub async fn query_operation_requests(
     OrgId(tenant): OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
-    State(client): State<Option<Arc<RuntimeClient>>>,
+    State(engine): State<Arc<dyn Engine>>,
     Json(request): Json<QueryOperationRequests>,
 ) -> (StatusCode, Json<Value>) {
-    let Some(client) = client else {
+    if !engine.available() {
         return error(StatusCode::SERVICE_UNAVAILABLE, "Runtime unavailable");
-    };
+    }
     if request.workflow_id.is_empty()
         || request.workflow_id.len() > 256
         || request.workflow_id.contains(':')
@@ -80,7 +77,7 @@ pub async fn query_operation_requests(
         Ok(o) => o,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
-    let found = match client
+    let found = match engine
         .operation_requests(
             &tenant,
             &request.workflow_id,

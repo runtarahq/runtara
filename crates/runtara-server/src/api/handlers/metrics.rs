@@ -4,6 +4,7 @@
 // ✓ No database queries (delegated to MetricsService)
 // ✓ Handlers only handle HTTP concerns
 
+use crate::engine::Engine;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -16,9 +17,7 @@ use std::sync::Arc;
 
 use crate::api::dto::metrics::*;
 use crate::metrics::MetricsService;
-use crate::runtime_client::{
-    GetTenantMetricsOptions, MAX_METRIC_BUCKETS, MetricsGranularity, RuntimeClient,
-};
+use crate::runtime_client::{GetTenantMetricsOptions, MAX_METRIC_BUCKETS, MetricsGranularity};
 
 /// Get metrics for a specific workflow
 #[utoipa::path(
@@ -211,23 +210,20 @@ pub async fn get_workflow_stats(
 pub async fn get_tenant_metrics(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(_pool): State<PgPool>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(runtime_client): State<Arc<dyn Engine>>,
     Query(query): Query<MetricsQuery>,
 ) -> (StatusCode, Json<Value>) {
-    // RuntimeClient is required for tenant metrics (data is in runtara-environment)
-    let runtime_client = match runtime_client {
-        Some(client) => client,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "success": false,
-                    "message": "Runtara environment not configured. Tenant metrics require runtara-environment connection.",
-                    "data": null
-                })),
-            );
-        }
-    };
+    // Tenant metrics are the runtime's (the data is in runtara-environment).
+    if !runtime_client.available() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "success": false,
+                "message": "Runtara environment not configured. Tenant metrics require runtara-environment connection.",
+                "data": null
+            })),
+        );
+    }
 
     // Default time range: last 24 hours
     let end_time = query.end_time.unwrap_or_else(Utc::now);
