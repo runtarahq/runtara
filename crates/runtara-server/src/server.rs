@@ -1515,9 +1515,8 @@ async fn start_as_platform(
         let slug_repo = Arc::new(api::repositories::workflows::WorkflowRepository::new(
             pool.clone(),
         ));
-        let slug_service = api::services::workflows::WorkflowService::new(
+        let slug_service = api::services::workflows::WorkflowService::without_engine(
             slug_repo,
-            connections_facade.clone(),
             agent_catalog.clone(),
         );
         match slug_service.backfill_workflow_slugs().await {
@@ -2223,7 +2222,8 @@ async fn start_as_platform(
             pool.clone(),
         )
         .with_agent_catalog(agent_catalog.clone())
-        .with_agent_testing(agent_testing.clone()),
+        .with_agent_testing(agent_testing.clone())
+        .with_connections(connections_facade.clone()),
     );
     let engine_api: Arc<dyn crate::engine::Engine> = local_engine.clone();
     native_control.install_engine(execution_engine.clone());

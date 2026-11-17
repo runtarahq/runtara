@@ -92,7 +92,7 @@ async fn compile_workflow_for_mcp(
         });
     }
 
-    let Some(valkey_config) = crate::valkey::ValkeyConfig::from_env() else {
+    if !server.engine.queues_compilations() {
         let result = api_post(
             server,
             &format!(
@@ -106,17 +106,13 @@ async fn compile_workflow_for_mcp(
             completed: true,
             value: result,
         });
-    };
+    }
 
-    let redis_url = valkey_config.connection_url();
-    let pending = crate::workers::compilation_worker::is_compilation_pending(
-        &redis_url,
-        &server.tenant(),
-        workflow_id,
-        version,
-    )
-    .await
-    .map_err(|e| err(format!("Failed to check compilation queue status: {}", e)))?;
+    let pending = server
+        .engine
+        .is_compilation_pending(&server.tenant(), workflow_id, version)
+        .await
+        .map_err(|e| err(format!("Failed to check compilation queue status: {}", e)))?;
 
     if !pending {
         // A non-fresh success row would make the worker skip the request. Delete
@@ -136,26 +132,24 @@ async fn compile_workflow_for_mcp(
             retry_after_ms.div_ceil(1000).max(1)
         )));
     }
-    let queued = crate::workers::compilation_worker::enqueue_compilation(
-        &redis_url,
-        &server.tenant(),
-        workflow_id,
-        version,
-        force_recompile || !pending,
-    )
-    .await
-    .map_err(|e| err(format!("Failed to enqueue compilation: {}", e)))?;
+    let queued = server
+        .engine
+        .enqueue_compilation(
+            &server.tenant(),
+            workflow_id,
+            version,
+            force_recompile || !pending,
+            None,
+        )
+        .await
+        .map_err(|e| err(format!("Failed to enqueue compilation: {}", e)))?;
 
     let timeout = mcp_compile_wait_timeout();
-    let completed = crate::workers::compilation_worker::wait_for_compilation(
-        &redis_url,
-        &server.tenant(),
-        workflow_id,
-        version,
-        timeout,
-    )
-    .await
-    .map_err(|e| err(format!("Failed while waiting for compilation: {}", e)))?;
+    let completed = server
+        .engine
+        .wait_for_compilation(&server.tenant(), workflow_id, version, timeout)
+        .await
+        .map_err(|e| err(format!("Failed while waiting for compilation: {}", e)))?;
 
     if !completed {
         return Ok(McpCompileResult {

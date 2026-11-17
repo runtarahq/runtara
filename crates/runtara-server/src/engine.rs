@@ -32,6 +32,7 @@ use crate::api::dto::agent_testing::TestEngine;
 use crate::api::dto::executions::{ExecutionFilters, ExecutionSummary};
 use crate::api::dto::operations::OperationQueue;
 use crate::api::dto::trigger_event::TriggerEvent;
+use crate::api::dto::triggers::InvocationTrigger;
 use crate::api::dto::workflows::{PageWorkflowInstanceHistoryDto, WorkflowInstanceDto};
 use crate::api::services::agent_testing::{
     AgentTestingService, ServiceError as AgentTestError, TestResult,
@@ -43,6 +44,8 @@ use crate::api::services::pending_inputs::PendingInputPage;
 use crate::api::services::workflow_runtime::{
     WorkflowActionReceipt, WorkflowRuntimeAction, WorkflowRuntimeActionPage, WorkflowRuntimeError,
 };
+use crate::api::utils::connection_validation::ConnectionRef;
+use crate::product_events::ProductEvent;
 use crate::runtime_client::{
     GetTenantMetricsOptions, InstanceInfo, RuntimeClient, RuntimeError, TenantMetricsResult,
 };
@@ -50,6 +53,8 @@ use crate::runtime_types::{
     ImageSummary, ListCheckpointsResult, ListEventsOptions, ListEventsResult, ListInstancesOptions,
     ListStepSummariesOptions, ListStepSummariesResult, ScopeInfo,
 };
+use crate::valkey::compilation_progress::CompilationProgress;
+use crate::valkey::compilation_queue::CompilationQueueError;
 use crate::workers::execution_engine::{
     ExecutionEngine, ExecutionError, PauseOutcome, QueueRequest, QueuedExecution, ResumeOutcome,
     StopOutcome, SyncExecution, SyncRequest,
@@ -344,6 +349,61 @@ pub trait Engine: Send + Sync {
         image_id: &str,
     ) -> Result<Option<ImageSummary>, RuntimeError>;
 
+    // ---- Connections, as a workflow names them ----------------------------
+
+    /// The connections a tenant has: what a workflow's steps may name. Their
+    /// ids, kinds and titles, and nothing of what they hold.
+    async fn tenant_connections(&self, tenant_id: &str) -> Result<Vec<ConnectionRef>, String>;
+
+    /// Takes down, at their providers, the webhooks of chat channel triggers
+    /// that were removed. Best effort: what fails is logged.
+    async fn reconcile_channel_webhooks(&self, tenant_id: &str, removed: &[InvocationTrigger]);
+
+    // ---- Compilation, through the queue -------------------------------------
+
+    /// Whether compiles are queued for a worker, and not done as they are
+    /// asked for.
+    fn queues_compilations(&self) -> bool;
+
+    /// Queues a compile of a version. `false` if one was already queued.
+    /// `compiled` is the event to record when it is done, for a compile a
+    /// caller asked for.
+    async fn enqueue_compilation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+        force_recompile: bool,
+        compiled: Option<ProductEvent>,
+    ) -> Result<bool, CompilationQueueError>;
+
+    /// Waits for a queued compile to be done. `false` if it is not in time.
+    async fn wait_for_compilation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+        timeout: std::time::Duration,
+    ) -> Result<bool, CompilationQueueError>;
+
+    async fn is_compilation_pending(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+    ) -> Result<bool, CompilationQueueError>;
+
+    /// Says a compile is queued, for whoever watches its progress.
+    async fn mark_compilation_queued(&self, tenant_id: &str, workflow_id: &str, version: i32);
+
+    /// How far a compile has got, while it is queued or under way.
+    async fn compilation_progress(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+    ) -> Option<CompilationProgress>;
+
     // ---- Running an agent on request ---------------------------------------
 
     /// Whether this engine runs an agent's capability on request at all.
@@ -384,6 +444,8 @@ pub struct LocalEngine {
     agent_catalog: Option<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     /// Runs an agent's capability on request, if this server allows it.
     agent_testing: Option<AgentTestingService>,
+    /// Connections and their sealed secrets.
+    connections: Option<Arc<runtara_connections::ConnectionsFacade>>,
     /// The parts of the API this engine serves, each a router of its own.
     /// They are built after the engine is, from what the engine holds.
     served: std::sync::RwLock<std::collections::HashMap<Served, axum::Router>>,
@@ -401,8 +463,33 @@ impl LocalEngine {
             pool,
             agent_catalog: None,
             agent_testing: None,
+            connections: None,
             served: std::sync::RwLock::default(),
         }
+    }
+
+    /// With the tenants' connections.
+    #[must_use]
+    pub fn with_connections(
+        mut self,
+        connections: Arc<runtara_connections::ConnectionsFacade>,
+    ) -> Self {
+        self.connections = Some(connections);
+        self
+    }
+
+    /// Where compiles are queued, if they are: Valkey, as the worker that
+    /// takes them from the queue reads it.
+    fn compile_queue(&self) -> Option<String> {
+        crate::valkey::ValkeyConfig::from_env().map(|config| config.connection_url())
+    }
+
+    fn queued_compiles(&self) -> Result<String, CompilationQueueError> {
+        self.compile_queue().ok_or_else(|| {
+            CompilationQueueError::ConnectionError(
+                "compiles are not queued on this server".to_owned(),
+            )
+        })
     }
 
     /// With the service that runs an agent's capability on request.
@@ -443,6 +530,21 @@ impl LocalEngine {
             Some(agent_catalog) => service.with_agent_catalog(agent_catalog.clone()),
             None => service,
         }
+    }
+
+    /// An engine with no workflow runtime, as a server started without a
+    /// runtime database has: it answers for what needs none (a tenant's
+    /// connections, the compile queue), and refuses what needs a run.
+    pub fn without_runtime(pool: sqlx::PgPool) -> Self {
+        let (events, _dropped) = tokio::sync::mpsc::channel(1);
+        let executions = Arc::new(ExecutionEngine::new(
+            pool.clone(),
+            Arc::new(crate::api::repositories::workflows::WorkflowRepository::new(pool.clone())),
+            None,
+            None,
+            crate::product_events::ProductEventSink::new(events),
+        ));
+        Self::new(None, executions, pool)
     }
 
     fn actions(&self) -> Result<&RuntimeClient, WorkflowRuntimeError> {
@@ -861,6 +963,139 @@ impl Engine for LocalEngine {
         self.runtime()?.get_image(image_id, tenant_id).await
     }
 
+    async fn tenant_connections(&self, tenant_id: &str) -> Result<Vec<ConnectionRef>, String> {
+        let Some(connections) = &self.connections else {
+            return Err("this engine holds no connections".to_owned());
+        };
+        Ok(connections
+            .list_connections(tenant_id, None, None)
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|connection| ConnectionRef {
+                id: connection.id,
+                integration_id: connection.integration_id,
+                title: connection.title,
+            })
+            .collect())
+    }
+
+    async fn reconcile_channel_webhooks(&self, tenant_id: &str, removed: &[InvocationTrigger]) {
+        let Some(connections) = &self.connections else {
+            return;
+        };
+        crate::api::services::webhook_manager::reconcile_channel_webhooks(
+            &self.pool,
+            &crate::api::services::webhook_manager::WebhookManager::new(connections.clone()),
+            removed,
+            tenant_id,
+        )
+        .await;
+    }
+
+    fn queues_compilations(&self) -> bool {
+        self.compile_queue().is_some()
+    }
+
+    async fn enqueue_compilation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+        force_recompile: bool,
+        compiled: Option<ProductEvent>,
+    ) -> Result<bool, CompilationQueueError> {
+        let queue = self.queued_compiles()?;
+        match compiled {
+            Some(compiled) => {
+                crate::workers::compilation_worker::enqueue_compilation_with_event(
+                    &queue,
+                    tenant_id,
+                    workflow_id,
+                    version,
+                    force_recompile,
+                    compiled,
+                )
+                .await
+            }
+            None => {
+                crate::workers::compilation_worker::enqueue_compilation(
+                    &queue,
+                    tenant_id,
+                    workflow_id,
+                    version,
+                    force_recompile,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn wait_for_compilation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+        timeout: std::time::Duration,
+    ) -> Result<bool, CompilationQueueError> {
+        crate::workers::compilation_worker::wait_for_compilation(
+            &self.queued_compiles()?,
+            tenant_id,
+            workflow_id,
+            version,
+            timeout,
+        )
+        .await
+    }
+
+    async fn is_compilation_pending(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+    ) -> Result<bool, CompilationQueueError> {
+        crate::workers::compilation_worker::is_compilation_pending(
+            &self.queued_compiles()?,
+            tenant_id,
+            workflow_id,
+            version,
+        )
+        .await
+    }
+
+    async fn mark_compilation_queued(&self, tenant_id: &str, workflow_id: &str, version: i32) {
+        let Some(queue) = self.compile_queue() else {
+            return;
+        };
+        if let Ok(manager) = crate::valkey::get_or_create_manager(&queue).await {
+            crate::valkey::compilation_progress::mark_queued(
+                &manager,
+                tenant_id,
+                workflow_id,
+                version,
+            )
+            .await;
+        }
+    }
+
+    async fn compilation_progress(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+    ) -> Option<CompilationProgress> {
+        let manager = crate::valkey::get_or_create_manager(&self.compile_queue()?)
+            .await
+            .ok()?;
+        crate::valkey::compilation_progress::read_progress(
+            &manager,
+            tenant_id,
+            workflow_id,
+            version,
+        )
+        .await
+    }
+
     fn tests_agents(&self) -> bool {
         self.agent_testing.is_some()
     }
@@ -918,12 +1153,34 @@ impl Engine for LocalEngine {
         request
             .extensions_mut()
             .remove::<axum::extract::NestedPath>();
-        match router {
-            Some(router) => match router.oneshot(request).await {
+        // The request is answered in the scope of the tenant it is for, as
+        // every other call is: the tenant the API authenticated its caller
+        // for, or the one its path named. The scope is entered here, on the
+        // engine's side, and not taken from whatever task handed it over. A
+        // request that names neither (a webhook known only by an id) has its
+        // tenant found by the part that serves it.
+        let tenant = request
+            .extensions()
+            .get::<crate::auth::AuthContext>()
+            .map(|caller| caller.org_id.clone())
+            .or_else(|| {
+                request
+                    .extensions()
+                    .get::<crate::middleware::tenant_path::RequestedTenant>()
+                    .map(|named| named.0.clone())
+            });
+        let Some(router) = router else {
+            return axum::http::StatusCode::NOT_FOUND.into_response();
+        };
+        let answered = async move {
+            match router.oneshot(request).await {
                 Ok(response) => response,
                 Err(never) => match never {},
-            },
-            None => axum::http::StatusCode::NOT_FOUND.into_response(),
+            }
+        };
+        match tenant {
+            Some(tenant) => scoped(tenant, answered).await,
+            None => answered.await,
         }
     }
 }
@@ -954,15 +1211,7 @@ fn local_without_runtime() -> Arc<LocalEngine> {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused/unused")
         .expect("a lazy pool connects to nothing");
-    let (events, _dropped) = tokio::sync::mpsc::channel(1);
-    let executions = Arc::new(ExecutionEngine::new(
-        pool.clone(),
-        Arc::new(crate::api::repositories::workflows::WorkflowRepository::new(pool.clone())),
-        None,
-        None,
-        crate::product_events::ProductEventSink::new(events),
-    ));
-    Arc::new(LocalEngine::new(None, executions, pool))
+    Arc::new(LocalEngine::without_runtime(pool))
 }
 
 #[cfg(test)]
@@ -974,8 +1223,31 @@ mod boundary {
 
     use std::path::{Path, PathBuf};
 
-    /// The engine's own types, which only the engine's side may name.
-    const ENGINE_ONLY: &[&str] = &["RuntimeClient", "ExecutionEngine", "EnvironmentClient"];
+    /// What only the engine's side may name: the engine's own types, and what
+    /// reaches a connection's credentials or the engine's queues.
+    const ENGINE_ONLY: &[&str] = &[
+        "RuntimeClient",
+        "ExecutionEngine",
+        "EnvironmentClient",
+        "ConnectionsFacade",
+        "SealedCredentials",
+        "WebhookManager",
+        "webhook_verification::",
+        "AgentTestingService",
+        "compilation_worker::",
+        "compilation_queue::",
+        "compilation_progress::",
+    ];
+
+    /// Handlers of the parts of the API the engine serves ([`super::Served`]):
+    /// they live beside the API's handlers and run on the engine's side.
+    const SERVED_BY_THE_ENGINE: &[&str] = &[
+        "api/handlers/events.rs",
+        "api/handlers/workflows_sync.rs",
+        "api/handlers/triggers.rs",
+        "api/handlers/object_model.rs",
+        "api/handlers/csv_import_export.rs",
+    ];
 
     fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(dir).expect("a source directory") {
@@ -999,7 +1271,12 @@ mod boundary {
         let mut named = Vec::new();
         for file in files {
             let name = file.to_string_lossy().into_owned();
-            if name.ends_with("_tests.rs") || name.ends_with("/tests.rs") {
+            if name.ends_with("_tests.rs")
+                || name.ends_with("/tests.rs")
+                || SERVED_BY_THE_ENGINE
+                    .iter()
+                    .any(|served| name.ends_with(served))
+            {
                 continue;
             }
             let text = std::fs::read_to_string(&file).expect("a source file");
@@ -1107,6 +1384,44 @@ mod serving {
             text(own).await,
             (StatusCode::OK, "the API's own route".to_owned())
         );
+    }
+
+    /// The engine answers a forwarded request in the scope of the tenant the
+    /// API authenticated its caller for, entered on the engine's side.
+    #[tokio::test]
+    async fn a_forwarded_request_is_answered_in_its_callers_tenant() {
+        let engine = local_without_runtime();
+        engine.serves(
+            Served::Triggers,
+            axum::Router::new().route(
+                "/scope",
+                get(|| async {
+                    runtara_store_postgres::tenant_scope::current()
+                        .unwrap_or_else(|| "no tenant".to_owned())
+                }),
+            ),
+        );
+        let engine: Arc<dyn Engine> = engine;
+        let ask = |caller: Option<&str>| {
+            let mut request = Request::get("/scope").body(Body::empty()).unwrap();
+            if let Some(tenant) = caller {
+                request
+                    .extensions_mut()
+                    .insert(crate::auth::AuthContext::new(
+                        tenant.to_owned(),
+                        "someone".to_owned(),
+                        crate::auth::AuthMethod::Unauthenticated,
+                    ));
+            }
+            let engine = engine.clone();
+            async move { text(engine.serve(Served::Triggers, request).await).await.1 }
+        };
+        // Asked from a task in no scope at all, as a request from another
+        // process would be.
+        assert_eq!(ask(Some("acme")).await, "acme");
+        assert_eq!(ask(None).await, "no tenant");
+        // And not the scope of whoever handed it over.
+        assert_eq!(scoped("other", ask(Some("acme"))).await, "acme");
     }
 
     #[tokio::test]
