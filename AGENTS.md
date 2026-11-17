@@ -85,6 +85,11 @@ scoped README files, examples.
   the work in `inherit`. The test databases connect as a superuser, which
   row-level security does not bind, so CI does not catch a missing scope;
   `e2e/test_served_tenants.sh` runs the server as a plain role and does.
+- Code that takes requests (`runtara-server`'s `api/handlers`, `mcp`) reaches
+  durable execution through `Engine` (`src/engine.rs`) and nothing else: no
+  `RuntimeClient`, no `ExecutionEngine`. A new operation is a method there,
+  naming its tenant; a route whose answer uses a connection's credentials is
+  served by the engine (`Engine::serve`). See `docs/separating-concerns.md`.
 - Never read, print, log, or commit credential values. Treat `.env*`, tokens,
   connection parameters, and database URLs as sensitive.
 - Do not hand-edit generated artifacts or ignored build outputs.

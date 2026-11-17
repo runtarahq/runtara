@@ -1,7 +1,8 @@
 # Separating the public API from the engine
 
-A plan. Phases 0 (branch `feature/row-security-fails-closed`) and 1 (branch
-`feature/seal-out-of-process`, on top of it) are implemented; the rest is not. This file is removed when the work lands and `docs/`
+A plan. Phases 0 (branch `feature/row-security-fails-closed`), 1 (branch
+`feature/seal-out-of-process`, on top of it) and most of 2 (branch
+`feature/engine-interface`, on top of that) are implemented; the rest is not. This file is removed when the work lands and `docs/`
 describes the result instead.
 
 ## The goal
@@ -217,47 +218,67 @@ What it left, and what follows from it:
   key in a KMS) is seal's own configuration and needs nothing more from
   Runtara; it was not run here.
 
-## Phase 2: one interface between handlers and the engine
+## Phase 2: done, but for what is listed last
 
-No behaviour changes and no new process. This is most of the work, and it
-is reviewable one operation group at a time.
+One interface between the code that takes requests and the engine, in one
+process, with no change in behaviour. Implemented on
+`feature/engine-interface`.
 
-1. **A trait, `Engine`, in a small crate of its own** (`runtara-engine-api`:
-   the trait, its request and reply types, and later the client and the
-   router). Its first implementation wraps today's `RuntimeClient` and the
-   engine half of `ExecutionEngine`.
-2. **Every call carries who is asking.** Each method takes the caller's
-   authority (the verified identity today; in Phase 4 the token or key
-   itself) and the tenant, instead of reading a task-local. The tenant
-   scope of Phase 0 is a task-local and does not cross a process boundary:
-   the engine enters the scope again from what the call carries.
-3. **Move the operations behind it, a group per change:**
+- **`Engine`** (`crates/runtara-server/src/engine.rs`) is the whole of what
+  the API asks of the engine, and `LocalEngine` answers it by calling the
+  engine in this process. It is a module of the server and not a crate of
+  its own: both roles are one binary, and the types it speaks are the
+  server's.
+- **Operations**, each naming the tenant it is for:
 
-   | Group | Operations |
-   |---|---|
-   | Launch | start a run, run and wait (`run_sync`), accept a trigger event, replay |
-   | Lifecycle | stop, pause, resume |
-   | Signals and input | submit an action or signal, list and get input requests, session delivery |
-   | Reads | executions (get, list, summary, listing options), instance info, events, step summaries, scope ancestors, checkpoints, tenant metrics, operation queues and requests |
-   | Compilation | compile, compile as an agent, is a compile pending, wait for one, progress |
-   | Credentialed | resolve a connection's resources, exchange an OAuth code, revoke a token, register and verify a webhook secret, send a channel reply, test an agent capability, open an object model session |
+  | Group | Operations |
+  |---|---|
+  | Launch | start a run, run and wait, accept a trigger's event, replay |
+  | Lifecycle | stop, pause, resume |
+  | Reads | runs as the API shows them; a run's info, events, step summaries, scope ancestors, checkpoints; tenant metrics; operation queues and requests |
+  | Signals and input | list and get input requests, answer one, the pending-input page, a workflow's open actions and submitting one |
+  | Compilation | compile now, publish as an agent, what an image was built from |
+  | On request | run an agent's capability |
 
-4. **Split `ExecutionEngine` along the line.** Admission, the outbox, the
-   relay, the trigger workers and the in-memory admission maps are the
-   engine's. What is left on the handler side is a call to `Engine`.
-5. **Handlers, channels and MCP hold `Arc<dyn Engine>`** and nothing else of
-   the engine: not `RuntimeClient`, not `ExecutionEngine`, not the sealed
-   credentials, not the component dispatcher. A test fails the build if
-   `api/handlers`, `channels` or `mcp` import those types.
-6. **Workers are sorted by role.** Engine: trigger workers, compilation
-   worker, outbox relay, admission reconcilers, control children, session
-   delivery, cron, channel intake worker, OAuth sweep, artifact restaging,
-   and everything `runtara-environment` starts. API: the control-event
-   consumer that revokes a removed member's keys, product events, pool
-   monitors.
+- **Parts of the API the engine serves itself** (`Engine::serve`). What is
+  answered with a connection's credentials is the engine's: connections,
+  the OAuth redirect, a tenant's object model, chat channels' webhooks,
+  triggers, and a trigger's HTTP events. Each is a router the engine holds;
+  the API authenticates the caller and hands the request over as it
+  arrived. What the caller's role may do there is decided on the engine's
+  side, where the route is known. The chat channel router, with its
+  conversations, is then the engine's alone.
+- **The boundary is held.** The server's state hands handlers the interface
+  and neither the runtime client nor the execution engine, and a test reads
+  the handlers' and MCP tools' sources and fails if one names them.
+- **A run's records are read in its tenant's scope**, entered on the
+  engine's side from the tenant the call names, instead of relying on the
+  scope the handler happened to run in.
 
-**Tests:** the existing server suite passes unchanged at every step, which
-is the point of doing this phase with no behaviour change.
+What is left of this phase:
+
+- **Workflow handlers still hold the connections facade**, to check that a
+  workflow's steps name connections that exist. It can do more than that
+  (it is the way to seal), so the API side is not yet free of it. It needs
+  a narrower question: "which connections does this tenant have".
+- **Compiling through the queue is still the API's**: it writes the compile
+  request to Valkey and reads its progress, and the engine's worker takes
+  it from there. That is a queue already, so it crosses a process boundary
+  as it is; it moves behind `Engine` when the API's Valkey user loses the
+  queue (Phase 4).
+- **The engine is not yet sorted out of the server's start-up.** Every
+  worker is started in one function, and `ExecutionEngine` still holds the
+  outbox and admission beside what `Engine` exposes. Phase 3 needs them
+  apart to start one role without the other.
+- **What crosses is not yet only values.** A forwarded request carries the
+  caller the API authenticated as a request extension, and some operations
+  take the caller's `AuthContext`; both are in-process shapes. Phase 3 puts
+  them on the wire, and Phase 4 replaces them with the token itself.
+
+Two small differences in answers, both for requests that were refused
+anyway: an unknown path under `/api/runtime/object-model` or
+`/api/runtime/triggers` is now refused as unauthenticated before it is not
+found, and a wrong method on those routes is answered by the engine.
 
 ## Phase 3: two roles and the wire between them
 
@@ -380,7 +401,7 @@ tenant, or a certificate an executor or the run channel accepts.
 
 ## Order and size
 
-Phases 0 and 1 are done. Phase 2 is the
+Phases 0 and 1 are done, and Phase 2 but for its last items. Phase 2 was the
 bulk: about 25 to 30 operations and 50 to 60 call sites, done in the six
 groups above. Phase 3 is mostly transport once Phase 2 holds. Phase 4 changes
 who verifies, and needs Phase 3. Each phase leaves a server that runs as one
