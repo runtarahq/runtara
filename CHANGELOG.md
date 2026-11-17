@@ -49,8 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that is not a read and gets no answer, a 5xx or an answer it cannot read
   fails with `BIGCOMMERCE_OUTCOME_UNKNOWN` instead of being retried:
   BigCommerce documents no idempotency key, and an order, a refund or a stock
-  adjustment sent again is made twice. A V2 list with no matches, which
-  BigCommerce answers with 204, is an empty list.
+  adjustment sent again is made twice. A refund quote only calculates, so it
+  is retried like a read. A V2 list with no matches, which BigCommerce answers
+  with 204, is an empty list.
 
 - **`connector_gen` takes BigCommerce's specs.** `connection_path_prefix`
   cuts the start every path shares (`/stores/{store_hash}`) and its

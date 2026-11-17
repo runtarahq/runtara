@@ -475,7 +475,7 @@ pub struct AmountBoundItem {
         description = r##"A non-negative 2 decimal place rounded value that represents the amount that can be charged/refunded with payment providers. When creating refunds and refund quotes, this field becomes irrelevant when you select PRODUCT or GIFT_WRAPPING for `item_type`."##
     )]
     #[serde(rename = "amount", default, skip_serializing_if = "Option::is_none")]
-    pub amount: Option<String>,
+    pub amount: Option<f64>,
     #[field(display_name = r##"Item ID"##, description = r##"Order address ID."##)]
     #[serde(rename = "item_id", default, skip_serializing_if = "Option::is_none")]
     pub item_id: Option<i64>,
@@ -3807,7 +3807,7 @@ pub struct FeeItem {
         description = r##"A non-negative 2 decimal place rounded value that represents the amount that can be charged/refunded with payment providers. When creating refunds and refund quotes, this field becomes irrelevant when you select PRODUCT or GIFT_WRAPPING for `item_type`."##
     )]
     #[serde(rename = "amount", default, skip_serializing_if = "Option::is_none")]
-    pub amount: Option<String>,
+    pub amount: Option<f64>,
     #[field(
         display_name = r##"Item ID"##,
         description = r##"Numeric ID of the fee in the order."##
@@ -13538,7 +13538,7 @@ pub struct Refund {
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub total_amount: Option<String>,
+    pub total_amount: Option<f64>,
     #[field(
         display_name = r##"Total Tax"##,
         description = r##"Total tax amount refunded back to the shopper. Note: `order_level_amount` does not affect tax liability. This can be a negative amount indicating we have collected tax by refunding less to the customer."##
@@ -13613,7 +13613,7 @@ pub struct RefundItem {
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub requested_amount: Option<String>,
+    pub requested_amount: Option<f64>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -13653,7 +13653,7 @@ pub struct RefundPayment {
         description = r##"A non-negative 2 decimal place rounded value that represents the amount that can be charged/refunded with payment providers. When creating refunds and refund quotes, this field becomes irrelevant when you select PRODUCT or GIFT_WRAPPING for `item_type`."##
     )]
     #[serde(rename = "amount", default, skip_serializing_if = "Option::is_none")]
-    pub amount: Option<String>,
+    pub amount: Option<f64>,
     #[field(
         display_name = r##"Declined Message"##,
         description = r##"Message indicate why payment was declined."##
@@ -13724,7 +13724,7 @@ pub struct RefundQuoteFull {
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub adjustment: Option<String>,
+    pub adjustment: Option<f64>,
     #[field(
         display_name = r##"Order ID"##,
         description = r##"ID of the order to be refunded."##
@@ -13828,7 +13828,7 @@ In this case there are three refund methods available to the merchant:
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub total_refund_amount: Option<String>,
+    pub total_refund_amount: Option<f64>,
     #[field(display_name = r##"Total Refund Tax Amount"##)]
     #[serde(
         rename = "total_refund_tax_amount",
@@ -14242,7 +14242,7 @@ pub struct TaxExemptItem {
         description = r##"A non-negative 2 decimal place rounded value that represents the amount that can be charged/refunded with payment providers. When creating refunds and refund quotes, this field becomes irrelevant when you select PRODUCT or GIFT_WRAPPING for `item_type`."##
     )]
     #[serde(rename = "amount", default, skip_serializing_if = "Option::is_none")]
-    pub amount: Option<String>,
+    pub amount: Option<f64>,
     #[field(
         display_name = r##"Item ID"##,
         description = r##"Numeric ID of the product in the order."##
@@ -17840,8 +17840,7 @@ Requires at least one of the following scopes:
 
 **Notes:**
 * Create a refund quote before performing a refund request to best avoid a `422` error. Check the refund quote's response body for the `refund_methods` array. The `amount` given in the array must match the `amount` used in the refund request body.
-* Order refunds should be processed sequentially. Processing multiple concurrent refunds on the same order is not yet supported."##,
-    side_effects = true
+* Order refunds should be processed sequentially. Processing multiple concurrent refunds on the same order is not yet supported."##
 )]
 pub async fn payment_actions_create_order_refund_quotes(
     input: PaymentActionsCreateOrderRefundQuotesInput,

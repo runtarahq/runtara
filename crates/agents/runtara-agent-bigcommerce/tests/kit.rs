@@ -182,6 +182,36 @@ fn retry_hint_prefers_the_hosts_milliseconds() {
         decode::<Value>(seconds).unwrap_err().retry_after_ms,
         Some(2000)
     );
+    // An absurd wait saturates instead of overflowing.
+    let huge = response(429, "", &[("Retry-After", "18446744073709551615")]);
+    assert_eq!(
+        decode::<Value>(huge).unwrap_err().retry_after_ms,
+        Some(u64::MAX)
+    );
+}
+
+#[test]
+fn a_refund_quote_is_a_read_though_it_is_a_post() {
+    // BigCommerce only calculates a quote, so one that got no answer or a 5xx
+    // is sent again; a refund is not.
+    let quote = "/v3/orders/100/payment_actions/refund_quotes";
+    let err = kit::network_error("POST", quote, "BIGCOMMERCE", "timed out");
+    assert_eq!(
+        (err.code.as_str(), err.category),
+        ("BIGCOMMERCE_NETWORK_ERROR", "transient")
+    );
+    let err = kit::decode::<Value>(&response(503, "busy", &[]), "POST", quote, "BIGCOMMERCE")
+        .unwrap_err();
+    assert_eq!(
+        (err.code.as_str(), err.category),
+        ("BIGCOMMERCE_UPSTREAM_ERROR", "transient")
+    );
+    let refund = "/v3/orders/100/payment_actions/refunds";
+    let err = kit::network_error("POST", refund, "BIGCOMMERCE", "timed out");
+    assert_eq!(
+        (err.code.as_str(), err.category),
+        ("BIGCOMMERCE_OUTCOME_UNKNOWN", "permanent")
+    );
 }
 
 #[test]

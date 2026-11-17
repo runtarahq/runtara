@@ -15,8 +15,9 @@ use runtara_agent_bigcommerce::{
     AdjustmentsPutAbsoluteAdjustmentInput, CustomersGetCustomersResponse200, OrderProducts,
     OrderResp, OrderShipment, OrderShipmentsCreateOrderShipmentsInput, OrderStatusBase,
     OrdersCreateOrderInput, OrdersGetOrdersInput, OrdersUpdateOrderInput,
-    ProductsCreateProductInput, ProductsGetProductsInput, ProductsGetProductsResponse200,
-    SimpleTransactionResponse, VariantsBatchUpdateVariantsBatchInput,
+    PaymentActionsCreateOrderRefundQuotesResponse200, ProductsCreateProductInput,
+    ProductsGetProductsInput, ProductsGetProductsResponse200, SimpleTransactionResponse,
+    VariantsBatchUpdateVariantsBatchInput,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -469,11 +470,48 @@ fn metadata_lists_every_operation() {
             "orders-create-order",
             "orders-update-order",
             "payment-actions-create-order-refund",
-            "payment-actions-create-order-refund-quotes",
             "products-create-product",
             "products-update-product",
             "variants-batch-update-variants-batch",
         ]
+    );
+}
+
+#[test]
+fn a_refund_quote_round_trips_with_its_amounts_as_numbers() {
+    // As a sandbox store answered it: the spec types `total_refund_amount`
+    // and `adjustment` as strings, and BigCommerce sends numbers.
+    check::<PaymentActionsCreateOrderRefundQuotesResponse200>(
+        "refund quote",
+        json!({
+            "data": {
+                "adjustment": 0,
+                "is_tax_included": true,
+                "order_level_refund_amount": 0,
+                "refund_methods": [
+                    [{
+                        "amount": 19.5,
+                        "offline": false,
+                        "offline_provider": false,
+                        "offline_reason": "",
+                        "provider_description": "Store Credit",
+                        "provider_id": "storecredit"
+                    }],
+                    [{
+                        "amount": 19.5,
+                        "offline": true,
+                        "offline_provider": true,
+                        "offline_reason": "This is an offline payment provider.",
+                        "provider_description": "Custom",
+                        "provider_id": "custom"
+                    }]
+                ],
+                "rounding": 0,
+                "total_refund_amount": 19.5,
+                "total_refund_tax_amount": 0
+            },
+            "meta": {}
+        }),
     );
 }
 

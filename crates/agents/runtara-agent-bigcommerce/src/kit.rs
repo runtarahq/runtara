@@ -358,15 +358,24 @@ impl Request {
 /// read is worth retrying; anything else may have been carried out.
 pub fn network_error(method: &str, path: &str, prefix: &str, cause: &str) -> AgentError {
     let message = format!("{prefix} {method} {path} failed: {cause}");
-    if is_read(method) {
+    if is_read(method, path) {
         AgentError::transient(format!("{prefix}_NETWORK_ERROR"), message)
     } else {
         outcome_unknown(prefix, message)
     }
 }
 
-fn is_read(method: &str) -> bool {
+/// A GET, or a refund quote: BigCommerce only calculates it, though it is a
+/// POST, so sending it again changes nothing.
+fn is_read(method: &str, path: &str) -> bool {
     method.eq_ignore_ascii_case("GET")
+        || (method.eq_ignore_ascii_case("POST")
+            && path
+                .split('?')
+                .next()
+                .unwrap_or(path)
+                .trim_end_matches('/')
+                .ends_with("/payment_actions/refund_quotes"))
 }
 
 /// A request that is not a read and got no answer, or a 5xx: BigCommerce may
@@ -408,7 +417,7 @@ pub fn decode<T: DeserializeOwned>(
         let err = match status {
             429 => AgentError::transient(format!("{prefix}_RATE_LIMITED"), message)
                 .with_retry_after_ms(retry_after_ms(&response.headers)),
-            500..=599 if is_read(method) => {
+            500..=599 if is_read(method, path) => {
                 AgentError::transient(format!("{prefix}_UPSTREAM_ERROR"), message)
             }
             500..=599 => outcome_unknown(prefix, message),
@@ -422,7 +431,7 @@ pub fn decode<T: DeserializeOwned>(
 
     let invalid = |e: serde_json::Error| {
         let message = format!("{prefix} {method} {path}: {e}");
-        if is_read(method) {
+        if is_read(method, path) {
             return AgentError::permanent(format!("{prefix}_INVALID_RESPONSE"), message);
         }
         // BigCommerce accepted the write; the record's id is what lets a
@@ -485,6 +494,6 @@ fn retry_after_ms(headers: &HashMap<String, String>) -> Option<u64> {
         .or_else(|| {
             header(headers, "retry-after")
                 .and_then(|value| value.parse::<u64>().ok())
-                .map(|seconds| seconds * 1000)
+                .map(|seconds| seconds.saturating_mul(1000))
         })
 }

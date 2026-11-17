@@ -19,8 +19,8 @@
       },
       "AdjustmentAmount": {
         "description": "A negative or positive 2 decimal place rounded value that represents the difference between the refund amount requested in the refund quote and the actual amount that is refundable on the order. This value is negative when the refund amount requested in the refund quote is more than the total refundable amount. This value is positive when the total refundable amount has increased, e.g. as a result of rounding.",
-        "title": "AdjustmentAmount",
-        "type": "string"
+        "format": "double",
+        "type": "number"
       },
       "AdjustmentsAbsoluteRequest": {
         "properties": {
@@ -268,8 +268,8 @@
       },
       "Amount": {
         "description": "A non-negative 2 decimal place rounded value that represents the amount that can be charged/refunded with payment providers. When creating refunds and refund quotes, this field becomes irrelevant when you select PRODUCT or GIFT_WRAPPING for `item_type`.",
-        "title": "Amount",
-        "type": "string"
+        "format": "double",
+        "type": "number"
       },
       "AmountBoundItem": {
         "description": "Amount Bound Item\n\nType of refund item that capture refunding of items in the order that are of type amount.\n* `ORDER`\n* `SHIPPING`\n* `HANDLING`\n* `TAX`\n* `FEE`",
@@ -15971,7 +15971,6 @@
         "tags": [
           "paymentActions"
         ],
-        "x-runtara-side-effects": true,
         "x-runtara-summary": "Create Refund Quote"
       }
     },

@@ -16,10 +16,17 @@ omit_parameters:
 # and customers specs leave theirs exploded.
 comma_separated_query_arrays: true
 # The specs write a number as a string titled `float` (a product's `price`, a
-# transaction's `amount`); the API sends and takes numbers. V2 order amounts,
-# which really are strings, carry no such title.
+# transaction's `amount`), or as the strings `Amount` and `AdjustmentAmount`
+# (a refund quote's `total_refund_amount` and `adjustment`); the API sends and
+# takes numbers. V2 order amounts, which really are strings, carry no such
+# title.
 title_types:
   float: {type: number, format: double}
+  Amount: {type: number, format: double}
+  AdjustmentAmount: {type: number, format: double}
+# A refund quote only calculates; sending it again changes nothing.
+read_operations:
+  - paymentActions_createOrderRefundQuotes
 # The specs type these ids and counts as `number`; a body would send `5.0`.
 input_types:
   customer_id: {type: integer, format: int64}
