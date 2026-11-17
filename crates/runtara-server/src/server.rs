@@ -1482,6 +1482,416 @@ fn api_app(parts: ApiParts) -> Router {
         .layer(middleware::sensitive_headers::layer())
 }
 
+/// What every role's start-up establishes first: configuration, telemetry,
+/// who authenticates callers, and the shared Valkey connection.
+struct Common {
+    tenant_id: String,
+    execution_timeout_policy: runtara_environment::execution_timeout::ExecutionTimeoutPolicy,
+    root_span: tracing::Span,
+    auth_providers: auth::AuthProviders,
+    auth_kind: auth::provider::AuthProviderKind,
+    oidc_cache: Arc<api::handlers::oidc_discovery::OidcDiscoveryCache>,
+    redis_manager: Option<redis::aio::ConnectionManager>,
+    membership_policy: auth::MembershipPolicy,
+    auth_state: auth::AuthState,
+    mcp_auth_state: auth::AuthState,
+    mcp_session_store: Option<Arc<dyn SessionStore>>,
+}
+
+async fn common_start(pool: &PgPool) -> Result<Common, Box<dyn std::error::Error>> {
+    // Load all env-derived configuration up front; fails fast on missing/invalid.
+    let server_config = config::Config::from_env()?;
+
+    // Initialize OpenTelemetry with Datadog integration
+    // Must be called BEFORE any tracing macros are used
+    observability::init_telemetry()?;
+
+    // The agent catalog is now sourced from the component dispatcher's
+    // `<agent>.meta.json` sidecars at boot — the bundle-emit step generates
+    // those from the macro derives, so any inconsistency surfaces at build
+    // time. The boot-time `validate_agent_metadata_or_panic()` checked
+    // self-consistency of the compile-time aggregator in `runtara-agents`,
+    // which is now vestigial; the check is removed.
+    println!("✓ Configured for tenant: {}", server_config.tenant_id);
+    println!("✓ Direct workflow compiler: direct-only");
+    println!(
+        "Max concurrent executions: {} (CPU cores: {})",
+        server_config.max_concurrent_executions,
+        num_cpus::get()
+    );
+
+    // Get version for logging context
+    let version = env!("BUILD_VERSION");
+    let commit = env!("BUILD_COMMIT");
+
+    let tenant_id = server_config.tenant_id.clone();
+    let execution_timeout_policy = server_config.execution_timeout_policy;
+    config::init(server_config);
+
+    // Create a root span with global context that will be included in all logs
+    let root_span = tracing::info_span!(
+        "runtime",
+        tenant_id = %tenant_id,
+        version = %version,
+        commit = %commit,
+        service = "runtara-server"
+    );
+    let _guard = root_span.clone().entered();
+
+    // Operator-visible summary of the resolved entitlement snapshot — what
+    // this process will actually enforce. Logged once at boot so an operator
+    // never has to re-derive it from env vars and JSON layers.
+    config::entitlements().log_summary();
+    // Warn on valid-but-surprising entitlement combinations (e.g. mcp=true
+    // with api=false silently breaks hosted MCP-over-HTTP — SYN-433 Finding 5).
+    config::entitlements().warn_risky_combinations();
+
+    // Validate Redis configuration (required for checkpoints)
+    if let Err(e) = config::validate_checkpoint_config() {
+        eprintln!("❌ Configuration error: {}", e);
+        eprintln!("   Redis/Valkey is required for checkpoint storage.");
+        eprintln!("   Please set VALKEY_HOST environment variable.");
+        std::process::exit(1);
+    }
+    println!("✓ Redis configuration validated");
+
+    // Build the auth providers selected by AUTH_PROVIDER (default: oidc).
+    let auth_providers = auth::AuthProviders::from_env(tenant_id.clone()).await;
+    println!(
+        "✓ Auth provider: {} (API + MCP)",
+        auth_providers.kind.as_str()
+    );
+
+    // Read the OIDC issuer for the OIDC discovery cache. In non-oidc modes we still
+    // expose the `.well-known/*` endpoints when an issuer is configured, so MCP clients
+    // that rely on upstream discovery keep working; if unset we fall back to the
+    // configured tenant's public base URL.
+    let oidc_issuer = std::env::var("OAUTH2_ISSUER").unwrap_or_else(|_| {
+        std::env::var("PUBLIC_BASE_URL").unwrap_or_else(|_| "http://localhost".to_string())
+    });
+    let oidc_cache = Arc::new(api::handlers::oidc_discovery::OidcDiscoveryCache::new(
+        oidc_issuer,
+    ));
+    println!("✓ OIDC discovery cache initialized");
+
+    println!("✓ Database connected successfully");
+
+    let auth_kind = auth_providers.kind;
+
+    // Build the single, process-wide Valkey/Redis connection manager. Every
+    // subsystem that needs Redis — connections facade rate limiting, trigger
+    // stream publisher, compilation worker, cron scheduler, MCP/handler
+    // utility calls — clones this manager instead of opening its own TCP
+    // connection per call.
+    let redis_url = crate::valkey::build_redis_url();
+    let redis_manager: Option<redis::aio::ConnectionManager> = match redis_url {
+        Some(url) => match crate::valkey::init_shared_manager(&url).await {
+            Ok(m) => {
+                println!("✓ Shared Valkey connection manager initialized");
+                Some(m)
+            }
+            Err(e) => {
+                if config::mcp_session_store() == config::McpSessionStore::Valkey {
+                    eprintln!(
+                        "❌ Configuration error: failed to initialize shared Valkey connection manager: {}",
+                        e
+                    );
+                    eprintln!(
+                        "   RUNTARA_MCP_SESSION_STORE=valkey requires a working Valkey connection."
+                    );
+                    std::process::exit(1);
+                }
+                eprintln!(
+                    "⚠ Failed to initialize shared Valkey connection manager: {}",
+                    e
+                );
+                None
+            }
+        },
+        None => {
+            if config::mcp_session_store() == config::McpSessionStore::Valkey {
+                eprintln!(
+                    "❌ Configuration error: RUNTARA_MCP_SESSION_STORE=valkey requires VALKEY_HOST."
+                );
+                std::process::exit(1);
+            }
+            None
+        }
+    };
+
+    // Per-tenant rate limits share their buckets through Valkey.
+    if let Some(manager) = redis_manager.clone() {
+        crate::tenant_quota::install(manager.clone());
+        crate::tenant_status::install(manager);
+    }
+    // Per-tenant Valkey membership enforcement policy. Built here, after the
+    // shared manager, so the policy default can see whether Valkey is actually configured.
+    // The auth middleware consumes both; they ride on AuthState.
+    let membership_policy = auth::MembershipPolicy::from_env(auth_kind, redis_manager.is_some());
+    // Publish to the process-wide accessor so handler-level ownership checks see the same
+    // policy the route gate enforces.
+    auth::set_membership_policy(membership_policy);
+    println!("✓ Auth membership policy: {}", membership_policy.as_str());
+
+    let auth_state = auth::AuthState {
+        provider: auth_providers.api.clone(),
+        pool: pool.clone(),
+        valkey: redis_manager.clone(),
+        membership_policy,
+    };
+    let mcp_auth_state = auth::AuthState {
+        provider: auth_providers.mcp.clone(),
+        pool: pool.clone(),
+        valkey: redis_manager.clone(),
+        membership_policy,
+    };
+
+    let mcp_session_store: Option<Arc<dyn SessionStore>> = match config::mcp_session_store() {
+        config::McpSessionStore::Local => {
+            println!("✓ MCP session recovery store: local");
+            None
+        }
+        config::McpSessionStore::Valkey => {
+            let Some(manager) = redis_manager.clone() else {
+                eprintln!(
+                    "❌ Configuration error: RUNTARA_MCP_SESSION_STORE=valkey requires a shared Valkey connection manager."
+                );
+                std::process::exit(1);
+            };
+            println!(
+                "✓ MCP session recovery store: valkey (ttl={}s)",
+                config::mcp_session_ttl_seconds()
+            );
+            Some(Arc::new(mcp::ValkeyMcpSessionStore::new(
+                manager,
+                tenant_id.clone(),
+                config::mcp_session_ttl_seconds(),
+            )))
+        }
+    };
+
+    drop(_guard);
+    let _ = (version, commit);
+    Ok(Common {
+        tenant_id,
+        execution_timeout_policy,
+        root_span,
+        auth_providers,
+        auth_kind,
+        oidc_cache,
+        redis_manager,
+        membership_policy,
+        auth_state,
+        mcp_auth_state,
+        mcp_session_store,
+    })
+}
+
+/// Starts what a server process runs for itself, whatever its role: a watch
+/// on its database pool, the drain of the product events it emits, and its
+/// heartbeat in the log.
+fn start_own_work(
+    workers: &crate::roles::Workers,
+    own: crate::roles::Role,
+    shutdown_coordinator: &Arc<crate::shutdown::ShutdownCoordinator>,
+    pool: &PgPool,
+    redis_manager: Option<redis::aio::ConnectionManager>,
+    product_event_rx: tokio::sync::mpsc::Receiver<product_events::ProductEvent>,
+    product_events_config: product_events::ProductEventConfig,
+) {
+    // Spawn background task to warn when pool usage is high
+    let pool_monitor = pool.clone();
+    workers.detached(own, "database pool monitor", async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            let size = pool_monitor.size();
+            let idle = pool_monitor.num_idle();
+            let active = size as usize - idle;
+            let usage_pct = if size > 0 {
+                (active * 100) / size as usize
+            } else {
+                0
+            };
+            if usage_pct >= 75 {
+                tracing::warn!(
+                    pool_size = size,
+                    pool_idle = idle,
+                    pool_active = active,
+                    usage_pct,
+                    "Database pool under pressure"
+                );
+            }
+        }
+    });
+
+    // Product-analytics pipeline: spawn the single drain (consumer) now that the shutdown
+    // signal exists. The channel + sink were built earlier (so the sink could be injected
+    // into the connections crate); the drain owns `product_event_rx` and ships batches to
+    // Valkey (`XADD`) for smo-management's per-tenant consumer to persist. `XADD` is
+    // non-blocking, so the drain reuses the shared connection manager rather than needing a
+    // dedicated one. Retention now lives in smo-management, next to the table it sweeps.
+    match redis_manager {
+        Some(manager) => {
+            let drain = product_events::ProductEventDrain::new(
+                manager,
+                product_event_rx,
+                product_events_config,
+                shutdown_coordinator.signal(),
+            );
+            workers.intake(
+                own,
+                "product events drain",
+                shutdown_coordinator,
+                drain.run(),
+            );
+        }
+        None => {
+            println!(
+                "⚠ Valkey not configured, skipping product events drain; \
+                 emitted events will fill the in-memory channel and then be dropped"
+            );
+        }
+    }
+
+    // Spawn heartbeat task for log pipeline monitoring
+    workers.detached(own, "heartbeat log", async {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600)); // 1 hour
+        loop {
+            interval.tick().await;
+            tracing::info!(heartbeat = true, "ping");
+        }
+    });
+}
+
+/// Starts the API's consumer of member control events, if there is a Valkey
+/// to read them from.
+fn start_member_control_events(
+    workers: &crate::roles::Workers,
+    shutdown_coordinator: &Arc<crate::shutdown::ShutdownCoordinator>,
+    pool: &PgPool,
+    auth_kind: auth::provider::AuthProviderKind,
+    membership_policy: auth::MembershipPolicy,
+) {
+    let Some(valkey) = valkey::ValkeyConfig::from_env() else {
+        return;
+    };
+    // Control-event consumer, one per served tenant (SYN-939): revokes a removed/disabled
+    // member's API keys when `runtara-cloud` appends a `member_removed` event to the tenant's
+    // `{tenant}:control` stream. Scoped to the tenant (row-level security) like the trigger
+    // worker, and joined on shutdown via the same intake coordinator.
+    for control_tenant in config::served_tenants() {
+        let control_pool = pool.clone();
+        let control_config = valkey.clone();
+        let control_shutdown = shutdown_coordinator.signal();
+        let control_tenant = control_tenant.clone();
+        let control_sweep =
+            crate::valkey::control_events::ReconcileSweep::for_auth(auth_kind, membership_policy);
+        let scope = control_tenant.clone();
+        workers.intake(
+            crate::roles::Role::Api,
+            "member control events",
+            shutdown_coordinator,
+            scoped(scope, async move {
+                crate::valkey::control_events::run(
+                    control_pool,
+                    control_config,
+                    control_tenant,
+                    control_sweep,
+                    control_shutdown,
+                )
+                .await;
+            }),
+        );
+    }
+}
+
+/// Binds the public listener and serves `public_app` on it until the
+/// shutdown flag is set.
+async fn serve_public(
+    public_app: Router,
+    auth_kind: auth::provider::AuthProviderKind,
+    shutdown_signal: crate::shutdown::ShutdownSignal,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Get port/host from environment variables or use defaults
+    let port = std::env::var("SERVER_PORT")
+        .unwrap_or_else(|_| "7001".to_string())
+        .parse::<u16>()
+        .unwrap_or(7001);
+    let host = std::env::var("SERVER_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let public_addr = format!("{}:{}", host, port);
+
+    // Safety: refuse to boot in a non-OIDC provider mode on a non-loopback public bind.
+    // Matches the valkey validation pattern above: print the error and exit with a
+    // non-zero status so container orchestrators and systemd surface a clean failure.
+    if let Err(msg) = crate::bind::enforce_loopback_for_unauthenticated(auth_kind, &host) {
+        eprintln!("❌ Configuration error: {msg}");
+        std::process::exit(1);
+    }
+
+    // Cap concurrent TCP connections so a slow-loris attack or a connection
+    // storm can't exhaust file descriptors and take the whole server down.
+    // Configurable via MAX_CONNECTIONS; see `conn_limit`.
+    let max_connections = crate::conn_limit::max_connections_from_env();
+
+    // Start public API server
+    let public_listener = crate::conn_limit::LimitedListener::new(
+        tokio::net::TcpListener::bind(&public_addr).await?,
+        max_connections,
+    );
+    tracing::info!(
+        port = port,
+        address = %public_addr,
+        max_connections = max_connections,
+        "Public API server started"
+    );
+
+    // Ready banner with a clickable UI link. Printed to stdout (not via
+    // tracing) so it shows regardless of RUST_LOG — the first thing a local
+    // or `docker compose up` user looks for once the listeners are bound.
+    {
+        // Wildcard / loopback binds aren't useful as clickable links; show
+        // localhost instead so the printed URL is something you can open.
+        let shown_host = if host == "0.0.0.0" || host == "::" || crate::bind::is_loopback(&host) {
+            "localhost"
+        } else {
+            host.as_str()
+        };
+        let origin = format!("http://{shown_host}:{port}");
+        println!("\n  Runtara {} is ready.\n", env!("BUILD_VERSION"));
+        println!("    API:     {origin}");
+        println!("    Health:  {origin}/health\n");
+    }
+
+    // The public API server stops accepting as soon as SIGTERM flips
+    // `shutdown_signal` (no new external intake). Running guests don't call
+    // this listener: agent calls are in-process host imports and the embedded
+    // core stays up until the drain below finishes.
+    let public_shutdown = shutdown_signal;
+    // A served tenant's path segment is stripped before routing (see
+    // `middleware::tenant_path`), so it wraps the finished router. The tenant
+    // it names scopes the request's database work, authenticated or not.
+    let public_app = public_app.layer(from_fn(
+        crate::middleware::tenant_path::scope_requested_tenant,
+    ));
+    let public_app = tower::Layer::layer(
+        &tower::util::MapRequestLayer::new(
+            crate::middleware::tenant_path::strip_tenant_segment::<axum::body::Body>,
+        ),
+        public_app,
+    );
+    let public_server = axum::serve(
+        public_listener,
+        axum::ServiceExt::<axum::extract::Request>::into_make_service(public_app),
+    )
+    .with_graceful_shutdown(async move { public_shutdown.wait().await });
+
+    if let Err(e) = public_server.await {
+        tracing::error!(error = %e, "Public API server error");
+    }
+    Ok(())
+}
+
 /// How a host composes the server beyond its environment configuration.
 #[derive(Default, Clone)]
 pub struct ServerOptions {
@@ -1541,16 +1951,217 @@ pub async fn start_with(
     // Starting, and every worker started here, is the platform's own work:
     // it reaches every tenant's rows, and says so. A worker for one tenant
     // enters that tenant's scope; a request starts in none.
-    runtara_store_postgres::tenant_scope::system(start_as_platform(pool, options)).await
+    let roles = match crate::roles::Roles::from_env() {
+        Ok(roles) => roles,
+        Err(msg) => {
+            eprintln!("❌ Configuration error: {msg}");
+            std::process::exit(1);
+        }
+    };
+    if roles.runs(crate::roles::Role::Engine) {
+        runtara_store_postgres::tenant_scope::system(start_as_platform(pool, options, roles)).await
+    } else {
+        runtara_store_postgres::tenant_scope::system(start_as_api(pool, options)).await
+    }
+}
+
+/// Starts the API role alone: it takes requests, and asks an engine in
+/// another process for everything that is the engine's. It holds no runtime
+/// database, no key, no way to seal and no component, and is given the way
+/// to none of them.
+async fn start_as_api(
+    pool: PgPool,
+    options: ServerOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::roles::Role;
+    let workers = crate::roles::Workers::new(crate::roles::Roles::only(Role::Api));
+    let given = crate::roles::given_to_the_api_role();
+    if !given.is_empty() {
+        eprintln!(
+            "❌ RUNTARA_ROLE=api was given {}. The API role holds none of the engine's: \
+             unset {} for this process.",
+            given.join(", "),
+            if given.len() == 1 { "it" } else { "them" },
+        );
+        std::process::exit(1);
+    }
+    let engine_at = match crate::roles::engine_at() {
+        Ok(engine_at) => engine_at,
+        Err(msg) => {
+            eprintln!("❌ Configuration error: {msg}");
+            std::process::exit(1);
+        }
+    };
+    if let Some(source) = options.entitlements.clone() {
+        config::install_entitlement_source(source);
+    }
+
+    // What agents there are, read from their descriptions alone. The engine
+    // loads the components; this process describes them to whoever edits a
+    // workflow, and runs none.
+    let Some(components_dir) = std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
+        .filter(|dir| !dir.to_string_lossy().trim().is_empty())
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!(
+            "❌ RUNTARA_ROLE=api needs RUNTARA_AGENT_COMPONENTS_DIR: the directory of the \
+             runtara_agent_*.meta.json files of the release the engine runs"
+        );
+        std::process::exit(1);
+    };
+    let described = match runtara_component_host::dispatcher::metadata_from_dir(&components_dir) {
+        Ok(described) if !described.catalog.agents().is_empty() => described,
+        Ok(_) => {
+            eprintln!(
+                "❌ {} holds no runtara_agent_*.meta.json file",
+                components_dir.display()
+            );
+            std::process::exit(1);
+        }
+        Err(error) => {
+            eprintln!("❌ Agents' descriptions could not be read: {error:#}");
+            std::process::exit(1);
+        }
+    };
+    config::install_release_agents(
+        described
+            .catalog
+            .agents()
+            .iter()
+            .map(|agent| agent.id.clone()),
+    );
+
+    let Common {
+        tenant_id,
+        execution_timeout_policy: _,
+        root_span,
+        auth_providers,
+        auth_kind,
+        oidc_cache,
+        redis_manager,
+        membership_policy,
+        auth_state,
+        mcp_auth_state,
+        mcp_session_store,
+    } = common_start(&pool).await?;
+    let _guard = root_span.enter();
+
+    println!(
+        "✓ {} agent(s) described from {}",
+        described.catalog.agents().len(),
+        components_dir.display()
+    );
+    let agent_catalog = Arc::new(runtara_agents::extractors::augment_catalog(
+        &described.catalog,
+    ));
+    if let Err(error) = runtara_agents::derived::register(described.declared_connection_types) {
+        eprintln!("❌ Connection types declared by agents: {error}");
+        std::process::exit(1);
+    }
+
+    let product_events_config = product_events::ProductEventConfig::from_env();
+    let (product_event_tx, product_event_rx) =
+        tokio::sync::mpsc::channel(product_events_config.channel_capacity());
+    let product_event_sink = product_events::ProductEventSink::new(product_event_tx);
+
+    let engine =
+        match crate::engine::remote::RemoteEngine::connect(&engine_at.url, &engine_at.tls_dir) {
+            Ok(engine) => engine,
+            Err(msg) => {
+                eprintln!("❌ The engine at {} cannot be called: {msg}", engine_at.url);
+                std::process::exit(1);
+            }
+        };
+    // The API starts whether or not the engine answers yet: what it is asked
+    // that is the engine's says so until it does.
+    if engine.learn().await {
+        println!("✓ Engine at {} answers", engine_at.url);
+    } else {
+        println!("⚠ Engine at {} does not answer yet", engine_at.url);
+    }
+    workers.detached(
+        Role::Api,
+        "watch on the engine",
+        engine.keep_asking_what_it_is(),
+    );
+    let engine_api: Arc<dyn crate::engine::Engine> = engine;
+
+    let shutdown_coordinator = Arc::new(crate::shutdown::ShutdownCoordinator::new(
+        config::shutdown_grace(),
+    ));
+    let shutdown_signal = shutdown_coordinator.signal();
+    start_own_work(
+        &workers,
+        Role::Api,
+        &shutdown_coordinator,
+        &pool,
+        redis_manager.clone(),
+        product_event_rx,
+        product_events_config,
+    );
+    start_member_control_events(
+        &workers,
+        &shutdown_coordinator,
+        &pool,
+        auth_kind,
+        membership_policy,
+    );
+
+    let public_app = api_app(ApiParts {
+        pool: pool.clone(),
+        engine: engine_api,
+        agent_catalog,
+        events: product_event_sink,
+        valkey_conn: redis_manager,
+        auth_state,
+        mcp_auth_state,
+        auth_providers,
+        oidc_cache,
+        mcp_session_store,
+        membership_policy,
+        tenant_id,
+    });
+
+    let signal_coordinator = shutdown_coordinator.clone();
+    let signal_task = runtara_store_postgres::tenant_scope::spawn(async move {
+        if let Err(e) = wait_for_shutdown_signal().await {
+            tracing::error!(error = %e, "Signal handler failed");
+        }
+        tracing::info!("Shutdown signal received");
+        signal_coordinator.request_shutdown();
+    });
+    serve_public(public_app, auth_kind, shutdown_signal).await?;
+    shutdown_coordinator.request_shutdown();
+    signal_task.abort();
+    shutdown_coordinator.drain_intake().await;
+    observability::shutdown_telemetry().await;
+    Ok(())
 }
 
 async fn start_as_platform(
     pool: PgPool,
     mut options: ServerOptions,
+    roles: crate::roles::Roles,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // One process runs both of the server's roles. Each piece of background
-    // work below is started for the role it belongs to.
-    let workers = crate::roles::Workers::new(crate::roles::Roles::all());
+    // This process runs the engine, and the API too unless another process
+    // does. Each piece of background work below is started for the role it
+    // belongs to.
+    let workers = crate::roles::Workers::new(roles);
+    let listen = match crate::roles::engine_listen() {
+        Ok(Some(listen)) => Some(listen),
+        Ok(None) if roles.runs(crate::roles::Role::Api) => None,
+        Ok(None) => {
+            eprintln!(
+                "❌ RUNTARA_ROLE=engine needs RUNTARA_ENGINE_LISTEN: the address the API \
+                 role reaches the engine at"
+            );
+            std::process::exit(1);
+        }
+        Err(msg) => {
+            eprintln!("❌ Configuration error: {msg}");
+            std::process::exit(1);
+        }
+    };
     if let Some(source) = options.entitlements.clone() {
         config::install_entitlement_source(source);
     }
@@ -1652,125 +2263,20 @@ async fn start_as_platform(
         });
     }
 
-    // Load all env-derived configuration up front; fails fast on missing/invalid.
-    let server_config = config::Config::from_env()?;
-
-    // Initialize OpenTelemetry with Datadog integration
-    // Must be called BEFORE any tracing macros are used
-    observability::init_telemetry()?;
-
-    // The agent catalog is now sourced from the component dispatcher's
-    // `<agent>.meta.json` sidecars at boot — the bundle-emit step generates
-    // those from the macro derives, so any inconsistency surfaces at build
-    // time. The boot-time `validate_agent_metadata_or_panic()` checked
-    // self-consistency of the compile-time aggregator in `runtara-agents`,
-    // which is now vestigial; the check is removed.
-    println!("✓ Configured for tenant: {}", server_config.tenant_id);
-    println!("✓ Direct workflow compiler: direct-only");
-    println!(
-        "Max concurrent executions: {} (CPU cores: {})",
-        server_config.max_concurrent_executions,
-        num_cpus::get()
-    );
-
-    // Get version for logging context
-    let version = env!("BUILD_VERSION");
-    let commit = env!("BUILD_COMMIT");
-
-    let tenant_id = server_config.tenant_id.clone();
-    let execution_timeout_policy = server_config.execution_timeout_policy;
-    config::init(server_config);
-
-    // Create a root span with global context that will be included in all logs
-    let root_span = tracing::info_span!(
-        "runtime",
-        tenant_id = %tenant_id,
-        version = %version,
-        commit = %commit,
-        service = "runtara-server"
-    );
+    let Common {
+        tenant_id,
+        execution_timeout_policy,
+        root_span,
+        auth_providers,
+        auth_kind,
+        oidc_cache,
+        redis_manager,
+        membership_policy,
+        auth_state,
+        mcp_auth_state,
+        mcp_session_store,
+    } = common_start(&pool).await?;
     let _guard = root_span.enter();
-
-    // Operator-visible summary of the resolved entitlement snapshot — what
-    // this process will actually enforce. Logged once at boot so an operator
-    // never has to re-derive it from env vars and JSON layers.
-    config::entitlements().log_summary();
-    // Warn on valid-but-surprising entitlement combinations (e.g. mcp=true
-    // with api=false silently breaks hosted MCP-over-HTTP — SYN-433 Finding 5).
-    config::entitlements().warn_risky_combinations();
-
-    // Validate Redis configuration (required for checkpoints)
-    if let Err(e) = config::validate_checkpoint_config() {
-        eprintln!("❌ Configuration error: {}", e);
-        eprintln!("   Redis/Valkey is required for checkpoint storage.");
-        eprintln!("   Please set VALKEY_HOST environment variable.");
-        std::process::exit(1);
-    }
-    println!("✓ Redis configuration validated");
-
-    // Build the auth providers selected by AUTH_PROVIDER (default: oidc).
-    let auth_providers = auth::AuthProviders::from_env(tenant_id.clone()).await;
-    println!(
-        "✓ Auth provider: {} (API + MCP)",
-        auth_providers.kind.as_str()
-    );
-
-    // Read the OIDC issuer for the OIDC discovery cache. In non-oidc modes we still
-    // expose the `.well-known/*` endpoints when an issuer is configured, so MCP clients
-    // that rely on upstream discovery keep working; if unset we fall back to the
-    // configured tenant's public base URL.
-    let oidc_issuer = std::env::var("OAUTH2_ISSUER").unwrap_or_else(|_| {
-        std::env::var("PUBLIC_BASE_URL").unwrap_or_else(|_| "http://localhost".to_string())
-    });
-    let oidc_cache = Arc::new(api::handlers::oidc_discovery::OidcDiscoveryCache::new(
-        oidc_issuer,
-    ));
-    println!("✓ OIDC discovery cache initialized");
-
-    println!("✓ Database connected successfully");
-
-    let auth_kind = auth_providers.kind;
-
-    // Build the single, process-wide Valkey/Redis connection manager. Every
-    // subsystem that needs Redis — connections facade rate limiting, trigger
-    // stream publisher, compilation worker, cron scheduler, MCP/handler
-    // utility calls — clones this manager instead of opening its own TCP
-    // connection per call.
-    let redis_url = crate::valkey::build_redis_url();
-    let redis_manager: Option<redis::aio::ConnectionManager> = match redis_url {
-        Some(url) => match crate::valkey::init_shared_manager(&url).await {
-            Ok(m) => {
-                println!("✓ Shared Valkey connection manager initialized");
-                Some(m)
-            }
-            Err(e) => {
-                if config::mcp_session_store() == config::McpSessionStore::Valkey {
-                    eprintln!(
-                        "❌ Configuration error: failed to initialize shared Valkey connection manager: {}",
-                        e
-                    );
-                    eprintln!(
-                        "   RUNTARA_MCP_SESSION_STORE=valkey requires a working Valkey connection."
-                    );
-                    std::process::exit(1);
-                }
-                eprintln!(
-                    "⚠ Failed to initialize shared Valkey connection manager: {}",
-                    e
-                );
-                None
-            }
-        },
-        None => {
-            if config::mcp_session_store() == config::McpSessionStore::Valkey {
-                eprintln!(
-                    "❌ Configuration error: RUNTARA_MCP_SESSION_STORE=valkey requires VALKEY_HOST."
-                );
-                std::process::exit(1);
-            }
-            None
-        }
-    };
 
     // Admission admits work the runner must then execute, and an admitted
     // request holds its reservation until it terminates or parks. A ceiling
@@ -1809,11 +2315,6 @@ async fn start_as_platform(
         }
     }
 
-    // Per-tenant rate limits share their buckets through Valkey.
-    if let Some(manager) = redis_manager.clone() {
-        crate::tenant_quota::install(manager.clone());
-        crate::tenant_status::install(manager);
-    }
     // A tenant not served now keeps its parked runs parked.
     runtara_environment::wake_scheduler::set_wake_gate(Arc::new(
         crate::tenant_status::TenantWakeGate,
@@ -1834,52 +2335,6 @@ async fn start_as_platform(
     runtara_component_host::api_launches::set_default_call_limiter(Arc::new(
         crate::tenant_quota::WorkflowCallLimiter,
     ));
-
-    // Per-tenant Valkey membership enforcement policy. Built here, after the
-    // shared manager, so the policy default can see whether Valkey is actually configured.
-    // The auth middleware consumes both; they ride on AuthState.
-    let membership_policy = auth::MembershipPolicy::from_env(auth_kind, redis_manager.is_some());
-    // Publish to the process-wide accessor so handler-level ownership checks see the same
-    // policy the route gate enforces.
-    auth::set_membership_policy(membership_policy);
-    println!("✓ Auth membership policy: {}", membership_policy.as_str());
-
-    let auth_state = auth::AuthState {
-        provider: auth_providers.api.clone(),
-        pool: pool.clone(),
-        valkey: redis_manager.clone(),
-        membership_policy,
-    };
-    let mcp_auth_state = auth::AuthState {
-        provider: auth_providers.mcp.clone(),
-        pool: pool.clone(),
-        valkey: redis_manager.clone(),
-        membership_policy,
-    };
-
-    let mcp_session_store: Option<Arc<dyn SessionStore>> = match config::mcp_session_store() {
-        config::McpSessionStore::Local => {
-            println!("✓ MCP session recovery store: local");
-            None
-        }
-        config::McpSessionStore::Valkey => {
-            let Some(manager) = redis_manager.clone() else {
-                eprintln!(
-                    "❌ Configuration error: RUNTARA_MCP_SESSION_STORE=valkey requires a shared Valkey connection manager."
-                );
-                std::process::exit(1);
-            };
-            println!(
-                "✓ MCP session recovery store: valkey (ttl={}s)",
-                config::mcp_session_ttl_seconds()
-            );
-            Some(Arc::new(mcp::ValkeyMcpSessionStore::new(
-                manager,
-                tenant_id.clone(),
-                config::mcp_session_ttl_seconds(),
-            )))
-        }
-    };
 
     // Build the component dispatcher (embedded wasmtime) once at startup and
     // share its Arc with every service that needs it — the compilation worker
@@ -2209,36 +2664,6 @@ async fn start_as_platform(
             Err(e) => eprintln!("   \u{26a0} Reserved slug check failed (continuing): {e}"),
         }
     }
-
-    // Spawn background task to warn when pool usage is high
-    let pool_monitor = pool.clone();
-    workers.detached(
-        crate::roles::Role::Api,
-        "database pool monitor",
-        async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-            loop {
-                interval.tick().await;
-                let size = pool_monitor.size();
-                let idle = pool_monitor.num_idle();
-                let active = size as usize - idle;
-                let usage_pct = if size > 0 {
-                    (active * 100) / size as usize
-                } else {
-                    0
-                };
-                if usage_pct >= 75 {
-                    tracing::warn!(
-                        pool_size = size,
-                        pool_idle = idle,
-                        pool_active = active,
-                        usage_pct,
-                        "Database pool under pressure"
-                    );
-                }
-            }
-        },
-    );
 
     let object_model_pool_config = config::object_model_pool_config();
 
@@ -2637,34 +3062,24 @@ async fn start_as_platform(
         );
     }
 
-    // Product-analytics pipeline: spawn the single drain (consumer) now that the shutdown
-    // signal exists. The channel + sink were built earlier (so the sink could be injected
-    // into the connections crate); the drain owns `product_event_rx` and ships batches to
-    // Valkey (`XADD`) for smo-management's per-tenant consumer to persist. `XADD` is
-    // non-blocking, so the drain reuses the shared connection manager rather than needing a
-    // dedicated one. Retention now lives in smo-management, next to the table it sweeps.
-    match redis_manager.clone() {
-        Some(manager) => {
-            let drain = product_events::ProductEventDrain::new(
-                manager,
-                product_event_rx,
-                product_events_config,
-                shutdown_signal.clone(),
-            );
-            workers.intake(
-                crate::roles::Role::Api,
-                "product events drain",
-                &shutdown_coordinator,
-                drain.run(),
-            );
-        }
-        None => {
-            println!(
-                "⚠ Valkey not configured, skipping product events drain; \
-                 emitted events will fill the in-memory channel and then be dropped"
-            );
-        }
-    }
+    // What this process runs for itself, and the API's consumer of member
+    // control events when it runs the API.
+    start_own_work(
+        &workers,
+        crate::roles::Role::Engine,
+        &shutdown_coordinator,
+        &pool,
+        redis_manager.clone(),
+        product_event_rx,
+        product_events_config,
+    );
+    start_member_control_events(
+        &workers,
+        &shutdown_coordinator,
+        &pool,
+        auth_kind,
+        membership_policy,
+    );
 
     // Initialize Valkey-based workers (optional but recommended)
     let valkey_config = valkey::ValkeyConfig::from_env();
@@ -2771,37 +3186,6 @@ async fn start_as_platform(
                         trigger_shutdown,
                         trigger_events,
                         permits_for_worker,
-                    )
-                    .await;
-                }),
-            );
-        }
-
-        // Control-event consumer, one per served tenant (SYN-939): revokes a removed/disabled
-        // member's API keys when `runtara-cloud` appends a `member_removed` event to the tenant's
-        // `{tenant}:control` stream. Scoped to the tenant (row-level security) like the trigger
-        // worker, and joined on shutdown via the same intake coordinator.
-        for control_tenant in config::served_tenants() {
-            let control_pool = pool.clone();
-            let control_config = config.clone();
-            let control_shutdown = shutdown_signal.clone();
-            let control_tenant = control_tenant.clone();
-            let control_sweep = crate::valkey::control_events::ReconcileSweep::for_auth(
-                auth_kind,
-                membership_policy,
-            );
-            let scope = control_tenant.clone();
-            workers.intake(
-                crate::roles::Role::Api,
-                "member control events",
-                &shutdown_coordinator,
-                scoped(scope, async move {
-                    crate::valkey::control_events::run(
-                        control_pool,
-                        control_config,
-                        control_tenant,
-                        control_sweep,
-                        control_shutdown,
                     )
                     .await;
                 }),
@@ -3385,72 +3769,46 @@ async fn start_as_platform(
         ),
     );
 
+    // Where the engine listens for an API role in another process. A request
+    // that arrives there is answered in the scope of the tenant it is for, and
+    // not in this start-up's: the listener's tasks are started in no scope.
+    if let Some(listen) = listen {
+        match crate::engine::remote::serve_api_role(
+            listen.address,
+            &listen.tls_dir,
+            crate::engine::listener::router(engine_api.clone()),
+        )
+        .await
+        {
+            Ok((address, serving)) => {
+                tokio::spawn(serving);
+                println!("✓ Engine listening for the API role on {address} (mutual TLS)");
+            }
+            Err(msg) => {
+                eprintln!("❌ RUNTARA_ENGINE_LISTEN: {msg}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // The API's routes: its own, and the mounts that hand the engine what it
     // serves.
-    let public_app = api_app(ApiParts {
-        pool: pool.clone(),
-        engine: engine_api.clone(),
-        agent_catalog: agent_catalog.clone(),
-        events: product_event_sink.clone(),
-        valkey_conn: valkey_conn.clone(),
-        auth_state,
-        mcp_auth_state,
-        auth_providers: auth_providers.clone(),
-        oidc_cache,
-        mcp_session_store,
-        membership_policy,
-        tenant_id: tenant_id.clone(),
+    let public_app = roles.runs(crate::roles::Role::Api).then(|| {
+        api_app(ApiParts {
+            pool: pool.clone(),
+            engine: engine_api.clone(),
+            agent_catalog: agent_catalog.clone(),
+            events: product_event_sink.clone(),
+            valkey_conn: valkey_conn.clone(),
+            auth_state,
+            mcp_auth_state,
+            auth_providers: auth_providers.clone(),
+            oidc_cache,
+            mcp_session_store,
+            membership_policy,
+            tenant_id: tenant_id.clone(),
+        })
     });
-
-    // Get port/host from environment variables or use defaults
-    let port = std::env::var("SERVER_PORT")
-        .unwrap_or_else(|_| "7001".to_string())
-        .parse::<u16>()
-        .unwrap_or(7001);
-    let host = std::env::var("SERVER_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-    let public_addr = format!("{}:{}", host, port);
-
-    // Safety: refuse to boot in a non-OIDC provider mode on a non-loopback public bind.
-    // Matches the valkey validation pattern above: print the error and exit with a
-    // non-zero status so container orchestrators and systemd surface a clean failure.
-    if let Err(msg) = crate::bind::enforce_loopback_for_unauthenticated(auth_kind, &host) {
-        eprintln!("❌ Configuration error: {msg}");
-        std::process::exit(1);
-    }
-
-    // Cap concurrent TCP connections so a slow-loris attack or a connection
-    // storm can't exhaust file descriptors and take the whole server down.
-    // Configurable via MAX_CONNECTIONS; see `conn_limit`.
-    let max_connections = crate::conn_limit::max_connections_from_env();
-
-    // Start public API server
-    let public_listener = crate::conn_limit::LimitedListener::new(
-        tokio::net::TcpListener::bind(&public_addr).await?,
-        max_connections,
-    );
-    tracing::info!(
-        port = port,
-        address = %public_addr,
-        max_connections = max_connections,
-        "Public API server started"
-    );
-
-    // Ready banner with a clickable UI link. Printed to stdout (not via
-    // tracing) so it shows regardless of RUST_LOG — the first thing a local
-    // or `docker compose up` user looks for once the listeners are bound.
-    {
-        // Wildcard / loopback binds aren't useful as clickable links; show
-        // localhost instead so the printed URL is something you can open.
-        let shown_host = if host == "0.0.0.0" || host == "::" || crate::bind::is_loopback(&host) {
-            "localhost"
-        } else {
-            host.as_str()
-        };
-        let origin = format!("http://{shown_host}:{port}");
-        println!("\n  Runtara {} is ready.\n", env!("BUILD_VERSION"));
-        println!("    API:     {origin}");
-        println!("    Health:  {origin}/health\n");
-    }
 
     // Which background work this process started, by role.
     {
@@ -3471,38 +3829,6 @@ async fn start_as_platform(
             "Background work started"
         );
     }
-    // Spawn heartbeat task for log pipeline monitoring
-    workers.detached(crate::roles::Role::Api, "heartbeat log", async {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600)); // 1 hour
-        loop {
-            interval.tick().await;
-            tracing::info!(heartbeat = true, "ping");
-        }
-    });
-
-    // The public API server stops accepting as soon as SIGTERM flips
-    // `shutdown_signal` (no new external intake). Running guests don't call
-    // this listener: agent calls are in-process host imports and the embedded
-    // core stays up until the drain below finishes.
-    let public_shutdown = shutdown_signal.clone();
-    // A served tenant's path segment is stripped before routing (see
-    // `middleware::tenant_path`), so it wraps the finished router. The tenant
-    // it names scopes the request's database work, authenticated or not.
-    let public_app = public_app.layer(from_fn(
-        crate::middleware::tenant_path::scope_requested_tenant,
-    ));
-    let public_app = tower::Layer::layer(
-        &tower::util::MapRequestLayer::new(
-            crate::middleware::tenant_path::strip_tenant_segment::<axum::body::Body>,
-        ),
-        public_app,
-    );
-    let public_server = axum::serve(
-        public_listener,
-        axum::ServiceExt::<axum::extract::Request>::into_make_service(public_app),
-    )
-    .with_graceful_shutdown(async move { public_shutdown.wait().await });
-
     // Install SIGINT / SIGTERM handlers that flip the shutdown flag. Runs
     // concurrently with the server — exiting is driven by the flag, not by
     // the server returning.
@@ -3515,8 +3841,12 @@ async fn start_as_platform(
         signal_coordinator.request_shutdown();
     });
 
-    if let Err(e) = public_server.await {
-        tracing::error!(error = %e, "Public API server error");
+    match public_app {
+        Some(public_app) => serve_public(public_app, auth_kind, shutdown_signal.clone()).await?,
+        None => {
+            println!("\n  Runtara {} engine is ready.\n", env!("BUILD_VERSION"));
+            shutdown_signal.clone().wait().await;
+        }
     }
 
     // Make sure the flag is set even if the public server stopped for
