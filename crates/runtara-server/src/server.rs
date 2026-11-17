@@ -2224,7 +2224,7 @@ async fn start_as_platform(
     ));
     println!("✓ Execution engine initialized");
     // The whole of what code that takes requests may ask of the engine.
-    let engine_api: Arc<dyn crate::engine::Engine> = Arc::new(
+    let local_engine = Arc::new(
         crate::engine::LocalEngine::new(
             runtime_client.clone(),
             execution_engine.clone(),
@@ -2232,6 +2232,7 @@ async fn start_as_platform(
         )
         .with_agent_catalog(agent_catalog.clone()),
     );
+    let engine_api: Arc<dyn crate::engine::Engine> = local_engine.clone();
     native_control.install_engine(execution_engine.clone());
     {
         let limit = crate::middleware::entitlement::effective_limit(
@@ -2720,20 +2721,33 @@ async fn start_as_platform(
     // (a) AuthContext is populated when the guard inspects auth_method, and
     // (b) Connections handlers see the same denial shape as every other tenant
     //     route when `api` is off and the caller used an API key.
-    let connections_tenant_routes =
-        runtara_connections::connections_router(connections_config.clone())
-            .layer(axum::middleware::from_fn(
-                crate::middleware::tenant_auth::inject_connections_tenant_id,
-            ))
-            .layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
-            // Enforce the per-route role permission map (no-op unless membership is Required).
-            .layer(from_fn(crate::middleware::authorization::authorize(
-                membership_policy,
-            )))
-            .layer(from_fn_with_state(
-                auth_state.clone(),
-                crate::middleware::auth::authenticate,
-            ));
+    //
+    // The engine serves these routes, because a connection's secrets are
+    // sealed and used there. The API authenticates the caller and hands the
+    // request over; what the caller's role may do is decided on the engine's
+    // side, where the route it asked for is known.
+    local_engine.serves(
+        crate::engine::Served::Connections,
+        Router::new().nest(
+            "/api/runtime",
+            runtara_connections::connections_router(connections_config.clone())
+                .layer(axum::middleware::from_fn(
+                    crate::middleware::tenant_auth::inject_connections_tenant_id,
+                ))
+                .layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
+                // Enforce the per-route role permission map (no-op unless membership is Required).
+                .layer(from_fn(crate::middleware::authorization::authorize(
+                    membership_policy,
+                ))),
+        ),
+    );
+    // Whatever under `/api/runtime` is not one of the API's own routes.
+    let connections_tenant_routes = Router::new().nest(
+        "/api/runtime",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Connections).layer(
+            from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
+        ),
+    );
 
     // Object Model routes (separate router to help type inference)
     // These routes use Arc<ObjectModelState> state extraction
@@ -2744,7 +2758,7 @@ async fn start_as_platform(
         events: product_event_sink.clone(),
     });
 
-    let object_model_routes = Router::new()
+    let object_model_served = Router::new()
         // Object Model Schema endpoints
         .route(
             "/api/runtime/object-model/schemas",
@@ -2856,15 +2870,20 @@ async fn start_as_platform(
         .route_layer(from_fn(crate::middleware::authorization::authorize(
             membership_policy,
         )))
-        // Apply JWT authentication middleware to object model routes
-        .route_layer(from_fn_with_state(
-            auth_state.clone(),
-            crate::middleware::auth::authenticate,
-        ))
         // CSV import accepts multipart / base64-JSON bodies up to ~50 MB; the
         // handler already reads up to 50 MB via to_bytes, but Axum's 2 MB
         // default body limit rejected them first with 413 (SYN-457).
         .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES));
+    // The engine serves a tenant's object model: its database is reached
+    // with a sealed password. The API authenticates the caller and hands the
+    // request over.
+    local_engine.serves(crate::engine::Served::ObjectModel, object_model_served);
+    let object_model_routes = Router::new().nest(
+        "/api/runtime/object-model",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::ObjectModel).layer(
+            from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
+        ),
+    );
 
     // Create router for public/global endpoints (no tenant auth required)
     let readiness_providers = auth_providers.clone();
@@ -2936,14 +2955,24 @@ async fn start_as_platform(
             runtara_store_postgres::tenant_scope::spawn(channel_router.clone().run_intake_worker());
             println!("✓ Channel router initialized");
 
-            channels::routes(channel_router)
-                // Defense in depth: these public, unauthenticated channel-ingest
-                // routes buffer the whole body (Bytes extractor) before auth, so
-                // cap it. Bot Framework / chat activities are a few KB; the
-                // shared webhook cap is generous enough for mailgun payloads.
-                .layer(DefaultBodyLimit::max(
-                    api::handlers::events::webhook_max_body_bytes(),
-                ))
+            // The engine serves a channel's webhook: the call is checked
+            // against its connection's sealed secret, and the conversation it
+            // belongs to runs there. The API hands it over as it arrived.
+            local_engine.serves(
+                crate::engine::Served::Channels,
+                channels::routes(channel_router)
+                    // Defense in depth: these public, unauthenticated channel-ingest
+                    // routes buffer the whole body (Bytes extractor) before auth, so
+                    // cap it. Bot Framework / chat activities are a few KB; the
+                    // shared webhook cap is generous enough for mailgun payloads.
+                    .layer(DefaultBodyLimit::max(
+                        api::handlers::events::webhook_max_body_bytes(),
+                    )),
+            );
+            Router::new().nest(
+                "/api/runtime/events/webhook",
+                crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Channels),
+            )
         } else {
             Router::new()
         };
@@ -2977,7 +3006,7 @@ async fn start_as_platform(
     let internal_router = Router::new()
         .merge(tenant_routes.clone())
         .merge(object_model_routes.clone())
-        .nest("/api/runtime", connections_tenant_routes.clone())
+        .merge(connections_tenant_routes.clone())
         .merge(public_routes.clone())
         .merge(internal_event_routes);
 
@@ -3021,8 +3050,17 @@ async fn start_as_platform(
 
     // OAuth2 callback route (public, no JWT — called by OAuth provider redirect)
     // Now served by the runtara-connections crate
-    let oauth_callback_routes =
-        runtara_connections::oauth_callback_router(connections_config.clone());
+    local_engine.serves(
+        crate::engine::Served::OAuthCallbacks,
+        Router::new().nest(
+            "/api/oauth",
+            runtara_connections::oauth_callback_router(connections_config.clone()),
+        ),
+    );
+    let oauth_callback_routes = Router::new().nest(
+        "/api/oauth",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::OAuthCallbacks),
+    );
 
     // =========================================================================
     // Public API server — accessible externally / via API gateway
@@ -3072,8 +3110,8 @@ async fn start_as_platform(
 
     let public_app = Router::new()
         .merge(tenant_routes)
-        .nest("/api/runtime", connections_tenant_routes)
-        .nest("/api/oauth", oauth_callback_routes)
+        .merge(connections_tenant_routes)
+        .merge(oauth_callback_routes)
         .merge(object_model_routes)
         .merge(me_routes)
         .merge(my_tenants_routes)

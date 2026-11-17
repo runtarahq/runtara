@@ -53,6 +53,21 @@ use crate::workers::execution_engine::{
 use crate::workers::execution_outbox::EnqueuedExecution;
 use crate::workers::runtara_dto::ExecutionWithMetadata;
 
+/// A part of the HTTP API the engine serves itself, because answering it uses
+/// a connection's credentials: the API hands the engine the request as it
+/// arrived, once it has authenticated it, and returns what the engine answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Served {
+    /// Connections: their records, types, OAuth authorization and rate limits.
+    Connections,
+    /// The OAuth redirect a provider sends a user back to.
+    OAuthCallbacks,
+    /// A tenant's object model: schemas, instances, SQL and CSV.
+    ObjectModel,
+    /// Webhooks of chat channels, each checked against its connection.
+    Channels,
+}
+
 /// What the API asks of the engine. See the module.
 #[async_trait]
 pub trait Engine: Send + Sync {
@@ -316,6 +331,17 @@ pub trait Engine: Send + Sync {
         tenant_id: &str,
         image_id: &str,
     ) -> Result<Option<ImageSummary>, RuntimeError>;
+
+    // ---- Parts of the API the engine serves --------------------------------
+
+    /// Answers a request for `part` of the API. The request carries what the
+    /// API established about its caller. A part this engine does not serve
+    /// is not found.
+    async fn serve(
+        &self,
+        part: Served,
+        request: axum::extract::Request,
+    ) -> axum::response::Response;
 }
 
 /// The engine in this process.
@@ -327,6 +353,9 @@ pub struct LocalEngine {
     pool: sqlx::PgPool,
     /// The agents a compiled workflow may use.
     agent_catalog: Option<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
+    /// The parts of the API this engine serves, each a router of its own.
+    /// They are built after the engine is, from what the engine holds.
+    served: std::sync::RwLock<std::collections::HashMap<Served, axum::Router>>,
 }
 
 impl LocalEngine {
@@ -340,7 +369,16 @@ impl LocalEngine {
             executions,
             pool,
             agent_catalog: None,
+            served: std::sync::RwLock::default(),
         }
+    }
+
+    /// Has this engine serve `part` of the API with `router`.
+    pub fn serves(&self, part: Served, router: axum::Router) {
+        self.served
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(part, router);
     }
 
     /// With the agents this server loaded, which a compile checks a workflow
@@ -783,12 +821,69 @@ impl Engine for LocalEngine {
     ) -> Result<Option<ImageSummary>, RuntimeError> {
         self.runtime()?.get_image(image_id, tenant_id).await
     }
+
+    async fn serve(
+        &self,
+        part: Served,
+        request: axum::extract::Request,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        use tower::ServiceExt;
+        let router = self
+            .served
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&part)
+            .cloned();
+        // The engine's router routes the request as it arrived: by its whole
+        // path, and with no trace of how the API routed it here, which its
+        // own layers and handlers would otherwise take for their own.
+        let mut request = request;
+        if let Some(axum::extract::OriginalUri(uri)) = request
+            .extensions_mut()
+            .remove::<axum::extract::OriginalUri>()
+        {
+            *request.uri_mut() = uri;
+        }
+        request
+            .extensions_mut()
+            .remove::<axum::extract::MatchedPath>();
+        request
+            .extensions_mut()
+            .remove::<axum::extract::NestedPath>();
+        match router {
+            Some(router) => match router.oneshot(request).await {
+                Ok(response) => response,
+                Err(never) => match never {},
+            },
+            None => axum::http::StatusCode::NOT_FOUND.into_response(),
+        }
+    }
+}
+
+/// The API's side of a part the engine serves, to be nested under the part's
+/// path: every request under it goes to the engine, and the engine's answer
+/// goes back. Authentication and the other request layers are put around this
+/// router, as they were around the routes it stands for.
+///
+/// It is a fallback and not a route, so that it adds no path parameter of its
+/// own to the request it hands over.
+pub fn forwarded(engine: Arc<dyn Engine>, part: Served) -> axum::Router {
+    axum::Router::new().fallback(move |request: axum::extract::Request| {
+        let engine = engine.clone();
+        async move { engine.serve(part, request).await }
+    })
 }
 
 /// An engine with no runtime, for a test of code that holds one and asks it
 /// nothing a runtime answers.
 #[cfg(test)]
 pub(crate) fn without_runtime() -> Arc<dyn Engine> {
+    local_without_runtime()
+}
+
+#[cfg(test)]
+fn local_without_runtime() -> Arc<LocalEngine> {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused/unused")
         .expect("a lazy pool connects to nothing");
@@ -859,5 +954,105 @@ mod boundary {
             "code that takes requests asks the engine through `Engine`, not:\n{}",
             named.join("\n")
         );
+    }
+}
+
+#[cfg(test)]
+mod serving {
+    use super::*;
+    use axum::body::Body;
+    use axum::extract::{MatchedPath, Path};
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
+    use tower::ServiceExt;
+
+    async fn text(response: axum::response::Response) -> (StatusCode, String) {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    /// The API's router: everything under `/api/runtime` is the engine's.
+    fn api(engine: Arc<dyn Engine>) -> axum::Router {
+        axum::Router::new()
+            .route("/api/runtime/own", get(|| async { "the API's own route" }))
+            .nest("/api/runtime", forwarded(engine, Served::Connections))
+    }
+
+    #[tokio::test]
+    async fn the_engine_routes_a_forwarded_request_as_it_arrived() {
+        let engine = local_without_runtime();
+        // What the engine's handler sees of the request: its own path
+        // parameter and no other, and the route its own router matched, which
+        // is what a layer that decides by route goes by.
+        engine.serves(
+            Served::Connections,
+            axum::Router::new().nest(
+                "/api/runtime",
+                axum::Router::new().route(
+                    "/things/{id}",
+                    get(|Path(id): Path<String>, matched: MatchedPath| async move {
+                        format!("{id} at {}", matched.as_str())
+                    }),
+                ),
+            ),
+        );
+        let api = api(engine);
+
+        let forwarded = api
+            .clone()
+            .oneshot(
+                Request::get("/api/runtime/things/7")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            text(forwarded).await,
+            (StatusCode::OK, "7 at /api/runtime/things/{id}".to_owned())
+        );
+
+        // What the engine does not have is not found there, by the engine.
+        let unknown = api
+            .clone()
+            .oneshot(
+                Request::get("/api/runtime/nothing")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+        // The API's own routes are still its own.
+        let own = api
+            .oneshot(
+                Request::get("/api/runtime/own")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            text(own).await,
+            (StatusCode::OK, "the API's own route".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_part_the_engine_does_not_serve_is_not_found() {
+        let engine: Arc<dyn Engine> = local_without_runtime();
+        let response = engine
+            .serve(
+                Served::Channels,
+                Request::post("/api/runtime/events/webhook/slack/c-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }
