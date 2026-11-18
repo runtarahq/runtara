@@ -1160,7 +1160,10 @@ impl ServerHandler for SmoMcpServer {
                 let tenant = auth.org_id.clone();
                 runtara_store_postgres::tenant_scope::scoped(
                     tenant,
-                    tools::internal_api::with_caller_auth(auth, call),
+                    crate::engine::approvals::asked_by(
+                        auth.user_id.clone(),
+                        tools::internal_api::with_caller_auth(auth, call),
+                    ),
                 )
                 .await
             }

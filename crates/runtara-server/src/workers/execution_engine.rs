@@ -994,6 +994,11 @@ impl ExecutionEngine {
         let version = self
             .resolve_version(req.tenant_id, req.workflow_id, req.version)
             .await?;
+        // A caller who may run it asked for this run: the version is approved
+        // as its definition stands. A run nobody asked for approves nothing.
+        crate::engine::approvals::approve_as_asked(req.tenant_id, req.workflow_id, version)
+            .await
+            .map_err(ExecutionError::DatabaseError)?;
 
         // 1.5 A compilation that failed for this unchanged definition fails
         // every launch the same way, so refuse now rather than report a
@@ -1175,6 +1180,9 @@ impl ExecutionEngine {
         let version = self
             .resolve_version(req.tenant_id, req.workflow_id, req.version)
             .await?;
+        crate::engine::approvals::approve_as_asked(req.tenant_id, req.workflow_id, version)
+            .await
+            .map_err(ExecutionError::DatabaseError)?;
         let workflow = self
             .workflow_repo
             .get_by_id(req.tenant_id, req.workflow_id, Some(version))
@@ -2530,6 +2538,25 @@ impl ExecutionEngine {
     }
 
     /// Resolve an explicit or current/latest version for a workflow.
+    /// The version that runs when none is named and none was chosen through
+    /// the engine: the latest. In a process that keeps no record of what was
+    /// chosen, the server database's choice stands.
+    async fn version_when_none_was_chosen(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+    ) -> Result<Option<i32>, sqlx::Error> {
+        if crate::engine::approvals::installed().is_some() {
+            self.workflow_repo
+                .get_latest_version(tenant_id, workflow_id)
+                .await
+        } else {
+            self.workflow_repo
+                .get_current_or_latest_version(tenant_id, workflow_id)
+                .await
+        }
+    }
+
     async fn resolve_version(
         &self,
         tenant_id: &str,
@@ -2543,9 +2570,19 @@ impl ExecutionEngine {
                 workflow_id
             ))),
             None => {
+                // The version that runs when none is named is the one chosen
+                // through the engine, by its own record; the server
+                // database's is the API's to write.
+                if let Some(approvals) = crate::engine::approvals::installed()
+                    && let Some(chosen) = approvals
+                        .current(tenant_id, workflow_id)
+                        .await
+                        .map_err(ExecutionError::DatabaseError)?
+                {
+                    return Ok(chosen);
+                }
                 let resolved = self
-                    .workflow_repo
-                    .get_current_or_latest_version(tenant_id, workflow_id)
+                    .version_when_none_was_chosen(tenant_id, workflow_id)
                     .await
                     .map_err(|e| {
                         ExecutionError::DatabaseError(format!(
@@ -2763,6 +2800,19 @@ impl ExecutionEngine {
         workflow_id: &str,
         version: Option<i32>,
     ) -> Result<(i32, ReadyLaunch), ExecutionError> {
+        let approvals = crate::engine::approvals::installed();
+        let version = match version {
+            None if approvals.is_some() => Some(
+                self.resolve_version(tenant_id, workflow_id, None)
+                    .await
+                    .map_err(|_| {
+                        ExecutionError::WorkflowNotFound(format!(
+                            "No runnable version for workflow '{workflow_id}'"
+                        ))
+                    })?,
+            ),
+            named => named,
+        };
         let (resolved, status) = self
             .workflow_repo
             .ensure_compilation_ready(tenant_id, workflow_id, version)
@@ -2781,11 +2831,50 @@ impl ExecutionEngine {
         self.require_allowed_agents(tenant_id, workflow_id, version, &status)
             .await?;
 
-        if let CompilationStatus::Ready {
-            registered_image_id,
-            execution_timeout,
-            ..
-        } = status
+        // Every launch passes here too for what makes a workflow runnable:
+        // the definition is the one someone who may run it approved, and the
+        // image is the one the engine compiled from it. What the server
+        // database says of either is not taken on its word.
+        let run_it = match approvals {
+            None => true,
+            Some(approvals) => {
+                let image = match &status {
+                    CompilationStatus::Ready {
+                        registered_image_id,
+                        ..
+                    } => Some(registered_image_id.as_str()),
+                    _ => None,
+                };
+                match approvals
+                    .verdict(tenant_id, workflow_id, version, image)
+                    .await
+                    .map_err(ExecutionError::DatabaseError)?
+                {
+                    crate::engine::approvals::Verdict::Run => true,
+                    crate::engine::approvals::Verdict::Compile => false,
+                    crate::engine::approvals::Verdict::Refuse => {
+                        tracing::warn!(
+                            tenant_id = %tenant_id,
+                            workflow_id = %workflow_id,
+                            version,
+                            "A version that was not approved to run was not run"
+                        );
+                        return Err(ExecutionError::WorkflowNotRunnable {
+                            workflow_id: workflow_id.to_string(),
+                            version,
+                            error: crate::engine::approvals::NOT_APPROVED.to_string(),
+                        });
+                    }
+                }
+            }
+        };
+
+        if run_it
+            && let CompilationStatus::Ready {
+                registered_image_id,
+                execution_timeout,
+                ..
+            } = status
         {
             return Ok((
                 version,

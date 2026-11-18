@@ -58,6 +58,8 @@ pub struct EmbeddedRuntara {
     environment: EnvironmentRuntime,
     #[allow(dead_code)]
     persistence: Arc<dyn Persistence>,
+    /// The runtime database, which this process alone is given.
+    pool: PgPool,
 }
 
 impl EmbeddedRuntara {
@@ -80,6 +82,7 @@ impl EmbeddedRuntara {
         event_observer: Option<Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         info!("Starting embedded Runtara servers...");
+        let pool = config.pool.clone();
 
         // Trusted pins, option B: record the installed trusted built-ins in
         // the approved history and hand the approved, non-revoked trusted pins
@@ -181,7 +184,13 @@ impl EmbeddedRuntara {
             core,
             environment,
             persistence,
+            pool,
         })
+    }
+
+    /// The runtime database's pool, for what the engine keeps there itself.
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
     }
 
     /// The environment's shared handler state, for callers that drive it

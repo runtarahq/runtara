@@ -163,7 +163,16 @@ macro_rules! operations {
                                     }
                                     Some(caller) => operation.of_caller(caller),
                                 }
-                                scoped(tenant, operation.ask(engine)).await
+                                let asker = caller.map(|caller| caller.user_id.clone());
+                                scoped(tenant, async {
+                                    match asker {
+                                        Some(asker) => {
+                                            approvals::asked_by(asker, operation.ask(engine)).await
+                                        }
+                                        None => operation.ask(engine).await,
+                                    }
+                                })
+                                .await
                             }
                             None => operation.ask(engine).await,
                         };
@@ -493,6 +502,20 @@ operations! {
     needs [WorkflowDelete],
     |engine, op| for Some(&op.tenant_id) =>
         engine.unstage_workflow_agent(&op.tenant_id, &op.slug).await;
+
+    SetCurrentVersion { tenant_id: String, workflow_id: String, version: i32 }
+        -> Result<bool, String>,
+    needs [WorkflowUpdate, WorkflowCreate],
+    |engine, op| for Some(&op.tenant_id) => engine
+        .set_current_version(&op.tenant_id, &op.workflow_id, op.version)
+        .await;
+
+    InvalidateCompilation { tenant_id: String, workflow_id: String, version: i32 }
+        -> Result<(), String>,
+    needs [WorkflowExecute, WorkflowCreate, WorkflowUpdate],
+    |engine, op| for Some(&op.tenant_id) => engine
+        .invalidate_compilation(&op.tenant_id, &op.workflow_id, op.version)
+        .await;
 
     // ---- Compilation, through the queue ------------------------------------------
     EnqueueCompilation {

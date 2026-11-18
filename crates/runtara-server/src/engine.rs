@@ -19,6 +19,7 @@
 //!   of the task that makes it, which does not leave the process;
 //! - nothing is handed across but values: no pool, no client, no callback.
 
+pub mod approvals;
 pub mod listener;
 pub mod remote;
 mod wire;
@@ -412,6 +413,25 @@ pub trait Engine: Send + Sync {
     /// Takes a published workflow-agent out of use, when its workflow is
     /// deleted.
     async fn unstage_workflow_agent(&self, tenant_id: &str, slug: &str) -> Result<(), String>;
+
+    /// Makes `version` the one that runs when a run names none, on the
+    /// engine's own record. `Ok(false)` if the workflow has no such version.
+    async fn set_current_version(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+    ) -> Result<bool, String>;
+
+    /// Forgets what a version was compiled to, so that it is compiled again
+    /// before it next runs: its definition was changed, or a rebuild was
+    /// asked for. The record of compilations is the engine's.
+    async fn invalidate_compilation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+    ) -> Result<(), String>;
 
     // ---- Connections, as a workflow names them ----------------------------
 
@@ -1002,6 +1022,9 @@ impl Engine for LocalEngine {
         version: i32,
         force_recompile: bool,
     ) -> Result<CompilationResultDto, CompilationError> {
+        approvals::approve_as_asked(tenant_id, workflow_id, version)
+            .await
+            .map_err(CompilationError::DatabaseError)?;
         self.compiler()
             .compile_workflow(tenant_id, workflow_id, version, force_recompile)
             .await
@@ -1014,6 +1037,9 @@ impl Engine for LocalEngine {
         version: i32,
         slug: String,
     ) -> Result<Value, CompilationError> {
+        approvals::approve_as_asked(tenant_id, workflow_id, version)
+            .await
+            .map_err(CompilationError::DatabaseError)?;
         self.compiler()
             .publish_workflow_agent(tenant_id, workflow_id, version, slug)
             .await
@@ -1033,6 +1059,52 @@ impl Engine for LocalEngine {
 
     async fn unstage_workflow_agent(&self, tenant_id: &str, slug: &str) -> Result<(), String> {
         crate::workflow_agents::unstage(tenant_id, slug)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn set_current_version(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+    ) -> Result<bool, String> {
+        let repository =
+            crate::api::repositories::workflows::WorkflowRepository::new(self.pool.clone());
+        // The engine's record first: it is the one a run goes by. The server
+        // database's is what the API shows.
+        match repository
+            .version_exists(tenant_id, workflow_id, version)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return Ok(false),
+            Err(error) => return Err(error.to_string()),
+        }
+        if let Some(approvals) = approvals::installed() {
+            let by = approvals::asker().unwrap_or_else(|| "unknown".to_owned());
+            approvals
+                .set_current(tenant_id, workflow_id, version, &by)
+                .await?;
+        }
+        match repository
+            .set_current_version(tenant_id, workflow_id, version)
+            .await
+        {
+            Ok(()) => Ok(true),
+            Err(sqlx::Error::RowNotFound) => Ok(false),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    async fn invalidate_compilation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+    ) -> Result<(), String> {
+        crate::api::repositories::workflows::WorkflowRepository::new(self.pool.clone())
+            .invalidate_compilation(tenant_id, workflow_id, version)
             .await
             .map_err(|error| error.to_string())
     }
@@ -1080,6 +1152,9 @@ impl Engine for LocalEngine {
         compiled: Option<ProductEvent>,
     ) -> Result<bool, CompilationQueueError> {
         let queue = self.queued_compiles()?;
+        approvals::approve_as_asked(tenant_id, workflow_id, version)
+            .await
+            .map_err(CompilationQueueError::ConnectionError)?;
         match compiled {
             Some(compiled) => {
                 crate::workers::compilation_worker::enqueue_compilation_with_event(
@@ -1243,6 +1318,10 @@ impl Engine for LocalEngine {
                     .get::<crate::middleware::tenant_path::RequestedTenant>()
                     .map(|named| named.0.clone())
             });
+        let request_asker = request
+            .extensions()
+            .get::<crate::auth::AuthContext>()
+            .map(|caller| caller.user_id.clone());
         let Some(router) = router else {
             return axum::http::StatusCode::NOT_FOUND.into_response();
         };
@@ -1250,6 +1329,14 @@ impl Engine for LocalEngine {
             match router.oneshot(request).await {
                 Ok(response) => response,
                 Err(never) => match never {},
+            }
+        };
+        // What a caller asks of a part the engine serves, it asks as itself.
+        let asker = request_asker;
+        let answered = async move {
+            match asker {
+                Some(asker) => approvals::asked_by(asker, answered).await,
+                None => answered.await,
             }
         };
         match tenant {

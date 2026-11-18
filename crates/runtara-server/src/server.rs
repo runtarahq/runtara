@@ -2881,6 +2881,25 @@ async fn start_as_platform(
                 ),
             }
             println!("✓ Embedded runtara-environment started (in-process)");
+            // What makes a workflow runnable is the engine's own record, in
+            // the runtime database (`engine::approvals`). What was compiled
+            // and chosen before the engine kept one is carried over once.
+            let approvals = crate::engine::approvals::install(
+                crate::engine::approvals::Approvals::new(runtara.pool().clone(), pool.clone()),
+            );
+            match approvals.carry_over_once().await {
+                Ok(Some((approved, chosen))) => println!(
+                    "✓ Carried over what ran before: {approved} compiled versions approved, \
+                     {chosen} current versions"
+                ),
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(format!(
+                        "what ran before could not be carried over to the engine's record: {error}"
+                    )
+                    .into());
+                }
+            }
             Some(runtara)
         }
         Ok(None) => {

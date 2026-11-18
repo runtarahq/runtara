@@ -991,6 +991,34 @@ impl Engine for RemoteEngine {
         .await
     }
 
+    async fn set_current_version(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+    ) -> Result<bool, String> {
+        self.ask(wire::SetCurrentVersion {
+            tenant_id: tenant_id.to_owned(),
+            workflow_id: workflow_id.to_owned(),
+            version,
+        })
+        .await
+    }
+
+    async fn invalidate_compilation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+    ) -> Result<(), String> {
+        self.ask(wire::InvalidateCompilation {
+            tenant_id: tenant_id.to_owned(),
+            workflow_id: workflow_id.to_owned(),
+            version,
+        })
+        .await
+    }
+
     async fn tenant_connections(&self, tenant_id: &str) -> Result<Vec<ConnectionRef>, String> {
         self.ask(wire::TenantConnections {
             tenant_id: tenant_id.to_owned(),

@@ -54,9 +54,12 @@ async fn authenticate_with(
 ) -> Response {
     if let Some(ctx) = request.extensions().get::<AuthContext>().cloned() {
         let span = auth_span(&ctx);
-        return as_tenant(enforce_membership_here, &ctx.org_id, next.run(request))
-            .instrument(span)
-            .await;
+        return crate::engine::approvals::asked_by(
+            ctx.user_id.clone(),
+            as_tenant(enforce_membership_here, &ctx.org_id, next.run(request)),
+        )
+        .instrument(span)
+        .await;
     }
 
     let requested_tenant = request
@@ -86,6 +89,7 @@ async fn authenticate_with(
 
     let span = auth_span(&auth_context);
     let tenant = auth_context.org_id.clone();
+    let asker = auth_context.user_id.clone();
     crate::middleware::http_metrics::note_tenant(request.extensions(), &tenant);
     request.extensions_mut().insert(auth_context);
     // What the caller presented goes with the request, for what it asks of
@@ -93,7 +97,12 @@ async fn authenticate_with(
     request.extensions_mut().insert(presented.clone());
     crate::auth::presented::presenting(
         presented,
-        as_tenant(enforce_membership_here, &tenant, next.run(request)),
+        // What the caller asks to have compiled or run, the engine in this
+        // process approves as theirs.
+        crate::engine::approvals::asked_by(
+            asker,
+            as_tenant(enforce_membership_here, &tenant, next.run(request)),
+        ),
     )
     .instrument(span)
     .await
