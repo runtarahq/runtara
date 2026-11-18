@@ -872,6 +872,9 @@ const TENANT_REQUEST_BODY_LIMIT_BYTES: usize = 96 * 1024 * 1024;
 struct ApiParts {
     pool: PgPool,
     engine: Arc<dyn crate::engine::Engine>,
+    /// Intake, where it is a process of its own: what anyone may send is
+    /// handed to it and not to the engine.
+    intake: Option<Arc<dyn crate::engine::Engine>>,
     agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
     events: product_events::ProductEventSink,
     valkey_conn: Option<redis::aio::ConnectionManager>,
@@ -890,6 +893,7 @@ fn api_app(parts: ApiParts) -> Router {
     let ApiParts {
         pool,
         engine: engine_api,
+        intake,
         agent_catalog,
         events: product_event_sink,
         valkey_conn,
@@ -1323,9 +1327,13 @@ fn api_app(parts: ApiParts) -> Router {
         // Unauthenticated: the permission map is static and the same for every tenant.
         .route("/api/runtime/permissions", get(permissions_handler));
 
+    // What anyone may send goes to intake, where it is a process of its own.
     let event_routes = Router::new().nest(
         "/api/runtime/events",
-        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Events),
+        crate::engine::forwarded(
+            intake.clone().unwrap_or_else(|| engine_api.clone()),
+            crate::engine::Served::Events,
+        ),
     );
 
     // A chat channel's webhook is the engine's, which answers that there is
@@ -1997,9 +2005,239 @@ pub async fn start_with(
     };
     if roles.runs(crate::roles::Role::Engine) {
         runtara_store_postgres::tenant_scope::system(start_as_platform(pool, options, roles)).await
+    } else if roles.runs(crate::roles::Role::Intake) {
+        // Intake is not the platform: it looks across no tenants, and each
+        // request it receives enters the scope of the tenant it is for.
+        start_as_intake(pool, options).await
     } else {
         runtara_store_postgres::tenant_scope::system(start_as_api(pool, options)).await
     }
+}
+
+/// What intake's routes are built from: the server database, what queues a
+/// run and asks the engine to run one, and what checks a webhook from its
+/// trigger. No connection, no runtime.
+#[derive(Clone)]
+struct IntakeState {
+    pool: PgPool,
+    engine: Arc<dyn crate::engine::Engine>,
+    check: Arc<dyn api::services::webhook_verification::WebhookCheck>,
+}
+
+impl axum::extract::FromRef<IntakeState> for PgPool {
+    fn from_ref(state: &IntakeState) -> PgPool {
+        state.pool.clone()
+    }
+}
+
+impl axum::extract::FromRef<IntakeState> for Arc<dyn crate::engine::Engine> {
+    fn from_ref(state: &IntakeState) -> Self {
+        state.engine.clone()
+    }
+}
+
+impl axum::extract::FromRef<IntakeState>
+    for Arc<dyn api::services::webhook_verification::WebhookCheck>
+{
+    fn from_ref(state: &IntakeState) -> Self {
+        state.check.clone()
+    }
+}
+
+/// A trigger's HTTP events and the synchronous trigger: what anyone may
+/// send. The same routes whether the engine serves them or intake does.
+fn event_routes<S>() -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+    PgPool: axum::extract::FromRef<S>,
+    Arc<dyn crate::engine::Engine>: axum::extract::FromRef<S>,
+    Arc<dyn api::services::webhook_verification::WebhookCheck>: axum::extract::FromRef<S>,
+{
+    let sync = api::handlers::workflows_sync::capture_http_event_sync;
+    let event = api::handlers::events::capture_http_event;
+    Router::new()
+        .route(
+            "/api/runtime/events/http-sync/{workflow_id}",
+            post(sync).get(sync).put(sync).delete(sync).patch(sync),
+        )
+        .route(
+            "/api/runtime/events/http/{trigger_id}/{action}",
+            post(event).get(event).put(event).delete(event).patch(event),
+        )
+}
+
+/// Starts the intake role alone: it receives what anyone may send, checks
+/// it, and queues the run it asks for. It holds no runtime database and no
+/// key, is given the way to neither, and asks seal only whether a signature
+/// is good. See docs/splitting-the-engine.md.
+async fn start_as_intake(
+    pool: PgPool,
+    options: ServerOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::roles::Role;
+    let workers = crate::roles::Workers::new(crate::roles::Roles::only(Role::Intake));
+    let given = crate::roles::given_to_the_intake_role();
+    if !given.is_empty() {
+        eprintln!(
+            "❌ RUNTARA_ROLE=intake was given {}. Intake holds nothing a run is made of: \
+             unset {} for this process.",
+            given.join(", "),
+            if given.len() == 1 { "it" } else { "them" },
+        );
+        std::process::exit(1);
+    }
+    if !runtara_connections::sealed::mode::SealMode::from_env().is_ok_and(|mode| mode.is_remote()) {
+        eprintln!(
+            "❌ RUNTARA_ROLE=intake needs a seal of its own (RUNTARA_SEAL_MODE=unix or mtls, \
+             docs/seal.md), as a caller that may only verify: intake holds no key"
+        );
+        std::process::exit(1);
+    }
+    let intake_at = match crate::roles::intake_at() {
+        Ok(intake_at) => intake_at,
+        Err(msg) => {
+            eprintln!("❌ Configuration error: {msg}");
+            std::process::exit(1);
+        }
+    };
+    if let Some(source) = options.entitlements.clone() {
+        config::install_entitlement_source(source);
+    }
+
+    let Common {
+        root_span,
+        redis_manager,
+        ..
+    } = common_start(&pool).await?;
+    let _guard = root_span.enter();
+
+    // A run intake queues is counted where every other is.
+    if let Some(manager) = redis_manager
+        .clone()
+        .filter(|_| config::valkey_admission_enabled())
+    {
+        // Counting only: the engine seeds the counter from its reservations
+        // and reconciles it.
+        workers::admission_counter::install_without_seeding(manager);
+        println!("✓ Valkey admission counter installed");
+    }
+
+    let sealed =
+        match runtara_connections::sealed::ready_from_env(pool.clone(), crate::seal_allowances())
+            .await
+        {
+            Ok(sealed) => sealed,
+            Err(msg) => {
+                eprintln!("❌ Configuration error: {msg}");
+                std::process::exit(1);
+            }
+        };
+
+    let product_events_config = product_events::ProductEventConfig::from_env();
+    let (product_event_tx, product_event_rx) =
+        tokio::sync::mpsc::channel(product_events_config.channel_capacity());
+    let product_event_sink = product_events::ProductEventSink::new(product_event_tx);
+
+    let runner = match crate::engine::remote::RemoteEngine::connect_as_intake(
+        &intake_at.engine_url,
+        &intake_at.tls_dir,
+    ) {
+        Ok(runner) => runner,
+        Err(msg) => {
+            eprintln!(
+                "❌ The engine at {} cannot be called: {msg}",
+                intake_at.engine_url
+            );
+            std::process::exit(1);
+        }
+    };
+
+    // What queues a run: the outbox, with no runtime behind it. What runs a
+    // workflow and waits is the engine's, asked for.
+    let executions = Arc::new(workers::execution_engine::ExecutionEngine::new(
+        pool.clone(),
+        Arc::new(api::repositories::workflows::WorkflowRepository::new(
+            pool.clone(),
+        )),
+        None,
+        None,
+        product_event_sink,
+    ));
+    let local = Arc::new(
+        crate::engine::LocalEngine::new(None, executions, pool.clone()).with_runs_elsewhere(runner),
+    );
+    let engine: Arc<dyn crate::engine::Engine> = local.clone();
+    local.serves(
+        crate::engine::Served::Events,
+        event_routes()
+            .with_state(IntakeState {
+                pool: pool.clone(),
+                engine,
+                check: Arc::new(api::services::webhook_verification::ByTrigger {
+                    pool: pool.clone(),
+                    sealed,
+                }),
+            })
+            .layer(DefaultBodyLimit::max(
+                api::handlers::events::webhook_max_body_bytes(),
+            )),
+    );
+
+    let identity = runtara_executor::tls::Identity::load(&intake_at.tls_dir)?;
+    let listener = runtara_executor::tls::bind(intake_at.listen).await?;
+    let address = listener.local_addr()?;
+    const SERVES: &[crate::engine::Served] = &[crate::engine::Served::Events];
+    tokio::spawn(runtara_executor::tls::serve(
+        listener,
+        identity.server_config()?,
+        crate::engine::remote::API_NAME,
+        crate::engine::listener::router_for_intake(local, SERVES),
+    ));
+    println!("✓ Intake listening for the API role on {address} (mutual TLS)");
+
+    let shutdown_coordinator = Arc::new(crate::shutdown::ShutdownCoordinator::new(
+        config::shutdown_grace(),
+    ));
+    let shutdown_signal = shutdown_coordinator.signal();
+    start_own_work(
+        &workers,
+        Role::Intake,
+        &shutdown_coordinator,
+        &pool,
+        redis_manager,
+        product_event_rx,
+        product_events_config,
+    );
+    workers.log_started();
+    let signal_coordinator = shutdown_coordinator.clone();
+    let signal_task = tokio::spawn(async move {
+        if let Err(e) = wait_for_shutdown_signal().await {
+            tracing::error!(error = %e, "Signal handler failed");
+        }
+        tracing::info!("Shutdown signal received");
+        signal_coordinator.request_shutdown();
+    });
+
+    if let Some(address) = intake_at.health {
+        let listener = tokio::net::TcpListener::bind(address)
+            .await
+            .map_err(|error| {
+                format!("RUNTARA_INTAKE_HEALTH_LISTEN: cannot listen on {address}: {error}")
+            })?;
+        let health = Router::new().route("/health", get(health_handler));
+        tokio::spawn(async move {
+            if let Err(error) = axum::serve(listener, health).await {
+                tracing::error!(%error, "Intake's health listener stopped");
+            }
+        });
+        println!("✓ Intake health on http://{address}/health");
+    }
+    println!("\n  Runtara {} intake is ready.\n", env!("BUILD_VERSION"));
+    shutdown_signal.clone().wait().await;
+    signal_task.abort();
+    shutdown_coordinator.drain_intake().await;
+    observability::shutdown_telemetry().await;
+    Ok(())
 }
 
 /// Starts the API role alone: it takes requests, and asks an engine in
@@ -2148,9 +2386,27 @@ async fn start_as_api(
         membership_policy,
     );
 
+    // What anyone may send goes to intake, where it is a process of its own
+    // (`RUNTARA_INTAKE_URL`), with the certificate the engine is called with.
+    let intake: Option<Arc<dyn crate::engine::Engine>> = match crate::roles::intake_url() {
+        None => None,
+        Some(url) => {
+            match crate::engine::remote::RemoteEngine::connect_to_intake(&url, &engine_at.tls_dir) {
+                Ok(intake) => {
+                    println!("✓ Webhooks are handed to intake at {url}");
+                    Some(intake)
+                }
+                Err(msg) => {
+                    eprintln!("❌ Intake at {url} cannot be called: {msg}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
     let public_app = api_app(ApiParts {
         pool: pool.clone(),
         engine: engine_api,
+        intake,
         agent_catalog,
         events: product_event_sink,
         valkey_conn: redis_manager,
@@ -3942,6 +4198,8 @@ async fn start_as_platform(
         api_app(ApiParts {
             pool: pool.clone(),
             engine: engine_api.clone(),
+            // This process receives what anyone may send itself.
+            intake: None,
             agent_catalog: agent_catalog.clone(),
             events: product_event_sink.clone(),
             valkey_conn: valkey_conn.clone(),

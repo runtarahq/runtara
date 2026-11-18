@@ -66,6 +66,30 @@ pub fn router(engine: Arc<dyn Engine>, callers: Arc<dyn Callers>) -> axum::Route
     })
 }
 
+/// Answers what the API hands intake: the requests of `parts`, as they
+/// arrived, and nothing else. Intake answers no operation, and serves no
+/// part that has a caller, so it verifies none.
+pub fn router_for_intake(engine: Arc<dyn Engine>, parts: &'static [Served]) -> axum::Router {
+    axum::Router::new().fallback(move |mut request: Request| {
+        let engine = engine.clone();
+        async move {
+            let path = request.uri().path().to_owned();
+            let Some(rest) = path.strip_prefix(wire::SERVED) else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            let (part, own) = rest.split_once('/').unwrap_or((rest, ""));
+            let Some(part) = Served::named(part).filter(|part| parts.contains(part)) else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            request.headers_mut().remove(wire::PRESENTED);
+            let Some(request) = as_it_arrived(request, own, None) else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            engine.serve(part, request).await
+        }
+    })
+}
+
 /// The caller of a call, verified. `Ok(None)` if the call came with nothing
 /// presented; `Err` is what is answered instead of the call.
 async fn caller_of(
