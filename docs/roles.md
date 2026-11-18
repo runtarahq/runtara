@@ -14,9 +14,10 @@ for itself who each call is for, and runs only what it approved.
 
 | `RUNTARA_ROLE` | What the process is |
 |---|---|
-| `all` (default) | Both, as before. |
+| `all` (default) | Everything, as before. |
 | `engine` | The engine alone. It binds no public listener; it listens for the API over mutual TLS. |
 | `api` | The API alone. It asks an engine for everything that is the engine's. |
+| `intake` | Optional. What receives a trigger's webhooks, in a process that holds no run state. See [Intake](#intake). |
 
 The background to this, and what is still to come, is in
 [separating-concerns.md](separating-concerns.md).
@@ -100,6 +101,65 @@ users, from the files under `scripts/roles/`. It needs
 `docker-compose.seal.yml` before it, because the engine starts only with a
 seal of its own, and combines with `docker-compose.executor.yml` (before it
 too). A stack that has already run without it is brought over as it is.
+
+## Intake
+
+A trigger's webhook and the synchronous trigger are sent by anyone. By
+default the API hands them to the engine as they arrived. With
+`RUNTARA_ROLE=intake` a third process receives them instead, so that
+anonymous traffic does not reach the process that holds run state.
+
+Intake looks up the trigger a webhook names, checks its signature where the
+trigger is bound to a connection that signs, and queues the run. The engine
+runs it. For the synchronous trigger it asks the engine to run the workflow
+and wait.
+
+| | Intake |
+|---|---|
+| `RUNTARA_INTAKE_LISTEN` | the address it listens on for the API, `host:port` |
+| `RUNTARA_INTAKE_TLS_DIR` | its certificate directory, from `init-pki --intake-dir` |
+| `RUNTARA_ENGINE_URL` | where the engine listens |
+| `RUNTARA_INTAKE_HEALTH_LISTEN` | optional: where it answers `/health`, and nothing else |
+| `RUNTARA_SERVER_DATABASE_URL` | yes, as a role of its own |
+| seal (`RUNTARA_SEAL_MODE`, …) | required, `unix` or `mtls`, as a caller of its own that administers nothing |
+| Valkey | yes, as a user of its own |
+| `TENANT_ID`, `RUNTARA_SERVED_TENANTS`, entitlements | yes, the same as the engine |
+| `RUNTARA_DATABASE_URL`, `RUNTARA_CONNECTIONS_ENCRYPTION_KEY`, `RUNTARA_CONNECTIONS_RETIRED_KEYS`, `RUNTARA_SEAL_WRAPPING_KEY`, `RUNTARA_EXECUTOR_TLS_DIR`, `RUNTARA_ARTIFACT_STORE_URL`, `RUNTARA_ENGINE_LISTEN`, `RUNTARA_COMPILER_WASM` | **refused** |
+
+The API is given `RUNTARA_INTAKE_URL` (`https://host:port`) and calls
+intake with the certificate it calls the engine with. Without it, the API
+hands webhooks to the engine as before.
+
+**What it is granted.** `scripts/roles/intake-database-role.sql` gives its
+database role the triggers to read, the tables a queued run is written to,
+and nothing else: no connection, no workflow definition, no key, and no
+working across tenants. `scripts/roles/intake-valkey-user.acl` lets its
+Valkey user count admissions and write product events. Its seal caller is
+one that administers nothing (`admin = false`, `destroy_keysets = false`).
+
+**How a signed webhook is checked without a connection.** What checks a
+trigger's webhook is kept on the trigger's row: the connection it is bound
+to, the connection's kind, and its signing secret as it is stored, sealed.
+The engine writes it when a trigger is saved, and again within thirty
+seconds of a connection's secret being entered again. Intake asks seal
+whether the signature is that secret's. A trigger bound to a connection
+with nothing kept for it yet is refused, not let through.
+
+**What it may ask the engine.** One thing: to run a workflow and wait, for
+anyone, which is what the synchronous trigger does. The engine takes that
+from intake's certificate only, and nothing else from it.
+
+**When something is away.** With the engine away, a webhook is still
+accepted and queued, and runs when the engine is back; the synchronous
+trigger answers `503`. With intake away, webhooks answer `503` and
+everything else the API does goes on.
+
+**What it does not receive yet.** Chat channel webhooks and OAuth redirects
+still go to the engine. See
+[splitting-the-engine.md](splitting-the-engine.md).
+
+`e2e/test_intake.sh` runs seal, an engine, intake and an API as separate
+processes and checks all of the above.
 
 ## Compiling
 

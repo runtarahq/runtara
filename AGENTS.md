@@ -123,6 +123,15 @@ scoped README files, examples.
   record or act on a field of a build's output that the engine has not
   checked or derived itself (`api/services/compilation.rs`). Give the
   compiler nothing but the request and the component files.
+- Intake (`RUNTARA_ROLE=intake`, `start_as_intake` in `server.rs`) receives
+  what anyone may send and holds no run state. Do not give it the runtime
+  database, a connection's row or the key that opens one
+  (`roles::given_to_the_intake_role` lists what it refuses). What it needs
+  to check a webhook is kept with the trigger
+  (`api/services/webhook_verification.rs`); what it needs of the engine is
+  an operation in `wire::ASKED_BY_INTAKE`, which does only what the engine
+  does for whoever sent the request. A table or Valkey key it uses is
+  granted in `scripts/roles/intake-*`.
 - Never read, print, log, or commit credential values. Treat `.env*`, tokens,
   connection parameters, and database URLs as sensitive.
 - Do not hand-edit generated artifacts or ignored build outputs.
