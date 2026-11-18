@@ -9,6 +9,7 @@ Written for people and coding assistants alike; the rules in
 | The service has… | Do this |
 | -- | -- |
 | An official OpenAPI 3 or Swagger 2.0 spec | [Generate the agent](#generated-agent) with `scripts/connector_gen` |
+| A GraphQL API | Generate the agent from its schema and operations you write ([GraphQL APIs](../scripts/connector_gen/README.md#graphql-apis)); its `kit.rs` reads the vendor's GraphQL answers |
 | No spec, but an API reference that describes it fully | Write the spec, keep it in the crate, and generate the agent from it ([`spec: path`](../scripts/connector_gen/README.md#everyday-changes)) |
 | No usable spec, or behaviour the spec cannot express | Write the agent by hand; `crates/agents/runtara-agent-stripe` is the reference |
 | A plain HTTP API nobody needs typed capabilities for | Add only a [connection type](#connection-type); the generic `http` agent can then call the service with it |
@@ -31,7 +32,7 @@ needs a hand-written capability, or the generic `http` agent.
   template change affects every generated agent: regenerate all of them and show
   the diff.
 - Do not update a `connector.yaml` sha256 pin without showing the user what
-  changed in the vendor's spec.
+  changed in the vendor's spec (or GraphQL schema).
 - Do not add capabilities by hand to a generated agent: list the operation in
   `connector.yaml`. The templates cannot yet include hand-written capabilities,
   so a vendor quirk that needs one is a template change (see the rule above).

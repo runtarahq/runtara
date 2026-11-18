@@ -1,10 +1,31 @@
 //! Checks for tests: whether a request a mock provider received is signed as
-//! the provider would require.
+//! the provider would require, and what a connection stores in the clear.
 
 use std::collections::HashMap;
 
 use hmac::{Hmac, Mac};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
+
+/// `value` with every sealed value in it replaced by `null`: what is stored
+/// in the clear, for a test to search for a secret.
+///
+/// A sealed value's ciphertext is random base64url, so any short text turns
+/// up in it by chance now and then. Searching the whole value for a short
+/// secret fails a test at random; searching this does not.
+pub fn without_sealed(value: &Value) -> Value {
+    match value {
+        sealed if super::is_sealed(sealed) => Value::Null,
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| (key.clone(), without_sealed(value)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(without_sealed).collect()),
+        other => other.clone(),
+    }
+}
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -147,5 +168,36 @@ pub fn check_shared_key(
         Ok(())
     } else {
         Err("the signature does not match".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::without_sealed;
+    use crate::sealed::SEALED_MARKER;
+
+    #[test]
+    fn only_sealed_values_are_taken_out() {
+        let sealed = json!({ SEALED_MARKER: { "envelope": { "ct": "csec" }, "policy": "ab" } });
+        let stored = json!({
+            "client_id": "cid",
+            "client_secret": sealed,
+            "pending": { "fields": { "access_token": sealed, "scope": "read" } },
+            "list": [sealed, "at-1"],
+            // An object with the marker beside other keys is not a sealed value.
+            "other": { SEALED_MARKER: "x", "csec": 1 },
+        });
+        assert_eq!(
+            without_sealed(&stored),
+            json!({
+                "client_id": "cid",
+                "client_secret": null,
+                "pending": { "fields": { "access_token": null, "scope": "read" } },
+                "list": [null, "at-1"],
+                "other": { SEALED_MARKER: "x", "csec": 1 },
+            })
+        );
     }
 }

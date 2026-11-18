@@ -10,6 +10,7 @@ use std::sync::Arc;
 use runtara_connections::auth::provider_auth::{
     ResolvedConnectionAuth, evict_connection_token_caches, resolve_connection_auth,
 };
+use runtara_connections::sealed::testing::without_sealed;
 use runtara_connections::sealed::{
     Allowances, MemoryKeySource, SealedCredentials, SendError, is_sealed,
 };
@@ -63,8 +64,9 @@ async fn stored(sealed: &SealedCredentials, connection: &str, params: &Value) ->
     for field in ["access_token", "refresh_token", "client_secret"] {
         assert!(is_sealed(&stored[field]));
     }
-    assert!(!stored.to_string().contains("CANARY"));
-    assert!(!stored.to_string().contains("csec"));
+    let clear = without_sealed(&stored).to_string();
+    assert!(!clear.contains("CANARY"), "{clear}");
+    assert!(!clear.contains("csec"), "{clear}");
     stored
 }
 
@@ -164,10 +166,10 @@ async fn sealed_tokens_refresh_through_seal_and_stay_sealed() {
     // The stored token ran out: seal refreshes, and the pair comes back sealed.
     let resolved = resolve(&sealed, connection, &first).await.unwrap();
     let presenting = resolved.sealed_parameters.clone().unwrap();
-    assert!(!presenting.to_string().contains("CANARY"));
+    assert!(!without_sealed(&presenting).to_string().contains("CANARY"));
     assert_eq!(send(presenting).await.unwrap().status, 200);
     let second = after(&first, &resolved);
-    assert!(!second.to_string().contains("CANARY"));
+    assert!(!without_sealed(&second).to_string().contains("CANARY"));
     assert_ne!(second["refresh_token"], first["refresh_token"]);
 
     // The client's credentials went as the provider takes them; seal added
@@ -407,7 +409,7 @@ async fn a_platform_apps_sealed_client_secret_goes_with_a_refresh() {
         )
         .await
         .unwrap();
-    assert!(!app.to_string().contains("CANARY"));
+    assert!(!app.to_string().contains("platform-CANARY"));
     let effective = sealed
         .with_shared_client(TYPE, &first, "platform", "platform-client", &app)
         .unwrap();
@@ -665,7 +667,7 @@ async fn a_code_is_exchanged_through_seal_for_a_sealed_pair() {
     let mut authorized = held.clone();
     authorized["access_token"] = grant.access_token;
     authorized["refresh_token"] = refresh_token;
-    assert!(!authorized.to_string().contains("CANARY"));
+    assert!(!without_sealed(&authorized).to_string().contains("CANARY"));
     assert!(!sealed.holds_stale_tokens(TYPE, &authorized));
     let kept = sealed
         .seal_parameters(TENANT, connection, TYPE, &authorized, Some(&authorized))
@@ -761,7 +763,7 @@ async fn a_platform_apps_code_is_exchanged_through_seal_too() {
         .unwrap();
     assert!(is_sealed(&exchanging["client_secret"]));
     assert_eq!(exchanging["client_id"], "platform-client");
-    assert!(!exchanging.to_string().contains("CANARY"));
+    assert!(!without_sealed(&exchanging).to_string().contains("CANARY"));
 
     let grant = sealed
         .exchange_code(
@@ -783,7 +785,7 @@ async fn a_platform_apps_code_is_exchanged_through_seal_too() {
     let mut authorized = stored.clone();
     authorized["access_token"] = grant.access_token;
     authorized["refresh_token"] = grant.refresh_token.expect("a refresh token");
-    assert!(!authorized.to_string().contains("CANARY"));
+    assert!(!without_sealed(&authorized).to_string().contains("CANARY"));
     assert!(authorized.get("client_secret").is_none());
     let kept = sealed
         .seal_parameters(TENANT, connection, TYPE, &authorized, Some(&authorized))
