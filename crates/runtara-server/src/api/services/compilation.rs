@@ -315,6 +315,63 @@ fn workflow_image_metadata(
     })
 }
 
+/// The agents `root` and `children` call, by canonical id: every Agent step,
+/// through the subgraphs of Split, While and WaitForSignal. The steps an
+/// allowlist check walks (`middleware::entitlement::walk_graph_for_agents`).
+pub(crate) fn agents_a_closure_calls<'a>(
+    root: &runtara_dsl::ExecutionGraph,
+    children: impl IntoIterator<Item = &'a runtara_dsl::ExecutionGraph>,
+) -> std::collections::BTreeSet<String> {
+    fn walk(graph: &runtara_dsl::ExecutionGraph, found: &mut std::collections::BTreeSet<String>) {
+        for step in graph.steps.values() {
+            match step {
+                runtara_dsl::Step::Agent(agent) => {
+                    found.insert(runtara_dsl::agent_meta::canonical_agent_id(&agent.agent_id));
+                }
+                runtara_dsl::Step::Split(split) => walk(&split.subgraph, found),
+                runtara_dsl::Step::While(repeated) => walk(&repeated.subgraph, found),
+                runtara_dsl::Step::WaitForSignal(wait) => {
+                    if let Some(on_wait) = &wait.on_wait {
+                        walk(on_wait, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut found = std::collections::BTreeSet::new();
+    walk(root, &mut found);
+    for child in children {
+        walk(child, &mut found);
+    }
+    found
+}
+
+/// Whether a build's metadata records every agent in `called` among the
+/// agents it composed. `Err` names the ones it leaves out; metadata that is
+/// missing leaves out all of them.
+fn records_the_agents_called(
+    metadata: Option<&DirectArtifactMetadata>,
+    called: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    let recorded: std::collections::BTreeSet<String> = metadata
+        .into_iter()
+        .flat_map(|metadata| &metadata.agent_components)
+        .filter_map(|component| component.agent_id.as_deref())
+        .map(runtara_dsl::agent_meta::canonical_agent_id)
+        .collect();
+    let missing: Vec<&str> = called
+        .iter()
+        .filter(|agent| !recorded.contains(*agent))
+        .map(String::as_str)
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(missing.join(", "))
+    }
+}
+
 async fn direct_artifact_metadata_for_image(
     compilation_result: &NativeCompilationResult,
 ) -> Option<DirectArtifactMetadata> {
@@ -1096,6 +1153,13 @@ impl CompilationService {
             None => (None, None, None),
         };
 
+        // The agents the graph and its children call, as this process reads
+        // them: what a compile elsewhere says it composed is held to this.
+        let agents_called = agents_a_closure_calls(
+            &execution_graph,
+            child_workflows.iter().map(|child| &child.execution_graph),
+        );
+
         // 4. Build compilation input
         let compilation_input = CompilationInput {
             tenant_id: tenant_id.to_string(),
@@ -1300,9 +1364,24 @@ impl CompilationService {
             }
             return Err(error);
         }
-        let floor = direct_artifact_metadata_for_image(&result)
-            .await
-            .and_then(|metadata| metadata.memory_floor_bytes);
+        let artifact_metadata = direct_artifact_metadata_for_image(&result).await;
+        // A compile outside this process says what agents it composed, and a
+        // launch checks those against the tenant's allowlist. It is not taken
+        // on its word: every agent the graph calls is among them, or the
+        // build is refused.
+        if crate::compile_executor::executor().is_some()
+            && let Err(missing) =
+                records_the_agents_called(artifact_metadata.as_ref(), &agents_called)
+        {
+            if let Some(r) = &progress_reporter {
+                r.clear().await;
+            }
+            return Err(ServiceError::CompilationError(format!(
+                "the build does not record the agents the workflow calls ({missing}), so it \
+                 cannot be checked against the tenant's agents"
+            )));
+        }
+        let floor = artifact_metadata.and_then(|metadata| metadata.memory_floor_bytes);
         let memory_floor_bytes = floor.and_then(|floor| i64::try_from(floor).ok());
         if let Err(error) = check_memory_floor(memory_mb, floor) {
             if let Some(r) = &progress_reporter {
@@ -2724,6 +2803,69 @@ mod tests {
             direct_artifact["agentComponents"][0]["agentId"],
             "transform"
         );
+    }
+
+    fn graph_of(steps: serde_json::Value) -> runtara_dsl::ExecutionGraph {
+        serde_json::from_value(serde_json::json!({
+            "entryPoint": "a", "steps": steps, "executionPlan": []
+        }))
+        .expect("a graph")
+    }
+
+    fn agent_step(id: &str, agent: &str) -> serde_json::Value {
+        serde_json::json!({"id": id, "stepType": "Agent", "agentId": agent, "capabilityId": "x"})
+    }
+
+    #[test]
+    fn the_agents_a_closure_calls_are_every_agent_step_of_it() {
+        let root = graph_of(serde_json::json!({
+            "a": agent_step("a", "http"),
+            "b": agent_step("b", "s3_storage"),
+            "finish": {"id": "finish", "stepType": "Finish"},
+        }));
+        let child = graph_of(serde_json::json!({ "a": agent_step("a", "utils") }));
+        let called = agents_a_closure_calls(&root, [&child]);
+        assert_eq!(
+            called.into_iter().collect::<Vec<_>>(),
+            [
+                runtara_dsl::agent_meta::canonical_agent_id("http"),
+                runtara_dsl::agent_meta::canonical_agent_id("s3_storage"),
+                runtara_dsl::agent_meta::canonical_agent_id("utils"),
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_build_that_leaves_out_an_agent_the_graph_calls_is_found_out() {
+        let called: std::collections::BTreeSet<String> = ["http".to_owned(), "utils".to_owned()]
+            .into_iter()
+            .collect();
+        // No metadata at all records nothing.
+        assert_eq!(
+            records_the_agents_called(None, &called).unwrap_err(),
+            "http, utils"
+        );
+        // A graph that calls no agent needs none recorded.
+        assert!(records_the_agents_called(None, &Default::default()).is_ok());
+        let mut metadata = direct_artifact_metadata_fixture();
+        let recorded: Vec<String> = metadata
+            .agent_components
+            .iter()
+            .filter_map(|component| component.agent_id.clone())
+            .collect();
+        let all: std::collections::BTreeSet<String> = recorded
+            .iter()
+            .map(|agent| runtara_dsl::agent_meta::canonical_agent_id(agent))
+            .collect();
+        assert!(records_the_agents_called(Some(&metadata), &all).is_ok());
+        metadata.agent_components.clear();
+        if !all.is_empty() {
+            assert!(records_the_agents_called(Some(&metadata), &all).is_err());
+        }
     }
 
     #[tokio::test]
