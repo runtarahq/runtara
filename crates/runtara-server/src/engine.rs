@@ -1214,21 +1214,9 @@ impl Engine for LocalEngine {
             .extensions_mut()
             .remove::<axum::extract::NestedPath>();
         // The request is answered in the scope of the tenant it is for, as
-        // every other call is: the tenant the API authenticated its caller
-        // for, or the one its path named. The scope is entered here, on the
-        // engine's side, and not taken from whatever task handed it over. A
-        // request that names neither (a webhook known only by an id) has its
-        // tenant found by the part that serves it.
-        let tenant = request
-            .extensions()
-            .get::<crate::auth::AuthContext>()
-            .map(|caller| caller.org_id.clone())
-            .or_else(|| {
-                request
-                    .extensions()
-                    .get::<crate::middleware::tenant_path::RequestedTenant>()
-                    .map(|named| named.0.clone())
-            });
+        // every other call is. The scope is entered here, on the engine's
+        // side, and not taken from whatever task handed it over.
+        let tenant = tenant_of(part, &request, crate::config::is_served_tenant);
         let Some(router) = router else {
             return axum::http::StatusCode::NOT_FOUND.into_response();
         };
@@ -1243,6 +1231,36 @@ impl Engine for LocalEngine {
             None => answered.await,
         }
     }
+}
+
+/// The tenant a request for a part the engine serves is for: the one the API
+/// authenticated its caller for, the one its path named to the API, or the
+/// one an OAuth redirect names in its own path (`/api/oauth/{tenant}/…`,
+/// whose segment stays in the path, so the API records none for it). A
+/// request that names none (a webhook known only by an id) has its tenant
+/// found by the part that serves it.
+fn tenant_of(
+    part: Served,
+    request: &axum::extract::Request,
+    is_served: impl Fn(&str) -> bool,
+) -> Option<String> {
+    request
+        .extensions()
+        .get::<crate::auth::AuthContext>()
+        .map(|caller| caller.org_id.clone())
+        .or_else(|| {
+            request
+                .extensions()
+                .get::<crate::middleware::tenant_path::RequestedTenant>()
+                .map(|named| named.0.clone())
+        })
+        .or_else(|| {
+            (part == Served::OAuthCallbacks)
+                .then(|| {
+                    crate::middleware::tenant_path::oauth_tenant(request.uri().path(), is_served)
+                })
+                .flatten()
+        })
 }
 
 /// The API's side of a part the engine serves, to be nested under the part's
@@ -1486,6 +1504,37 @@ mod serving {
         assert_eq!(ask(None).await, "no tenant");
         // And not the scope of whoever handed it over.
         assert_eq!(scoped("other", ask(Some("acme"))).await, "acme");
+    }
+
+    /// An OAuth redirect names its tenant in its own path, which the API
+    /// hands over as it is: the engine finds the tenant there, where it is
+    /// one it serves, and answers in its scope. In one process the API's
+    /// scope covered it; an engine in a process of its own had none, and
+    /// row-level security refused the callback its rows.
+    #[test]
+    fn an_oauth_redirect_is_for_the_tenant_its_path_names() {
+        let served = |tenant: &str| tenant == "acme";
+        let to = |path: &str| Request::get(path).body(Body::empty()).unwrap();
+        assert_eq!(
+            super::tenant_of(
+                Served::OAuthCallbacks,
+                &to("/api/oauth/acme/callback?code=c"),
+                served
+            ),
+            Some("acme".to_owned())
+        );
+        // Not a tenant this engine serves, and the redirect that names none.
+        for path in ["/api/oauth/other/callback", "/api/oauth/callback"] {
+            assert_eq!(
+                super::tenant_of(Served::OAuthCallbacks, &to(path), served),
+                None
+            );
+        }
+        // Only an OAuth redirect's path is read this way.
+        assert_eq!(
+            super::tenant_of(Served::Events, &to("/api/oauth/acme/callback"), served),
+            None
+        );
     }
 
     #[tokio::test]

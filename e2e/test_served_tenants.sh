@@ -541,6 +541,17 @@ STATE_HASH=$(python3 -c 'import sys,hashlib; print(hashlib.sha256(sys.argv[1].en
 [ "$(valkey_cli EXISTS "${SECOND_TENANT}:oauth_state:${STATE_HASH}")" = "1" ] \
     || { print_error "the primary tenant's callback reached the second tenant's state"; exit 1; }
 echo "  the primary tenant's callback refuses the second tenant's state and leaves it alone ✓"
+# Its own callback redeems its flow in its own scope: with the browser's
+# cookie it gets as far as the provider, which is not there. (An engine in a
+# process of its own once answered this in no scope, and row-level security
+# refused it its rows.)
+JAR="${TEST_DATA_DIR}/oauth.jar"
+OWN_AUTHORIZE=$(curl -sS -c "${JAR}" -H "Authorization: Bearer ${SECOND_KEY}" "${API}/connections/${B_CONN}/oauth/authorize" | jq -r '.authorization_url // .authorizationUrl // empty')
+OWN_STATE=$(python3 -c 'import sys,urllib.parse as u; print(u.parse_qs(u.urlparse(sys.argv[1]).query)["state"][0])' "${OWN_AUTHORIZE}")
+OWN=$(curl -sS -D - -b "${JAR}" "${CALLBACK}/${SECOND_TENANT}/callback?state=${OWN_STATE}&code=c1")
+echo "${OWN}" | grep -qE "token_exchange_failed" \
+    || { print_error "the second tenant's own callback did not reach the provider: $(echo "${OWN}" | tail -1)"; exit 1; }
+echo "  the second tenant's own callback redeems its flow in its scope, as far as the provider ✓"
 # A failed callback names no tenant it could prove: its event is not filed
 # under the tenant in its path.
 curl -sS -o /dev/null "${CALLBACK}/not-a-served-tenant/callback?error=access_denied"
