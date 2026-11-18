@@ -120,6 +120,11 @@ async fn answer(engine: Arc<dyn Engine>, callers: Arc<dyn Callers>, request: Req
                 "NOT_THE_CALLERS_TENANT",
                 "the caller does not act for the tenant the operation names",
             ),
+            Some(Err(wire::Refused::NotPermitted)) => refused(
+                StatusCode::FORBIDDEN,
+                "FORBIDDEN",
+                "the caller's role or credential does not allow the operation",
+            ),
             Some(Ok(answer)) => (
                 [(header::CONTENT_TYPE, "application/json")],
                 Body::from(answer),

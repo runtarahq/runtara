@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use super::*;
 use crate::auth::AuthContext;
+use crate::authz::Permission;
 use crate::workers::execution_engine::TriggerSource;
 
 /// The path of an operation is this, then its name.
@@ -39,6 +40,11 @@ pub(crate) trait Operation: Serialize + DeserializeOwned + Send + 'static {
     /// The tenant it is for, whose scope the engine answers it in.
     fn tenant(&self) -> Option<&str>;
 
+    /// What the caller's role and credential must allow, any one of them,
+    /// for the operation to be done. Empty for an operation that reads: any
+    /// member of the tenant may ask it.
+    const NEEDS: &'static [Permission];
+
     /// Makes the caller the operation names the one the engine found. Only an
     /// operation that names its caller does anything.
     fn of_caller(&mut self, caller: &AuthContext);
@@ -55,6 +61,9 @@ pub(crate) enum Refused {
     NoCaller,
     /// It is for a tenant its caller does not act for.
     NotTheCallers,
+    /// The caller's role, or what its credential is held to, does not allow
+    /// it.
+    NotPermitted,
 }
 
 /// What the engine says of itself, which does not change while it runs.
@@ -71,9 +80,30 @@ pub(crate) struct EngineFacts {
     pub compiles_by: crate::api::repositories::workflows::CompilesBy,
 }
 
+/// Whether `caller` may do what needs any one of `needs`: by its role, as
+/// the API's route gate decides it, and by what its credential is held to.
+fn permitted(caller: &AuthContext, needs: &[Permission]) -> bool {
+    if needs.is_empty() {
+        return true;
+    }
+    let policy = crate::auth::membership_policy();
+    needs.iter().any(|permission| {
+        caller
+            .api_key_scope
+            .permits(Some(*permission), &axum::http::Method::POST)
+            && crate::middleware::authorization::require_permission(
+                policy,
+                caller.role,
+                *permission,
+            )
+            .is_ok()
+    })
+}
+
 macro_rules! operations {
     ($(
         $name:ident { $($field:ident : $ty:ty),* $(,)? } -> $answer:ty,
+        $(needs [$($needs:ident),+],)?
         |$engine:ident, $op:ident| for $tenant:expr $(, as $caller:ident)? => $call:expr;
     )*) => {
         $(
@@ -83,6 +113,7 @@ macro_rules! operations {
             impl Operation for $name {
                 const NAME: &'static str = stringify!($name);
                 type Answer = $answer;
+                const NEEDS: &'static [Permission] = &[$($(Permission::$needs),+)?];
 
                 fn tenant(&self) -> Option<&str> {
                     let $op = self;
@@ -127,6 +158,9 @@ macro_rules! operations {
                                     Some(caller) if caller.org_id != tenant => {
                                         return Some(Err(Refused::NotTheCallers));
                                     }
+                                    Some(caller) if !permitted(caller, <$name>::NEEDS) => {
+                                        return Some(Err(Refused::NotPermitted));
+                                    }
                                     Some(caller) => operation.of_caller(caller),
                                 }
                                 scoped(tenant, operation.ask(engine)).await
@@ -166,6 +200,7 @@ operations! {
         trigger_source: TriggerSource,
         instance_id: Option<Uuid>,
     } -> Result<QueuedExecution, ExecutionError>,
+    needs [WorkflowExecute],
     |engine, op| for Some(&op.tenant_id) => engine.queue(QueueRequest {
         run_label: op.run_label,
         tenant_id: &op.tenant_id,
@@ -186,6 +221,7 @@ operations! {
         version: Option<i32>,
         inputs: Value,
     } -> Result<SyncExecution, ExecutionError>,
+    needs [WorkflowExecute],
     |engine, op| for Some(&op.tenant_id) => engine.run_sync(SyncRequest {
         run_label: op.run_label,
         tenant_id: &op.tenant_id,
@@ -196,22 +232,27 @@ operations! {
 
     EnqueueTriggerEvent { tenant_id: String, event: TriggerEvent, idempotency_key: String }
         -> Result<EnqueuedExecution, ExecutionError>,
+    needs [WorkflowExecute],
     |engine, op| for Some(&op.tenant_id) =>
         engine.enqueue_trigger_event(&op.tenant_id, op.event, op.idempotency_key).await;
 
     Replay { tenant_id: String, original_instance_id: String }
         -> Result<QueuedExecution, ExecutionError>,
+    needs [WorkflowExecute],
     |engine, op| for Some(&op.tenant_id) =>
         engine.replay(&op.tenant_id, &op.original_instance_id).await;
 
     // ---- Lifecycle ------------------------------------------------------------
     Stop { tenant_id: String, instance_id: String } -> Result<StopOutcome, ExecutionError>,
+    needs [WorkflowExecute],
     |engine, op| for Some(&op.tenant_id) => engine.stop(&op.tenant_id, &op.instance_id).await;
 
     Pause { tenant_id: String, instance_id: String } -> Result<PauseOutcome, ExecutionError>,
+    needs [WorkflowExecute],
     |engine, op| for Some(&op.tenant_id) => engine.pause(&op.tenant_id, &op.instance_id).await;
 
     Resume { tenant_id: String, instance_id: String } -> Result<ResumeOutcome, ExecutionError>,
+    needs [WorkflowExecute],
     |engine, op| for Some(&op.tenant_id) => engine.resume(&op.tenant_id, &op.instance_id).await;
 
     // ---- Runs, as the API shows them ----------------------------------------------
@@ -327,6 +368,7 @@ operations! {
         operation: String,
         payload: Value,
     } -> InputResult<InputReceipt>,
+    needs [WorkflowExecute],
     |engine, op| for Some(&op.tenant_id) => engine
         .submit_input_response(
             &op.tenant_id,
@@ -344,6 +386,7 @@ operations! {
         operation: String,
         payload: Value,
     } -> InputResult<InputReceipt>,
+    needs [WorkflowExecute],
     |engine, op| for Some(&op.auth.org_id), as auth => engine
         .submit_authenticated_input_response(
             &op.auth,
@@ -383,6 +426,7 @@ operations! {
         operation_id: String,
         payload: Value,
     } -> Result<WorkflowActionReceipt, WorkflowRuntimeError>,
+    needs [WorkflowExecute],
     |engine, op| for Some(&op.auth.org_id), as auth => engine
         .submit_workflow_action(
             &op.auth,
@@ -401,6 +445,7 @@ operations! {
         operation_id: String,
         payload: Value,
     } -> Result<WorkflowActionReceipt, WorkflowRuntimeError>,
+    needs [WorkflowExecute],
     |engine, op| for Some(&op.auth.org_id), as auth => engine
         .submit_authenticated_input(
             &op.auth,
@@ -417,12 +462,14 @@ operations! {
     // ---- Compilation ------------------------------------------------------------
     CompileWorkflow { tenant_id: String, workflow_id: String, version: i32, force_recompile: bool }
         -> Result<CompilationResultDto, CompilationError>,
+    needs [WorkflowExecute, WorkflowCreate, WorkflowUpdate],
     |engine, op| for Some(&op.tenant_id) => engine
         .compile_workflow(&op.tenant_id, &op.workflow_id, op.version, op.force_recompile)
         .await;
 
     PublishWorkflowAgent { tenant_id: String, workflow_id: String, version: i32, slug: String }
         -> Result<Value, CompilationError>,
+    needs [WorkflowExecute, WorkflowCreate, WorkflowUpdate],
     |engine, op| for Some(&op.tenant_id) => engine
         .publish_workflow_agent(&op.tenant_id, &op.workflow_id, op.version, op.slug)
         .await;
@@ -435,6 +482,7 @@ operations! {
     |engine, op| for Some(&op.tenant_id) => engine.tenant_connections(&op.tenant_id).await;
 
     ReconcileChannelWebhooks { tenant_id: String, removed: Vec<InvocationTrigger> } -> (),
+    needs [WorkflowDelete],
     |engine, op| for Some(&op.tenant_id) =>
         engine.reconcile_channel_webhooks(&op.tenant_id, &op.removed).await;
 
@@ -442,6 +490,7 @@ operations! {
     |engine, op| for Some(&op.tenant_id) => engine.workflow_agents(&op.tenant_id).await;
 
     UnstageWorkflowAgent { tenant_id: String, slug: String } -> Result<(), String>,
+    needs [WorkflowDelete],
     |engine, op| for Some(&op.tenant_id) =>
         engine.unstage_workflow_agent(&op.tenant_id, &op.slug).await;
 
@@ -453,6 +502,7 @@ operations! {
         force_recompile: bool,
         compiled: Option<ProductEvent>,
     } -> Result<bool, CompilationQueueError>,
+    needs [WorkflowExecute, WorkflowCreate, WorkflowUpdate],
     |engine, op| for Some(&op.tenant_id) => engine
         .enqueue_compilation(
             &op.tenant_id,
@@ -481,6 +531,7 @@ operations! {
         .await;
 
     MarkCompilationQueued { tenant_id: String, workflow_id: String, version: i32 } -> (),
+    needs [WorkflowExecute, WorkflowCreate, WorkflowUpdate],
     |engine, op| for Some(&op.tenant_id) => engine
         .mark_compilation_queued(&op.tenant_id, &op.workflow_id, op.version)
         .await;
@@ -500,6 +551,7 @@ operations! {
         connection_id: Option<String>,
         engine: TestEngine,
     } -> Result<TestResult, AgentTestError>,
+    needs [WorkflowExecute],
     |engine, op| for Some(&op.tenant_id) => engine
         .test_agent(
             &op.tenant_id,

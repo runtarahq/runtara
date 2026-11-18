@@ -1419,6 +1419,31 @@ mod tests {
         assert!(remote.learn().await);
     }
 
+    /// What changes something is done for a caller whose credential allows
+    /// it; what reads is answered to any member.
+    #[tokio::test]
+    async fn an_operation_is_done_only_as_far_as_the_callers_credential_allows() {
+        let mut reader = caller("acme", "ann");
+        reader.api_key_scope = crate::authz::ApiKeyScope::ReadOnly;
+        let ask = |name: &'static str, body: &'static str, caller: crate::auth::AuthContext| async move {
+            let engine = engine_side();
+            wire::answer(engine.as_ref(), name, body.as_bytes(), Some(&caller))
+                .await
+                .unwrap()
+        };
+        let stop = r#"{"tenant_id":"acme","instance_id":"r"}"#;
+        assert_eq!(
+            ask("Stop", stop, reader.clone()).await,
+            Err(wire::Refused::NotPermitted)
+        );
+        assert!(ask("Stop", stop, caller("acme", "ann")).await.is_ok());
+        assert!(ask("GetInstanceInfo", stop, reader).await.is_ok());
+        // Every operation that reads nothing but changes something says what
+        // it needs.
+        assert!(!<wire::Queue as wire::Operation>::NEEDS.is_empty());
+        assert!(<wire::ListEvents as wire::Operation>::NEEDS.is_empty());
+    }
+
     /// An operation that names its caller is answered for the caller the
     /// engine found, not the one the API wrote.
     #[tokio::test]
