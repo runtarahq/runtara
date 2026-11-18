@@ -33,6 +33,15 @@ use uuid::Uuid;
 /// otherwise. One past it is refused.
 pub const QUEUE_BOUND: usize = 32;
 
+/// The bound an operator set (`RUNTARA_CONVERSATION_QUEUE_BOUND`), or
+/// [`QUEUE_BOUND`].
+pub fn queue_bound_from_env() -> usize {
+    std::env::var("RUNTARA_CONVERSATION_QUEUE_BOUND")
+        .ok()
+        .and_then(|bound| bound.trim().parse().ok())
+        .unwrap_or(QUEUE_BOUND)
+}
+
 /// The kind of event a `conversation` agent's `reply` leaves on its run.
 pub const REPLY_EVENT: &str = "conversation_reply";
 

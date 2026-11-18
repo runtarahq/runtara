@@ -590,7 +590,8 @@ impl LocalEngine {
             conversations: Conversations::new(
                 pool.clone(),
                 Arc::new(EngineRuns::new(runtime.clone(), executions.clone())),
-            ),
+            )
+            .with_queue_bound(crate::api::services::conversations::queue_bound_from_env()),
             runtime,
             executions,
             pool,
