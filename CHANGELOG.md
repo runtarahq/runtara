@@ -1105,21 +1105,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   terminal execution and asserts it is swept within seconds — guarding
   the eager-pass behavior described above.
 
-### Removed
-
-- **BREAKING: the platform chat channels and the Channel trigger type.**
-  The server no longer receives Telegram, Slack, Teams or Mailgun
-  conversations itself: the `/api/runtime/events/webhook/{platform}/…`
-  routes, the `CHANNEL` trigger type, Telegram's webhook registration, and
-  the `channel_intake` table are gone. A migration deletes existing Channel
-  triggers; nothing reads them. A trigger's response no longer carries
-  `webhookUrl`. Sending a message with the Slack, Teams and Mailgun agents
-  is unchanged, and so are HTTP triggers. A chat platform is to reach a
-  workflow as an integration built on the native conversation
-  (`docs/native-chat.md`), which is not built yet: until it is, no chat
-  platform starts or continues a conversation. The console's Channel
-  trigger option needs removing in runtara-frontend.
-
 ### Changed
 
 - **The session delivery routes need a permission.** `GET
@@ -1639,6 +1624,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   states will be deleted.
 
 ### Removed
+
+- **BREAKING: the platform chat channels and the Channel trigger type.**
+  The server no longer receives Telegram, Slack, Teams or Mailgun
+  conversations itself: the `/api/runtime/events/webhook/{platform}/…`
+  routes, the `CHANNEL` trigger type, Telegram's webhook registration, and
+  the `channel_intake` table are gone. A migration deletes existing Channel
+  triggers; nothing reads them. A trigger's response no longer carries
+  `webhookUrl`. Sending a message with the Slack, Teams and Mailgun agents
+  is unchanged, and so are HTTP triggers. A chat platform is to reach a
+  workflow as an integration built on the native conversation
+  (`docs/native-chat.md`), which is not built yet: until it is, no chat
+  platform starts or continues a conversation. The console's Channel
+  trigger option needs removing in runtara-frontend.
 
 - **The isolated-agent experiment.** Agent steps were once compiled, behind
   an operator policy, as children run in Wasmtime stores of their own. New
