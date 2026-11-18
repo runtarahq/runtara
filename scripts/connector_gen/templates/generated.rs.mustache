@@ -122,6 +122,28 @@ pub async fn {{operationId}}(input: {{operationIdCamelCase}}Input) -> Result<{{#
 impl {{operationIdCamelCase}}Input {
     /// The request this capability sends; the connection supplies host and credentials.
     pub fn request(&self) -> Result<kit::Request, AgentError> {
+{{! A GraphQL operation (`graphql_source.py`) is a POST of the operation and
+    its variables to the API's one endpoint; its inputs are the variables. }}
+{{#vendorExtensions.x-runtara-graphql-document}}
+        const DOCUMENT: &str = r##"{{{vendorExtensions.x-runtara-graphql-document}}}"##;
+        let variables = kit::Body::new()
+{{#bodyParam}}
+{{#vars}}
+{{^isReadOnly}}
+            .{{#required}}field{{/required}}{{^required}}field_opt{{/required}}("{{baseName}}", &self.{{#vendorExtensions.x-runtara-input-name}}{{.}}{{/vendorExtensions.x-runtara-input-name}}{{^vendorExtensions.x-runtara-input-name}}{{name}}{{/vendorExtensions.x-runtara-input-name}})
+{{/isReadOnly}}
+{{/vars}}
+{{/bodyParam}}
+        ;
+        kit::Request::new("POST", String::from("{{{vendorExtensions.x-runtara-graphql-path}}}")).graphql(
+            DOCUMENT,
+            "{{{vendorExtensions.x-runtara-graphql-field}}}",
+            {{#vendorExtensions.x-runtara-side-effects}}false{{/vendorExtensions.x-runtara-side-effects}}{{^vendorExtensions.x-runtara-side-effects}}true{{/vendorExtensions.x-runtara-side-effects}},
+            variables,
+            "{{errorPrefix}}",
+        )
+{{/vendorExtensions.x-runtara-graphql-document}}
+{{^vendorExtensions.x-runtara-graphql-document}}
 {{#hasPathParams}}
         let path = format!(
             "{{basePathWithoutHost}}{{{path}}}"{{#pathParams}},
@@ -164,6 +186,7 @@ impl {{operationIdCamelCase}}Input {
 {{^bodyParam}}
         Ok(request)
 {{/bodyParam}}
+{{/vendorExtensions.x-runtara-graphql-document}}
     }
 }
 {{/operation}}

@@ -254,7 +254,8 @@ async fn generic_authcode_full_flow_from_params() {
             "{token}"
         );
     }
-    assert!(!stored.to_string().contains("at-1"), "{stored}");
+    let clear = runtara_connections::sealed::testing::without_sealed(&stored).to_string();
+    assert!(!clear.contains("at-1"), "{clear}");
     assert!(stored["token_expires_at"].is_string());
     assert_eq!(status, "ACTIVE");
 }

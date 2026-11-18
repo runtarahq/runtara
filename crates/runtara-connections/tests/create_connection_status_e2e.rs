@@ -15,6 +15,7 @@ use std::sync::Arc;
 use runtara_connections::crypto::noop::NoOpCipher;
 use runtara_connections::integration_compatibility::IntegrationCompatibility;
 use runtara_connections::repository::connections::ConnectionRepository;
+use runtara_connections::sealed::testing::without_sealed;
 use runtara_connections::service::connections::ConnectionService;
 use runtara_connections::types::CreateConnectionRequest;
 use serde_json::json;
@@ -303,7 +304,7 @@ async fn editing_params_applies_descriptor_owned_reauthorization() {
         runtara_connections::sealed::is_sealed(&after["client_secret"]),
         "untouched secret is kept, sealed"
     );
-    assert!(!after.to_string().contains("QBSEC"));
+    assert!(!without_sealed(&after).to_string().contains("QBSEC"));
     assert_eq!(status_of(&fx.pool, &id).await, "REQUIRES_RECONNECTION");
 
     let stale_request = serde_json::from_value(json!({
@@ -500,7 +501,11 @@ async fn explicit_secret_replace_clear_and_forbidden_clear_are_enforced() {
         &replaced["bearer_token"]
     ));
     assert_ne!(replaced["bearer_token"], before_replace["bearer_token"]);
-    assert!(!replaced.to_string().contains("new-password"));
+    assert!(
+        !without_sealed(&replaced)
+            .to_string()
+            .contains("new-password")
+    );
 
     let projection = svc
         .get_connection(&id, "t")
