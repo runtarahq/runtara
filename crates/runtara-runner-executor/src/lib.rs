@@ -245,6 +245,15 @@ impl Provider for ExecutorProvider {
         })
     }
 
+    /// A compiler is a guest like a run's: its memory and its lifetime.
+    fn guest_spec(&self, memory_bytes: u64, lifetime: Duration) -> Option<Value> {
+        Some(json!({
+            "wasm_memory_bytes": memory_bytes,
+            "lifetime_seconds": lifetime.as_secs().clamp(1, 86_400),
+            "env": {},
+        }))
+    }
+
     /// Nothing is sent: the executor fetches a workflow it does not hold
     /// when a run of it is placed ([`workflow_router`]).
     async fn stage(&self, _tenant: &str, bytes: &[u8]) -> Result<String, String> {

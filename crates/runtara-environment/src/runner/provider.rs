@@ -36,9 +36,9 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 use super::{
-    ContainerMetrics, LaunchLifecycle, LaunchOptions, Result, RunExitReport, Runner, RunnerError,
-    RunnerHandle, RunnerOccupancy, RunnerParts, StartGate, StartGateOutcome, publish_terminal,
-    run_launch_lifecycle,
+    CompileElsewhere, CompiledElsewhere, ContainerMetrics, LaunchLifecycle, LaunchOptions, Result,
+    RunExitReport, Runner, RunnerError, RunnerHandle, RunnerOccupancy, RunnerParts, StartGate,
+    StartGateOutcome, publish_terminal, run_launch_lifecycle,
 };
 use crate::launch_queue::LaunchKind;
 use crate::runtime_host::PersistenceRuntimeHost;
@@ -116,6 +116,12 @@ pub trait Provider: Send + Sync {
     /// the runner adds) for a run of `options` of a component of
     /// `component_bytes`.
     fn spec(&self, options: &LaunchOptions, component_bytes: u64) -> Value;
+    /// The provider's launch spec for a guest that is not a workflow's run
+    /// (a compiler): its memory and how long it may live. `None` from a
+    /// provider that places only runs.
+    fn guest_spec(&self, _memory_bytes: u64, _lifetime: Duration) -> Option<Value> {
+        None
+    }
     /// Stages a workflow component for `tenant`; what a placement names it by.
     async fn stage(&self, tenant: &str, bytes: &[u8]) -> std::result::Result<String, String>;
     /// Places a run of `artifact` with `spec`; the provider's run id.
@@ -639,10 +645,120 @@ async fn run_placed(placement: Placement, mut slot: SlotPermit) -> InvokeRunResu
     result
 }
 
+/// The tenant a provider keeps the compiler under. The compiler is the
+/// platform's and the same for every tenant, so what a provider makes of it
+/// (an executor's machine code) is made once, not once for each tenant.
+/// Each compile is still a guest of its own.
+pub const COMPILER_TENANT: &str = "runtara-compiler";
+
+/// How long past its lifetime a compiler is waited for before it is given up.
+const COMPILE_GRACE: Duration = Duration::from_secs(30);
+
+/// Places one compile with `provider` and waits for what its compiler
+/// answers. The launch is served the compile's request, the components it
+/// names and its outcome, and nothing else of the workflow API
+/// ([`ApiLaunches::begin_compile`]).
+async fn place_compile(
+    provider: Arc<dyn Provider>,
+    launches: Arc<ApiLaunches>,
+    channel: &RunChannel,
+    workflows: &Arc<LaunchWorkflows>,
+    mut spec: Value,
+    compile: CompileElsewhere,
+) -> std::result::Result<CompiledElsewhere, String> {
+    let binding = Binding {
+        tenant_id: compile.tenant_id,
+        instance_id: String::new(),
+        launch_id: format!("compile-{}", uuid::Uuid::new_v4().simple()),
+        root_lease_epoch: 0,
+    };
+    let launch = binding.launch_id.clone();
+    launches.begin_compile(binding.clone(), compile.request, compile.components)?;
+    // Whatever happens from here, the launch is no longer served afterwards.
+    let ended = async {
+        channel.attach(&mut spec, &launches, &binding)?;
+        // Its runner may fetch the compiler, and no other artifact, from
+        // before it is placed until the compile is over.
+        let _served = workflows.serve(&launch, compile.compiler.clone());
+        let kept_as = Binding {
+            tenant_id: COMPILER_TENANT.to_owned(),
+            ..binding.clone()
+        };
+        let run = provider
+            .place(spec, compile.compiler.as_str(), &kept_as)
+            .await
+            .map_err(|error| format!("{} did not take the compile: {error}", provider.name()))?;
+        launches.open_start(&launch);
+        let deadline = tokio::time::Instant::now() + compile.timeout + COMPILE_GRACE;
+        loop {
+            if launches.posted(&launch) {
+                return Ok(());
+            }
+            let end = tokio::select! {
+                end = provider.ended(&run, WAIT) => end,
+                _ = launches.outcome_posted(&launch) => None,
+            };
+            if launches.posted(&launch) {
+                return Ok(());
+            }
+            if let Some(end) = end {
+                return Err(match end {
+                    ProviderEnd::Exited(code) => {
+                        format!("the compiler ended with {code} and no outcome")
+                    }
+                    ProviderEnd::Failed(why) => format!("the compiler was not run: {why}"),
+                    ProviderEnd::Lost(why) => format!("the compiler was lost: {why}"),
+                });
+            }
+            if tokio::time::Instant::now() >= deadline {
+                provider.stop(&run).await;
+                return Err("the compiler ran past its time".to_owned());
+            }
+        }
+    }
+    .await;
+    let made = launches.made(&launch);
+    let posted = launches.finish(&launch);
+    ended?;
+    match posted {
+        Some(runtara_workflow_api::PostedOutcome::Completed(outcome)) => {
+            Ok(CompiledElsewhere { outcome, made })
+        }
+        Some(runtara_workflow_api::PostedOutcome::Failed(error)) => Err(format!(
+            "the compiler failed: {} ({})",
+            error.message, error.code
+        )),
+        Some(runtara_workflow_api::PostedOutcome::Suspended(_)) | None => {
+            Err("the compiler posted no outcome".to_owned())
+        }
+    }
+}
+
 #[async_trait]
 impl Runner for ProviderRunner {
     fn runner_type(&self) -> &'static str {
         self.provider.name()
+    }
+
+    async fn compile_elsewhere(
+        &self,
+        compile: CompileElsewhere,
+    ) -> Option<std::result::Result<CompiledElsewhere, String>> {
+        let spec = self
+            .provider
+            .guest_spec(compile.memory_bytes, compile.timeout)?;
+        let (channel, workflows) = (self.run_channel.as_ref()?, self.workflows.as_ref()?);
+        Some(
+            place_compile(
+                self.provider.clone(),
+                self.launches.clone(),
+                channel,
+                workflows,
+                spec,
+                compile,
+            )
+            .await,
+        )
     }
 
     /// A provider's runner gives a run only WASI, so workflows compose the
