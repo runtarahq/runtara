@@ -42,6 +42,7 @@ from graphql import (
     build_schema,
     get_introspection_query,
     get_named_type,
+    is_abstract_type,
     is_composite_type,
     is_leaf_type,
     lexicographic_sort_schema,
@@ -121,6 +122,15 @@ def markdown_text(text: str) -> str:
         if fence:
             fenced = not fenced
     return "\n".join(lines)
+
+
+def nullable(schema: dict) -> dict:
+    """`schema`, which may also be `null`. OpenAPI 3.0 ignores keys beside a
+    `$ref`, so a model is wrapped in an `allOf` that can carry `nullable`."""
+    if "$ref" in schema:
+        return {"allOf": [{"$ref": schema["$ref"]}], "nullable": True,
+                **{key: value for key, value in schema.items() if key != "$ref"}}
+    return {**schema, "nullable": True}
 
 
 def described(text) -> dict:
@@ -301,11 +311,22 @@ class Operation:
         schema = dict(mapped) if isinstance(mapped, dict) else {"type": mapped}
         return {**described(named.description), **schema}
 
+    def input_value(self, gql_type) -> dict:
+        """The schema of a value sent in: a variable, an input object's field or
+        a list's item. Unless the type is non-null, it is marked nullable, so an
+        explicit `null` stays apart from leaving it out: GraphQL applies a
+        variable's default or leaves a field as it is when it is left out, and
+        uses (or clears with) the `null` it is sent."""
+        schema = self.input_schema(gql_type)
+        if isinstance(gql_type, GraphQLNonNull):
+            return schema
+        return nullable(schema)
+
     def input_schema(self, gql_type) -> dict:
         if isinstance(gql_type, GraphQLNonNull):
             return self.input_schema(gql_type.of_type)
         if isinstance(gql_type, GraphQLList):
-            return {"type": "array", "items": self.input_schema(gql_type.of_type)}
+            return {"type": "array", "items": self.input_value(gql_type.of_type)}
         if is_leaf_type(gql_type):
             return self.leaf_schema(gql_type)
         assert isinstance(gql_type, GraphQLInputObjectType)
@@ -318,7 +339,7 @@ class Operation:
             self.components[name] = {}  # placeholder: an input type may refer to itself
             properties, required = {}, []
             for field_name, field in gql_type.fields.items():
-                properties[field_name] = {**self.input_schema(field.type), **described(field.description)}
+                properties[field_name] = {**self.input_value(field.type), **described(field.description)}
                 if field.deprecation_reason is not None:
                     properties[field_name]["deprecated"] = True
                 if isinstance(field.type, GraphQLNonNull) and field.default_value is Undefined:
@@ -346,7 +367,7 @@ class Operation:
         if isinstance(gql_type, GraphQLList):
             items = self.output_schema(gql_type.of_type, sources, model, prefix)
             if not isinstance(gql_type.of_type, GraphQLNonNull):
-                items = {"allOf": [items], "nullable": True} if "$ref" in items else {**items, "nullable": True}
+                items = nullable(items)
             return {"type": "array", "items": items}
         if is_leaf_type(gql_type):
             return self.leaf_schema(gql_type)
@@ -472,7 +493,7 @@ class Operation:
         for variable in variables:
             name = variable.variable.name.value
             gql_type = type_from_ast(self.schema, variable.type)
-            schema = {**self.input_schema(gql_type), **described(descriptions.get(name))}
+            schema = {**self.input_value(gql_type), **described(descriptions.get(name))}
             if variable.default_value is not None:
                 schema["default"] = value_from_ast_untyped(variable.default_value)
             elif isinstance(gql_type, GraphQLNonNull):
@@ -493,18 +514,50 @@ class Operation:
         payload = get_named_type(self.root_field.type)
         if self.user_errors not in getattr(payload, "fields", {}):
             return
-        # Selected directly or through a fragment, under its own name: the
-        # kit reads the answer's field of that name.
-        selected = {}
-        self.collect(payload, self.root.selection_set, selected)
-        if not any(node.name.value == self.user_errors for _, node, _ in selected.get(self.user_errors, [])):
-            sys.exit(f"{self.name}: select `{self.user_errors}` (not aliased) on `{self.root_key}`; "
-                     "it is how the vendor says it refused the write")
+        if not self.always_selects(payload, self.root.selection_set, self.user_errors, set()):
+            sys.exit(f"{self.name}: select `{self.user_errors}` on `{self.root_key}` so that it is always "
+                     "in the answer: not aliased, and with no @skip or @include on it or on a fragment "
+                     "around it. It is how the vendor says it refused the write")
+
+    def always_selects(self, parent, selection_set, name: str, spread: set) -> bool:
+        """Whether `selection_set` selects the field `name` of `parent` under its
+        own name in every answer: directly, or through fragments that always
+        apply to `parent`, with no @skip or @include on the way."""
+        if selection_set is None:
+            return False
+        for selection in selection_set.selections:
+            if any(d.name.value in ("skip", "include") for d in selection.directives or ()):
+                continue
+            if isinstance(selection, FieldNode):
+                if selection.name.value == name and selection.alias is None:
+                    return True
+            elif isinstance(selection, InlineFragmentNode):
+                condition = selection.type_condition
+                if (condition is None or self.applies(condition.name.value, parent)) and \
+                        self.always_selects(parent, selection.selection_set, name, spread):
+                    return True
+            elif isinstance(selection, FragmentSpreadNode) and selection.name.value not in spread:
+                fragment = self.fragments[selection.name.value]
+                if any(d.name.value in ("skip", "include") for d in fragment.directives or ()):
+                    continue
+                if self.applies(fragment.type_condition.name.value, parent) and self.always_selects(
+                        parent, fragment.selection_set, name, spread | {selection.name.value}):
+                    return True
+        return False
+
+    def applies(self, type_name: str, parent) -> bool:
+        """Whether a fragment on `type_name` applies to every `parent`: the type
+        itself, or an interface or union it belongs to."""
+        condition = self.schema.get_type(type_name)
+        return condition is parent or (is_abstract_type(condition) and self.schema.is_sub_type(condition, parent))
 
     def openapi_operation(self, path: str) -> dict:
         self.check_user_errors()
         # The result is `ListProductsResult`; the objects inside it are named
         # after the operation, not after `…Result`: `ListProductsPageInfo`.
+        # It is the field's type even when the schema lets the field be null:
+        # the kit reports a null top-level field as an error (nothing found,
+        # or an unknown outcome for a mutation), never as a null result.
         response = self.output_schema(self.root_field.type, [(self.root_field, self.root)],
                                       pascal(self.name) + "Result", prefix=pascal(self.name))
         operation = {

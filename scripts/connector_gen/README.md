@@ -467,7 +467,12 @@ which is then sliced, labelled and rendered like any other:
   Putting variables inside an input object (`product: {title: $title}`) gives
   the step one input per field, where a variable of the input object's type
   would be one object input. An unset input is not sent, so the operation's
-  default applies.
+  default applies (or, for an input object's field, the vendor leaves the
+  value as it is). An input whose type is not non-null (no `!`), an input
+  object's field of such a type and a list's item may also be set to `null`,
+  which is sent as `null`: it overrides the default, or clears the value.
+  These are `Option<Option<T>>` (`kit::nullable`), as a nullable body field
+  of an OpenAPI operation is.
 - **The output** is what the top-level field returns, built from the fields
   the operation selects; aliases, inline fragments and fragment spreads are
   merged, each fragment's fields read from its own type (an `owner` that is a
@@ -484,8 +489,9 @@ which is then sliced, labelled and rendered like any other:
 - **Queries are reads; mutations have side effects.**
 - **`user_errors`** names the field in which the vendor's mutations report
   input they refused (Shopify's `userErrors`). A mutation whose result has
-  that field must select it, directly or through a fragment and not aliased,
-  so a refused write cannot read as done.
+  that field must select it so that it is always in the answer: directly or
+  through a fragment, not aliased, and with no `@skip` or `@include` on it or
+  on a fragment around it. Otherwise a refused write could read as done.
 - Descriptions are Markdown: links read as their text, and the lines of a
   paragraph are joined. Code, fenced or indented, is kept as written.
 
@@ -502,13 +508,24 @@ kit::Request::new("POST", path).graphql(
 )
 ```
 
-So a GraphQL agent's kit has `Request::graphql`, and its `send` reads the
-answer, which a GraphQL API sends with HTTP 200 whether it worked or not:
-`errors` (a rate limit among them, as Shopify's `THROTTLED`), the mutation's
-`user_errors` field, and a `null` field (nothing found, for a query). How each
-maps to an error is the vendor's to define. A query can be sent again when it
-gets no answer; a mutation, like any other write, is retried only if sending
-it twice changes nothing.
+So a GraphQL agent's kit has `Request::graphql` and `nullable`, and its
+`send` reads the answer, which a GraphQL API sends with HTTP 200 whether it
+worked or not: `errors` (a rate limit among them, as Shopify's `THROTTLED`)
+and the mutation's `user_errors` field. How each maps to an error is the
+vendor's to define. A query can be sent again when it gets no answer; a
+mutation, like any other write, is retried only if sending it twice changes
+nothing.
+
+**A `null` top-level field is an error, not a result.** `product(id:)` answers
+`null` for an id it does not know, and a nullable mutation payload can be
+`null` too. The kit reports that as an error: nothing found
+(`<PREFIX>_NOT_FOUND`) for a query, and an unknown outcome for a mutation,
+which may or may not have been carried out. So the capability returns the
+field's non-null type (`GetProductResult`, not `Option<GetProductResult>`),
+and a workflow branches on the error rather than checking every step's output
+for `null`. Items of a list are different: a `null` item is part of the
+answer (`nodes(ids:)` keeps a place for each id), so they are
+`Option<T>`.
 
 `check` also fails when an operation file no longer matches the operation in
 `spec.slice.json`, or `graphql.path` (where an API version usually is) no
@@ -646,8 +663,8 @@ crates/agents/runtara-agent-<id>/
   rewritten where listed above), and GraphQL schemas with operations of ours.
 - A GraphQL operation selects one top-level field and is no subscription. The
   objects it returns are typed from what it selects, with every field
-  optional. An optional input, or an optional field of an input object, is
-  sent or left out, never sent as an explicit `null`.
+  optional. A top-level field that answers `null` is an error the kit reports,
+  never a `null` result.
 - `fetch` refuses, naming the operation, what the templates cannot send yet:
   request bodies that are not JSON (form-encoded, multipart), object query
   parameters without declared scalar fields (unless free-form: a `deepObject`

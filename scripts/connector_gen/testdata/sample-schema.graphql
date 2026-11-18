@@ -89,7 +89,14 @@ type Query {
   "Returns an item by its ID."
   item("The ID of the item." id: ID!): Item
   "Lists items."
-  items("How many items to return." first: Int, after: String, query: String): [Item!]!
+  items(
+    "How many items to return."
+    first: Int
+    after: String
+    query: String
+    "Labels the items carry; a null one matches an item without a label."
+    labels: [String]
+  ): [Item!]!
   node(id: ID!): Node
   "Looks objects up by their IDs; an unknown ID is null."
   nodes("The IDs of the objects." ids: [ID!]!): [Node]!

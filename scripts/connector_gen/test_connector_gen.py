@@ -2330,6 +2330,41 @@ class GraphqlTest(unittest.TestCase):
         self.assertEqual(result["properties"]["userErrors"]["items"],
                          {"$ref": "#/components/schemas/CreateItemUserErrors"})
 
+    def test_inputs_that_may_be_null_can_be_sent_as_null(self):
+        sliced, _ = fetched({
+            "byLabels": """
+                query byLabels($labels: [String], $first: Int = 3, $query: String!) {
+                  items(first: $first, labels: $labels, query: $query) { id }
+                }""",
+            "createFromInput": """
+                mutation createFromInput($input: ItemInput!) {
+                  itemCreate(input: $input) { item { id } userErrors { message } }
+                }""",
+        })
+        variables = body_schema(operation(sliced, "byLabels"))["properties"]
+        # Nullable: an explicit null is sent, and stays apart from leaving the
+        # input out (which applies the default of 3).
+        self.assertTrue(variables["first"]["nullable"])
+        self.assertEqual(variables["first"]["default"], 3)
+        self.assertTrue(variables["labels"]["nullable"])
+        self.assertEqual(variables["labels"]["items"], {"type": "string", "nullable": True})
+        # `String!` cannot be null.
+        self.assertNotIn("nullable", variables["query"])
+        fields = sliced["components"]["schemas"]["ItemInput"]["properties"]
+        self.assertNotIn("nullable", fields["name"])
+        self.assertTrue(fields["price"]["nullable"])
+        # A field with a default, of a nullable type, can still be sent as null.
+        self.assertTrue(fields["status"]["nullable"])
+        # `[String!]`: the list may be null, its items not.
+        self.assertTrue(fields["tags"]["nullable"])
+        self.assertNotIn("nullable", fields["tags"]["items"])
+        # An input object variable of a nullable type keeps its model.
+        legacy = body_schema(operation(fetched({"legacy": """
+            mutation legacy($item: ItemInput) {
+              itemCreate(input: {name: "A"}, legacy: $item) { item { id } userErrors { message } }
+            }"""})[0], "legacy"))["properties"]["item"]
+        self.assertEqual((legacy["allOf"], legacy["nullable"]), ([{"$ref": "#/components/schemas/ItemInput"}], True))
+
     def test_a_default_makes_an_input_optional(self):
         sliced, _ = fetched({"listItems": "query listItems($first: Int = 25) { items(first: $first) { id } }"})
         op = operation(sliced, "listItems")
@@ -2451,6 +2486,28 @@ class GraphqlTest(unittest.TestCase):
                           user_errors="userErrors")
         self.assertIn("select `userErrors`", message)
 
+    def test_user_errors_must_always_be_in_the_answer(self):
+        conditional = {
+            "skipped field": "itemCreate(input: {name: \"A\"}) { item { id } userErrors @skip(if: true) { message } }",
+            "included field": "itemCreate(input: {name: \"A\"}) { item { id } userErrors @include(if: $on) { message } }",
+            "inline fragment": "itemCreate(input: {name: \"A\"}) { item { id } ... @include(if: $on) { userErrors { message } } }",
+            "fragment spread": "itemCreate(input: {name: \"A\"}) { item { id } ...Errors @skip(if: $on) }",
+            "aliased": "itemCreate(input: {name: \"A\"}) { item { id } refused: userErrors { message } }",
+        }
+        fragment = "\nfragment Errors on ItemCreatePayload { userErrors { message } }"
+        for case, selection in conditional.items():
+            with self.subTest(case):
+                variables = "($on: Boolean = true)" if "$on" in selection else ""
+                document = f"mutation createItem{variables} {{ {selection} }}"
+                if "...Errors" in selection:
+                    document += fragment
+                self.assertIn("so that it is always in the answer",
+                              refused({"createItem": document}, user_errors="userErrors"))
+        # Conditionally in one place and always in another is enough.
+        fetched({"createItem": "mutation createItem($on: Boolean = true) { itemCreate(input: {name: \"A\"}) "
+                               "{ item { id } userErrors @include(if: $on) { field } ...Errors } }" + fragment},
+                user_errors="userErrors")
+
     def test_scalars_must_be_the_schemas(self):
         self.assertIn("are no custom scalar", refused({"getItem": GET_ITEM}, scalars={"Item": "string"}))
 
@@ -2490,6 +2547,8 @@ class GraphqlRenderTest(unittest.TestCase):
                 "createItem": CREATE_ITEM,
                 "many": "query many($ids: [ID!]!) { nodes(ids: $ids) { id } }",
                 "itemLabels": "query itemLabels($id: ID!) { item(id: $id) { labels } }",
+                "byLabels": "query byLabels($labels: [String], $first: Int = 3) "
+                            "{ items(first: $first, labels: $labels) { id } }",
             }, user_errors="userErrors")
             with contextlib.redirect_stdout(io.StringIO()):
                 cg.fetch(Path(tmp))
@@ -2507,9 +2566,20 @@ class GraphqlRenderTest(unittest.TestCase):
         self.assertIn('.field("name", &self.name)', self.flat)
         self.assertIn('.field_opt("price", &self.price)', self.flat)
         self.assertIn("pub name: String,", self.text)
-        self.assertIn("pub price: Option<String>,", self.text)
+
+    def test_an_input_that_may_be_null_tells_null_from_left_out(self):
+        # Option<Option<T>>: None is left out (the default applies), Some(None)
+        # is sent as null.
+        self.assertIn("pub price: Option<Option<String>>,", self.text)
+        self.assertIn("pub first: Option<Option<i64>>,", self.text)
+        self.assertIn("pub labels: Option<Option<Vec<Option<String>>>>,", self.text)
+        self.assertIn('rename = "first", default, skip_serializing_if = "Option::is_none", '
+                      'deserialize_with = "kit::nullable"', self.flat)
+        self.assertIn('.field_opt("first", &self.first)', self.flat)
 
     def test_the_result_is_returned_typed(self):
+        # `item(id:)` may be null, yet the capability returns the item: the kit
+        # reports a null top-level field as an error, never as a null result.
         self.assertIn("-> Result<GetItemResult, AgentError>", self.flat)
         self.assertIn("-> Result<CreateItemResult, AgentError>", self.flat)
         self.assertIn("pub user_errors: Option<Vec<CreateItemUserErrors>>,", self.text)
