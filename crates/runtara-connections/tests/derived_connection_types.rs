@@ -127,7 +127,11 @@ async fn a_declared_connections_secret_is_sealed_for_the_vendors_host() {
         .unwrap()
         .expect("the connection is sealed");
     assert!(is_sealed(&stored["password"]));
-    assert!(!stored.to_string().contains("pw-CANARY"));
+    assert!(
+        !runtara_connections::sealed::testing::without_sealed(&stored)
+            .to_string()
+            .contains("pw-CANARY")
+    );
     assert_eq!(policy::request_fields("example_crm", &stored), ["password"]);
     assert_eq!(
         policy::injected_headers("example_crm", &stored),

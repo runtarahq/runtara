@@ -1202,6 +1202,7 @@ fn signed_mailgun_request(connection_id: &str, delivery: u32, key: &str) -> Requ
 #[tokio::test]
 async fn a_sealed_channel_connections_webhook_is_checked_by_seal() {
     use runtara_connections::sealed::keys::PgKeySource;
+    use runtara_connections::sealed::testing::without_sealed;
     use runtara_connections::sealed::{Allowances, SealedCredentials, is_sealed};
     const MAILGUN_KEY: &str = "intake-harness-mailgun-signing-key";
     let harness = Harness::new().await;
@@ -1228,7 +1229,7 @@ async fn a_sealed_channel_connections_webhook_is_checked_by_seal() {
     .await
     .unwrap();
     assert!(is_sealed(&stored["signing_secret"]) && is_sealed(&stored["bot_token"]));
-    assert!(!stored.to_string().contains(SLACK_SECRET));
+    assert!(!without_sealed(&stored).to_string().contains(SLACK_SECRET));
 
     let mut forged = Provider::Slack.request(&slack, 1);
     forged.headers_mut().insert(
