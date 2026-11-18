@@ -164,9 +164,11 @@ if [ "${RUNTARA_ONLY_WORKFLOW_COMPONENTS:-}" != "1" ]; then
     # it the component files, and one that asks its host for them over the
     # workflow API, for a guest placed on an executor
     # (docs/compiler-on-an-executor.md).
-    echo "==> runtara-compile-sandboxed, runtara-compile-guest"
+    # And the save-time validator, placed on an executor the same way.
+    echo "==> runtara-compile-sandboxed, runtara-compile-guest, runtara-validate-placed"
     cargo build --release --target wasm32-wasip2 -p runtara-compile-guest \
-        --bin runtara-compile-sandboxed --bin runtara-compile-guest
+        --bin runtara-compile-sandboxed --bin runtara-compile-guest \
+        --bin runtara-validate-placed
 fi
 
 echo "==> runtara-workflow-stdlib"

@@ -249,8 +249,15 @@ a guest like a run, in a `runtara-run` of its own:
    one the outcome names, and what the server records of the build it
    checks or derives itself.
 
+Saving a workflow validates it, and the validator is placed the same way
+(`runtara-validate-placed.wasm`): it is given the closure and the agent
+catalog, and answers its report.
+
 What follows from it:
 
+- **No executor, no save.** A workflow that could not be validated is not
+  saved. A server that has just started waits up to ten seconds for its
+  first executor before it refuses one.
 - **No executor, no compile.** The server does not compile in its own
   process instead. A compile no executor takes fails, and is asked for
   again when the workflow is next saved or run.
@@ -258,8 +265,9 @@ What follows from it:
   usually well under a second.
 - **The first compile at an executor** waits for the compiler itself to be
   compiled to machine code, some seconds, once.
-- **A server with executors does not start without the compiler to place**
-  (`RUNTARA_COMPILE_GUEST_WASM` names it when it is not beside the
+- **A server with executors does not start without the compiler and the
+  validator to place** (`RUNTARA_COMPILE_GUEST_WASM` and
+  `RUNTARA_VALIDATE_GUEST_WASM` name them when they are not beside the
   components).
 
 ## What is different from the embedded runner

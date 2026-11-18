@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **With executors, workflows are validated on one.** Saving a workflow
+  validates it, and a server whose runner is executors places the
+  validator as a guest there, as it places the compiler. The API asks the
+  engine to validate (in a split deployment it validated itself), and the
+  engine validates against the agents it has. There is no validating in
+  the server instead: with no executor a workflow is not saved (E138),
+  after a wait of up to ten seconds for one to say it is here, which a
+  compile now waits too. The bundle carries the validator to place
+  (`runtara-validate-placed.wasm`; `RUNTARA_VALIDATE_GUEST_WASM` names
+  another), and a server with executors does not start without it. Without
+  executors nothing changes.
 - **With executors, workflows are compiled on one.** A server whose
   runner is executors (`RUNTARA_RUNNER=executor`) places the compiler as a
   guest there, like a run: in a `runtara-run` that can open no file and

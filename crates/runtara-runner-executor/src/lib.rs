@@ -245,6 +245,10 @@ impl Provider for ExecutorProvider {
         })
     }
 
+    fn none_here(&self) -> bool {
+        self.executors.candidates().is_empty()
+    }
+
     /// A compiler is a guest like a run's: its memory and its lifetime.
     fn guest_spec(&self, memory_bytes: u64, lifetime: Duration) -> Option<Value> {
         Some(json!({

@@ -1125,6 +1125,22 @@ impl Engine for RemoteEngine {
         .await
     }
 
+    async fn validate_closure(
+        &self,
+        tenant_id: &str,
+        root_workflow_id: &str,
+        root: runtara_dsl::ExecutionGraph,
+        children: Vec<runtara_workflows::ClosureChildGraph>,
+    ) -> Result<runtara_workflows::ClosureValidationReport, String> {
+        self.ask(wire::ValidateClosure {
+            tenant_id: tenant_id.to_owned(),
+            root_workflow_id: root_workflow_id.to_owned(),
+            root,
+            children,
+        })
+        .await
+    }
+
     async fn workflow_agents(&self, tenant_id: &str) -> Vec<runtara_dsl::agent_meta::AgentInfo> {
         self.ask(wire::WorkflowAgents {
             tenant_id: tenant_id.to_owned(),
@@ -1919,6 +1935,16 @@ mod tests {
                 )],
             ),
             ("GetTenantMetrics", vec![get("/api/runtime/metrics/tenant")]),
+            // Validating is asked by the validate route, and by saving a
+            // workflow (the API and MCP's authoring tools).
+            (
+                "ValidateClosure",
+                vec![
+                    post("/api/runtime/workflows/graph/validate"),
+                    WorkflowCreate,
+                    WorkflowUpdate,
+                ],
+            ),
             (
                 "OpenConversationWith",
                 vec![

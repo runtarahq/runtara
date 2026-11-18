@@ -611,6 +611,19 @@ operations! {
     needs [WorkflowRead, WorkflowCreate, WorkflowUpdate],
     |engine, op| for Some(&op.tenant_id) => engine.tenant_connections(&op.tenant_id).await;
 
+    // Validating a closure, as saving it does: asked by the validate route
+    // and by every save.
+    ValidateClosure {
+        tenant_id: String,
+        root_workflow_id: String,
+        root: runtara_dsl::ExecutionGraph,
+        children: Vec<runtara_workflows::ClosureChildGraph>,
+    } -> Result<runtara_workflows::ClosureValidationReport, String>,
+    needs [WorkflowRead, WorkflowCreate, WorkflowUpdate],
+    |engine, op| for Some(&op.tenant_id) => engine
+        .validate_closure(&op.tenant_id, &op.root_workflow_id, op.root, op.children)
+        .await;
+
     // What agents a tenant published: the API lists agents to every caller
     // (its agent routes are ungated), so any member may ask.
     WorkflowAgents { tenant_id: String } -> Vec<runtara_dsl::agent_meta::AgentInfo>,

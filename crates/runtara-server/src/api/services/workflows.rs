@@ -855,12 +855,26 @@ impl WorkflowService {
         // catalog overlay (a parent may target `agentId: <slug>`).
         let effective_catalog =
             crate::workflow_agents::catalog_with_workflow_agents(&self.agent_catalog, tenant_id);
-        let report = crate::validation_sandbox::validate_workflow_closure(
-            workflow_id,
-            &workflow.execution_graph,
-            &effective_catalog,
-            &closure_children,
-        );
+        // The engine validates, where it validates. A closure it could not
+        // validate is refused, not validated here instead. Work that asks
+        // the engine nothing has none to ask, and validates in this process.
+        let report = match &self.engine {
+            Some(engine) => engine
+                .validate_closure(
+                    tenant_id,
+                    workflow_id,
+                    workflow.execution_graph.clone(),
+                    closure_children.clone(),
+                )
+                .await
+                .unwrap_or_else(crate::validation_sandbox::refused),
+            None => crate::validation_sandbox::validate_workflow_closure(
+                workflow_id,
+                &workflow.execution_graph,
+                &effective_catalog,
+                &closure_children,
+            ),
+        };
 
         structured_errors.extend(report.errors_with_graph_paths().map(
             |(origin, graph_path, error)| {

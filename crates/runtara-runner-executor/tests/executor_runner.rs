@@ -690,3 +690,83 @@ async fn a_compile_with_no_executor_to_take_it_fails() {
         .expect_err("no executor is here");
     assert!(refused.contains("did not take the compile"), "{refused}");
 }
+
+// ---- Save-time validation placed on an executor ----
+
+/// The validator that takes its request and gives its report over the
+/// workflow API.
+fn validator() -> Vec<u8> {
+    let path = components_dir().join("runtara-validate-placed.wasm");
+    std::fs::read(&path).unwrap_or_else(|_| {
+        panic!(
+            "missing {}: scripts/build-agent-components.sh builds it",
+            path.display()
+        )
+    })
+}
+
+impl Deployment {
+    /// Places a validation of `graph` with an executor and answers its
+    /// report.
+    async fn validate_elsewhere(
+        &self,
+        graph: Value,
+    ) -> Result<runtara_workflows::ClosureValidationReport, String> {
+        let validator = self.artifacts.put(&validator()).await.unwrap();
+        let catalog = runtara_dsl::agent_meta::AgentCatalog::from_meta_dir(&components_dir())
+            .expect("catalog");
+        let request = runtara_workflows::ClosureValidationRequest {
+            root_workflow_id: "placed".into(),
+            root: serde_json::from_value(graph).expect("graph"),
+            catalog,
+            children: vec![],
+        };
+        let answered = self
+            .runner
+            .compile_elsewhere(runtara_environment::runner::CompileElsewhere {
+                tenant_id: "tenant-x".into(),
+                compiler: validator,
+                request: serde_json::to_vec(&request).unwrap(),
+                components: Default::default(),
+                memory_bytes: 256 * 1024 * 1024,
+                timeout: Duration::from_secs(30),
+            })
+            .await
+            .expect("a runner over executors places guests")?;
+        assert!(
+            answered.made.is_none(),
+            "a validator hands back no component"
+        );
+        serde_json::from_slice(&answered.outcome).map_err(|error| error.to_string())
+    }
+}
+
+/// The validator runs as a guest of `runtara-run` on an executor, is given
+/// the closure and the whole agent catalog over the run channel, and reports
+/// what validating in this process does.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_validation_placed_on_an_executor_reports_what_one_in_process_does() {
+    let deployment = deployment().await;
+    let catalog =
+        runtara_dsl::agent_meta::AgentCatalog::from_meta_dir(&components_dir()).expect("catalog");
+    let mut broken = an_agent_graph();
+    broken["steps"]["echo"]["agentId"] = json!("an-agent-that-is-not-there");
+    for graph in [an_agent_graph(), broken] {
+        let local = runtara_workflows::validate_workflow_closure(
+            "placed",
+            &serde_json::from_value(graph.clone()).unwrap(),
+            &catalog,
+            &[],
+        );
+        let placed = deployment
+            .validate_elsewhere(graph)
+            .await
+            .expect("validated on an executor");
+        assert_eq!(placed.is_ok(), local.is_ok());
+        assert_eq!(
+            serde_json::to_value(&placed).unwrap(),
+            serde_json::to_value(&local).unwrap(),
+            "the same report as validating in this process"
+        );
+    }
+}

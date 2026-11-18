@@ -43,6 +43,7 @@ The background to this, and what is still to come, is in
 | `RUNTARA_ENGINE_HEALTH_LISTEN` | **refused** | optional: where it says it is up, `host:port` |
 | `RUNTARA_COMPILER_WASM` | unused | required without executors: the compiler's WASI command for a sandbox in the engine's process, `runtara-compile-sandboxed.wasm`, which ships beside the components. With executors (`RUNTARA_RUNNER=executor`) it is not loaded: workflows are compiled on one |
 | `RUNTARA_COMPILE_GUEST_WASM` | unused | optional, with executors: the compiler that is placed on one, when it is not `runtara-compile-guest.wasm` beside the components |
+| `RUNTARA_VALIDATE_GUEST_WASM` | unused | optional, with executors: the save-time validator that is placed on one, when it is not `runtara-validate-placed.wasm` beside the components |
 | `RUNTARA_CONVERSATION_QUEUE_BOUND` | unused | optional: how many messages one conversation holds while its run is busy; 32 without it ([native-chat.md](native-chat.md)) |
 
 An API that is given something marked **refused** does not start, and names
@@ -207,6 +208,10 @@ no executor takes fails, and a server with executors that has not the
 compiler to place (`runtara-compile-guest.wasm`, beside the components)
 does not start. What the compiler hands back the engine checks as it does
 the sandbox's.
+
+Validating a workflow when it is saved goes the same way: the API asks the
+engine, and an engine with executors places the validator on one. With no
+executor a workflow is not saved.
 
 Loading the compiler, loading the source, and everything after the build
 (the records, the image, what is approved to run) stay the engine's. A
