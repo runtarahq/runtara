@@ -373,8 +373,9 @@ Left as it was, on purpose:
 - **Database migrations run in whichever process starts.** An API given a
   role that cannot change the schema (Phase 4) starts with
   `SKIP_MIGRATIONS=true`, after the engine.
-- **The engine has no health endpoint of its own.** What says it is up is
-  the API's log (`The engine answers`) and its answers.
+- **The engine had no health endpoint of its own.** What said it was up
+  was the API's log (`The engine answers`) and its answers. Phase 5 gave it
+  one (`RUNTARA_ENGINE_HEALTH_LISTEN`).
 
 **Tests.** The wire has unit tests in one process and over real mutual TLS
 (`engine::remote::tests`): a request crosses as it arrived, a caller named
@@ -483,17 +484,28 @@ e2e/test_served_tenants.sh` runs the two-tenant test with the API on its
 own database role and Valkey user, and its last section turns each thing
 the API holds against the engine.
 
-## Phase 5: deployment and documents
+## Phase 5: done
 
-- An overlay for the evaluation stack that runs the three processes, next to
-  `docker-compose.executor.yml`.
-- `docs/roles.md` (written with Phase 3, and the database roles and Valkey
-  users with Phase 4) grows into the page for the deployment, with the
-  overlay.
-- A hosted deployment maps onto this directly: the proxy in front routes
-  public traffic to API processes and refuses the engine, run channel,
-  executor and seal ports; the engine and seal run on hosts the proxy does
-  not share.
+Deployment and documents. Implemented on `feature/engine-decides`.
+
+- **`docker-compose.roles.yml`** is an overlay for the evaluation stack that
+  runs the three processes, next to `docker-compose.executor.yml` and on top
+  of `docker-compose.seal.yml`. The `runtara` service becomes the engine and
+  a new `api` service takes the requests. It makes the certificates, the
+  API's database role and the two Valkey users from the files under
+  `scripts/roles/`, which a test holds it to.
+- **The engine says it is up** where `RUNTARA_ENGINE_HEALTH_LISTEN` tells it
+  to: `/health` and nothing else, once it is ready. The overlay's health
+  check asks it, and the API starts after it.
+- **`docs/roles.md`** is the page for the deployment: what each process is
+  given, the certificates, the database roles and Valkey users, the
+  overlay, and how a hosted deployment maps onto it. The proxy in front
+  routes public traffic to API processes and refuses the engine, run
+  channel, executor and seal ports; the engine and seal run on hosts the
+  proxy does not share.
+- **`e2e/test_two_roles_oidc.sh`** closes what Phase 4's scripts left to
+  unit tests: the engine verifying OIDC tokens, membership and roles
+  itself.
 
 ## What this does not protect against
 
@@ -534,7 +546,7 @@ the API holds against the engine.
 
 ## Order and size
 
-Phases 0, 1, 2, 3 and 4 are done. Phase 2 was the
+Phases 0 to 5 are done. Phase 2 was the
 bulk: about 25 to 30 operations and 50 to 60 call sites, done in the six
 groups above. Phase 3 was mostly transport once Phase 2 held, and found
 three more things the API's code took from its own process. Phase 4 changes

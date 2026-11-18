@@ -3874,6 +3874,22 @@ async fn start_as_platform(
     match public_app {
         Some(public_app) => serve_public(public_app, auth_kind, shutdown_signal.clone()).await?,
         None => {
+            // An engine with no public listener says it is up where it is
+            // told to, once it is: `/health` and nothing else.
+            if let Some(address) = crate::roles::engine_health_listen()? {
+                let listener = tokio::net::TcpListener::bind(address)
+                    .await
+                    .map_err(|error| {
+                        format!("RUNTARA_ENGINE_HEALTH_LISTEN: cannot listen on {address}: {error}")
+                    })?;
+                let health = Router::new().route("/health", get(health_handler));
+                tokio::spawn(async move {
+                    if let Err(error) = axum::serve(listener, health).await {
+                        tracing::error!(%error, "The engine's health listener stopped");
+                    }
+                });
+                println!("✓ Engine health on http://{address}/health");
+            }
             println!("\n  Runtara {} engine is ready.\n", env!("BUILD_VERSION"));
             shutdown_signal.clone().wait().await;
         }

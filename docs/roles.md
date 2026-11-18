@@ -39,6 +39,7 @@ The background to this, and what is still to come, is in
 | `RUNTARA_ENGINE_URL` | where the engine listens, `https://host:port` | — |
 | `RUNTARA_ENGINE_LISTEN` | **refused** | the address it listens on for the API, `host:port` |
 | `RUNTARA_ENGINE_TLS_DIR` | its certificate directory | its certificate directory |
+| `RUNTARA_ENGINE_HEALTH_LISTEN` | **refused** | optional: where it says it is up, `host:port` |
 
 An API that is given something marked **refused** does not start, and names
 what it was given. An engine does not start without
@@ -80,11 +81,35 @@ the components. Give it a directory of those files from the same release
 the engine runs, as `RUNTARA_AGENT_COMPONENTS_DIR`. It reads the
 descriptions and loads no component; the `.wasm` files need not be there.
 
+## Trying it: the evaluation stack
+
+`docker-compose.roles.yml` is an overlay on the evaluation stack that runs
+the three processes: seal, the engine and the API.
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.seal.yml \
+  -f docker-compose.roles.yml up
+```
+
+The stack's `runtara` service becomes the engine, and a new `api` service
+takes the requests on the same port as before. The overlay makes the
+certificates, the API's database role with its grants, and the two Valkey
+users, from the files under `scripts/roles/`. It needs
+`docker-compose.seal.yml` before it, because the engine starts only with a
+seal of its own, and combines with `docker-compose.executor.yml` (before it
+too). A stack that has already run without it is brought over as it is.
+
 ## Starting and stopping
 
 Start the engine first. It runs the database migrations; an API started
 before it runs them itself, and one started with `SKIP_MIGRATIONS=true`
 leaves them to the engine.
+
+The engine binds no public listener, so nothing answers `/health` for it
+unless it is told where: with `RUNTARA_ENGINE_HEALTH_LISTEN=host:port` it
+answers `/health` there once it is ready, and nothing else. It has no TLS,
+and is for the engine's own host or container (a container health check, a
+process supervisor).
 
 The API starts whether or not the engine answers, and says which in its
 log (`Engine at … answers`, later `The engine answers` or `The engine does
@@ -218,10 +243,33 @@ trigger).
 ## Checking it
 
 `e2e/test_two_roles.sh` starts seal, an engine, two executors and an API
-as separate processes and runs through the above. `TWO_ROLES=true
+as separate processes and runs through the above. `e2e/test_two_roles_oidc.sh`
+runs the two with OIDC sign-in and membership required, and asks the engine
+directly with tokens that are forged, expired, another tenant's, revoked, a
+non-member's, a viewer's, and for the other way in. `TWO_ROLES=true
 e2e/test_served_tenants.sh` runs the two-tenant test the same way, with
 the API on the database role and Valkey user above. Its last section turns
 what the API holds against the engine: its certificate asks for another
 tenant, its database role reaches for the outbox, the keys and the runtime
 database, its Valkey user writes a trigger stream, and a definition and a
 current version are changed in the server database behind the engine.
+
+## A hosted deployment
+
+The same three processes map onto hosts:
+
+- **The proxy in front** routes public traffic to the API processes and to
+  nothing else. The engine's listener for the API, the run channel, the
+  executors and seal are on ports it does not route and, where it can be
+  arranged, on hosts it does not share.
+- **API processes** scale out behind it. Each is given the API's
+  certificate, the API's database role and the API's Valkey user, and none
+  of what the table above marks refused.
+- **The engine** is one process, on a host the proxy does not reach, with
+  both databases, the engine's Valkey user and its certificate. Its health
+  is `RUNTARA_ENGINE_HEALTH_LISTEN`.
+- **seal** is on a host of its own where it can be, with the keys
+  ([seal.md](seal.md)); executors are on theirs ([executor.md](executor.md)).
+- **Postgres** takes the engine's role for both databases and the API's for
+  the server database only: refuse the API's role `CONNECT` on the runtime
+  database. **Valkey** has the `default` user off, and a user for each.

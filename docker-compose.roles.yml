@@ -1,0 +1,260 @@
+# Runtara evaluation stack, with the API and the engine as two processes.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.seal.yml \
+#     -f docker-compose.roles.yml up
+#
+# An overlay on docker-compose.yml and docker-compose.seal.yml: the `runtara`
+# service becomes the engine (RUNTARA_ROLE=engine), and a new `api` service
+# takes the requests (RUNTARA_ROLE=api). The API holds nothing of the
+# engine's: no runtime database, no key, no way to seal. It asks the engine
+# over mutual TLS, and the engine verifies for itself who each call is for
+# and runs only what it approved. See docs/roles.md.
+#
+# The engine starts only with a seal of its own, so this overlay needs
+# docker-compose.seal.yml before it. It combines with
+# docker-compose.executor.yml, which then goes before it too:
+#   docker compose -f docker-compose.yml -f docker-compose.seal.yml \
+#     -f docker-compose.executor.yml -f docker-compose.roles.yml up
+#
+# What each of the two is given:
+#   - a certificate each, from the CA `executor-pki` makes (the one the
+#     executors use). The CA's key is kept nowhere; to make new certificates,
+#     remove the three volumes (<project>_executor_pki_server,
+#     <project>_executor_pki_executor, <project>_roles_pki_api) and start
+#     again.
+#   - a database role each. The engine's (`runtara_server`) owns the
+#     databases. The API's (`runtara_api`) is granted its own records in the
+#     server database and nothing else (`api-role`, from
+#     scripts/roles/api-database-role.sql), and cannot work across tenants.
+#   - a Valkey user each. The API's cannot write what starts work
+#     (scripts/roles/api-valkey-user.acl).
+#
+# The passwords here are this trial stack's, like the database's in
+# docker-compose.yml. A stack that has already run without this overlay is
+# brought over as it is: the engine carries over what was compiled.
+#
+# Needs Docker Compose 2.24 or newer (`!reset`, `!override`).
+
+services:
+  # One-shot: the deployment's certificates, the API's among them, unless
+  # they are all already there. With docker-compose.executor.yml this is its
+  # `executor-pki`, made to issue the API's certificate too.
+  executor-pki:
+    image: ghcr.io/runtarahq/runtara:${RUNTARA_IMAGE_TAG:-latest}
+    pull_policy: always
+    restart: "no"
+    user: "0:0"
+    healthcheck:
+      disable: true
+    entrypoint:
+      - sh
+      - -c
+      - |
+        if [ ! -s /pki/server/tls.key ] || [ ! -s /pki/executor/tls.key ] || [ ! -s /pki/api/tls.key ]; then
+          runtara-executor init-pki --server-dir /pki/server --executor-dir /pki/executor \
+            --api-dir /pki/api --replace || exit 1
+        fi
+        chown -R 10001:0 /pki/server /pki/executor /pki/api
+    volumes:
+      - executor_pki_server:/pki/server
+      - executor_pki_executor:/pki/executor
+      - roles_pki_api:/pki/api
+
+  # Valkey with two users: the engine's, which keeps every key, and the
+  # API's.
+  valkey:
+    command: ["valkey-server", "--aclfile", "/etc/valkey/users.acl"]
+    configs:
+      - source: valkey-users
+        target: /etc/valkey/users.acl
+    healthcheck:
+      test: ["CMD", "valkey-cli", "--user", "runtara-api", "--pass", "runtara_api", "--no-auth-warning", "ping"]
+
+  # The engine. It binds no public listener: it listens for the API on the
+  # stack's private network, with mutual TLS, and says it is up on its own
+  # loopback for the health check.
+  runtara:
+    depends_on:
+      executor-pki:
+        condition: service_completed_successfully
+    environment:
+      RUNTARA_ROLE: engine
+      RUNTARA_ENGINE_LISTEN: "0.0.0.0:7445"
+      RUNTARA_ENGINE_TLS_DIR: /pki
+      RUNTARA_ENGINE_HEALTH_LISTEN: "127.0.0.1:7446"
+      VALKEY_PASSWORD: runtara_engine
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:7446/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 40s
+      retries: 5
+    # The API's port is the `api` service's to publish.
+    ports: !reset []
+    volumes:
+      - executor_pki_server:/pki:ro
+
+  # One-shot: the API's database role, and what it is granted, once the
+  # engine has made the tables. Runs on every `up` and changes nothing it has
+  # already done, so a table an upgrade adds is granted then.
+  api-role:
+    image: pgvector/pgvector:pg18
+    depends_on:
+      runtara:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: runtara
+      PGPASSWORD: runtara
+    configs:
+      - source: api-database-role
+        target: /api-database-role.sql
+    entrypoint:
+      - sh
+      - -ec
+      - |
+        psql -v ON_ERROR_STOP=1 -q -d postgres <<'SQL'
+        DO $$$$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'runtara_api') THEN
+                CREATE ROLE runtara_api LOGIN PASSWORD 'runtara_api'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+            END IF;
+        END
+        $$$$;
+        GRANT CONNECT ON DATABASE runtara_server TO runtara_api;
+        SQL
+        psql -q -d runtara_server -v api_role=runtara_api -v engine_role=runtara_server \
+          -f /api-database-role.sql
+    restart: "no"
+
+  # The API: what takes requests from outside. Its environment is all it is
+  # given; it refuses to start with the runtime database, a key or the way
+  # to seal.
+  api:
+    image: ghcr.io/runtarahq/runtara:${RUNTARA_IMAGE_TAG:-latest}
+    pull_policy: always
+    depends_on:
+      runtara:
+        condition: service_healthy
+      api-role:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+    environment:
+      RUNTARA_ROLE: api
+      RUNTARA_ENGINE_URL: "https://runtara:7445"
+      RUNTARA_ENGINE_TLS_DIR: /pki
+      # As `runtara_api`, which owns nothing: the engine runs the migrations.
+      RUNTARA_SERVER_DATABASE_URL: postgres://runtara_api:runtara_api@postgres/runtara_server
+      RUNTARA_REQUIRE_ROW_SECURITY: "true"
+      SKIP_MIGRATIONS: "true"
+      # The same sign-in, tenant and Valkey as the engine: they must agree.
+      AUTH_PROVIDER: local
+      TENANT_ID: evaluation
+      VALKEY_HOST: valkey
+      VALKEY_PORT: "6379"
+      VALKEY_USER: runtara-api
+      VALKEY_PASSWORD: runtara_api
+      # Local auth binds loopback; the `proxy` sidecar fronts it, as it
+      # fronted the server.
+      SERVER_HOST: 127.0.0.1
+      SERVER_PORT: "${RUNTARA_API_PORT:-7001}"
+      CORS_ALLOWED_ORIGINS: "http://localhost:${RUNTARA_PORT:-3000},http://127.0.0.1:${RUNTARA_PORT:-3000}"
+      RUNTARA_UI_PUBLIC_URL: "http://localhost:${RUNTARA_PORT:-3000}/"
+      OTEL_SDK_DISABLED: "true"
+    ports:
+      - "${RUNTARA_API_PORT:-7001}:8080"
+    volumes:
+      - roles_pki_api:/pki:ro
+
+  # The front for the loopback-bound listener, and the example seeder, now
+  # go to the API.
+  proxy:
+    depends_on: !override
+      api:
+        condition: service_healthy
+    network_mode: "service:api"
+
+  seeder:
+    depends_on: !override
+      api:
+        condition: service_healthy
+    network_mode: "service:api"
+
+configs:
+  # The engine's user (`default`) keeps every key. The API's rules are
+  # scripts/roles/api-valkey-user.acl, on one line.
+  valkey-users:
+    content: |
+      user default on >runtara_engine ~* &* +@all
+      user runtara-api on >runtara_api resetkeys resetchannels -@all %R~*:member:* %R~member:* ~*:token:revoked:* ~token:revoked:* %R~runtara:tenant_status:* ~*:quota:api ~*:quota:compile ~runtara:mcp:sessions:* ~queue:* ~runtara:session:* ~*:session:* ~runtara:product_events:* +@all -@admin -@dangerous +info (%RW~*:control resetchannels -@all +xgroup +xreadgroup +xack +xautoclaim +xpending +xinfo +xlen +ping)
+
+  # scripts/roles/api-database-role.sql, as it is.
+  api-database-role:
+    content: |
+      -- What the API role's database role may do in the server database, for a
+      -- server run as two processes (RUNTARA_ROLE, docs/roles.md).
+      --
+      -- The API keeps workflows' definitions and its own records. It is given
+      -- nothing of what starts or admits a run, nothing of what a compile
+      -- recorded but to read it, no connection, no key, and it may not work
+      -- across tenants: only members of `runtara_system` may, and it is not one.
+      --
+      -- Run as an administrator, on the server database, once the engine has run
+      -- the migrations, and again after an upgrade that adds a table:
+      --
+      --   psql -d <server database> -v api_role=<role> -v engine_role=<role> \
+      --        -f scripts/roles/api-database-role.sql
+      --
+      -- Both roles exist already, as plain login roles (NOSUPERUSER NOBYPASSRLS).
+      -- The engine's owns the tables. The API starts with SKIP_MIGRATIONS=true.
+
+      \set ON_ERROR_STOP on
+
+      -- Who may work across tenants. Until this role exists any role may; from
+      -- then on only its members.
+      DO $$$$
+      BEGIN
+          IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'runtara_system') THEN
+              CREATE ROLE runtara_system NOLOGIN;
+          END IF;
+      END
+      $$$$;
+      GRANT runtara_system TO :"engine_role";
+      REVOKE runtara_system FROM :"api_role";
+
+      REVOKE ALL ON ALL TABLES IN SCHEMA public FROM :"api_role";
+      REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM :"api_role";
+      GRANT USAGE ON SCHEMA public TO :"api_role";
+
+      -- Its own records: definitions, saved views, API keys, and the audit trail
+      -- it adds to.
+      GRANT SELECT, INSERT, UPDATE, DELETE
+          ON workflows, workflow_definitions, operations_views, api_keys
+          TO :"api_role";
+      GRANT SELECT, INSERT ON audit_events TO :"api_role";
+
+      -- A deleted workflow's triggers are switched off with it. Triggers are
+      -- otherwise the engine's, which serves them.
+      GRANT SELECT, UPDATE ON invocation_trigger TO :"api_role";
+
+      -- What the engine recorded, to show it.
+      GRANT SELECT
+          ON workflow_compilations, workflow_dependencies,
+             workflow_metrics_hourly, workflow_metrics_daily
+          TO :"api_role";
+
+      GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO :"api_role";
+
+      -- Nothing is granted on: execution_requests, execution_outbox,
+      -- execution_admission_reservations, execution_admission_tenants,
+      -- channel_intake, connection_data_entity, connection_defaults, oauth_state,
+      -- rate_limit_events, platform_oauth_app, seal_wrapped_key, object_schema,
+      -- report_definitions, metadata. Nothing is granted in the runtime database,
+      -- which the API is given no address of.
+
+volumes:
+  executor_pki_server:
+  executor_pki_executor:
+  roles_pki_api:

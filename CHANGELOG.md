@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no working across tenants: `runtara_system` is the engine's) and a
   Valkey user that cannot write the trigger, compilation or control
   streams.
+- **The split in the evaluation stack.** `docker-compose.roles.yml` is an
+  overlay that runs seal, the engine and the API as three services, with
+  the certificates, the API's database role and the Valkey users made for
+  it. An engine says it is up on `RUNTARA_ENGINE_HEALTH_LISTEN` (`/health`
+  and nothing else), since it binds no public listener.
 - **seal as a process of its own.** seal, which holds connection secrets
   and sends their requests, ran in the server's process, which could
   therefore open every credential. `RUNTARA_SEAL_MODE=unix` or `mtls` has

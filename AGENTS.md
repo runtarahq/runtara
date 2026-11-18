@@ -115,7 +115,8 @@ scoped README files, examples.
   write a table the engine's records are in, nor look across tenants; a new
   table the API reads or writes is granted in
   `scripts/roles/api-database-role.sql`, and a new Valkey key in
-  `scripts/roles/api-valkey-user.acl`.
+  `scripts/roles/api-valkey-user.acl`; `docker-compose.roles.yml` carries a
+  copy of both, which a test in `roles.rs` holds to them.
 - Never read, print, log, or commit credential values. Treat `.env*`, tokens,
   connection parameters, and database URLs as sensitive.
 - Do not hand-edit generated artifacts or ignored build outputs.
