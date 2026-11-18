@@ -32,6 +32,13 @@ scoped README files, examples.
 - Workflow agents are standalone component crates under
   `crates/agents/runtara-agent-*`. To add or change an integration agent or a
   connection type, follow `docs/adding-an-agent.md`.
+- A chat with a workflow is a conversation (`docs/native-chat.md`): found by
+  a key, kept by the engine (`api/services/conversations.rs`), carried by
+  one run after another, and answered with the built-in `conversation`
+  agent. The server has no code for a chat platform: one reaches a workflow
+  as an integration on the conversation, made of workflows and agents. Do
+  not add a platform's webhook route, verifier or reply adapter to the
+  server.
 - `crates/runtara-agents` contains host-only support, including connection
   extractors. Do not add a
   normal workflow agent there.

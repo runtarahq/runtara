@@ -56,5 +56,6 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO :"api_role";
 -- execution_admission_reservations, execution_admission_tenants,
 -- connection_data_entity, connection_defaults, oauth_state,
 -- rate_limit_events, platform_oauth_app, seal_wrapped_key, object_schema,
--- report_definitions, metadata. Nothing is granted in the runtime database,
+-- report_definitions, metadata, conversations, conversation_messages,
+-- conversation_events. Nothing is granted in the runtime database,
 -- which the API is given no address of.

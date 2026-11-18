@@ -268,7 +268,7 @@ process, with no change in behaviour. Implemented on
 
   | Role | Work |
   |---|---|
-  | Engine | trigger workers, compilation worker, execution outbox relay, admission reconcilers, control children, session delivery, cron, channel intake, unconfirmed OAuth sweep, platform OAuth apps reload, artifact restaging, invocation and trigger stream clean-up, object model pool monitor, and everything `runtara-environment` starts |
+  | Engine | trigger workers, compilation worker, execution outbox relay, admission reconcilers, control children, session delivery, conversations, cron, unconfirmed OAuth sweep, platform OAuth apps reload, artifact restaging, invocation and trigger stream clean-up, object model pool monitor, and everything `runtara-environment` starts |
   | API | member control events (revoking a removed member's API keys) |
   | Each process, whatever its role (since Phase 3) | the product events drain, the database pool monitor, the heartbeat log |
 
