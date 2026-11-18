@@ -232,15 +232,36 @@ async fn validate_api_key(token: &str, auth_state: &AuthState) -> Result<ApiKey,
     let key_hash = hex::encode(sha2::Sha256::digest(token.as_bytes()));
 
     // The key is all the caller presented: its row says whose it is. Within
-    // a tenant named in the path only that tenant's keys are found.
-    runtara_store_postgres::tenant_scope::locating(
-        crate::api::handlers::api_keys::validate_api_key_by_hash(&auth_state.pool, &key_hash),
-    )
-    .await
-    .map_err(|e| {
+    // a tenant named in the path only that tenant's keys are found. Looking
+    // across tenants is the engine's to do: an API that is a process of its
+    // own asks it.
+    let found = match KEYS_ELSEWHERE.get() {
+        Some(engine) => engine.api_key_by_hash(&key_hash).await,
+        None => {
+            runtara_store_postgres::tenant_scope::locating(
+                crate::api::handlers::api_keys::validate_api_key_by_hash(
+                    &auth_state.pool,
+                    &key_hash,
+                ),
+            )
+            .await
+        }
+    };
+    found.map_err(|e| {
         tracing::warn!(error = %e, "API key validation failed");
         unauthorized("Invalid or expired API key")
     })
+}
+
+/// The engine in another process, for a process whose database role may not
+/// look across tenants: the API role.
+static KEYS_ELSEWHERE: std::sync::OnceLock<std::sync::Arc<dyn crate::engine::Engine>> =
+    std::sync::OnceLock::new();
+
+/// Have this process ask `engine` whose an API key is, instead of looking for
+/// it across tenants itself.
+pub fn ask_engine_elsewhere(engine: std::sync::Arc<dyn crate::engine::Engine>) {
+    let _ = KEYS_ELSEWHERE.set(engine);
 }
 
 /// Build the `AuthContext` for an API-key request. The key acts as its issuing user — role

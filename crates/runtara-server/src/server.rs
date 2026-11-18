@@ -2089,6 +2089,8 @@ async fn start_as_api(
     let engine_api: Arc<dyn crate::engine::Engine> = engine;
     // A tenant's published workflow-agents are staged where the engine is.
     workflow_agents::ask_engine_elsewhere(engine_api.clone());
+    // Whose an API key is, too: looking across tenants is the engine's.
+    crate::middleware::auth::ask_engine_elsewhere(engine_api.clone());
 
     let shutdown_coordinator = Arc::new(crate::shutdown::ShutdownCoordinator::new(
         config::shutdown_grace(),

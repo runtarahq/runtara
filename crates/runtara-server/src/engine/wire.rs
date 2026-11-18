@@ -116,6 +116,7 @@ macro_rules! operations {
                 const NEEDS: &'static [Permission] = &[$($(Permission::$needs),+)?];
 
                 fn tenant(&self) -> Option<&str> {
+                    #[allow(unused_variables)]
                     let $op = self;
                     $tenant
                 }
@@ -502,6 +503,11 @@ operations! {
     needs [WorkflowDelete],
     |engine, op| for Some(&op.tenant_id) =>
         engine.unstage_workflow_agent(&op.tenant_id, &op.slug).await;
+
+    // ---- Who a caller is ---------------------------------------------------------
+    // No tenant's and with no caller: it is how a caller is found.
+    ApiKeyByHash { key_hash: String } -> Result<crate::api::handlers::api_keys::ApiKey, String>,
+    |engine, op| for None => engine.api_key_by_hash(&op.key_hash).await;
 
     SetCurrentVersion { tenant_id: String, workflow_id: String, version: i32 }
         -> Result<bool, String>,

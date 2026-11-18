@@ -414,6 +414,14 @@ pub trait Engine: Send + Sync {
     /// deleted.
     async fn unstage_workflow_agent(&self, tenant_id: &str, slug: &str) -> Result<(), String>;
 
+    /// The API key whose hash is `key_hash`, whichever tenant's it is, if it
+    /// is still good. The key is all a caller presented, so its row is looked
+    /// for across tenants, which only the engine may do.
+    async fn api_key_by_hash(
+        &self,
+        key_hash: &str,
+    ) -> Result<crate::api::handlers::api_keys::ApiKey, String>;
+
     /// Makes `version` the one that runs when a run names none, on the
     /// engine's own record. `Ok(false)` if the workflow has no such version.
     async fn set_current_version(
@@ -1061,6 +1069,17 @@ impl Engine for LocalEngine {
         crate::workflow_agents::unstage(tenant_id, slug)
             .await
             .map_err(|error| error.to_string())
+    }
+
+    async fn api_key_by_hash(
+        &self,
+        key_hash: &str,
+    ) -> Result<crate::api::handlers::api_keys::ApiKey, String> {
+        // Within a tenant already named, only that tenant's keys are found.
+        runtara_store_postgres::tenant_scope::locating(
+            crate::api::handlers::api_keys::validate_api_key_by_hash(&self.pool, key_hash),
+        )
+        .await
     }
 
     async fn set_current_version(

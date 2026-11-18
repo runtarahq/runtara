@@ -991,6 +991,16 @@ impl Engine for RemoteEngine {
         .await
     }
 
+    async fn api_key_by_hash(
+        &self,
+        key_hash: &str,
+    ) -> Result<crate::api::handlers::api_keys::ApiKey, String> {
+        self.ask(wire::ApiKeyByHash {
+            key_hash: key_hash.to_owned(),
+        })
+        .await
+    }
+
     async fn set_current_version(
         &self,
         tenant_id: &str,
