@@ -2,6 +2,7 @@
 #![allow(clippy::result_large_err)]
 
 pub mod agent_release;
+pub mod agent_test_placed;
 pub mod api;
 pub mod audit;
 pub mod auth;
