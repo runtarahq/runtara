@@ -306,6 +306,15 @@ async fn a_conversation_is_carried_by_one_run_after_another() {
     talk.advance("k").await;
 
     assert_eq!(talk.replies("k").await, ["hi there", "once more"]);
+    // The events alone are the transcript: what was sent is in them too.
+    let sent: Vec<_> = talk
+        .events("k")
+        .await
+        .into_iter()
+        .filter(|event| event.kind == "run_started")
+        .map(|event| event.body["text"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(sent, ["hello", "again"]);
     assert_eq!(
         talk.kinds("k").await,
         [

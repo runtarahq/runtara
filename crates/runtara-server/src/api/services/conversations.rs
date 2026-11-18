@@ -183,7 +183,9 @@ pub struct ConversationEvent {
     pub seq: i64,
     /// `reply`, `waiting_for_input`, `activity`, `run_started`,
     /// `run_ended`, `message_delivered`, `message_failed` or
-    /// `reply_route_failed`.
+    /// `reply_route_failed`. `run_started` and `message_delivered` carry
+    /// the message's text and sender, so the events alone are the
+    /// transcript.
     pub kind: String,
     pub body: Value,
     pub created_at: DateTime<Utc>,
@@ -747,7 +749,13 @@ impl Conversations {
                     .await?;
                 at.say(
                     "message_delivered",
-                    json!({"messageId": message_id, "requestId": wait.request_id, "instanceId": instance}),
+                    json!({
+                        "messageId": message_id,
+                        "requestId": wait.request_id,
+                        "instanceId": instance,
+                        "text": message.text,
+                        "sender": message.sender,
+                    }),
                 )
                 .await?;
                 at.row.waiting = None;
@@ -782,6 +790,7 @@ impl Conversations {
         // The run's id is made from the message's, so starting it again
         // after a failure here starts the same run.
         let instance = Uuid::new_v5(&at.row.id, format!("message:{message_id}").as_bytes());
+        let said = json!({"text": message.text, "sender": message.sender});
         let inputs = json!({
             "data": {
                 "message": message.text,
@@ -809,7 +818,12 @@ impl Conversations {
                 at.row.waiting = None;
                 at.say(
                     "run_started",
-                    json!({"instanceId": instance, "messageId": message_id}),
+                    json!({
+                        "instanceId": instance,
+                        "messageId": message_id,
+                        "text": said["text"],
+                        "sender": said["sender"],
+                    }),
                 )
                 .await?;
                 Ok(true)

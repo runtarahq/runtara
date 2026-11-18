@@ -220,7 +220,9 @@ granted nothing on: `conversations`, `conversation_messages`,
   answer to sending it says which, where that is known at once.
 - **Events** are numbered and kept: `run_started`, `reply`,
   `waiting_for_input`, `message_delivered`, `message_failed`, `run_ended`,
-  `reply_route_failed`, and `activity`, which is what the old chat stream
+  `reply_route_failed`, and `activity`. `run_started` and
+  `message_delivered` carry the message's text and sender, so the events
+  alone are the transcript. `activity` is what the old chat stream
   showed of a run (model and tool calls), for a client that shows it. A
   reply is what the run said with `conversation.reply`. A run that said
   nothing answers with what it returned: `answer.response`, or `answer`,
