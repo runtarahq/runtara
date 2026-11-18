@@ -1634,12 +1634,14 @@ async fn common_start(pool: &PgPool) -> Result<Common, Box<dyn std::error::Error
     println!("✓ Auth membership policy: {}", membership_policy.as_str());
 
     let auth_state = auth::AuthState {
+        door: auth::presented::Door::Api,
         provider: auth_providers.api.clone(),
         pool: pool.clone(),
         valkey: redis_manager.clone(),
         membership_policy,
     };
     let mcp_auth_state = auth::AuthState {
+        door: auth::presented::Door::Mcp,
         provider: auth_providers.mcp.clone(),
         pool: pool.clone(),
         valkey: redis_manager.clone(),
@@ -2087,6 +2089,8 @@ async fn start_as_api(
     let engine_api: Arc<dyn crate::engine::Engine> = engine;
     // A tenant's published workflow-agents are staged where the engine is.
     workflow_agents::ask_engine_elsewhere(engine_api.clone());
+    // Whose an API key is, too: looking across tenants is the engine's.
+    crate::middleware::auth::ask_engine_elsewhere(engine_api.clone());
 
     let shutdown_coordinator = Arc::new(crate::shutdown::ShutdownCoordinator::new(
         config::shutdown_grace(),
@@ -2879,6 +2883,25 @@ async fn start_as_platform(
                 ),
             }
             println!("✓ Embedded runtara-environment started (in-process)");
+            // What makes a workflow runnable is the engine's own record, in
+            // the runtime database (`engine::approvals`). What was compiled
+            // and chosen before the engine kept one is carried over once.
+            let approvals = crate::engine::approvals::install(
+                crate::engine::approvals::Approvals::new(runtara.pool().clone(), pool.clone()),
+            );
+            match approvals.carry_over_once().await {
+                Ok(Some((approved, chosen))) => println!(
+                    "✓ Carried over what ran before: {approved} compiled versions approved, \
+                     {chosen} current versions"
+                ),
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(format!(
+                        "what ran before could not be carried over to the engine's record: {error}"
+                    )
+                    .into());
+                }
+            }
             Some(runtara)
         }
         Ok(None) => {
@@ -3788,11 +3811,18 @@ async fn start_as_platform(
     // Where the engine listens for an API role in another process. A request
     // that arrives there is answered in the scope of the tenant it is for, and
     // not in this start-up's: the listener's tasks are started in no scope.
+    // Who it is for the engine verifies itself, as the API's middleware does.
     if let Some(listen) = listen {
         match crate::engine::remote::serve_api_role(
             listen.address,
             &listen.tls_dir,
-            crate::engine::listener::router(engine_api.clone()),
+            crate::engine::listener::router(
+                engine_api.clone(),
+                Arc::new(crate::engine::listener::Verification {
+                    api: auth_state.clone(),
+                    mcp: mcp_auth_state.clone(),
+                }),
+            ),
         )
         .await
         {
@@ -3844,6 +3874,22 @@ async fn start_as_platform(
     match public_app {
         Some(public_app) => serve_public(public_app, auth_kind, shutdown_signal.clone()).await?,
         None => {
+            // An engine with no public listener says it is up where it is
+            // told to, once it is: `/health` and nothing else.
+            if let Some(address) = crate::roles::engine_health_listen()? {
+                let listener = tokio::net::TcpListener::bind(address)
+                    .await
+                    .map_err(|error| {
+                        format!("RUNTARA_ENGINE_HEALTH_LISTEN: cannot listen on {address}: {error}")
+                    })?;
+                let health = Router::new().route("/health", get(health_handler));
+                tokio::spawn(async move {
+                    if let Err(error) = axum::serve(listener, health).await {
+                        tracing::error!(%error, "The engine's health listener stopped");
+                    }
+                });
+                println!("✓ Engine health on http://{address}/health");
+            }
             println!("\n  Runtara {} engine is ready.\n", env!("BUILD_VERSION"));
             shutdown_signal.clone().wait().await;
         }

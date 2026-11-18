@@ -293,7 +293,9 @@ async fn start_chat_stream(
     // Build the SSE stream that polls for events
     let stream = build_event_stream(engine, tenant_id, instance_id, params.workflow_id);
 
-    let sse = Sse::new(stream).keep_alive(KeepAlive::default());
+    // The stream asks the engine after this request has returned, for the
+    // caller who asked for it.
+    let sse = Sse::new(crate::auth::presented::kept(stream)).keep_alive(KeepAlive::default());
 
     // Disable nginx proxy buffering for SSE streaming
     let headers = [

@@ -93,6 +93,12 @@ pub trait AuthProvider: Send + Sync {
     ) -> Result<AuthContext, AuthError>;
 
     fn kind(&self) -> AuthProviderKind;
+
+    /// The headers it authenticates by, other than `Authorization`. They are
+    /// what an engine in another process is handed to verify a caller itself.
+    fn also_reads(&self) -> Vec<axum::http::HeaderName> {
+        Vec::new()
+    }
 }
 
 /// A pair of providers built from the environment: one for the public API and one for MCP.

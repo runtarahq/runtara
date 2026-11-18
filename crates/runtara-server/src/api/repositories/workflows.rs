@@ -2027,7 +2027,7 @@ impl WorkflowRepository {
         workflow_id: &str,
         version: i32,
         track_events: bool,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<bool, sqlx::Error> {
         // The definition update and its invalidation form one state change.
         // Readers must never observe the new compilation input alongside a
         // still-ready record from the old artifact, even though the readiness
@@ -2051,24 +2051,11 @@ impl WorkflowRepository {
         .execute(&mut *transaction)
         .await?;
 
-        // Calling toggle_track_events with the same value (e.g. from UI
-        // post-compile refresh) must not wipe the freshly created row.
-        if update.rows_affected() > 0 {
-            sqlx::query(
-                r#"
-                DELETE FROM workflow_compilations
-                WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3
-                "#,
-            )
-            .bind(tenant_id)
-            .bind(workflow_id)
-            .bind(version)
-            .execute(&mut *transaction)
-            .await?;
-        }
-
         transaction.commit().await?;
-        Ok(())
+        // Whether it changed: calling this with the same value (e.g. from UI
+        // post-compile refresh) must not have the freshly compiled record
+        // forgotten.
+        Ok(update.rows_affected() > 0)
     }
 
     /// Update a version's execution graph in-place (no new version created).
@@ -2084,10 +2071,9 @@ impl WorkflowRepository {
         let definition_bytes = serde_json::to_vec(definition).unwrap_or_default();
         let file_size = definition_bytes.len() as i32;
 
-        // The graph and its compiled artifact are one observable state
-        // change. Keep the update and invalidation together so readers never
-        // see new source metadata paired with a ready artifact from the old
-        // graph.
+        // What the version was compiled to is the engine's record, which the
+        // caller has the engine forget. Until it has, the record is stale by
+        // its checksum and is not run from.
         let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
             r#"
@@ -2103,21 +2089,6 @@ impl WorkflowRepository {
         .bind(file_size)
         .execute(&mut *transaction)
         .await?;
-
-        if result.rows_affected() > 0 {
-            // Invalidate compilation since the graph changed
-            sqlx::query(
-                r#"
-                DELETE FROM workflow_compilations
-                WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3
-                "#,
-            )
-            .bind(tenant_id)
-            .bind(workflow_id)
-            .bind(version)
-            .execute(&mut *transaction)
-            .await?;
-        }
 
         transaction.commit().await?;
         Ok(result.rows_affected())

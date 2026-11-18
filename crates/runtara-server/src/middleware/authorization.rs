@@ -387,6 +387,15 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         ("POST", "/api/runtime/operations/requests/query") => InvocationHistoryRead,
         ("GET", "/api/runtime/sessions/{sessionId}/events") => InvocationHistoryRead,
         ("GET", "/api/runtime/sessions/{sessionId}/pending-input") => InvocationHistoryRead,
+        // What a session has to deliver is part of its run's history; choosing where a held
+        // message goes (or failing it) drives the run, like submitting the event did.
+        ("GET", "/api/runtime/sessions/{sessionId}/deliveries") => InvocationHistoryRead,
+        ("GET", "/api/runtime/sessions/{sessionId}/deliveries/{messageId}") => {
+            InvocationHistoryRead
+        }
+        ("POST", "/api/runtime/sessions/{sessionId}/deliveries/{messageId}/resolve") => {
+            WorkflowExecute
+        }
         ("GET", "/api/runtime/workflows/{id}/instances") => InvocationHistoryRead,
         ("GET", "/api/runtime/workflows/{id}/instances/{instanceId}") => InvocationHistoryRead,
         ("GET", "/api/runtime/workflows/{id}/instances/{instanceId}/checkpoints") => {
@@ -1271,6 +1280,28 @@ mod tests {
         assert_eq!(
             permission_for(&Method::GET, "/connections/{id}/oauth/pending"),
             Some(Permission::ConnectionRead)
+        );
+    }
+
+    #[test]
+    fn permission_for_gates_session_deliveries() {
+        // Reading what a session holds is history; resolving a held message drives the run.
+        for path in [
+            "/api/runtime/sessions/{sessionId}/deliveries",
+            "/api/runtime/sessions/{sessionId}/deliveries/{messageId}",
+        ] {
+            assert_eq!(
+                permission_for(&Method::GET, path),
+                Some(Permission::InvocationHistoryRead),
+                "{path}"
+            );
+        }
+        assert_eq!(
+            permission_for(
+                &Method::POST,
+                "/api/runtime/sessions/{sessionId}/deliveries/{messageId}/resolve"
+            ),
+            Some(Permission::WorkflowExecute)
         );
     }
 
@@ -2206,6 +2237,10 @@ mod tests {
             (Method::PUT, "/api/runtime/workflows/folders/rename"),
             (Method::POST, "/api/runtime/workflows/{id}/execute"),
             (Method::POST, "/api/runtime/workflows/{id}/clone"),
+            (
+                Method::POST,
+                "/api/runtime/sessions/{sessionId}/deliveries/{messageId}/resolve",
+            ),
             (
                 Method::POST,
                 "/api/runtime/agents/{name}/capabilities/{capability_id}/execute",

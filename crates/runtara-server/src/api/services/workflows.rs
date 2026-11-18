@@ -248,6 +248,29 @@ impl WorkflowService {
         }
     }
 
+    /// Has the engine forget what a version was compiled to, after its
+    /// definition was changed in place. The record of compilations is the
+    /// engine's; until it is forgotten it is stale by its checksum, and is
+    /// not run from.
+    async fn forget_compiled(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+    ) -> Result<(), ServiceError> {
+        let Some(engine) = &self.engine else {
+            return Ok(());
+        };
+        engine
+            .invalidate_compilation(tenant_id, workflow_id, version)
+            .await
+            .map_err(|error| {
+                ServiceError::DatabaseError(format!(
+                    "Failed to invalidate the compiled artifact: {error}"
+                ))
+            })
+    }
+
     fn engine(&self) -> Result<&dyn Engine, ServiceError> {
         self.engine.as_deref().ok_or_else(|| {
             ServiceError::DatabaseError(
@@ -983,6 +1006,8 @@ impl WorkflowService {
                 version, workflow_id
             )));
         }
+        self.forget_compiled(tenant_id, workflow_id, version)
+            .await?;
 
         Ok(all_warnings)
     }
@@ -1018,12 +1043,17 @@ impl WorkflowService {
         }
 
         // Update track-events mode and invalidate compilation
-        self.repository
+        let changed = self
+            .repository
             .update_track_events(tenant_id, workflow_id, version, track_events)
             .await
             .map_err(|e| {
                 ServiceError::DatabaseError(format!("Failed to update track events: {}", e))
             })?;
+        if changed {
+            self.forget_compiled(tenant_id, workflow_id, version)
+                .await?;
+        }
 
         // Fetch and return updated workflow
         self.repository
@@ -1189,6 +1219,18 @@ impl WorkflowService {
                 "Failed to clone workflow: no versions found".to_string(),
             ));
         }
+        // A clone runs its first version, which the engine records as every
+        // other choice of version.
+        if let Some(engine) = &self.engine {
+            engine
+                .set_current_version(tenant_id, &new_workflow_id, 1)
+                .await
+                .map_err(|error| {
+                    ServiceError::DatabaseError(format!(
+                        "Failed to set the clone's current version: {error}"
+                    ))
+                })?;
+        }
 
         // A clone is a NEW workflow — derive its own slug from the new name
         // (never inherit the source's; slugs are per-tenant unique).
@@ -1235,19 +1277,22 @@ impl WorkflowService {
             )));
         }
 
-        // Delegate to repository (will return RowNotFound if version doesn't exist)
-        self.repository
+        // Which version runs is the engine's to record: the server database's
+        // column is what is shown.
+        match self
+            .engine()?
             .set_current_version(tenant_id, workflow_id, version_number)
             .await
-            .map_err(|e| match e {
-                sqlx::Error::RowNotFound => ServiceError::NotFound(format!(
-                    "Version {} not found for workflow '{}'",
-                    version_number, workflow_id
-                )),
-                _ => ServiceError::DatabaseError(format!("Failed to set current version: {}", e)),
-            })?;
-
-        Ok(())
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(ServiceError::NotFound(format!(
+                "Version {} not found for workflow '{}'",
+                version_number, workflow_id
+            ))),
+            Err(error) => Err(ServiceError::DatabaseError(format!(
+                "Failed to set current version: {error}"
+            ))),
+        }
     }
 
     /// Get schemas and variables from a specific workflow version's execution graph

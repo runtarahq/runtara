@@ -109,6 +109,19 @@ pub fn engine_listen() -> Result<Option<EngineListen>, String> {
     }))
 }
 
+/// `RUNTARA_ENGINE_HEALTH_LISTEN`: where an engine that binds no public
+/// listener says it is up, to whatever checks its health. It answers
+/// `/health` and nothing else, with no TLS: it is for the engine's own host
+/// or container.
+pub fn engine_health_listen() -> Result<Option<std::net::SocketAddr>, String> {
+    let Some(address) = set("RUNTARA_ENGINE_HEALTH_LISTEN") else {
+        return Ok(None);
+    };
+    address.parse().map(Some).map_err(|_| {
+        format!("RUNTARA_ENGINE_HEALTH_LISTEN is `{address}`, which is not an address")
+    })
+}
+
 /// Where the API role reaches the engine, and its certificate.
 pub struct EngineAt {
     pub url: String,
@@ -147,6 +160,7 @@ const NOT_FOR_THE_API: &[&str] = &[
     "RUNTARA_EXECUTOR_TLS_DIR",
     "RUNTARA_ARTIFACT_STORE_URL",
     "RUNTARA_ENGINE_LISTEN",
+    "RUNTARA_ENGINE_HEALTH_LISTEN",
 ];
 
 /// Which of what the API role is not to be given this process was given.
@@ -238,6 +252,55 @@ impl Workers {
 
 #[cfg(test)]
 mod tests {
+
+    /// The evaluation stack's overlay (`docker-compose.roles.yml`) carries
+    /// what the API's database role and Valkey user are granted, because it
+    /// is one file that runs on its own. They are the two files under
+    /// `scripts/roles`, as they are.
+    #[test]
+    fn the_compose_overlay_grants_what_the_role_files_grant() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let read = |path: &str| std::fs::read_to_string(root.join(path)).unwrap();
+        let overlay = read("docker-compose.roles.yml");
+        // A config's content, as compose hands it over: its block, without
+        // the indentation, and with `$$` for `$`.
+        let content_of = |name: &str| -> String {
+            let start = format!("  {name}:\n    content: |\n");
+            let from = overlay
+                .find(&start)
+                .unwrap_or_else(|| panic!("no config {name}"))
+                + start.len();
+            overlay[from..]
+                .lines()
+                .take_while(|line| line.is_empty() || line.starts_with("      "))
+                .map(|line| line.strip_prefix("      ").unwrap_or(line))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .replace("$$", "$")
+        };
+
+        assert_eq!(
+            content_of("api-database-role").trim_end(),
+            read("scripts/roles/api-database-role.sql").trim_end(),
+            "docker-compose.roles.yml and scripts/roles/api-database-role.sql differ"
+        );
+
+        let rules = read("scripts/roles/api-valkey-user.acl")
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let users = content_of("valkey-users");
+        let api = users
+            .lines()
+            .find(|line| line.starts_with("user runtara-api "))
+            .expect("the API's Valkey user");
+        assert_eq!(
+            api,
+            format!("user runtara-api on >runtara_api {rules}"),
+            "docker-compose.roles.yml and scripts/roles/api-valkey-user.acl differ"
+        );
+    }
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};

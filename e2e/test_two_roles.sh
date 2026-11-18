@@ -56,6 +56,8 @@ SECOND_API_PORT="${TEST_SECOND_API_PORT:-17861}"
 ENGINE_PORT="${TEST_ENGINE_PORT:-17865}"
 # Where the engine would serve the public API, if it served one.
 ENGINE_PUBLIC_PORT="${TEST_ENGINE_PUBLIC_PORT:-17866}"
+# Where the engine says it is up, and nothing else.
+ENGINE_HEALTH_PORT="${TEST_ENGINE_HEALTH_PORT:-17867}"
 TEST_CORE_PORT="${TEST_CORE_PORT:-18861}"
 TEST_ENV_PORT="${TEST_ENV_PORT:-18862}"
 TEST_CORE_HTTP_PORT="${TEST_CORE_HTTP_PORT:-18863}"
@@ -138,6 +140,7 @@ engine_env() {
     exec env \
     RUNTARA_ROLE=engine \
     RUNTARA_ENGINE_LISTEN="127.0.0.1:${ENGINE_PORT}" \
+    RUNTARA_ENGINE_HEALTH_LISTEN="127.0.0.1:${ENGINE_HEALTH_PORT}" \
     RUNTARA_RUNNER=executor \
     RUNTARA_EXECUTOR_TLS_DIR="${WORK_DIR}/pki-engine" \
     RUNTARA_RUN_CHANNEL_LISTEN="127.0.0.1:${RUN_CHANNEL_PORT}" \
@@ -415,6 +418,10 @@ SAID=$(refused_start env -i "${API_ENV[@]}" "SERVER_PORT=${API_PORT}" \
     "${RUNTARA_SERVER_BIN}")
 echo "${SAID}" | grep -q "was given RUNTARA_CONNECTIONS_ENCRYPTION_KEY, RUNTARA_SEAL_SOCKET" \
     || { print_error "an API given a key and the way to seal did not refuse them: ${SAID}"; exit 1; }
+SAID=$(refused_start env -i "${API_ENV[@]}" "SERVER_PORT=${API_PORT}" \
+    "RUNTARA_ENGINE_HEALTH_LISTEN=127.0.0.1:${ENGINE_HEALTH_PORT}" "${RUNTARA_SERVER_BIN}")
+echo "${SAID}" | grep -q "was given RUNTARA_ENGINE_HEALTH_LISTEN" \
+    || { print_error "an API given the engine's health address did not refuse it: ${SAID}"; exit 1; }
 SAID=$(refused_start engine_env env -u RUNTARA_SEAL_MODE -u RUNTARA_SEAL_SOCKET "${RUNTARA_SERVER_BIN}")
 echo "${SAID}" | grep -q "RUNTARA_ROLE=engine needs a seal of its own" \
     || { print_error "an engine with seal in itself did not refuse to start: ${SAID}"; exit 1; }
@@ -455,7 +462,13 @@ if healthy "${ENGINE_PUBLIC_PORT}"; then
 fi
 (echo > "/dev/tcp/127.0.0.1/${ENGINE_PUBLIC_PORT}") 2>/dev/null \
     && { print_error "the engine listens on the public port"; exit 1; }
-print_success "the API holds no key, no runtime database and no way to seal; the engine has no public listener"
+# Where it is told to, the engine says it is up, and answers nothing else.
+healthy "${ENGINE_HEALTH_PORT}" || { print_error "the engine does not say it is up"; exit 1; }
+for path in /api/runtime/workflows /ready /engine/v1/operations/Facts; do
+    [ "$(http_status "http://127.0.0.1:${ENGINE_HEALTH_PORT}${path}")" = "404" ] \
+        || { print_error "the engine's health listener answers ${path}"; exit 1; }
+done
+print_success "the API holds no key, no runtime database and no way to seal; the engine has no public listener, and says it is up where it is told to"
 
 # --- 3 ------------------------------------------------------------------
 print_step "3. A workflow is made, compiled and run through the API..."

@@ -118,7 +118,8 @@ async fn compile_workflow_for_mcp(
         // A non-fresh success row would make the worker skip the request. Delete
         // it once before queueing; retries after a successful compile will pass
         // the freshness check above and will not rebuild.
-        repository
+        server
+            .engine
             .invalidate_compilation(&server.tenant(), workflow_id, version)
             .await
             .map_err(|e| err(format!("Failed to invalidate stale compilation: {}", e)))?;

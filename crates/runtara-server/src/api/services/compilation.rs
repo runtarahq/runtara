@@ -423,6 +423,38 @@ fn require_publishable_workflow_agent(
     Ok(workflow_agent_safety)
 }
 
+/// The image the server database says a version is compiled to, where the
+/// engine's own record does not say otherwise. Where this definition is the
+/// one approved to run and the engine compiled it to another image, or to
+/// none yet, the row is not the engine's: the version is compiled again.
+async fn only_as_the_engine_compiled(
+    tenant_id: &str,
+    workflow_id: &str,
+    version: i32,
+    source_checksum: &str,
+    track_events: bool,
+    image: Option<String>,
+) -> Option<String> {
+    let image = image?;
+    let Some(approvals) = crate::engine::approvals::installed() else {
+        return Some(image);
+    };
+    match approvals.approval(tenant_id, workflow_id, version).await {
+        Ok(Some(approval))
+            if approval.source.checksum == source_checksum
+                && approval.source.track_events == track_events
+                && approval.image_id.as_deref() != Some(image.as_str()) =>
+        {
+            None
+        }
+        Ok(_) => Some(image),
+        Err(error) => {
+            warn!(%error, "What was approved to run could not be read; compiling again");
+            None
+        }
+    }
+}
+
 fn compile_workflow_direct_only(
     input: CompilationInput,
     source_checksum: String,
@@ -1112,6 +1144,15 @@ impl CompilationService {
             "compile: step 5 completed - database check done"
         );
 
+        let existing_image_id = only_as_the_engine_compiled(
+            tenant_id,
+            workflow_id,
+            version,
+            &source_checksum,
+            track_events,
+            existing_image_id,
+        )
+        .await;
         if let Some(existing_id) = existing_image_id {
             info!(
                 total_duration_ms = compile_start.elapsed().as_millis(),
@@ -1171,6 +1212,15 @@ impl CompilationService {
                     ))
                 })?;
 
+            let existing_image_id = only_as_the_engine_compiled(
+                tenant_id,
+                workflow_id,
+                version,
+                &source_checksum,
+                track_events,
+                existing_image_id,
+            )
+            .await;
             if let Some(existing_id) = existing_image_id {
                 info!(
                     total_duration_ms = compile_start.elapsed().as_millis(),
@@ -1453,6 +1503,26 @@ impl CompilationService {
         completion.commit().await.map_err(|e| {
             ServiceError::DatabaseError(format!("Failed to commit registered image ID: {e}"))
         })?;
+        // The image is what runs for this version only where this definition
+        // is the one approved to run (`engine::approvals`).
+        if let Some(approvals) = crate::engine::approvals::installed()
+            && let Err(error) = approvals
+                .compiled(
+                    tenant_id,
+                    workflow_id,
+                    version,
+                    &crate::engine::approvals::Source {
+                        checksum: source_checksum.clone(),
+                        track_events,
+                    },
+                    &image_id,
+                )
+                .await
+        {
+            return Err(ServiceError::DatabaseError(format!(
+                "Failed to record the compiled image as approved: {error}"
+            )));
+        }
 
         // 9. Record child workflow dependencies
         if !result.child_dependencies.is_empty() {
