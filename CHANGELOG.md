@@ -1141,6 +1141,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The agent routes are the API's own.** Listing agents, reading one and
+  its capabilities, and the component status ask the engine what it loaded
+  through operations of its interface, as running an agent on request
+  already did; the engine no longer serves them as a router. Answers are
+  unchanged, except that with the engine away they are `503` and not an
+  error handed back from it.
 - **The session delivery routes need a permission.** `GET
   /api/runtime/sessions/{sessionId}/deliveries` and
   `/deliveries/{messageId}` need `invocation_history:read`, and `POST
