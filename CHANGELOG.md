@@ -36,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no working across tenants: `runtara_system` is the engine's) and a
   Valkey user that cannot write the trigger, compilation or control
   streams.
+- **Intake as a process of its own.** `RUNTARA_ROLE=intake` receives a
+  trigger's webhooks and the synchronous trigger, where the API is given
+  `RUNTARA_INTAKE_URL`. It holds no runtime database and no key, refuses to
+  start if given either, and is a database role, a Valkey user and a seal
+  caller of its own (`scripts/roles/intake-*`). A webhook is still accepted
+  with the engine away. What checks a trigger's webhook is now kept with
+  the trigger (`invocation_trigger.webhook_verification`, sealed), written
+  by the engine. `runtara-executor init-pki --intake-dir` issues its
+  certificate. Chat channel webhooks and OAuth redirects still go to the
+  engine.
 - **Workflows compiled in a sandbox.** With `RUNTARA_COMPILER_WASM` naming
   the compiler's WASI command (`runtara-compile-sandboxed.wasm`, which now
   ships beside the components), a workflow is compiled in a Wasmtime store

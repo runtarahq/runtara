@@ -72,7 +72,7 @@ pub async fn capture_http_event_sync(
 ) -> (StatusCode, Json<Value>) {
     // An unauthenticated webhook: the workflow's tenant, among those this
     // process serves. A workflow id two served tenants share names neither.
-    let found: Result<Vec<String>, sqlx::Error> = runtara_store_postgres::tenant_scope::locating(
+    let found: Result<Vec<String>, sqlx::Error> = crate::middleware::tenant_path::finding_the_tenant(
         sqlx::query_scalar(
             "SELECT tenant_id FROM workflows WHERE workflow_id = $1 AND tenant_id = ANY($2) LIMIT 2",
         )

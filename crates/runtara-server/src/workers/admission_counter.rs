@@ -50,6 +50,16 @@ fn tenants() -> &'static [String] {
     TENANTS.get().map(Vec::as_slice).unwrap_or_default()
 }
 
+/// Counts admissions in Valkey from now on, without seeding the counters:
+/// for a process that only adds to them (intake). The engine seeds them from
+/// its reservations ([`install`]) and reconciles them; a process that reset
+/// them from a query across tenants would need to be the platform, and
+/// intake is not.
+pub fn install_without_seeding(manager: ConnectionManager) {
+    let _ = TENANTS.set(crate::config::served_tenants().to_vec());
+    let _ = MANAGER.set(manager);
+}
+
 /// Adopt `manager` for admission counting and seed each of `tenants`' counters
 /// from the durable reservation rows.
 ///

@@ -73,6 +73,7 @@ pub async fn create_invocation_trigger(
                 )
                 .await;
             }
+            keep_webhook_checks_current(&pool, &connections, &tenant_id).await;
 
             // Re-read the trigger to get the config registration updated (platform).
             let trigger = service
@@ -255,6 +256,7 @@ pub async fn update_invocation_trigger(
 
     match service.update_trigger(&id, request, Some(&tenant_id)).await {
         Ok(Some(trigger)) => {
+            keep_webhook_checks_current(&pool, &connections, &tenant_id).await;
             // Handle webhook lifecycle on state transitions. A bot's webhook
             // is shared by every Channel trigger on its connection, so these
             // take the connection's other triggers into account.
@@ -399,5 +401,23 @@ pub async fn delete_invocation_trigger(
             });
             Err((StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)))
         }
+    }
+}
+/// Writes what checking the tenant's triggers' webhooks needs, now that one
+/// was saved: so a trigger bound to a connection is checked by whatever
+/// receives its webhooks at once, not after the engine's next pass.
+async fn keep_webhook_checks_current(
+    pool: &PgPool,
+    connections: &runtara_connections::ConnectionsFacade,
+    tenant_id: &str,
+) {
+    if let Err(error) = crate::api::services::webhook_verification::keep_material_current(
+        pool,
+        connections,
+        tenant_id,
+    )
+    .await
+    {
+        tracing::warn!(tenant_id, %error, "What checks a trigger's webhook was not written");
     }
 }

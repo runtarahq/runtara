@@ -655,8 +655,19 @@ AUTH=(-H "Authorization: Bearer ${SECOND_KEY}")
 CODE=$(mcp_status "${LIST}")
 [ "${CODE}" = "200" ] && grep -q '"tools"' "${TEST_DATA_DIR}/mcp_body" \
     || { print_error "the second tenant could not restore its own MCP session (${CODE}): $(head -c 300 "${TEST_DATA_DIR}/mcp_body")"; exit 1; }
+# A tool that runs a workflow and waits is the caller's own operation: the
+# second tenant runs its workflow through its session, and not the primary's.
+CALL="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"execute_workflow_sync\",\"arguments\":{\"workflow_id\":\"${B_WF}\",\"body\":{}}}}"
+CODE=$(mcp_status "${CALL}")
+[ "${CODE}" = "200" ] && grep -q 'answer' "${TEST_DATA_DIR}/mcp_body" && grep -q '42' "${TEST_DATA_DIR}/mcp_body" \
+    || { print_error "the second tenant's MCP tool did not run its workflow (${CODE}): $(head -c 400 "${TEST_DATA_DIR}/mcp_body")"; exit 1; }
+CALL="${CALL/${B_WF}/${WF_ID}}"
+CODE=$(mcp_status "${CALL}")
+if grep -q '\\"answer\\":42\|"answer":42' "${TEST_DATA_DIR}/mcp_body" && ! grep -qi 'not found\|isError.*true' "${TEST_DATA_DIR}/mcp_body"; then
+    print_error "the second tenant's MCP tool ran the primary tenant's workflow: $(head -c 400 "${TEST_DATA_DIR}/mcp_body")"; exit 1
+fi
 AUTH=()
-echo "  the session is kept under the second tenant; after a restart the primary is refused it and its owner restores it ✓"
+echo "  the session is kept under the second tenant; after a restart the primary is refused it and its owner restores it; its tool runs its own workflow and not the primary's ✓"
 
 #-------------------------------------------------------------------------
 print_step "8. The runtime and server databases bind the server to each request's tenant..."

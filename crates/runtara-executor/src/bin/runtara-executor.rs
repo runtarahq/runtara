@@ -10,20 +10,27 @@ const USAGE: &str = "usage:
       serve, configured by RUNTARA_EXECUTOR_SERVER_URL, RUNTARA_EXECUTOR_TLS_DIR,
       RUNTARA_EXECUTOR_STATE_DIR, RUNTARA_EXECUTOR_LISTEN, RUNTARA_EXECUTOR_ADVERTISE_URL,
       RUNTARA_EXECUTOR_MAX_RUNS, RUNTARA_EXECUTOR_RUN_BIN
-  runtara-executor init-pki --server-dir <dir> --executor-dir <dir> [--api-dir <dir>] [--replace]
+  runtara-executor init-pki --server-dir <dir> --executor-dir <dir> [--api-dir <dir>]
+                            [--intake-dir <dir>] [--replace]
       make a CA and a certificate for each side; each directory is given
       ca.pem, tls.pem and tls.key. --api-dir is for a server whose API and
       engine are two processes: the API's certificate goes there, and the
-      server's directory is the engine's";
+      server's directory is the engine's. --intake-dir is for one whose
+      intake is a process too";
 
 fn init_pki(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
-    let (mut server, mut executor, mut api, mut replace) = (None, None, None, false);
+    let (mut server, mut executor, mut api, mut intake, mut replace) =
+        (None, None, None, None, false);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--server-dir" => server = arguments.next().map(PathBuf::from),
             "--executor-dir" => executor = arguments.next().map(PathBuf::from),
             "--api-dir" => match arguments.next() {
                 Some(directory) => api = Some(PathBuf::from(directory)),
+                None => return Err(USAGE.to_owned()),
+            },
+            "--intake-dir" => match arguments.next() {
+                Some(directory) => intake = Some(PathBuf::from(directory)),
                 None => return Err(USAGE.to_owned()),
             },
             "--replace" => replace = true,
@@ -33,7 +40,13 @@ fn init_pki(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
     let (Some(server), Some(executor)) = (server, executor) else {
         return Err(USAGE.to_owned());
     };
-    runtara_executor::pki::init(&server, &executor, api.as_deref(), replace)?;
+    runtara_executor::pki::init_every_side(
+        &server,
+        &executor,
+        api.as_deref(),
+        intake.as_deref(),
+        replace,
+    )?;
     println!(
         "wrote the server's certificate to {} and the executor's to {}",
         server.display(),
@@ -41,6 +54,9 @@ fn init_pki(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
     );
     if let Some(api) = api {
         println!("wrote the API's certificate to {}", api.display());
+    }
+    if let Some(intake) = intake {
+        println!("wrote intake's certificate to {}", intake.display());
     }
     Ok(())
 }

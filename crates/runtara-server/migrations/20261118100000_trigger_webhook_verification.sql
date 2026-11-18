@@ -1,0 +1,14 @@
+-- What checking a trigger's webhook needs, kept with the trigger
+-- (docs/splitting-the-engine.md, Phase 7): the connection it is checked
+-- against, that connection's kind, and its signing secret as it is stored,
+-- sealed. A sealed value says nothing to who reads it and only seal checks a
+-- signature against it, so it may lie outside the connection's parameters,
+-- which are encrypted at rest as a whole. What receives a webhook then
+-- checks it from the trigger's row alone, and needs neither the connection's
+-- row nor the key that opens it.
+--
+-- The engine writes it from the connection, and writes it again when either
+-- changes. NULL until it has: a trigger bound to a connection with nothing
+-- here is not checked from here, and its webhooks are refused by a process
+-- that has nothing else to check them with.
+ALTER TABLE invocation_trigger ADD COLUMN webhook_verification JSONB;

@@ -66,6 +66,30 @@ pub fn router(engine: Arc<dyn Engine>, callers: Arc<dyn Callers>) -> axum::Route
     })
 }
 
+/// Answers what the API hands intake: the requests of `parts`, as they
+/// arrived, and nothing else. Intake answers no operation, and serves no
+/// part that has a caller, so it verifies none.
+pub fn router_for_intake(engine: Arc<dyn Engine>, parts: &'static [Served]) -> axum::Router {
+    axum::Router::new().fallback(move |mut request: Request| {
+        let engine = engine.clone();
+        async move {
+            let path = request.uri().path().to_owned();
+            let Some(rest) = path.strip_prefix(wire::SERVED) else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            let (part, own) = rest.split_once('/').unwrap_or((rest, ""));
+            let Some(part) = Served::named(part).filter(|part| parts.contains(part)) else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            request.headers_mut().remove(wire::PRESENTED);
+            let Some(request) = as_it_arrived(request, own, None) else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            engine.serve(part, request).await
+        }
+    })
+}
+
 /// The caller of a call, verified. `Ok(None)` if the call came with nothing
 /// presented; `Err` is what is answered instead of the call.
 async fn caller_of(
@@ -91,8 +115,22 @@ fn refused(status: StatusCode, code: &str, message: &str) -> Response {
         .into_response()
 }
 
+/// Who a request came from, by the certificate its connection presented. A
+/// request that came over no such connection (a test in one process) is the
+/// API's.
+fn peer_of(request: &Request) -> wire::Peer {
+    match request
+        .extensions()
+        .get::<runtara_executor::tls::PeerName>()
+    {
+        Some(name) if name.0 == runtara_executor::protocol::INTAKE_NAME => wire::Peer::Intake,
+        _ => wire::Peer::Api,
+    }
+}
+
 async fn answer(engine: Arc<dyn Engine>, callers: Arc<dyn Callers>, request: Request) -> Response {
     let path = request.uri().path().to_owned();
+    let peer = peer_of(&request);
     let mut request = request;
     if let Some(name) = path.strip_prefix(wire::OPERATIONS) {
         if request.method() != Method::POST {
@@ -105,7 +143,7 @@ async fn answer(engine: Arc<dyn Engine>, callers: Arc<dyn Callers>, request: Req
         let Ok(body) = axum::body::to_bytes(request.into_body(), OPERATION_LIMIT).await else {
             return StatusCode::PAYLOAD_TOO_LARGE.into_response();
         };
-        return match wire::answer(engine.as_ref(), name, &body, caller.as_ref()).await {
+        return match wire::answer(engine.as_ref(), name, &body, caller.as_ref(), peer).await {
             None => StatusCode::NOT_FOUND.into_response(),
             Some(Err(wire::Refused::Unreadable(reason))) => {
                 (StatusCode::BAD_REQUEST, reason).into_response()
@@ -120,6 +158,11 @@ async fn answer(engine: Arc<dyn Engine>, callers: Arc<dyn Callers>, request: Req
                 "NOT_THE_CALLERS_TENANT",
                 "the caller does not act for the tenant the operation names",
             ),
+            Some(Err(wire::Refused::NotThePeers)) => refused(
+                StatusCode::FORBIDDEN,
+                "NOT_THIS_PEERS",
+                "this operation is not one this peer may ask",
+            ),
             Some(Err(wire::Refused::NotPermitted)) => refused(
                 StatusCode::FORBIDDEN,
                 "FORBIDDEN",
@@ -133,6 +176,14 @@ async fn answer(engine: Arc<dyn Engine>, callers: Arc<dyn Callers>, request: Req
         };
     }
     if let Some(rest) = path.strip_prefix(wire::SERVED) {
+        // Intake hands the engine nothing as it arrived: it asks operations.
+        if peer == wire::Peer::Intake {
+            return refused(
+                StatusCode::FORBIDDEN,
+                "NOT_THIS_PEERS",
+                "intake is served no part of the API",
+            );
+        }
         let (part, own) = rest.split_once('/').unwrap_or((rest, ""));
         let Some(part) = Served::named(part) else {
             return StatusCode::NOT_FOUND.into_response();

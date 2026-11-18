@@ -1,6 +1,7 @@
 # Splitting the engine: the compiler and intake
 
-A plan, with Phase 6 built. It follows
+A plan, with Phase 6 built and Phase 7 built for a trigger's webhooks. What
+is left of Phase 7 is said where it is. It follows
 [separating-concerns.md](separating-concerns.md), whose phases 0 to 5 put
 the API in a process that holds nothing of the engine's and made the engine
 decide for itself who a call is for and what runs.
@@ -184,6 +185,57 @@ almost nothing: read a trigger, ask seal to verify, write a row. Serving
 connections and the object model needs nearly everything seal offers.
 Moving both together would make a second process almost as valuable as the
 engine; moving the first alone makes a small one.
+
+### What was built, and what was not
+
+Built, and described in [roles.md](roles.md):
+
+- **The role** (`RUNTARA_ROLE=intake`), for a trigger's HTTP events and the
+  synchronous trigger. It refuses the runtime database, the at-rest key, an
+  executor's certificate and the engine's own settings, and starts only
+  with a seal of its own. The API hands it those routes where
+  `RUNTARA_INTAKE_URL` names it, and the engine otherwise.
+- **Preparation 1**: a caller's synchronous run (MCP) is an operation the
+  API asks as that caller, and the part that served it is gone. What anyone
+  may send is answered by intake asking the engine one operation, to run a
+  workflow and wait, which only intake's certificate may ask.
+- **Preparation 3** (decision 2): what checks a trigger's webhook is kept
+  on the trigger's row (`invocation_trigger.webhook_verification`): the
+  connection, its kind, and its signing secret as stored, sealed. The
+  engine writes it when a trigger is saved and every thirty seconds. Intake
+  checks from that with seal; a trigger bound to a connection with nothing
+  kept for it is refused.
+- **Preparation 5**: where one tenant is served, a webhook that names no
+  tenant is looked for in that tenant, not across tenants.
+- **Preparation 6**: the per-tenant OAuth callback's scope, as a fix of its
+  own.
+- **A certificate** (`init-pki --intake-dir`), **a database role** and **a
+  Valkey user** (`scripts/roles/intake-*`), and a seal caller that
+  administers nothing.
+
+Not built:
+
+- **Preparation 2: chat channels.** Their webhooks still go to the engine,
+  which receives them and runs their conversations. Cutting them at
+  `channel_intake` is the largest piece left, and is what stands between
+  this and "all anonymous traffic goes to intake". Until then a deployment
+  that has chat channel triggers still has the engine receive anonymous
+  requests for them.
+- **Preparation 4: agents.** Listing agents and running one on request are
+  still a part the engine serves. It was a tidying of the engine's surface
+  and not needed for intake.
+- **OAuth redirects** stay with the engine, as the plan had them: finishing
+  a flow seals tokens.
+- **Routing at the proxy.** The API hands intake what it receives; a
+  deployment that wants anonymous traffic never to reach the API either
+  routes those two paths to a listener of intake's own, which does not
+  exist: intake listens for the API only.
+- **A seal permission to verify alone.** seal's callers are held to
+  keysets and to administering or not. Intake's caller administers nothing
+  and its keyset rule gives it `send` and `connect` as well as `verify`;
+  what stops it using a connection is that it cannot read one: its
+  database role has no connection table and it has no at-rest key. A
+  permission for `verify` alone is seal's to add.
 
 ### The design
 

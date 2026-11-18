@@ -14,7 +14,7 @@ use rcgen::{
     KeyUsagePurpose,
 };
 
-use crate::protocol::{API_NAME, EXECUTOR_NAME, SERVER_NAME};
+use crate::protocol::{API_NAME, EXECUTOR_NAME, INTAKE_NAME, SERVER_NAME};
 use crate::tls::{CA_FILE, CERTIFICATE_FILE, KEY_FILE};
 
 /// How long the certificates are good for.
@@ -43,6 +43,14 @@ pub fn issue() -> Result<(Issued, Issued), String> {
 /// and the API role's, for a server whose API and engine are two processes.
 /// The server's is then the engine's.
 pub fn issue_with_api() -> Result<(Issued, Issued, Issued), String> {
+    let (server, executor, api, _) = issue_every_side()?;
+    Ok((server, executor, api))
+}
+
+/// A new CA and a certificate from it for every side a deployment may have:
+/// the server's (the engine's), the executor's, the API role's and the
+/// intake role's.
+pub fn issue_every_side() -> Result<(Issued, Issued, Issued, Issued), String> {
     let failed = |error: rcgen::Error| error.to_string();
     let ca_key = KeyPair::generate().map_err(failed)?;
     let mut ca = CertificateParams::new(Vec::<String>::new()).map_err(failed)?;
@@ -61,7 +69,8 @@ pub fn issue_with_api() -> Result<(Issued, Issued, Issued), String> {
         params.distinguished_name.push(DnType::CommonName, name);
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         // The server and the executor are each a server to the other's
-        // client. The API role only ever calls.
+        // client, and intake is one to the API's. The API role only ever
+        // calls.
         params.extended_key_usages = if serves {
             vec![
                 ExtendedKeyUsagePurpose::ServerAuth,
@@ -82,6 +91,7 @@ pub fn issue_with_api() -> Result<(Issued, Issued, Issued), String> {
         side(SERVER_NAME, true)?,
         side(EXECUTOR_NAME, true)?,
         side(API_NAME, false)?,
+        side(INTAKE_NAME, true)?,
     ))
 }
 
@@ -117,8 +127,22 @@ pub fn init(
     api: Option<&Path>,
     replace: bool,
 ) -> Result<(), String> {
+    init_every_side(server, executor, api, None, replace)
+}
+
+/// [`init`], and the intake role's files to `intake` if it is given one.
+pub fn init_every_side(
+    server: &Path,
+    executor: &Path,
+    api: Option<&Path>,
+    intake: Option<&Path>,
+    replace: bool,
+) -> Result<(), String> {
     if !replace {
-        for directory in [Some(server), Some(executor), api].into_iter().flatten() {
+        for directory in [Some(server), Some(executor), api, intake]
+            .into_iter()
+            .flatten()
+        {
             if directory.join(KEY_FILE).exists() {
                 return Err(format!(
                     "{} already holds a key; pass --replace to make new certificates for every side",
@@ -127,11 +151,14 @@ pub fn init(
             }
         }
     }
-    let (for_server, for_executor, for_api) = issue_with_api()?;
+    let (for_server, for_executor, for_api, for_intake) = issue_every_side()?;
     write(server, &for_server)?;
     write(executor, &for_executor)?;
-    match api {
-        Some(api) => write(api, &for_api),
+    if let Some(api) = api {
+        write(api, &for_api)?;
+    }
+    match intake {
+        Some(intake) => write(intake, &for_intake),
         None => Ok(()),
     }
 }
