@@ -1457,29 +1457,250 @@ mod tests {
         assert!(remote.learn().await);
     }
 
-    /// What changes something is done for a caller whose credential allows
-    /// it; what reads is answered to any member.
+    /// An operation is answered as far as the caller's credential allows,
+    /// whether it changes something or reads.
     #[tokio::test]
-    async fn an_operation_is_done_only_as_far_as_the_callers_credential_allows() {
-        let mut reader = caller("acme", "ann");
-        reader.api_key_scope = crate::authz::ApiKeyScope::ReadOnly;
+    async fn an_operation_is_answered_only_as_far_as_the_callers_credential_allows() {
+        use crate::authz::{ApiKeyScope, Permission, PermissionSet};
+        let scoped = |scope: ApiKeyScope| {
+            let mut caller = caller("acme", "ann");
+            caller.api_key_scope = scope;
+            caller
+        };
+        let only = |permission| ApiKeyScope::Restricted(PermissionSet::EMPTY.with(permission));
         let ask = |name: &'static str, body: &'static str, caller: crate::auth::AuthContext| async move {
             let engine = engine_side();
             wire::answer(engine.as_ref(), name, body.as_bytes(), Some(&caller))
                 .await
                 .unwrap()
         };
-        let stop = r#"{"tenant_id":"acme","instance_id":"r"}"#;
+        let run = r#"{"tenant_id":"acme","instance_id":"r"}"#;
+        let refused = Err(wire::Refused::NotPermitted);
+
+        // A key that only reads does not stop a run, and reads its history.
         assert_eq!(
-            ask("Stop", stop, reader.clone()).await,
-            Err(wire::Refused::NotPermitted)
+            ask("Stop", run, scoped(ApiKeyScope::ReadOnly)).await,
+            refused
         );
-        assert!(ask("Stop", stop, caller("acme", "ann")).await.is_ok());
-        assert!(ask("GetInstanceInfo", stop, reader).await.is_ok());
-        // Every operation that reads nothing but changes something says what
-        // it needs.
-        assert!(!<wire::Queue as wire::Operation>::NEEDS.is_empty());
-        assert!(<wire::ListEvents as wire::Operation>::NEEDS.is_empty());
+        assert!(
+            ask("GetInstanceInfo", run, scoped(ApiKeyScope::ReadOnly))
+                .await
+                .is_ok()
+        );
+        assert!(ask("Stop", run, caller("acme", "ann")).await.is_ok());
+
+        // A key held to connections reads no run, though it is the tenant's.
+        let connections = only(Permission::ConnectionRead);
+        for name in ["GetInstanceInfo", "GetExecution", "Stop"] {
+            assert_eq!(ask(name, run, scoped(connections)).await, refused, "{name}");
+        }
+        // A key held to running workflows follows the run it started, and
+        // does not list the tenant's history.
+        let runs = only(Permission::WorkflowExecute);
+        assert!(ask("GetInstanceInfo", run, scoped(runs)).await.is_ok());
+        assert_eq!(ask("GetExecution", run, scoped(runs)).await, refused);
+        // What the API lists to every caller, any member may ask.
+        assert!(
+            ask(
+                "WorkflowAgents",
+                r#"{"tenant_id":"acme"}"#,
+                scoped(connections)
+            )
+            .await
+            .is_ok()
+        );
+    }
+
+    /// Every operation says what it needs. The few that need nothing are
+    /// named here, so that a new one is not open by omission.
+    #[test]
+    fn every_operation_for_a_tenant_names_what_it_needs() {
+        let open: Vec<&str> = wire::NEEDS
+            .iter()
+            .filter(|(_, needs)| needs.is_empty())
+            .map(|(name, _)| *name)
+            .collect();
+        // What the engine says of itself and whose a key is are no tenant's;
+        // a tenant's published agents are listed to every caller.
+        assert_eq!(open, ["Facts", "WorkflowAgents", "ApiKeyByHash"]);
+    }
+
+    /// What an operation needs is what the API's routes that ask it need
+    /// (`permission_for`), so the engine refuses nothing the API allows and
+    /// allows nothing the API refuses.
+    #[test]
+    fn an_operation_needs_what_the_routes_that_ask_it_need() {
+        use crate::authz::Permission::{WorkflowCreate, WorkflowUpdate};
+        use crate::middleware::authorization::permission_for;
+        use http::Method;
+        let get = |path: &str| permission_for(&Method::GET, path).unwrap();
+        let post = |path: &str| permission_for(&Method::POST, path).unwrap();
+        // Each operation, and the routes whose handlers ask it.
+        let asked_by: &[(&str, Vec<crate::authz::Permission>)] = &[
+            (
+                "GetExecution",
+                vec![get("/api/runtime/workflows/instances/{instanceId}")],
+            ),
+            (
+                "GetExecutionWithMetadata",
+                vec![get("/api/runtime/workflows/{id}/instances/{instanceId}")],
+            ),
+            (
+                "ListExecutions",
+                vec![get("/api/runtime/workflows/{id}/instances")],
+            ),
+            (
+                "ListAllExecutions",
+                vec![
+                    get("/api/runtime/executions"),
+                    post("/api/runtime/executions/query"),
+                ],
+            ),
+            (
+                "ExecutionSummaryOf",
+                vec![post("/api/runtime/executions/summary")],
+            ),
+            (
+                "ExecutionListingOptions",
+                vec![post("/api/runtime/operations/requests/query")],
+            ),
+            (
+                "OperationRequests",
+                vec![post("/api/runtime/operations/requests/query")],
+            ),
+            (
+                "OperationQueues",
+                vec![get("/api/runtime/operations/queues")],
+            ),
+            (
+                "AuthorizeExecution",
+                vec![
+                    get("/api/runtime/workflows/{workflowId}/instances/{instanceId}/pending-input"),
+                    get("/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions"),
+                    post("/api/runtime/sessions/{sessionId}/deliveries/{messageId}/resolve"),
+                ],
+            ),
+            (
+                "GetInstanceInfo",
+                vec![
+                    get("/api/runtime/workflows/{workflowId}/instances/{instanceId}/steps"),
+                    get("/api/runtime/sessions/{sessionId}/events"),
+                    post("/api/runtime/workflows/{id}/sessions"),
+                    post("/api/runtime/workflows/{id}/chat"),
+                ],
+            ),
+            (
+                "ListEvents",
+                vec![
+                    get("/api/runtime/workflows/{workflowId}/instances/{instanceId}/step-events"),
+                    get("/api/runtime/sessions/{sessionId}/events"),
+                    post("/api/runtime/workflows/{id}/sessions"),
+                    post("/api/runtime/workflows/{id}/chat"),
+                ],
+            ),
+            (
+                "ListStepSummaries",
+                vec![get(
+                    "/api/runtime/workflows/{workflowId}/instances/{instanceId}/steps",
+                )],
+            ),
+            (
+                "GetScopeAncestors",
+                vec![get(
+                    "/api/runtime/workflows/{workflowId}/instances/{instanceId}/scopes/{scopeId}/ancestors",
+                )],
+            ),
+            (
+                "ListCheckpoints",
+                vec![get(
+                    "/api/runtime/workflows/{id}/instances/{instanceId}/checkpoints",
+                )],
+            ),
+            ("GetTenantMetrics", vec![get("/api/runtime/metrics/tenant")]),
+            (
+                "ListInputRequests",
+                vec![post("/api/runtime/sessions/{sessionId}/events")],
+            ),
+            (
+                "GetInputRequest",
+                vec![post(
+                    "/api/runtime/sessions/{sessionId}/deliveries/{messageId}/resolve",
+                )],
+            ),
+            (
+                "PendingInputPageOf",
+                vec![
+                    get("/api/runtime/sessions/{sessionId}/pending-input"),
+                    get("/api/runtime/workflows/{workflowId}/instances/{instanceId}/pending-input"),
+                ],
+            ),
+            (
+                "ListInstanceActions",
+                vec![get(
+                    "/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions",
+                )],
+            ),
+            (
+                "ListWorkflowActions",
+                vec![get("/api/runtime/workflows/{workflowId}/actions")],
+            ),
+            (
+                "CompilationProgressOf",
+                vec![get(
+                    "/api/runtime/workflows/{id}/versions/{version}/compilation-progress",
+                )],
+            ),
+            // Compiling is asked by the compile route, and by saving a
+            // workflow (the API and MCP's authoring tools).
+            (
+                "GetImage",
+                vec![
+                    post("/api/runtime/workflows/{id}/versions/{version}/compile"),
+                    WorkflowCreate,
+                    WorkflowUpdate,
+                ],
+            ),
+            (
+                "WaitForCompilation",
+                vec![
+                    post("/api/runtime/workflows/{id}/versions/{version}/compile"),
+                    WorkflowCreate,
+                    WorkflowUpdate,
+                ],
+            ),
+            (
+                "IsCompilationPending",
+                vec![
+                    post("/api/runtime/workflows/{id}/versions/{version}/compile"),
+                    WorkflowCreate,
+                    WorkflowUpdate,
+                ],
+            ),
+            // A workflow's connections are checked where it is validated and
+            // where it is saved.
+            (
+                "TenantConnections",
+                vec![
+                    post("/api/runtime/workflows/graph/validate"),
+                    post("/api/runtime/workflows/{workflowId}/validate-mappings"),
+                    post("/api/runtime/workflows/create"),
+                    post("/api/runtime/workflows/{id}/update"),
+                ],
+            ),
+        ];
+        for (name, routes) in asked_by {
+            let needs = wire::NEEDS
+                .iter()
+                .find(|(operation, _)| operation == name)
+                .unwrap_or_else(|| panic!("no operation {name}"))
+                .1;
+            let mut expected = routes.clone();
+            expected.sort_by_key(|permission| permission.as_str());
+            expected.dedup();
+            let mut named = needs.to_vec();
+            named.sort_by_key(|permission| permission.as_str());
+            assert_eq!(named, expected, "{name}");
+        }
     }
 
     /// An operation that names its caller is answered for the caller the

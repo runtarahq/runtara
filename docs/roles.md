@@ -116,10 +116,13 @@ does not read whom the API says it authenticated.
 - An operation for a tenant is answered only for a caller who acts for
   that tenant. With nothing presented it is refused (`401`), and for
   another tenant's caller too (`403`).
-- An operation that changes something (starting or stopping a run,
-  compiling, choosing the version that runs) is held to what the caller's
-  role and API key scope allow, by the permissions the API's routes use.
-  Reading is open to any member of the tenant.
+- An operation is held to what the caller's role and API key scope allow,
+  whether it changes something (starting or stopping a run, compiling,
+  choosing the version that runs) or reads (a run's history, its events,
+  the tenant's metrics). Each needs the permission of the API's routes
+  that ask it, so the engine refuses nothing the API allows and allows
+  nothing the API refuses. The one exception is the list of agents a
+  tenant published, which the API shows to every caller.
 - A part of the API the engine serves for callers (connections, the object
   model, agents, triggers) is served to the caller the engine found, and
   to nobody without one. A webhook or an OAuth redirect has no caller, and

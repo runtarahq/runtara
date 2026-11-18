@@ -41,8 +41,10 @@ pub(crate) trait Operation: Serialize + DeserializeOwned + Send + 'static {
     fn tenant(&self) -> Option<&str>;
 
     /// What the caller's role and credential must allow, any one of them,
-    /// for the operation to be done. Empty for an operation that reads: any
-    /// member of the tenant may ask it.
+    /// for the operation to be answered: the permissions of the API's routes
+    /// that ask it (`middleware::authorization::permission_for`). An
+    /// operation several routes ask names each route's. Empty only where the
+    /// API's own route for the same thing is open to every caller.
     const NEEDS: &'static [Permission];
 
     /// Makes the caller the operation names the one the engine found. Only an
@@ -103,7 +105,7 @@ fn permitted(caller: &AuthContext, needs: &[Permission]) -> bool {
 macro_rules! operations {
     ($(
         $name:ident { $($field:ident : $ty:ty),* $(,)? } -> $answer:ty,
-        $(needs [$($needs:ident),+],)?
+        needs [$($needs:ident),*],
         |$engine:ident, $op:ident| for $tenant:expr $(, as $caller:ident)? => $call:expr;
     )*) => {
         $(
@@ -113,7 +115,7 @@ macro_rules! operations {
             impl Operation for $name {
                 const NAME: &'static str = stringify!($name);
                 type Answer = $answer;
-                const NEEDS: &'static [Permission] = &[$($(Permission::$needs),+)?];
+                const NEEDS: &'static [Permission] = &[$(Permission::$needs),*];
 
                 fn tenant(&self) -> Option<&str> {
                     #[allow(unused_variables)]
@@ -135,6 +137,11 @@ macro_rules! operations {
         /// The name of every operation.
         #[cfg(test)]
         pub(crate) const NAMES: &[&str] = &[$(stringify!($name)),*];
+
+        /// What each operation needs, by its name.
+        #[cfg(test)]
+        pub(crate) const NEEDS: &[(&str, &[Permission])] =
+            &[$((stringify!($name), <$name as Operation>::NEEDS)),*];
 
         /// Has `engine` answer the operation `name` sent as `body` for
         /// `caller`, whom the engine verified. `None` if there is no such
@@ -189,6 +196,7 @@ macro_rules! operations {
 
 operations! {
     Facts {} -> EngineFacts,
+    needs [],
     |engine, _op| for None => EngineFacts {
         available: engine.available(),
         queues_compilations: engine.queues_compilations(),
@@ -268,17 +276,20 @@ operations! {
     // ---- Runs, as the API shows them ----------------------------------------------
     GetExecution { tenant_id: String, instance_id: String }
         -> Result<WorkflowInstanceDto, ExecutionError>,
+    needs [InvocationHistoryRead],
     |engine, op| for Some(&op.tenant_id) =>
         engine.get_execution(&op.tenant_id, &op.instance_id).await;
 
     GetExecutionWithMetadata { workflow_id: String, instance_id: String, tenant_id: String }
         -> Result<ExecutionWithMetadata, ExecutionError>,
+    needs [InvocationHistoryRead],
     |engine, op| for Some(&op.tenant_id) => engine
         .get_execution_with_metadata(&op.workflow_id, &op.instance_id, &op.tenant_id)
         .await;
 
     ListExecutions { tenant_id: String, workflow_id: String, page: Option<i32>, size: Option<i32> }
         -> Result<PageWorkflowInstanceHistoryDto, ExecutionError>,
+    needs [InvocationHistoryRead],
     |engine, op| for Some(&op.tenant_id) => engine
         .list_executions(&op.tenant_id, &op.workflow_id, op.page, op.size)
         .await;
@@ -289,34 +300,40 @@ operations! {
         size: Option<i32>,
         filters: ExecutionFilters,
     } -> Result<PageWorkflowInstanceHistoryDto, ExecutionError>,
+    needs [InvocationHistoryRead],
     |engine, op| for Some(&op.tenant_id) => engine
         .list_all_executions(&op.tenant_id, op.page, op.size, op.filters)
         .await;
 
     ExecutionSummaryOf { tenant_id: String, filters: ExecutionFilters }
         -> Result<ExecutionSummary, ExecutionError>,
+    needs [InvocationHistoryRead],
     |engine, op| for Some(&op.tenant_id) =>
         engine.execution_summary(&op.tenant_id, op.filters).await;
 
     ExecutionListingOptions { tenant_id: String, page: i32, size: i32, filters: ExecutionFilters }
         -> Result<ListInstancesOptions, ExecutionError>,
+    needs [InvocationHistoryRead],
     |engine, op| for Some(&op.tenant_id) => engine
         .execution_listing_options(&op.tenant_id, op.page, op.size, &op.filters)
         .await;
 
     AuthorizeExecution { workflow_id: String, instance_id: String, tenant_id: String }
         -> Result<InstanceInfo, ExecutionError>,
+    needs [InvocationHistoryRead, WorkflowExecute],
     |engine, op| for Some(&op.tenant_id) => engine
         .authorize_execution(&op.workflow_id, &op.instance_id, &op.tenant_id)
         .await;
 
     // ---- A run's own records ------------------------------------------------------
     GetInstanceInfo { tenant_id: String, instance_id: String } -> Result<InstanceInfo, RuntimeError>,
+    needs [InvocationHistoryRead, WorkflowExecute],
     |engine, op| for Some(&op.tenant_id) =>
         engine.get_instance_info(&op.tenant_id, &op.instance_id).await;
 
     ListEvents { tenant_id: String, instance_id: String, options: Option<ListEventsOptions> }
         -> Result<ListEventsResult, RuntimeError>,
+    needs [InvocationHistoryRead, WorkflowExecute],
     |engine, op| for Some(&op.tenant_id) =>
         engine.list_events(&op.tenant_id, &op.instance_id, op.options).await;
 
@@ -325,11 +342,13 @@ operations! {
         instance_id: String,
         options: Option<ListStepSummariesOptions>,
     } -> Result<ListStepSummariesResult, RuntimeError>,
+    needs [InvocationHistoryRead],
     |engine, op| for Some(&op.tenant_id) =>
         engine.list_step_summaries(&op.tenant_id, &op.instance_id, op.options).await;
 
     GetScopeAncestors { tenant_id: String, instance_id: String, scope_id: String }
         -> Result<Vec<ScopeInfo>, RuntimeError>,
+    needs [InvocationHistoryRead],
     |engine, op| for Some(&op.tenant_id) => engine
         .get_scope_ancestors(&op.tenant_id, &op.instance_id, &op.scope_id)
         .await;
@@ -340,11 +359,13 @@ operations! {
         limit: Option<u32>,
         offset: Option<u32>,
     } -> Result<ListCheckpointsResult, RuntimeError>,
+    needs [InvocationHistoryRead],
     |engine, op| for Some(&op.tenant_id) => engine
         .list_checkpoints(&op.tenant_id, &op.instance_id, op.limit, op.offset)
         .await;
 
     GetTenantMetrics { options: GetTenantMetricsOptions } -> Result<TenantMetricsResult, RuntimeError>,
+    needs [AnalyticsRead],
     |engine, op| for Some(&op.options.tenant_id) => engine.get_tenant_metrics(op.options).await;
 
     OperationRequests {
@@ -354,6 +375,7 @@ operations! {
         listing: ListInstancesOptions,
         fields: Vec<String>,
     } -> Result<runtara_environment::operations::RequestPage, RuntimeError>,
+    needs [InvocationHistoryRead],
     |engine, op| for Some(&op.tenant_id) => engine
         .operation_requests(&op.tenant_id, &op.workflow_id, &op.key, &op.listing, &op.fields)
         .await;
@@ -361,12 +383,14 @@ operations! {
     // ---- Input a run waits for ------------------------------------------------
     ListInputRequests { tenant_id: String, instances: Vec<String>, offset: u64, limit: u32 }
         -> InputResult<InputRequestPage>,
+    needs [WorkflowExecute],
     |engine, op| for Some(&op.tenant_id) => engine
         .list_input_requests(&op.tenant_id, &op.instances, op.offset, op.limit)
         .await;
 
     GetInputRequest { tenant_id: String, instance_id: String, request: String }
         -> InputResult<InputRequest>,
+    needs [WorkflowExecute],
     |engine, op| for Some(&op.tenant_id) => engine
         .get_input_request(&op.tenant_id, &op.instance_id, &op.request)
         .await;
@@ -408,12 +432,14 @@ operations! {
         .await;
 
     PendingInputPageOf { tenant_id: String, instance_id: String } -> InputResult<PendingInputPage>,
+    needs [InvocationHistoryRead],
     |engine, op| for Some(&op.tenant_id) =>
         engine.pending_input_page(&op.tenant_id, &op.instance_id).await;
 
     // ---- Actions a workflow offers while it waits ------------------------------
     ListInstanceActions { tenant_id: String, workflow_id: String, instance_id: String }
         -> Result<Vec<WorkflowRuntimeAction>, WorkflowRuntimeError>,
+    needs [InvocationHistoryRead],
     |engine, op| for Some(&op.tenant_id) => engine
         .list_instance_actions(&op.tenant_id, &op.workflow_id, &op.instance_id)
         .await;
@@ -424,6 +450,7 @@ operations! {
         page: Option<i32>,
         size: Option<i32>,
     } -> Result<WorkflowRuntimeActionPage, WorkflowRuntimeError>,
+    needs [InvocationHistoryRead],
     |engine, op| for Some(&op.tenant_id) => engine
         .list_workflow_actions(&op.tenant_id, &op.workflow_id, op.page, op.size)
         .await;
@@ -467,6 +494,7 @@ operations! {
         .await;
 
     OperationQueues { tenant_id: String } -> Result<Vec<OperationQueue>, WorkflowRuntimeError>,
+    needs [InvocationHistoryRead],
     |engine, op| for Some(&op.tenant_id) => engine.operation_queues(&op.tenant_id).await;
 
     // ---- Compilation ------------------------------------------------------------
@@ -485,10 +513,12 @@ operations! {
         .await;
 
     GetImage { tenant_id: String, image_id: String } -> Result<Option<ImageSummary>, RuntimeError>,
+    needs [WorkflowExecute, WorkflowCreate, WorkflowUpdate],
     |engine, op| for Some(&op.tenant_id) => engine.get_image(&op.tenant_id, &op.image_id).await;
 
     // ---- Connections, as a workflow names them -----------------------------------
     TenantConnections { tenant_id: String } -> Result<Vec<ConnectionRef>, String>,
+    needs [WorkflowRead, WorkflowCreate, WorkflowUpdate],
     |engine, op| for Some(&op.tenant_id) => engine.tenant_connections(&op.tenant_id).await;
 
     ReconcileChannelWebhooks { tenant_id: String, removed: Vec<InvocationTrigger> } -> (),
@@ -496,7 +526,10 @@ operations! {
     |engine, op| for Some(&op.tenant_id) =>
         engine.reconcile_channel_webhooks(&op.tenant_id, &op.removed).await;
 
+    // What agents a tenant published: the API lists agents to every caller
+    // (its agent routes are ungated), so any member may ask.
     WorkflowAgents { tenant_id: String } -> Vec<runtara_dsl::agent_meta::AgentInfo>,
+    needs [],
     |engine, op| for Some(&op.tenant_id) => engine.workflow_agents(&op.tenant_id).await;
 
     UnstageWorkflowAgent { tenant_id: String, slug: String } -> Result<(), String>,
@@ -507,6 +540,7 @@ operations! {
     // ---- Who a caller is ---------------------------------------------------------
     // No tenant's and with no caller: it is how a caller is found.
     ApiKeyByHash { key_hash: String } -> Result<crate::api::handlers::api_keys::ApiKey, String>,
+    needs [],
     |engine, op| for None => engine.api_key_by_hash(&op.key_hash).await;
 
     SetCurrentVersion { tenant_id: String, workflow_id: String, version: i32 }
@@ -544,6 +578,7 @@ operations! {
 
     WaitForCompilation { tenant_id: String, workflow_id: String, version: i32, timeout_ms: u64 }
         -> Result<bool, CompilationQueueError>,
+    needs [WorkflowExecute, WorkflowCreate, WorkflowUpdate],
     |engine, op| for Some(&op.tenant_id) => engine
         .wait_for_compilation(
             &op.tenant_id,
@@ -555,6 +590,7 @@ operations! {
 
     IsCompilationPending { tenant_id: String, workflow_id: String, version: i32 }
         -> Result<bool, CompilationQueueError>,
+    needs [WorkflowExecute, WorkflowCreate, WorkflowUpdate],
     |engine, op| for Some(&op.tenant_id) => engine
         .is_compilation_pending(&op.tenant_id, &op.workflow_id, op.version)
         .await;
@@ -567,6 +603,7 @@ operations! {
 
     CompilationProgressOf { tenant_id: String, workflow_id: String, version: i32 }
         -> Option<CompilationProgress>,
+    needs [WorkflowRead],
     |engine, op| for Some(&op.tenant_id) => engine
         .compilation_progress(&op.tenant_id, &op.workflow_id, op.version)
         .await;

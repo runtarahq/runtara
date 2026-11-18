@@ -410,9 +410,11 @@ The engine decides, not the API role. Implemented on
    (`engine/listener.rs`):
    - an operation for a tenant is answered only for a caller who acts for
      that tenant, in that tenant's scope;
-   - an operation that changes something is held to the caller's role and
-     API key scope, by the permissions the API's route gate uses
-     (`engine/wire.rs`, `needs`). What reads is answered to any member;
+   - an operation, whether it changes something or reads, is held to the
+     caller's role and API key scope: it names the permissions of the API's
+     routes that ask it (`engine/wire.rs`, `needs`), and a test holds the
+     two to each other. Only the list of a tenant's published agents needs
+     none, as the API's agent routes do;
    - a part of the API that has a caller is served to the caller the engine
      found; the caller the API names is not read.
 
@@ -446,10 +448,10 @@ The engine decides, not the API role. Implemented on
 
 Where it differs from the plan as it was written:
 
-- **A caller's permission is checked for operations that change
-  something**, not for reads. A read is answered to any verified member of
-  the tenant, so an API key scoped to less than reading runs is held to
-  that by the API and not by the engine.
+- **The session delivery routes are gated.** Tracing which routes ask each
+  operation found three with no permission: reading what a session holds
+  now needs `invocation_history:read`, and resolving a held message
+  `workflow:execute`.
 - **The API's role keeps `invocation_trigger` to update**, because deleting
   a workflow switches its triggers off in the same transaction.
 - **A compile nobody approved may still happen** (through the compile
@@ -474,7 +476,8 @@ tenant, or a certificate an executor or the run channel accepts.
 
 **Tests.** Unit tests cover what crosses (`auth::presented`), the engine's
 side of the wire (`engine::remote::tests`: no caller, another tenant's
-caller, a credential that allows less, a caller the API names) and the
+caller, a credential that allows less, a caller the API names, and each
+operation's permissions against the route map) and the
 verdict on a version (`engine::approvals`). `TWO_ROLES=true
 e2e/test_served_tenants.sh` runs the two-tenant test with the API on its
 own database role and Valkey user, and its last section turns each thing

@@ -106,8 +106,9 @@ scoped README files, examples.
   crosses with what the caller presented (`auth::presented`), and the
   engine verifies it (`engine/listener.rs`): work that outlives its request
   keeps it with `presented::inherit` or `presented::kept`, as it keeps the
-  tenant's scope. An operation that changes something names the permissions
-  it `needs` in `wire.rs`. What makes a workflow runnable is the engine's
+  tenant's scope. Every operation names the permissions it `needs` in
+  `wire.rs`: those of the routes that ask it (`permission_for`), which
+  `engine::remote::tests` holds it to. What makes a workflow runnable is the engine's
   record in the runtime database (`engine/approvals.rs`), not a row of the
   server database: do not add a path that runs a definition, an image or a
   version because the server database names it. The API's side does not

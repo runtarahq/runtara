@@ -30,8 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The engine decides, not the API.** An engine in a process of its own
   verifies for itself who each call is for: the API sends what the caller
   presented, and the engine answers an operation only for a caller who
-  acts for its tenant, and one that changes something only as far as the
-  caller's role and API key scope allow. `scripts/roles/` holds a database
+  acts for its tenant, and only as far as the caller's role and API key
+  scope allow, for reading as for changing something. `scripts/roles/` holds a database
   role for the API (its own records, nothing that starts or admits a run,
   no working across tenants: `runtara_system` is the engine's) and a
   Valkey user that cannot write the trigger, compilation or control
@@ -1083,6 +1083,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The session delivery routes need a permission.** `GET
+  /api/runtime/sessions/{sessionId}/deliveries` and
+  `/deliveries/{messageId}` need `invocation_history:read`, and `POST
+  …/deliveries/{messageId}/resolve` needs `workflow:execute`. They were
+  open to any role and, for reading, any API key scope.
 - **A workflow runs only as the engine approved it.** The engine records,
   in the runtime database, each version someone who may run it asked to
   have compiled or run, the image it compiled from that, and the version

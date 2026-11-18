@@ -43,7 +43,8 @@
 #      more, and a Valkey user that cannot write what starts work
 #      (scripts/roles). With all the API holds — its certificate, its
 #      database role, its Valkey user — the engine is asked for another
-#      tenant and refuses; the outbox, the keys and the runtime database are
+#      tenant and refuses; a key held to less is held to it by the engine,
+#      for reading as for running; the outbox, the keys and the runtime database are
 #      closed; a definition changed in the server database does not run
 #      until a caller who may compiles it; the version that runs is the one
 #      chosen through the engine; a version a caller edits through the API
@@ -836,6 +837,50 @@ CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
     "https://runtara-server:${TEST_ENGINE_PORT}/engine/v1/served/connections/api/runtime/connections")
 [ "${CODE}" = "401" ] || { print_error "the engine served connections to a caller the API named (${CODE})"; exit 1; }
 echo "  with the API's certificate: no caller 401, another tenant's caller 403, a key that is nobody's 401, no run started; the tenant's own key is answered ✓"
+
+# A key held to less is held to it by the engine too, for what reads as for
+# what changes something: through the API, and when the API is not asked.
+scoped_key() {  # scoped_key NAME SCOPE-JSON: a key of the primary tenant
+    local resp key
+    resp=$(api_post /api-keys "{\"name\": \"$1\", \"scope\": $2}")
+    key=$(echo "${resp}" | jq -r '.key // .data.key // empty')
+    [ -n "${key}" ] || { print_error "the $1 key was not made: $(echo "${resp}" | jq -c 'del(.key)')"; exit 1; }
+    echo "${key}"
+}
+READ_KEY=$(scoped_key reader '"read_only"')
+CONN_KEY=$(scoped_key connections '["connection:read"]')
+RUN_KEY=$(scoped_key runner '["workflow:execute"]')
+A_LIST="{\"tenant_id\": \"${TENANT}\", \"workflow_id\": \"${WF_ID}\", \"page\": 0, \"size\": 5}"
+A_QUEUE="${B_QUEUE//${SECOND_TENANT}/${TENANT}}"; A_QUEUE="${A_QUEUE//${B_WF}/${WF_ID}}"
+expect_engine() {  # expect_engine STATUS OPERATION BODY KEY WHAT
+    local code
+    code=$(ask_engine "$2" "$3" "$(presented "$4")")
+    [ "${code}" = "$1" ] || { print_error "the engine answered $2 to $5 with ${code}, not $1: $(head -c 300 "${TEST_DATA_DIR}/engine_body")"; exit 1; }
+}
+expect_engine 200 ListExecutions "${A_LIST}" "${READ_KEY}" "a key that only reads"
+expect_engine 403 Queue "${A_QUEUE}" "${READ_KEY}" "a key that only reads"
+expect_engine 403 ListExecutions "${A_LIST}" "${CONN_KEY}" "a key held to connections"
+expect_engine 403 Queue "${A_QUEUE}" "${CONN_KEY}" "a key held to connections"
+expect_engine 403 ListExecutions "${A_LIST}" "${RUN_KEY}" "a key held to running workflows"
+A_RUNS_BEFORE=$(runtime_sql "SELECT count(*) FROM instances WHERE tenant_id = '${TENANT}'")
+expect_engine 200 Queue "${A_QUEUE}" "${RUN_KEY}" "a key held to running workflows"
+for _ in {1..40}; do
+    [ "$(runtime_sql "SELECT count(*) FROM instances WHERE tenant_id = '${TENANT}'")" -gt "${A_RUNS_BEFORE}" ] && break
+    sleep 0.5
+done
+[ "$(runtime_sql "SELECT count(*) FROM instances WHERE tenant_id = '${TENANT}'")" -gt "${A_RUNS_BEFORE}" ] \
+    || { print_error "the run a key held to running workflows asked for did not start"; exit 1; }
+# And through the API, which the engine agrees with.
+[ "$(http_status -H "Authorization: Bearer ${READ_KEY}" "${API}/workflows/${WF_ID}/instances")" = "200" ] \
+    || { print_error "a key that only reads was refused a workflow's runs through the API"; exit 1; }
+[ "$(http_status -H "Authorization: Bearer ${CONN_KEY}" "${API}/workflows/${WF_ID}/instances")" = "403" ] \
+    || { print_error "a key held to connections read a workflow's runs through the API"; exit 1; }
+[ "$(http_status -H "Authorization: Bearer ${CONN_KEY}" "${API}/connections")" = "200" ] \
+    || { print_error "a key held to connections was refused them"; exit 1; }
+CODE=$(http_status -X POST -H "Authorization: Bearer ${RUN_KEY}" -H 'Content-Type: application/json' \
+    -d '{"inputs": {"data": {}}}' "${API}/workflows/${WF_ID}/execute")
+case "${CODE}" in 2??) ;; *) print_error "a key held to running workflows could not run one through the API (${CODE})"; exit 1 ;; esac
+echo "  a key that only reads is answered a run's history and refused a run; one held to connections is refused both; one held to running starts a run and lists none ✓"
 
 # b. The API's database role holds its own records and no more.
 as_api_role() {  # as_api_role SQL [database]: its output, or the error
