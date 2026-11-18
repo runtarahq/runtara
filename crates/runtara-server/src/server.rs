@@ -508,7 +508,6 @@ struct ServedState {
     engine: Arc<dyn crate::engine::Engine>,
     /// Metadata service for agent listings — pre-built with the component
     /// dispatcher so component-backed agents override the legacy registry.
-    agents: api::services::operators::AgentsService,
     /// Shared snapshot of every agent the runtime can route to. Validators
     /// consume this instead of `runtara_agents::registry` so the
     /// server-side view matches what the dispatcher actually loaded.
@@ -587,14 +586,6 @@ impl axum::extract::FromRef<ServedState>
         Arc::new(api::services::webhook_verification::ByConnection(
             state.connections.clone(),
         ))
-    }
-}
-
-// Implement FromRef to allow extracting the unified execution engine from ServedState
-// Implement FromRef to allow extracting AgentsService from ServedState
-impl axum::extract::FromRef<ServedState> for api::services::operators::AgentsService {
-    fn from_ref(state: &ServedState) -> api::services::operators::AgentsService {
-        state.agents.clone()
     }
 }
 
@@ -1191,7 +1182,32 @@ fn api_app(parts: ApiParts) -> Router {
             "/api/runtime/entitlements",
             get(api::handlers::entitlements::get_entitlements_handler),
         )
-        // Agents are served by the engine: see `Served::Agents` below.
+        // Agents: what there are and what each can do is asked of the engine,
+        // which loaded them, and so is running one on request.
+        .route(
+            "/api/runtime/agents",
+            get(api::handlers::operators::list_agents_handler),
+        )
+        .route(
+            "/api/runtime/agents/{name}",
+            get(api::handlers::operators::get_agent_handler),
+        )
+        .route(
+            "/api/runtime/agents/{name}/capabilities/{capability_id}",
+            get(api::handlers::operators::get_capability_handler),
+        )
+        .route(
+            "/api/runtime/agents/{name}/connection-schema",
+            get(api::handlers::operators::get_agent_connection_schema_handler),
+        )
+        .route(
+            "/api/runtime/_internal/components/status",
+            get(api::handlers::operators::components_status_handler),
+        )
+        .route(
+            "/api/runtime/agents/{name}/capabilities/{capability_id}/test",
+            post(api::handlers::agent_testing::test_agent_handler),
+        )
         // Step type endpoints
         .route(
             "/api/runtime/steps",
@@ -1263,17 +1279,6 @@ fn api_app(parts: ApiParts) -> Router {
         // file inputs (workflow `file` fields) are not rejected with 413
         // (SYN-457). See TENANT_REQUEST_BODY_LIMIT_BYTES.
         .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES));
-
-    let agent_routes = {
-        let to_agents = || {
-            crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Agents).layer(
-                from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
-            )
-        };
-        Router::new()
-            .nest("/api/runtime/agents", to_agents())
-            .nest("/api/runtime/_internal", to_agents())
-    };
 
     let trigger_routes = Router::new().nest(
         "/api/runtime/triggers",
@@ -1374,7 +1379,6 @@ fn api_app(parts: ApiParts) -> Router {
         .merge(object_model_routes.clone())
         .merge(connections_tenant_routes.clone())
         .merge(trigger_routes.clone())
-        .merge(agent_routes.clone())
         .merge(public_routes.clone())
         .merge(internal_event_routes);
 
@@ -1470,7 +1474,6 @@ fn api_app(parts: ApiParts) -> Router {
         .merge(tenant_routes)
         .merge(connections_tenant_routes)
         .merge(trigger_routes)
-        .merge(agent_routes)
         .merge(oauth_callback_routes)
         .merge(object_model_routes)
         .merge(me_routes)
@@ -3664,6 +3667,7 @@ async fn start_as_platform(
         )
         .with_agent_catalog(agent_catalog.clone())
         .with_agent_testing(agent_testing.clone())
+        .with_agents(agents_service.clone())
         .with_connections(connections_facade.clone()),
     );
     let engine_api: Arc<dyn crate::engine::Engine> = local_engine.clone();
@@ -3727,54 +3731,6 @@ async fn start_as_platform(
     }
     println!("✓ Cron scheduler started (durable outbox)");
 
-    // Agents are the engine's: it is the engine that loaded them, and that runs
-    // one on request. What agents there are, what each can do, and whether
-    // their components loaded is asked of it.
-    local_engine.serves(
-        crate::engine::Served::Agents,
-        Router::new()
-            .route(
-                "/api/runtime/agents",
-                get(api::handlers::operators::list_agents_handler),
-            )
-            .route(
-                "/api/runtime/agents/{name}",
-                get(api::handlers::operators::get_agent_handler),
-            )
-            .route(
-                "/api/runtime/agents/{name}/capabilities/{capability_id}",
-                get(api::handlers::operators::get_capability_handler),
-            )
-            .route(
-                "/api/runtime/agents/{name}/connection-schema",
-                get(api::handlers::operators::get_agent_connection_schema_handler),
-            )
-            .route(
-                "/api/runtime/_internal/components/status",
-                get(api::handlers::operators::components_status_handler),
-            )
-            .route(
-                "/api/runtime/agents/{name}/capabilities/{capability_id}/test",
-                post(api::handlers::agent_testing::test_agent_handler),
-            )
-            .with_state(ServedState {
-                pool: pool.clone(),
-                object_store_manager: object_store_manager.clone(),
-                trigger_stream: trigger_stream.clone(),
-                valkey_conn: valkey_conn.clone(),
-                connections: connections_facade.clone(),
-                engine: engine_api.clone(),
-                agents: agents_service.clone(),
-                agent_catalog: agent_catalog.clone(),
-                events: product_event_sink.clone(),
-            })
-            .route_layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
-            .route_layer(from_fn(crate::middleware::authorization::authorize(
-                membership_policy,
-            )))
-            .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES)),
-    );
-
     // Triggers are the engine's: making or changing one may register a webhook
     // at its provider, with the connection's sealed secret. The API
     // authenticates the caller and hands the request over; the caller's role
@@ -3800,7 +3756,6 @@ async fn start_as_platform(
                 valkey_conn: valkey_conn.clone(),
                 connections: connections_facade.clone(),
                 engine: engine_api.clone(),
-                agents: agents_service.clone(),
                 agent_catalog: agent_catalog.clone(),
                 events: product_event_sink.clone(),
             })
@@ -3999,7 +3954,6 @@ async fn start_as_platform(
             valkey_conn: valkey_conn.clone(),
             connections: connections_facade.clone(),
             engine: engine_api.clone(),
-            agents: agents_service.clone(),
             agent_catalog: agent_catalog.clone(),
             events: product_event_sink.clone(),
         })

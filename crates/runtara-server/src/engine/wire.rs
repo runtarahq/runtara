@@ -606,6 +606,23 @@ operations! {
     needs [],
     |engine, op| for Some(&op.tenant_id) => engine.workflow_agents(&op.tenant_id).await;
 
+    // What agents the engine loaded and what each can do: the agent routes
+    // are ungated too. Which of them a tenant's plan includes is decided by
+    // the API, which reads the plan.
+    ListAgents { tenant_id: String } -> Result<AgentListing, String>,
+    needs [],
+    |engine, op| for Some(&op.tenant_id) => engine.list_agents(&op.tenant_id).await;
+
+    AgentNamed { tenant_id: String, name: String, published: bool }
+        -> Result<Option<runtara_dsl::agent_meta::AgentInfo>, String>,
+    needs [],
+    |engine, op| for Some(&op.tenant_id) =>
+        engine.agent(&op.tenant_id, &op.name, op.published).await;
+
+    ComponentsStatusOf { tenant_id: String } -> Result<ComponentsStatus, String>,
+    needs [],
+    |engine, op| for Some(&op.tenant_id) => engine.components_status(&op.tenant_id).await;
+
     UnstageWorkflowAgent { tenant_id: String, slug: String } -> Result<(), String>,
     needs [WorkflowDelete],
     |engine, op| for Some(&op.tenant_id) =>
