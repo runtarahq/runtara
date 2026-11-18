@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Generate an agent crate's `src/generated.rs` from the vendor's OpenAPI spec.
+"""Generate an agent crate's `src/generated.rs` from the vendor's OpenAPI spec,
+or from its GraphQL schema and the crate's operations (`graphql_source.py`).
 
 Every generated agent crate carries a `connector.yaml` (see README.md). Commands,
 where CRATE is an agent crate directory such as
 `crates/agents/runtara-agent-pipedrive`:
 
-    fetch CRATE       download the spec (or specs), verify each sha256, and write
-                      `spec.slice.json` plus `tests/fixtures/<operationId>.json`
+    fetch CRATE       download the spec (or specs, or the GraphQL schema), verify
+                      each sha256, and write `spec.slice.json` plus
+                      `tests/fixtures/<operationId>.json`
     generate CRATE    render `src/generated.rs` from `spec.slice.json`
-    check CRATE...    fail when `src/generated.rs`, the fixtures or the operation
-                      list no longer match `spec.slice.json`
+    check CRATE...    fail when `src/generated.rs`, the fixtures, the operation
+                      list or a GraphQL operation no longer match `spec.slice.json`
 """
 
 import argparse
@@ -87,7 +89,10 @@ def load_config(crate: Path) -> dict:
 def spec_sources(config: dict) -> list:
     """The specs a connector is generated from, each with its operations: the
     `specs:` list (an API the vendor publishes as several specs, one per
-    product), or the single `spec:` with the top-level `operations:`."""
+    product), or the single `spec:` with the top-level `operations:`. A GraphQL
+    API (`graphql:`) has one source, its schema."""
+    if "graphql" in config:
+        return [{**(config["graphql"].get("schema") or {}), "operations": config["operations"]}]
     if "specs" in config:
         return config["specs"]
     return [{**config["spec"], "operations": config["operations"]}]
@@ -1225,9 +1230,12 @@ def check_input_names(sliced: dict) -> None:
                     sys.exit(f"{op['operationId']}: {INPUT_NAME} `{custom}` is not a plain name")
                 name = custom or field["name"]
                 if name in PLATFORM_INPUTS:
+                    # A GraphQL operation's inputs are its variables, which are ours to name.
+                    fix = ("rename the variable in the operation" if "x-runtara-graphql-document" in op
+                           else f"name it with {INPUT_NAME}")
                     sys.exit(
                         f"{op['operationId']}: the platform sets the input `{name}` on every call, "
-                        f"which would overwrite the value; name it with {INPUT_NAME}"
+                        f"which would overwrite the value; {fix}"
                     )
                 if name in seen:
                     sys.exit(f"{op['operationId']}: two inputs are named `{name}`")
@@ -1287,10 +1295,12 @@ def slice_spec(spec: dict, operation_ids: list, model_names: dict = None, body_e
     return sliced
 
 
-def slice_specs(specs: list, config: dict) -> dict:
+def slice_specs(specs: list, config: dict, reads: list = ()) -> dict:
     """The slice of every `spec_sources` entry, paired here with its loaded spec,
-    merged into one when there are several."""
+    merged into one when there are several. `reads` are operations that only
+    read though they are POSTs: a GraphQL API's queries."""
     options = {key: config.get(key) or [] for key in NAME_LISTS}
+    options["read_operations"] = [*options["read_operations"], *reads]
     model_names = config.get("model_names") or {}
     first = specs[0][0]["operations"][0]
     slices, used = [], {}
@@ -1872,7 +1882,14 @@ def download(source: dict, crate: Path) -> bytes:
 
 def fetch(crate: Path) -> None:
     config = load_config(crate)
-    sliced = slice_specs([(source, load_spec(download(source, crate))) for source in spec_sources(config)], config)
+    if "graphql" in config:
+        import graphql_source
+
+        spec, queries = graphql_source.openapi_spec(config, crate)
+        sliced = slice_specs([(spec_sources(config)[0], spec)], config, queries)
+    else:
+        sliced = slice_specs([(source, load_spec(download(source, crate))) for source in spec_sources(config)],
+                             config)
     describe_fields(sliced, config.get("labels") or {})
     write_json(crate / "spec.slice.json", sliced)
     fixtures = crate / "tests" / "fixtures"
@@ -2050,6 +2067,10 @@ def drift(crate: Path) -> list:
     actual = {p.stem: json.loads(p.read_text()) for p in fixtures.glob("*.json")} if fixtures.exists() else {}
     if actual != response_examples(sliced):
         problems.append("tests/fixtures do not match the response examples in spec.slice.json")
+    if "graphql" in config:
+        import graphql_source
+
+        problems += graphql_source.document_drift(config, crate, sliced)
     return problems
 
 
