@@ -150,6 +150,19 @@ if [ "${RUNTARA_ONLY_WORKFLOW_COMPONENTS:-}" != "1" ]; then
     cargo build --release --target wasm32-wasip2 "${agent_pkg_args[@]}"
 fi
 
+if [ "${RUNTARA_ONLY_WORKFLOW_COMPONENTS:-}" != "1" ]; then
+    # The compiler as a WASI command, which an engine compiles workflows in
+    # (RUNTARA_COMPILER_WASM, docs/roles.md). It ships beside the components.
+    #
+    # Built before the workflow stdlib, not after: the compiler depends on the
+    # stdlib with other features, so building it writes
+    # runtara_workflow_stdlib.wasm too. The stdlib's own build below must be
+    # the last to write that file, or its meta.json names a checksum the file
+    # no longer has and no workflow composes.
+    echo "==> runtara-compile-sandboxed"
+    cargo build --release --target wasm32-wasip2 -p runtara-compile-guest --bin runtara-compile-sandboxed
+fi
+
 echo "==> runtara-workflow-stdlib"
 cargo build --release --target wasm32-wasip2 -p runtara-workflow-stdlib --no-default-features --features direct-component
 emit_workflow_component_meta \
@@ -191,11 +204,6 @@ if [ "${RUNTARA_ONLY_WORKFLOW_COMPONENTS:-}" != "1" ]; then
     # (the macro-emitted statics), not hand-edited JSON.
     echo "==> emit-meta"
     cargo run --quiet -p runtara-agent-bundle-emit --bin emit-meta -- "$out_dir"
-
-    # The compiler as a WASI command, which an engine compiles workflows in
-    # (RUNTARA_COMPILER_WASM, docs/roles.md). It ships beside the components.
-    echo "==> runtara-compile-sandboxed"
-    cargo build --release --target wasm32-wasip2 -p runtara-compile-guest --bin runtara-compile-sandboxed
 
     # Stage the exact workspace component set. Old Cargo outputs are left intact
     # but can never reintroduce a removed agent into the runtime/release bundle.
