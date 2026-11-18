@@ -14,7 +14,6 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use sqlx::PgPool;
 
 use crate::api::repositories::object_model::ObjectStoreManager;
-use crate::runtime_client::RuntimeClient;
 
 use super::tools;
 
@@ -25,7 +24,8 @@ pub struct SmoMcpServer {
     tool_router: ToolRouter<Self>,
     pub(crate) pool: PgPool,
     pub(crate) object_store_manager: Arc<ObjectStoreManager>,
-    pub(crate) runtime_client: Option<Arc<RuntimeClient>>,
+    /// What tools ask of the engine beyond the API's own routes.
+    pub(crate) engine: Arc<dyn crate::engine::Engine>,
     pub(crate) tenant_id: String,
     /// Internal router for in-process API calls (no network hop).
     /// MCP tools call this via Router::oneshot() with AuthContext pre-injected.
@@ -48,7 +48,7 @@ impl SmoMcpServer {
     pub fn new(
         pool: PgPool,
         object_store_manager: Arc<ObjectStoreManager>,
-        runtime_client: Option<Arc<RuntimeClient>>,
+        engine: Arc<dyn crate::engine::Engine>,
         tenant_id: String,
         internal_router: axum::Router,
     ) -> Self {
@@ -56,7 +56,7 @@ impl SmoMcpServer {
             tool_router: Self::tool_router(),
             pool,
             object_store_manager,
-            runtime_client,
+            engine,
             tenant_id,
             internal_router,
             workflow_mutation_locks: Arc::new(DashMap::new()),
@@ -1247,7 +1247,7 @@ impl ServerHandler for SmoMcpServer {
 pub fn create_mcp_router(
     pool: PgPool,
     object_store_manager: Arc<ObjectStoreManager>,
-    runtime_client: Option<Arc<RuntimeClient>>,
+    engine: Arc<dyn crate::engine::Engine>,
     tenant_id: String,
     internal_router: axum::Router,
     mcp_allowed_hosts: Vec<String>,
@@ -1265,7 +1265,7 @@ pub fn create_mcp_router(
             Ok(SmoMcpServer::new(
                 pool.clone(),
                 object_store_manager.clone(),
-                runtime_client.clone(),
+                engine.clone(),
                 tenant_id.clone(),
                 internal_router.clone(),
             ))

@@ -1,3 +1,4 @@
+use crate::engine::Engine;
 use crate::runtime_types::ListEventsOptions;
 use axum::{
     Json,
@@ -26,8 +27,7 @@ use crate::api::handlers::chat::{
 use crate::api::handlers::common::execution_error_response;
 use crate::api::services::session_queue;
 use crate::api::services::session_queue::managed::{self, QueueError, QueueScope};
-use crate::runtime_client::RuntimeClient;
-use crate::workers::execution_engine::{ExecutionEngine, QueueRequest, TriggerSource};
+use crate::workers::execution_engine::{QueueRequest, TriggerSource};
 
 mod delivery;
 pub use delivery::*;
@@ -72,18 +72,18 @@ pub struct SubmitEventRequest {
 pub async fn create_session(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     State(valkey_conn): State<Option<ConnectionManager>>,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path(workflow_id): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
-    let runtime_client = runtime_client.ok_or_else(|| {
-        (
+    if !engine.available() {
+        return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"success": false, "message": "Runtime client not configured"})),
-        )
-    })?;
+        ));
+    }
+    let runtime_client = engine.clone();
 
     let mut valkey = valkey_conn.ok_or_else(|| {
         (
@@ -225,7 +225,7 @@ fn input_target_response(code: &str, message: &str) -> (StatusCode, Json<Value>)
 /// Choose the request a new message answers, while the sender can still see it.
 /// Binding later (at delivery) could attach a late reply to a different wait.
 async fn bind_session_message(
-    client: &RuntimeClient,
+    client: &dyn Engine,
     tenant_id: &str,
     instance_id: &str,
     requested: Option<&str>,
@@ -280,7 +280,7 @@ async fn bind_session_message(
 pub async fn submit_event(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     axum::Extension(auth): axum::Extension<crate::auth::AuthContext>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(runtime_client): State<Arc<dyn Engine>>,
     State(valkey_conn): State<Option<ConnectionManager>>,
     Path(session_id): Path<String>,
     body: Result<Json<SubmitEventRequest>, axum::extract::rejection::JsonRejection>,
@@ -324,16 +324,16 @@ pub async fn submit_event(
             existing.target
         }
         None => {
-            let Some(client) = runtime_client else {
+            if !runtime_client.available() {
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
                     Json(
                         json!({"success":false,"code":"RUNTIME_UNAVAILABLE","message":"Runtime client not configured"}),
                     ),
                 );
-            };
+            }
             match bind_session_message(
-                &client,
+                runtime_client.as_ref(),
                 &tenant_id,
                 &route.instance_id,
                 request.request_id.as_deref(),
@@ -385,16 +385,16 @@ pub async fn submit_event(
 pub async fn session_event_stream(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(runtime_client): State<Arc<dyn Engine>>,
     State(valkey_conn): State<Option<ConnectionManager>>,
     Path(session_id): Path<String>,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
-    let runtime_client = runtime_client.ok_or_else(|| {
-        (
+    if !runtime_client.available() {
+        return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"success": false, "message": "Runtime client not configured"})),
-        )
-    })?;
+        ));
+    }
 
     let mut valkey = valkey_conn.ok_or_else(|| {
         (
@@ -458,18 +458,15 @@ pub async fn session_event_stream(
 )]
 pub async fn session_pending_input(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(client): State<Arc<dyn Engine>>,
     State(valkey_conn): State<Option<ConnectionManager>>,
     Path(session_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    let client = match runtime_client {
-        Some(c) => c,
-        None => {
-            return crate::api::handlers::step_events::workflow_runtime_error_response(
-                crate::api::services::workflow_runtime::WorkflowRuntimeError::RuntimeUnavailable,
-            );
-        }
-    };
+    if !client.available() {
+        return crate::api::handlers::step_events::workflow_runtime_error_response(
+            crate::api::services::workflow_runtime::WorkflowRuntimeError::RuntimeUnavailable,
+        );
+    }
 
     let mut valkey = match valkey_conn {
         Some(c) => c,
@@ -496,13 +493,7 @@ pub async fn session_pending_input(
 
     let instance_id = meta.instance_id;
 
-    match crate::api::services::pending_inputs::pending_input_page(
-        &client,
-        &tenant_id,
-        &instance_id,
-    )
-    .await
-    {
+    match client.pending_input_page(&tenant_id, &instance_id).await {
         Ok(page) => (StatusCode::OK, Json(json!({"success":true,"data":page}))),
         Err(error) => {
             crate::api::handlers::step_events::workflow_runtime_error_response(error.into())
@@ -513,7 +504,7 @@ pub async fn session_pending_input(
 /// SSE observes durable session routing. Disconnecting a viewer does not cancel
 /// execution or own delivery; the managed queue worker runs independently.
 struct SessionStreamParams {
-    client: Arc<RuntimeClient>,
+    client: Arc<dyn Engine>,
     valkey: ConnectionManager,
     instance_id: String,
     tenant_id: String,
@@ -538,13 +529,13 @@ fn build_session_event_stream(
                 terminal_reported=false;
                 yield Ok(Event::default().event("started").json_data(json!({"instance_id":current})).unwrap_or_default());
             }
-            let info=match client.get_instance_info(&current).await {
+            let info=match client.get_instance_info(&tenant_id,&current).await {
                 Ok(info) if info.tenant_id==tenant_id=>info,
                 Ok(_)=>{ yield Ok(make_event("error",&ChatEvent::Error {message:"Session execution unavailable".into()})); break; }
                 Err(_)=>{ sleep(Duration::from_millis(500)).await; continue; }
             };
             let mut more_events=false;
-            match client.list_events(&current,Some(ListEventsOptions {
+            match client.list_events(&tenant_id,&current,Some(ListEventsOptions {
                 event_type:Some("custom".into()),sort_order:Some(crate::runtime_types::EventSortOrder::Asc),
                 limit:Some(100),offset:Some(offset),..Default::default()
             })).await {

@@ -1,4 +1,5 @@
 /// Handlers for execution-related endpoints
+use crate::engine::Engine;
 use axum::{
     Json,
     extract::{Query, State},
@@ -11,7 +12,6 @@ use crate::api::dto::executions::{
     ExecutionFilters, ListAllExecutionsQuery, ListAllExecutionsResponse, QueryExecutionsRequest,
 };
 use crate::api::handlers::common::execution_error_response;
-use crate::workers::execution_engine::ExecutionEngine;
 
 /// List all executions across all workflows with filtering, sorting, and pagination
 #[utoipa::path(
@@ -28,7 +28,7 @@ use crate::workers::execution_engine::ExecutionEngine;
 )]
 pub async fn list_all_executions_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Query(query): Query<ListAllExecutionsQuery>,
 ) -> (StatusCode, Json<Value>) {
     // Parse and validate query parameters
@@ -83,7 +83,7 @@ pub async fn list_all_executions_handler(
 )]
 pub async fn query_executions_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Json(request): Json<QueryExecutionsRequest>,
 ) -> (StatusCode, Json<Value>) {
     let listing = request.listing();
@@ -130,7 +130,7 @@ pub async fn query_executions_handler(
 )]
 pub async fn execution_summary_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Json(request): Json<crate::api::dto::executions::ExecutionSummaryRequest>,
 ) -> (StatusCode, Json<Value>) {
     let filters = match parse_query(&request.listing()) {

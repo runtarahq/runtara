@@ -448,17 +448,16 @@ pub struct ApiDoc;
 struct AppState {
     pool: PgPool,
     object_store_manager: Arc<ObjectStoreManager>,
-    agent_testing: Option<AgentTestingService>,
-    /// Runtime client for workflow execution via Management SDK (None if not configured)
-    runtime_client: Option<Arc<RuntimeClient>>,
     /// Trigger stream publisher for async executions (None if Valkey not configured)
     trigger_stream: Option<Arc<api::repositories::trigger_stream::TriggerStreamPublisher>>,
     /// Valkey connection manager for session queue operations (None if Valkey not configured)
     valkey_conn: Option<redis::aio::ConnectionManager>,
     /// Connections facade for unified connection operations
     connections: Arc<runtara_connections::ConnectionsFacade>,
-    /// Unified execution engine — single orchestrator for all execution paths
-    engine: Arc<workers::execution_engine::ExecutionEngine>,
+    /// What code that takes requests may ask of the engine, and all it is
+    /// given of it: the state holds neither the runtime client nor the
+    /// execution engine, so a handler cannot take them.
+    engine: Arc<dyn crate::engine::Engine>,
     /// Metadata service for agent listings — pre-built with the component
     /// dispatcher so component-backed agents override the legacy registry.
     agents: api::services::operators::AgentsService,
@@ -472,6 +471,12 @@ struct AppState {
     events: product_events::ProductEventSink,
 }
 
+impl axum::extract::FromRef<AppState> for Arc<dyn crate::engine::Engine> {
+    fn from_ref(state: &AppState) -> Self {
+        state.engine.clone()
+    }
+}
+
 // Implement FromRef to allow extracting PgPool from AppState
 impl axum::extract::FromRef<AppState> for PgPool {
     fn from_ref(state: &AppState) -> PgPool {
@@ -483,13 +488,6 @@ impl axum::extract::FromRef<AppState> for PgPool {
 impl axum::extract::FromRef<AppState> for Arc<ObjectStoreManager> {
     fn from_ref(state: &AppState) -> Arc<ObjectStoreManager> {
         state.object_store_manager.clone()
-    }
-}
-
-// Implement FromRef to allow extracting agent_testing from AppState
-impl axum::extract::FromRef<AppState> for Option<AgentTestingService> {
-    fn from_ref(state: &AppState) -> Option<AgentTestingService> {
-        state.agent_testing.clone()
     }
 }
 
@@ -508,12 +506,6 @@ impl axum::extract::FromRef<AppState> for product_events::ProductEventSink {
 }
 
 // Implement FromRef to allow extracting runtime_client from AppState
-impl axum::extract::FromRef<AppState> for Option<Arc<RuntimeClient>> {
-    fn from_ref(state: &AppState) -> Option<Arc<RuntimeClient>> {
-        state.runtime_client.clone()
-    }
-}
-
 // Implement FromRef to allow extracting trigger_stream from AppState
 impl axum::extract::FromRef<AppState>
     for Option<Arc<api::repositories::trigger_stream::TriggerStreamPublisher>>
@@ -540,12 +532,6 @@ impl axum::extract::FromRef<AppState> for Arc<runtara_connections::ConnectionsFa
 }
 
 // Implement FromRef to allow extracting the unified execution engine from AppState
-impl axum::extract::FromRef<AppState> for Arc<workers::execution_engine::ExecutionEngine> {
-    fn from_ref(state: &AppState) -> Arc<workers::execution_engine::ExecutionEngine> {
-        state.engine.clone()
-    }
-}
-
 // Implement FromRef to allow extracting AgentsService from AppState
 impl axum::extract::FromRef<AppState> for api::services::operators::AgentsService {
     fn from_ref(state: &AppState) -> api::services::operators::AgentsService {
@@ -892,6 +878,9 @@ async fn start_as_platform(
     pool: PgPool,
     mut options: ServerOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // One process runs both of the server's roles. Each piece of background
+    // work below is started for the role it belongs to.
+    let workers = crate::roles::Workers::new(crate::roles::Roles::all());
     if let Some(source) = options.entitlements.clone() {
         config::install_entitlement_source(source);
     }
@@ -1473,16 +1462,20 @@ async fn start_as_platform(
             // An app entered, changed or removed (`runtara-server oauth-apps`)
             // is seen by every instance within a minute.
             let (apps, sealed) = (stored.clone(), sealed_credentials.clone());
-            runtara_store_postgres::tenant_scope::spawn(async move {
-                let mut every = tokio::time::interval(std::time::Duration::from_secs(60));
-                every.tick().await;
-                loop {
+            workers.detached(
+                crate::roles::Role::Engine,
+                "platform OAuth apps reload",
+                async move {
+                    let mut every = tokio::time::interval(std::time::Duration::from_secs(60));
                     every.tick().await;
-                    if let Err(error) = apps.reload(&sealed).await {
-                        tracing::warn!(%error, "The platform's OAuth apps were not read again");
+                    loop {
+                        every.tick().await;
+                        if let Err(error) = apps.reload(&sealed).await {
+                            tracing::warn!(%error, "The platform's OAuth apps were not read again");
+                        }
                     }
-                }
-            });
+                },
+            );
             Some(stored)
         }
     };
@@ -1529,9 +1522,8 @@ async fn start_as_platform(
         let slug_repo = Arc::new(api::repositories::workflows::WorkflowRepository::new(
             pool.clone(),
         ));
-        let slug_service = api::services::workflows::WorkflowService::new(
+        let slug_service = api::services::workflows::WorkflowService::without_engine(
             slug_repo,
-            connections_facade.clone(),
             agent_catalog.clone(),
         );
         match slug_service.backfill_workflow_slugs().await {
@@ -1550,29 +1542,33 @@ async fn start_as_platform(
 
     // Spawn background task to warn when pool usage is high
     let pool_monitor = pool.clone();
-    runtara_store_postgres::tenant_scope::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-        loop {
-            interval.tick().await;
-            let size = pool_monitor.size();
-            let idle = pool_monitor.num_idle();
-            let active = size as usize - idle;
-            let usage_pct = if size > 0 {
-                (active * 100) / size as usize
-            } else {
-                0
-            };
-            if usage_pct >= 75 {
-                tracing::warn!(
-                    pool_size = size,
-                    pool_idle = idle,
-                    pool_active = active,
-                    usage_pct,
-                    "Database pool under pressure"
-                );
+    workers.detached(
+        crate::roles::Role::Api,
+        "database pool monitor",
+        async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                let size = pool_monitor.size();
+                let idle = pool_monitor.num_idle();
+                let active = size as usize - idle;
+                let usage_pct = if size > 0 {
+                    (active * 100) / size as usize
+                } else {
+                    0
+                };
+                if usage_pct >= 75 {
+                    tracing::warn!(
+                        pool_size = size,
+                        pool_idle = idle,
+                        pool_active = active,
+                        usage_pct,
+                        "Database pool under pressure"
+                    );
+                }
             }
-        }
-    });
+        },
+    );
 
     let object_model_pool_config = config::object_model_pool_config();
 
@@ -1602,39 +1598,43 @@ async fn start_as_platform(
 
     // Spawn background task to report object-model pool stats / warn on pressure.
     let object_model_pool_monitor = object_store_manager.clone();
-    runtara_store_postgres::tenant_scope::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-        loop {
-            interval.tick().await;
-            let stats = object_model_pool_monitor.pool_stats();
-            if stats.pools == 0 {
-                continue;
+    workers.detached(
+        crate::roles::Role::Engine,
+        "object model pool monitor",
+        async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                let stats = object_model_pool_monitor.pool_stats();
+                if stats.pools == 0 {
+                    continue;
+                }
+                let usage_pct = (stats.active * 100)
+                    .checked_div(stats.capacity)
+                    .unwrap_or(0);
+                if usage_pct >= 75 {
+                    tracing::warn!(
+                        pools = stats.pools,
+                        connections = stats.connections,
+                        idle = stats.idle,
+                        active = stats.active,
+                        capacity = stats.capacity,
+                        usage_pct,
+                        "Object model pools under pressure"
+                    );
+                } else {
+                    tracing::debug!(
+                        pools = stats.pools,
+                        connections = stats.connections,
+                        idle = stats.idle,
+                        active = stats.active,
+                        capacity = stats.capacity,
+                        "Object model pool stats"
+                    );
+                }
             }
-            let usage_pct = (stats.active * 100)
-                .checked_div(stats.capacity)
-                .unwrap_or(0);
-            if usage_pct >= 75 {
-                tracing::warn!(
-                    pools = stats.pools,
-                    connections = stats.connections,
-                    idle = stats.idle,
-                    active = stats.active,
-                    capacity = stats.capacity,
-                    usage_pct,
-                    "Object model pools under pressure"
-                );
-            } else {
-                tracing::debug!(
-                    pools = stats.pools,
-                    connections = stats.connections,
-                    idle = stats.idle,
-                    active = stats.active,
-                    capacity = stats.capacity,
-                    "Object model pool stats"
-                );
-            }
-        }
-    });
+        },
+    );
 
     // Webhook secrets earlier releases stored readable in Channel triggers
     // are sealed: nothing checks a call against a readable one any more.
@@ -1821,28 +1821,32 @@ async fn start_as_platform(
         .with_direct_compilation(
             api::services::compilation::direct_compilation_settings_from_config(),
         );
-        runtara_store_postgres::tenant_scope::spawn(async move {
-            for tenant_id in config::served_tenants() {
-                let (rebuilt, failed) = service.restage_missing_artifacts(tenant_id).await;
-                if rebuilt + failed > 0 {
-                    tracing::info!(
-                        %tenant_id,
-                        rebuilt,
-                        failed,
-                        "rebuilt missing workflow artifacts"
-                    );
+        workers.detached(
+            crate::roles::Role::Engine,
+            "artifact restaging",
+            async move {
+                for tenant_id in config::served_tenants() {
+                    let (rebuilt, failed) = service.restage_missing_artifacts(tenant_id).await;
+                    if rebuilt + failed > 0 {
+                        tracing::info!(
+                            %tenant_id,
+                            rebuilt,
+                            failed,
+                            "rebuilt missing workflow artifacts"
+                        );
+                    }
+                    let (restaged, failed) = service.restage_stale_workflow_agents(tenant_id).await;
+                    if restaged + failed > 0 {
+                        tracing::info!(
+                            %tenant_id,
+                            restaged,
+                            failed,
+                            "restaged workflow-agents for this lowering"
+                        );
+                    }
                 }
-                let (restaged, failed) = service.restage_stale_workflow_agents(tenant_id).await;
-                if restaged + failed > 0 {
-                    tracing::info!(
-                        %tenant_id,
-                        restaged,
-                        failed,
-                        "restaged workflow-agents for this lowering"
-                    );
-                }
-            }
-        });
+            },
+        );
     }
 
     // Install before any Valkey worker is started. Environment commits its
@@ -1876,7 +1880,12 @@ async fn start_as_platform(
             runtime_client,
         );
         let reconcile_shutdown = shutdown_signal.clone();
-        shutdown_coordinator.spawn_intake(async move { reconciler.run(reconcile_shutdown).await });
+        workers.intake(
+            crate::roles::Role::Engine,
+            "execution admission reconciler",
+            &shutdown_coordinator,
+            async move { reconciler.run(reconcile_shutdown).await },
+        );
         println!("✓ Execution admission reconciler started");
     }
 
@@ -1891,7 +1900,12 @@ async fn start_as_platform(
             runtime_client,
         );
         let publisher_shutdown = shutdown_signal.clone();
-        shutdown_coordinator.spawn_intake(async move { publisher.run(publisher_shutdown).await });
+        workers.intake(
+            crate::roles::Role::Engine,
+            "control children publisher",
+            &shutdown_coordinator,
+            async move { publisher.run(publisher_shutdown).await },
+        );
         println!("✓ Control children publisher started");
     }
 
@@ -1900,15 +1914,21 @@ async fn start_as_platform(
     {
         let cleanup_pool = pool.clone();
         let cleanup_shutdown = shutdown_signal.clone();
-        shutdown_coordinator.spawn_intake(async move {
-            let cfg = workers::invocation_cleanup_worker::InvocationCleanupWorkerConfig::from_env();
-            let worker = workers::invocation_cleanup_worker::InvocationCleanupWorker::new(
-                cleanup_pool,
-                cfg,
-                cleanup_shutdown,
-            );
-            worker.run().await;
-        });
+        workers.intake(
+            crate::roles::Role::Engine,
+            "invocation cleanup",
+            &shutdown_coordinator,
+            async move {
+                let cfg =
+                    workers::invocation_cleanup_worker::InvocationCleanupWorkerConfig::from_env();
+                let worker = workers::invocation_cleanup_worker::InvocationCleanupWorker::new(
+                    cleanup_pool,
+                    cfg,
+                    cleanup_shutdown,
+                );
+                worker.run().await;
+            },
+        );
     }
 
     // Unconfirmed OAuth authorizations: a flow started without a browser whose
@@ -1918,28 +1938,33 @@ async fn start_as_platform(
     {
         let state = runtara_connections::ConnectionsState::from_config(connections_config.clone());
         let pending_shutdown = shutdown_signal.clone();
-        shutdown_coordinator.spawn_intake(async move {
-            let service = runtara_connections::service::oauth::OAuthService::from_state(&state);
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = pending_shutdown.clone().wait() => return,
-                    _ = interval.tick() => {}
+        workers.intake(
+            crate::roles::Role::Engine,
+            "unconfirmed OAuth sweep",
+            &shutdown_coordinator,
+            async move {
+                let service = runtara_connections::service::oauth::OAuthService::from_state(&state);
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = pending_shutdown.clone().wait() => return,
+                        _ = interval.tick() => {}
+                    }
+                    match service.expire_pending(config::served_tenants()).await {
+                        Ok(0) => {}
+                        Ok(dropped) => tracing::info!(
+                            dropped,
+                            "dropped OAuth authorizations no member confirmed in time"
+                        ),
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "sweeping unconfirmed OAuth authorizations failed"
+                        ),
+                    }
                 }
-                match service.expire_pending(config::served_tenants()).await {
-                    Ok(0) => {}
-                    Ok(dropped) => tracing::info!(
-                        dropped,
-                        "dropped OAuth authorizations no member confirmed in time"
-                    ),
-                    Err(error) => tracing::warn!(
-                        %error,
-                        "sweeping unconfirmed OAuth authorizations failed"
-                    ),
-                }
-            }
-        });
+            },
+        );
     }
 
     // Product-analytics pipeline: spawn the single drain (consumer) now that the shutdown
@@ -1956,7 +1981,12 @@ async fn start_as_platform(
                 product_events_config,
                 shutdown_signal.clone(),
             );
-            shutdown_coordinator.spawn_intake(drain.run());
+            workers.intake(
+                crate::roles::Role::Api,
+                "product events drain",
+                &shutdown_coordinator,
+                drain.run(),
+            );
         }
         None => {
             println!(
@@ -2051,25 +2081,30 @@ async fn start_as_platform(
             // A tenant's consumers act for it alone: row level security keeps
             // their database work to its rows, as a request's is.
             let scope = trigger_worker_tenant_id.clone();
-            shutdown_coordinator.spawn_intake(scoped(scope, async move {
-                let worker_config = workers::trigger_worker::TriggerWorkerConfig {
-                    tenant_id: trigger_worker_tenant_id,
-                    batch_size: trigger_batch_size,
-                    block_timeout_ms: 5000,
-                    ..Default::default()
-                };
+            workers.intake(
+                crate::roles::Role::Engine,
+                "trigger worker",
+                &shutdown_coordinator,
+                scoped(scope, async move {
+                    let worker_config = workers::trigger_worker::TriggerWorkerConfig {
+                        tenant_id: trigger_worker_tenant_id,
+                        batch_size: trigger_batch_size,
+                        block_timeout_ms: 5000,
+                        ..Default::default()
+                    };
 
-                workers::trigger_worker::run(
-                    pool_for_worker,
-                    client_for_worker,
-                    cfg_for_worker,
-                    worker_config,
-                    trigger_shutdown,
-                    trigger_events,
-                    permits_for_worker,
-                )
-                .await;
-            }));
+                    workers::trigger_worker::run(
+                        pool_for_worker,
+                        client_for_worker,
+                        cfg_for_worker,
+                        worker_config,
+                        trigger_shutdown,
+                        trigger_events,
+                        permits_for_worker,
+                    )
+                    .await;
+                }),
+            );
         }
 
         // Control-event consumer, one per served tenant (SYN-939): revokes a removed/disabled
@@ -2086,16 +2121,21 @@ async fn start_as_platform(
                 membership_policy,
             );
             let scope = control_tenant.clone();
-            shutdown_coordinator.spawn_intake(scoped(scope, async move {
-                crate::valkey::control_events::run(
-                    control_pool,
-                    control_config,
-                    control_tenant,
-                    control_sweep,
-                    control_shutdown,
-                )
-                .await;
-            }));
+            workers.intake(
+                crate::roles::Role::Api,
+                "member control events",
+                &shutdown_coordinator,
+                scoped(scope, async move {
+                    crate::valkey::control_events::run(
+                        control_pool,
+                        control_config,
+                        control_tenant,
+                        control_sweep,
+                        control_shutdown,
+                    )
+                    .await;
+                }),
+            );
         }
 
         // Start compilation worker (processes compilation queue)
@@ -2107,21 +2147,26 @@ async fn start_as_platform(
         let compilation_shutdown = shutdown_signal.clone();
         let compilation_agent_catalog = Some(agent_catalog.clone());
         let compilation_events = product_event_sink.clone();
-        shutdown_coordinator.spawn_intake(async move {
-            let worker_config = workers::compilation_worker::CompilationWorkerConfig::from_env(
-                compilation_worker_config.connection_url(),
-            );
+        workers.intake(
+            crate::roles::Role::Engine,
+            "compilation worker",
+            &shutdown_coordinator,
+            async move {
+                let worker_config = workers::compilation_worker::CompilationWorkerConfig::from_env(
+                    compilation_worker_config.connection_url(),
+                );
 
-            workers::compilation_worker::run(
-                compilation_pool,
-                compilation_runtime_client,
-                compilation_agent_catalog,
-                worker_config,
-                compilation_shutdown,
-                compilation_events,
-            )
-            .await;
-        });
+                workers::compilation_worker::run(
+                    compilation_pool,
+                    compilation_runtime_client,
+                    compilation_agent_catalog,
+                    worker_config,
+                    compilation_shutdown,
+                    compilation_events,
+                )
+                .await;
+            },
+        );
 
         // Keep the admission counter honest against the durable rows while the
         // process runs. Startup seeding alone left a slot leaked by a crash
@@ -2130,9 +2175,15 @@ async fn start_as_platform(
         {
             let reconcile_pool = pool.clone();
             let reconcile_shutdown = shutdown_signal.clone();
-            shutdown_coordinator.spawn_intake(async move {
-                workers::admission_counter::run_reconciler(reconcile_pool, reconcile_shutdown).await
-            });
+            workers.intake(
+                crate::roles::Role::Engine,
+                "admission counter reconciler",
+                &shutdown_coordinator,
+                async move {
+                    workers::admission_counter::run_reconciler(reconcile_pool, reconcile_shutdown)
+                        .await
+                },
+            );
         }
 
         // Relay source requests after their transaction commits. A publish
@@ -2144,7 +2195,12 @@ async fn start_as_platform(
                 publisher,
             );
             let relay_shutdown = shutdown_signal.clone();
-            shutdown_coordinator.spawn_intake(async move { relay.run(relay_shutdown).await });
+            workers.intake(
+                crate::roles::Role::Engine,
+                "execution outbox relay",
+                &shutdown_coordinator,
+                async move { relay.run(relay_shutdown).await },
+            );
         } else {
             tracing::warn!("Execution outbox relay not started: Valkey publisher unavailable");
         }
@@ -2156,17 +2212,21 @@ async fn start_as_platform(
         // not `spawn_intake`: it trims streams on its own interval and never
         // reads the shutdown flag, so waiting for it would spend the whole
         // intake grace on every shutdown for a task that cannot exit.
-        runtara_store_postgres::tenant_scope::spawn(async move {
-            let redis_url = cleanup_config.connection_url();
-            match valkey::open_client(redis_url.as_str()) {
-                Ok(redis_client) => {
-                    valkey::cleanup::start_cleanup_task(redis_client, cleanup_config).await;
+        workers.detached(
+            crate::roles::Role::Engine,
+            "trigger stream cleanup",
+            async move {
+                let redis_url = cleanup_config.connection_url();
+                match valkey::open_client(redis_url.as_str()) {
+                    Ok(redis_client) => {
+                        valkey::cleanup::start_cleanup_task(redis_client, cleanup_config).await;
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to create Redis client for cleanup task: {}", e);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("Failed to create Redis client for cleanup task: {}", e);
-                }
-            }
-        });
+            },
+        );
 
         println!("✓ Trigger worker started (stream-based execution)");
         println!("✓ Compilation worker started (async compilation queue)");
@@ -2229,6 +2289,18 @@ async fn start_as_platform(
         product_event_sink.clone(),
     ));
     println!("✓ Execution engine initialized");
+    // The whole of what code that takes requests may ask of the engine.
+    let local_engine = Arc::new(
+        crate::engine::LocalEngine::new(
+            runtime_client.clone(),
+            execution_engine.clone(),
+            pool.clone(),
+        )
+        .with_agent_catalog(agent_catalog.clone())
+        .with_agent_testing(agent_testing.clone())
+        .with_connections(connections_facade.clone()),
+    );
+    let engine_api: Arc<dyn crate::engine::Engine> = local_engine.clone();
     native_control.install_engine(execution_engine.clone());
     {
         let limit = crate::middleware::entitlement::effective_limit(
@@ -2252,16 +2324,21 @@ async fn start_as_platform(
             let shutdown = shutdown_signal.clone();
             let delivery_pool = pool.clone();
             let scope = delivery_tenant_id.clone();
-            shutdown_coordinator.spawn_intake(scoped(scope, async move {
-                workers::session_delivery_worker::run(
-                    connection,
-                    client,
-                    delivery_pool,
-                    delivery_tenant_id,
-                    shutdown,
-                )
-                .await;
-            }));
+            workers.intake(
+                crate::roles::Role::Engine,
+                "session delivery",
+                &shutdown_coordinator,
+                scoped(scope, async move {
+                    workers::session_delivery_worker::run(
+                        connection,
+                        client,
+                        delivery_pool,
+                        delivery_tenant_id,
+                        shutdown,
+                    )
+                    .await;
+                }),
+            );
         }
     }
 
@@ -2274,14 +2351,24 @@ async fn start_as_platform(
         let cron_engine = Arc::clone(&execution_engine);
         let cron_shutdown = shutdown_signal.clone();
         let scope = cron_tenant_id.clone();
-        shutdown_coordinator.spawn_intake(scoped(scope, async move {
-            let scheduler_config = workers::cron_scheduler::CronSchedulerConfig {
-                tenant_id: cron_tenant_id,
-                check_interval_secs: 60,
-            };
-            workers::cron_scheduler::run(cron_pool, cron_engine, scheduler_config, cron_shutdown)
+        workers.intake(
+            crate::roles::Role::Engine,
+            "cron scheduler",
+            &shutdown_coordinator,
+            scoped(scope, async move {
+                let scheduler_config = workers::cron_scheduler::CronSchedulerConfig {
+                    tenant_id: cron_tenant_id,
+                    check_interval_secs: 60,
+                };
+                workers::cron_scheduler::run(
+                    cron_pool,
+                    cron_engine,
+                    scheduler_config,
+                    cron_shutdown,
+                )
                 .await;
-        }));
+            }),
+        );
     }
     println!("✓ Cron scheduler started (durable outbox)");
 
@@ -2578,59 +2665,14 @@ async fn start_as_platform(
         )
         // Reporting endpoints are mounted through reports_router.
         // Rate limit analytics are served by runtara-connections.
-        .route(
-            "/api/runtime/triggers",
-            post(api::handlers::triggers::create_invocation_trigger),
-        )
-        // Reporting endpoints are mounted through reports_router.
-        // Rate limit analytics are served by runtara-connections.
-        .route(
-            "/api/runtime/triggers",
-            get(api::handlers::triggers::list_invocation_triggers),
-        )
-        .route(
-            "/api/runtime/triggers/{id}",
-            get(api::handlers::triggers::get_invocation_trigger),
-        )
-        .route(
-            "/api/runtime/triggers/{id}",
-            put(api::handlers::triggers::update_invocation_trigger),
-        )
-        .route(
-            "/api/runtime/triggers/{id}",
-            delete(api::handlers::triggers::delete_invocation_trigger),
-        )
+        // Triggers are served by the engine: see `triggers_served` below.
         // API Key management endpoints — defined in `api_keys_router` above and merged below.
         // Entitlements snapshot endpoint
         .route(
             "/api/runtime/entitlements",
             get(api::handlers::entitlements::get_entitlements_handler),
         )
-        // Agent endpoints (global metadata)
-        .route(
-            "/api/runtime/agents",
-            get(api::handlers::operators::list_agents_handler),
-        )
-        .route(
-            "/api/runtime/agents/{name}",
-            get(api::handlers::operators::get_agent_handler),
-        )
-        .route(
-            "/api/runtime/agents/{name}/capabilities/{capability_id}",
-            get(api::handlers::operators::get_capability_handler),
-        )
-        .route(
-            "/api/runtime/agents/{name}/connection-schema",
-            get(api::handlers::operators::get_agent_connection_schema_handler),
-        )
-        .route(
-            "/api/runtime/_internal/components/status",
-            get(api::handlers::operators::components_status_handler),
-        )
-        .route(
-            "/api/runtime/agents/{name}/capabilities/{capability_id}/test",
-            post(api::handlers::agent_testing::test_agent_handler),
-        )
+        // Agents are served by the engine: see `Served::Agents` below.
         // Step type endpoints
         .route(
             "/api/runtime/steps",
@@ -2677,12 +2719,10 @@ async fn start_as_platform(
         .with_state(AppState {
             pool: pool.clone(),
             object_store_manager: object_store_manager.clone(),
-            agent_testing: agent_testing.clone(),
-            runtime_client: runtime_client.clone(),
             trigger_stream: trigger_stream.clone(),
             valkey_conn: valkey_conn.clone(),
             connections: connections_facade.clone(),
-            engine: execution_engine.clone(),
+            engine: engine_api.clone(),
             agents: agents_service.clone(),
             agent_catalog: agent_catalog.clone(),
             events: product_event_sink.clone(),
@@ -2709,6 +2749,106 @@ async fn start_as_platform(
         // (SYN-457). See TENANT_REQUEST_BODY_LIMIT_BYTES.
         .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES));
 
+    // Agents are the engine's: it is the engine that loaded them, and that runs
+    // one on request. What agents there are, what each can do, and whether
+    // their components loaded is asked of it.
+    local_engine.serves(
+        crate::engine::Served::Agents,
+        Router::new()
+            .route(
+                "/api/runtime/agents",
+                get(api::handlers::operators::list_agents_handler),
+            )
+            .route(
+                "/api/runtime/agents/{name}",
+                get(api::handlers::operators::get_agent_handler),
+            )
+            .route(
+                "/api/runtime/agents/{name}/capabilities/{capability_id}",
+                get(api::handlers::operators::get_capability_handler),
+            )
+            .route(
+                "/api/runtime/agents/{name}/connection-schema",
+                get(api::handlers::operators::get_agent_connection_schema_handler),
+            )
+            .route(
+                "/api/runtime/_internal/components/status",
+                get(api::handlers::operators::components_status_handler),
+            )
+            .route(
+                "/api/runtime/agents/{name}/capabilities/{capability_id}/test",
+                post(api::handlers::agent_testing::test_agent_handler),
+            )
+            .with_state(AppState {
+                pool: pool.clone(),
+                object_store_manager: object_store_manager.clone(),
+                trigger_stream: trigger_stream.clone(),
+                valkey_conn: valkey_conn.clone(),
+                connections: connections_facade.clone(),
+                engine: engine_api.clone(),
+                agents: agents_service.clone(),
+                agent_catalog: agent_catalog.clone(),
+                events: product_event_sink.clone(),
+            })
+            .route_layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
+            .route_layer(from_fn(crate::middleware::authorization::authorize(
+                membership_policy,
+            )))
+            .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES)),
+    );
+    let agent_routes = {
+        let to_agents = || {
+            crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Agents).layer(
+                from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
+            )
+        };
+        Router::new()
+            .nest("/api/runtime/agents", to_agents())
+            .nest("/api/runtime/_internal", to_agents())
+    };
+
+    // Triggers are the engine's: making or changing one may register a webhook
+    // at its provider, with the connection's sealed secret. The API
+    // authenticates the caller and hands the request over; the caller's role
+    // is held to the route on the engine's side.
+    local_engine.serves(
+        crate::engine::Served::Triggers,
+        Router::new()
+            .route(
+                "/api/runtime/triggers",
+                post(api::handlers::triggers::create_invocation_trigger)
+                    .get(api::handlers::triggers::list_invocation_triggers),
+            )
+            .route(
+                "/api/runtime/triggers/{id}",
+                get(api::handlers::triggers::get_invocation_trigger)
+                    .put(api::handlers::triggers::update_invocation_trigger)
+                    .delete(api::handlers::triggers::delete_invocation_trigger),
+            )
+            .with_state(AppState {
+                pool: pool.clone(),
+                object_store_manager: object_store_manager.clone(),
+                trigger_stream: trigger_stream.clone(),
+                valkey_conn: valkey_conn.clone(),
+                connections: connections_facade.clone(),
+                engine: engine_api.clone(),
+                agents: agents_service.clone(),
+                agent_catalog: agent_catalog.clone(),
+                events: product_event_sink.clone(),
+            })
+            .route_layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
+            .route_layer(from_fn(crate::middleware::authorization::authorize(
+                membership_policy,
+            )))
+            .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES)),
+    );
+    let trigger_routes = Router::new().nest(
+        "/api/runtime/triggers",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Triggers).layer(
+            from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
+        ),
+    );
+
     // Connections crate routes (CRUD, OAuth authorize, type discovery, rate limit analytics)
     // Mounted as a separate router with tenant bridge middleware.
     //
@@ -2718,20 +2858,33 @@ async fn start_as_platform(
     // (a) AuthContext is populated when the guard inspects auth_method, and
     // (b) Connections handlers see the same denial shape as every other tenant
     //     route when `api` is off and the caller used an API key.
-    let connections_tenant_routes =
-        runtara_connections::connections_router(connections_config.clone())
-            .layer(axum::middleware::from_fn(
-                crate::middleware::tenant_auth::inject_connections_tenant_id,
-            ))
-            .layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
-            // Enforce the per-route role permission map (no-op unless membership is Required).
-            .layer(from_fn(crate::middleware::authorization::authorize(
-                membership_policy,
-            )))
-            .layer(from_fn_with_state(
-                auth_state.clone(),
-                crate::middleware::auth::authenticate,
-            ));
+    //
+    // The engine serves these routes, because a connection's secrets are
+    // sealed and used there. The API authenticates the caller and hands the
+    // request over; what the caller's role may do is decided on the engine's
+    // side, where the route it asked for is known.
+    local_engine.serves(
+        crate::engine::Served::Connections,
+        Router::new().nest(
+            "/api/runtime",
+            runtara_connections::connections_router(connections_config.clone())
+                .layer(axum::middleware::from_fn(
+                    crate::middleware::tenant_auth::inject_connections_tenant_id,
+                ))
+                .layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
+                // Enforce the per-route role permission map (no-op unless membership is Required).
+                .layer(from_fn(crate::middleware::authorization::authorize(
+                    membership_policy,
+                ))),
+        ),
+    );
+    // Whatever under `/api/runtime` is not one of the API's own routes.
+    let connections_tenant_routes = Router::new().nest(
+        "/api/runtime",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Connections).layer(
+            from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
+        ),
+    );
 
     // Object Model routes (separate router to help type inference)
     // These routes use Arc<ObjectModelState> state extraction
@@ -2742,7 +2895,7 @@ async fn start_as_platform(
         events: product_event_sink.clone(),
     });
 
-    let object_model_routes = Router::new()
+    let object_model_served = Router::new()
         // Object Model Schema endpoints
         .route(
             "/api/runtime/object-model/schemas",
@@ -2854,15 +3007,20 @@ async fn start_as_platform(
         .route_layer(from_fn(crate::middleware::authorization::authorize(
             membership_policy,
         )))
-        // Apply JWT authentication middleware to object model routes
-        .route_layer(from_fn_with_state(
-            auth_state.clone(),
-            crate::middleware::auth::authenticate,
-        ))
         // CSV import accepts multipart / base64-JSON bodies up to ~50 MB; the
         // handler already reads up to 50 MB via to_bytes, but Axum's 2 MB
         // default body limit rejected them first with 413 (SYN-457).
         .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES));
+    // The engine serves a tenant's object model: its database is reached
+    // with a sealed password. The API authenticates the caller and hands the
+    // request over.
+    local_engine.serves(crate::engine::Served::ObjectModel, object_model_served);
+    let object_model_routes = Router::new().nest(
+        "/api/runtime/object-model",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::ObjectModel).layer(
+            from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
+        ),
+    );
 
     // Create router for public/global endpoints (no tenant auth required)
     let readiness_providers = auth_providers.clone();
@@ -2881,7 +3039,7 @@ async fn start_as_platform(
     // Event capture routes (webhook endpoints — no JWT auth required).
     // These are called by external services (Shopify, etc.) and use the
     // configured TENANT_ID directly (single-tenant runtime).
-    let event_routes = Router::new()
+    let events_served = Router::new()
         .route(
             "/api/runtime/events/http-sync/{workflow_id}",
             post(api::handlers::workflows_sync::capture_http_event_sync)
@@ -2901,12 +3059,10 @@ async fn start_as_platform(
         .with_state(AppState {
             pool: pool.clone(),
             object_store_manager: object_store_manager.clone(),
-            agent_testing: agent_testing.clone(),
-            runtime_client: runtime_client.clone(),
             trigger_stream: trigger_stream.clone(),
             valkey_conn: valkey_conn.clone(),
             connections: connections_facade.clone(),
-            engine: execution_engine.clone(),
+            engine: engine_api.clone(),
             agents: agents_service.clone(),
             agent_catalog: agent_catalog.clone(),
             events: product_event_sink.clone(),
@@ -2918,6 +3074,24 @@ async fn start_as_platform(
         .layer(DefaultBodyLimit::max(
             api::handlers::events::webhook_max_body_bytes(),
         ));
+    // A trigger's HTTP events are the engine's: each is checked against its
+    // connection's sealed secret before a run is accepted. Whoever sends one
+    // is not authenticated, so the API hands it over as it arrived. The same
+    // routes asked from inside (an MCP tool, for a caller the API already
+    // authenticated) hold the caller's role to what it may run.
+    local_engine.serves(
+        crate::engine::Served::EventsForCallers,
+        events_served
+            .clone()
+            .route_layer(from_fn(crate::middleware::authorization::authorize(
+                membership_policy,
+            ))),
+    );
+    local_engine.serves(crate::engine::Served::Events, events_served);
+    let event_routes = Router::new().nest(
+        "/api/runtime/events",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Events),
+    );
 
     // Initialize channel router for conversational triggers (Telegram, Slack, Teams).
     // The router is always available — it looks up connection + trigger from DB per request.
@@ -2932,17 +3106,31 @@ async fn start_as_platform(
             ));
             // Dispatches messages a previous process acknowledged but did not
             // finish, retries pending ones, and purges handled ones.
-            runtara_store_postgres::tenant_scope::spawn(channel_router.clone().run_intake_worker());
+            workers.detached(
+                crate::roles::Role::Engine,
+                "channel intake",
+                channel_router.clone().run_intake_worker(),
+            );
             println!("✓ Channel router initialized");
 
-            channels::routes(channel_router)
-                // Defense in depth: these public, unauthenticated channel-ingest
-                // routes buffer the whole body (Bytes extractor) before auth, so
-                // cap it. Bot Framework / chat activities are a few KB; the
-                // shared webhook cap is generous enough for mailgun payloads.
-                .layer(DefaultBodyLimit::max(
-                    api::handlers::events::webhook_max_body_bytes(),
-                ))
+            // The engine serves a channel's webhook: the call is checked
+            // against its connection's sealed secret, and the conversation it
+            // belongs to runs there. The API hands it over as it arrived.
+            local_engine.serves(
+                crate::engine::Served::Channels,
+                channels::routes(channel_router)
+                    // Defense in depth: these public, unauthenticated channel-ingest
+                    // routes buffer the whole body (Bytes extractor) before auth, so
+                    // cap it. Bot Framework / chat activities are a few KB; the
+                    // shared webhook cap is generous enough for mailgun payloads.
+                    .layer(DefaultBodyLimit::max(
+                        api::handlers::events::webhook_max_body_bytes(),
+                    )),
+            );
+            Router::new().nest(
+                "/api/runtime/events/webhook",
+                crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Channels),
+            )
         } else {
             Router::new()
         };
@@ -2966,17 +3154,17 @@ async fn start_as_platform(
     // process, though, `execute_workflow_sync` reaches it as a real identity, so the internal
     // copy gets the same gate every other MCP-reachable route has. Without it that single tool
     // would run a workflow for a caller whose role or credential scope forbids executing one.
-    let internal_event_routes =
-        event_routes
-            .clone()
-            .route_layer(from_fn(crate::middleware::authorization::authorize(
-                membership_policy,
-            )));
+    let internal_event_routes = Router::new().nest(
+        "/api/runtime/events",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::EventsForCallers),
+    );
 
     let internal_router = Router::new()
         .merge(tenant_routes.clone())
         .merge(object_model_routes.clone())
-        .nest("/api/runtime", connections_tenant_routes.clone())
+        .merge(connections_tenant_routes.clone())
+        .merge(trigger_routes.clone())
+        .merge(agent_routes.clone())
         .merge(public_routes.clone())
         .merge(internal_event_routes);
 
@@ -2986,7 +3174,7 @@ async fn start_as_platform(
     let mcp_router = mcp::create_mcp_router(
         pool.clone(),
         object_store_manager.clone(),
-        runtime_client.clone(),
+        engine_api.clone(),
         tenant_id.clone(),
         internal_router,
         config::mcp_allowed_hosts().to_vec(),
@@ -3020,8 +3208,17 @@ async fn start_as_platform(
 
     // OAuth2 callback route (public, no JWT — called by OAuth provider redirect)
     // Now served by the runtara-connections crate
-    let oauth_callback_routes =
-        runtara_connections::oauth_callback_router(connections_config.clone());
+    local_engine.serves(
+        crate::engine::Served::OAuthCallbacks,
+        Router::new().nest(
+            "/api/oauth",
+            runtara_connections::oauth_callback_router(connections_config.clone()),
+        ),
+    );
+    let oauth_callback_routes = Router::new().nest(
+        "/api/oauth",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::OAuthCallbacks),
+    );
 
     // =========================================================================
     // Public API server — accessible externally / via API gateway
@@ -3071,8 +3268,10 @@ async fn start_as_platform(
 
     let public_app = Router::new()
         .merge(tenant_routes)
-        .nest("/api/runtime", connections_tenant_routes)
-        .nest("/api/oauth", oauth_callback_routes)
+        .merge(connections_tenant_routes)
+        .merge(trigger_routes)
+        .merge(agent_routes)
+        .merge(oauth_callback_routes)
         .merge(object_model_routes)
         .merge(me_routes)
         .merge(my_tenants_routes)
@@ -3153,8 +3352,27 @@ async fn start_as_platform(
         println!("    Health:  {origin}/health\n");
     }
 
+    // Which background work this process started, by role.
+    {
+        let names = |role: crate::roles::Role| {
+            let mut names: Vec<&str> = workers
+                .started()
+                .into_iter()
+                .filter(|(started, _)| *started == role)
+                .map(|(_, name)| name)
+                .collect();
+            names.sort_unstable();
+            names.dedup();
+            names.join(", ")
+        };
+        tracing::info!(
+            engine = %names(crate::roles::Role::Engine),
+            api = %names(crate::roles::Role::Api),
+            "Background work started"
+        );
+    }
     // Spawn heartbeat task for log pipeline monitoring
-    runtara_store_postgres::tenant_scope::spawn(async {
+    workers.detached(crate::roles::Role::Api, "heartbeat log", async {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600)); // 1 hour
         loop {
             interval.tick().await;

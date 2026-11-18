@@ -31,24 +31,34 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// What handlers ask the engine through: this engine and runtime, in process.
+fn engine_api(
+    pool: &sqlx::PgPool,
+    engine: &Arc<ExecutionEngine>,
+    client: Option<Arc<RuntimeClient>>,
+) -> Arc<dyn runtara_server::engine::Engine> {
+    Arc::new(runtara_server::engine::LocalEngine::new(
+        client,
+        engine.clone(),
+        pool.clone(),
+    ))
+}
+
 fn mcp_server(
     pool: sqlx::PgPool,
     engine: Arc<ExecutionEngine>,
     client: Option<Arc<RuntimeClient>>,
     tenant: &str,
 ) -> runtara_server::mcp::server::SmoMcpServer {
-    let discovery_client = client.clone();
-    let signal_client = client.clone();
-    let signal_pool = pool.clone();
+    let discovery = engine_api(&pool, &engine, client);
+    let signals = discovery.clone();
+    let tools = discovery.clone();
     let router = axum::Router::new()
         .route(
             "/api/runtime/workflows/{workflow}/instances/{instance}/pending-input",
             axum::routing::get(move |owner: OrgId, path: Path<(String, String)>| {
-                let engine = engine.clone();
-                let client = discovery_client.clone();
-                async move {
-                    step_events::get_pending_input(owner, path, State(engine), State(client)).await
-                }
+                let engine = discovery.clone();
+                async move { step_events::get_pending_input(owner, path, State(engine)).await }
             }),
         )
         .route(
@@ -58,18 +68,9 @@ fn mcp_server(
                       auth: Extension<runtara_server::auth::AuthContext>,
                       path: Path<String>,
                       body| {
-                    let client = signal_client.clone();
-                    let pool = signal_pool.clone();
+                    let engine = signals.clone();
                     async move {
-                        step_events::submit_signal(
-                            owner,
-                            auth,
-                            State(pool),
-                            path,
-                            State(client),
-                            body,
-                        )
-                        .await
+                        step_events::submit_signal(owner, auth, path, State(engine), body).await
                     }
                 },
             ),
@@ -77,7 +78,7 @@ fn mcp_server(
     runtara_server::mcp::server::SmoMcpServer::new(
         pool,
         Arc::new(runtara_server::api::repositories::object_model::ObjectStoreManager::new()),
-        client,
+        tools,
         tenant.into(),
         router,
     )
@@ -108,7 +109,7 @@ async fn delivery_api_contract(
     instance: &str,
     request: &str,
     mut conn: redis::aio::ConnectionManager,
-    engine: Arc<ExecutionEngine>,
+    api: Arc<dyn runtara_server::engine::Engine>,
     client: Arc<RuntimeClient>,
 ) {
     use axum::extract::Query;
@@ -122,7 +123,7 @@ async fn delivery_api_contract(
                 "session-operator".into(),
                 AuthMethod::Unauthenticated,
             )),
-            State(Some(client.clone())),
+            State(api.clone()),
             State(Some(conn.clone())),
             Path(session.into()),
             Ok(Json(SubmitEventRequest {
@@ -206,8 +207,7 @@ async fn delivery_api_contract(
         resolve_session_delivery(
             OrgId(owner.into()),
             State(Some(conn.clone())),
-            State(engine.clone()),
-            State(Some(client.clone())),
+            State(api.clone()),
             Path((session.into(), "api-message".into())),
             Ok(Json(body)),
         )
@@ -312,6 +312,7 @@ async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
         None,
         ProductEventSink::new(events),
     ));
+    let api = engine_api(&pool, &engine, Some(client.clone()));
     let tenant = Uuid::new_v4().to_string();
     let workflow = format!("managed_%_{}", Uuid::new_v4());
     let image = Uuid::new_v4().to_string();
@@ -436,8 +437,7 @@ async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
         step_events::get_pending_input(
             OrgId(owner),
             Path((workflow.clone(), action.instance_id.clone())),
-            State(engine.clone()),
-            State(Some(client.clone())),
+            State(api.clone()),
         )
     };
     let (status, Json(discovered)) = pending(tenant.clone()).await;
@@ -517,7 +517,7 @@ async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
         .unwrap();
         let (status, Json(session_page)) = sessions::session_pending_input(
             OrgId(tenant.clone()),
-            State(Some(client.clone())),
+            State(api.clone()),
             State(Some(connection.clone())),
             Path(session.clone()),
         )
@@ -526,7 +526,7 @@ async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
         assert_eq!(session_page["data"], discovered["data"]);
         let (status, Json(error)) = sessions::session_pending_input(
             OrgId("foreign".into()),
-            State(Some(client.clone())),
+            State(api.clone()),
             State(Some(connection.clone())),
             Path(session.clone()),
         )
@@ -542,7 +542,7 @@ async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
         &action.instance_id,
         &action.request_id,
         valkey.clone(),
-        engine.clone(),
+        api.clone(),
         client.clone(),
     )
     .await;
@@ -560,9 +560,8 @@ async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
             "operator".into(),
             runtara_server::auth::AuthMethod::Unauthenticated,
         )),
-        State(pool.clone()),
         Path(action.instance_id.clone()),
-        State(Some(client.clone())),
+        State(api.clone()),
         Err(rejection),
     )
     .await;
@@ -576,9 +575,8 @@ async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
                 "operator".into(),
                 runtara_server::auth::AuthMethod::Unauthenticated,
             )),
-            State(pool.clone()),
             Path(action.instance_id.clone()),
-            State(Some(client.clone())),
+            State(api.clone()),
             Ok(Json(SubmitWorkflowActionRequest {
                 request_id: action.request_id.clone(),
                 operation_id: operation.into(),
@@ -649,9 +647,7 @@ async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
                 "operator".into(),
                 runtara_server::auth::AuthMethod::Unauthenticated,
             )),
-            State(pool.clone()),
-            State(engine.clone()),
-            State(Some(client.clone())),
+            State(api.clone()),
             Path((
                 workflow.clone(),
                 action.instance_id.clone(),
@@ -789,7 +785,7 @@ async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
         let (status, Json(session_page)) =
             runtara_server::api::handlers::sessions::session_pending_input(
                 OrgId(tenant.clone()),
-                State(Some(client.clone())),
+                State(api.clone()),
                 State(Some(valkey)),
                 Path(session_id),
             )

@@ -1190,9 +1190,13 @@ async fn compilation_progress_reports_an_upgraded_trusted_pin_as_failed() {
     let progress = || {
         let (tenant, pool, workflow_id) = (tenant.clone(), pool.clone(), workflow_id.clone());
         async move {
+            let engine: std::sync::Arc<dyn runtara_server::engine::Engine> = std::sync::Arc::new(
+                runtara_server::engine::LocalEngine::without_runtime(pool.clone()),
+            );
             let (status, body) = compilation_progress_handler(
                 OrgId(tenant),
                 State(pool),
+                State(engine),
                 AxumPath((workflow_id, "1".to_owned())),
             )
             .await;

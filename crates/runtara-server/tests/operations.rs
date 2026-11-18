@@ -439,12 +439,17 @@ async fn queues_count_requests_filter_active_work_and_project_typed_state() {
         .unwrap()
         .is_empty()
     );
-    let engine = Arc::new(fx.engine);
+    // Handlers ask the engine through its interface.
+    let engine: Arc<dyn runtara_server::engine::Engine> =
+        Arc::new(runtara_server::engine::LocalEngine::new(
+            Some(fx.client.clone()),
+            Arc::new(fx.engine),
+            fx.server.clone(),
+        ));
     for (page, expected) in [(0, &small), (1, &large)] {
         let (status, Json(body)) = query_operation_requests(
             OrgId(fx.tenant.clone()),
             State(engine.clone()),
-            State(Some(fx.client.clone())),
             Json(QueryOperationRequests {
                 workflow_id: fx.workflow.clone(),
                 action_key: "old_key".into(),
@@ -488,7 +493,6 @@ async fn queues_count_requests_filter_active_work_and_project_typed_state() {
     let (_, Json(filtered)) = query_operation_requests(
         OrgId(fx.tenant.clone()),
         State(engine.clone()),
-        State(Some(fx.client.clone())),
         Json(QueryOperationRequests {
             workflow_id: fx.workflow.clone(),
             action_key: "old_key".into(),
@@ -535,7 +539,6 @@ async fn queues_count_requests_filter_active_work_and_project_typed_state() {
     let (status, Json(body)) = query_operation_requests(
         OrgId("foreign".into()),
         State(engine.clone()),
-        State(Some(fx.client.clone())),
         Json(QueryOperationRequests {
             workflow_id: fx.workflow.clone(),
             action_key: "old_key".into(),

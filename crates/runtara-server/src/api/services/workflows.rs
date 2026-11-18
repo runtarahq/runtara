@@ -6,7 +6,6 @@
 use crate::api::dto::triggers::TriggerType;
 use crate::api::dto::workflows::*;
 use crate::api::repositories::workflows::WorkflowRepository;
-use crate::api::services::webhook_manager::{WebhookManager, reconcile_channel_webhooks};
 use crate::api::utils::pagination::{normalize_page, normalize_page_size};
 use crate::api::utils::validation::is_valid_identifier;
 use crate::types::{DEFAULT_MEMORY_MB, MAX_MEMORY_MB};
@@ -21,7 +20,7 @@ fn validate_memory_mb(memory_mb: Option<u32>) -> Result<(), ServiceError> {
         _ => Ok(()),
     }
 }
-use runtara_connections::ConnectionsFacade;
+use crate::engine::Engine;
 use runtara_dsl::agent_meta::AgentCatalog;
 use runtara_workflows::validation::validate_workflow;
 use serde_json::Value;
@@ -30,7 +29,9 @@ use uuid::Uuid;
 
 pub struct WorkflowService {
     repository: Arc<WorkflowRepository>,
-    connections: Arc<ConnectionsFacade>,
+    /// Asked which connections a tenant has, and to take down the webhooks
+    /// of a deleted workflow's triggers. `None` for work that asks neither.
+    engine: Option<Arc<dyn Engine>>,
     /// Snapshot of every agent the runtime can route to. Validators read
     /// this instead of the statically-linked `runtara_agents::registry`,
     /// so the service-side view matches what the dispatcher loaded.
@@ -188,7 +189,7 @@ pub(crate) fn validate_description_length(definition: &Value) -> Result<(), Serv
 /// connections in the message. The tenant's connections are listed only when
 /// the workflow pins one.
 pub(crate) async fn tenant_connection_issues(
-    connections: &ConnectionsFacade,
+    engine: &dyn Engine,
     tenant_id: &str,
     workflow: &runtara_dsl::Workflow,
     catalog: &AgentCatalog,
@@ -199,17 +200,10 @@ pub(crate) async fn tenant_connection_issues(
     if extract_connection_ids(workflow).is_empty() {
         return Ok(Vec::new());
     }
-    let tenant_refs: Vec<ConnectionRef> = connections
-        .list_connections(tenant_id, None, None)
-        .await
-        .map_err(|e| ServiceError::DatabaseError(format!("Failed to validate connections: {}", e)))?
-        .into_iter()
-        .map(|c| ConnectionRef {
-            id: c.id,
-            integration_id: c.integration_id,
-            title: c.title,
-        })
-        .collect();
+    let tenant_refs: Vec<ConnectionRef> =
+        engine.tenant_connections(tenant_id).await.map_err(|e| {
+            ServiceError::DatabaseError(format!("Failed to validate connections: {}", e))
+        })?;
     Ok(validate_connections_with_candidates(
         workflow,
         &tenant_refs,
@@ -231,14 +225,35 @@ fn json_value_kind(value: &Value) -> &'static str {
 impl WorkflowService {
     pub fn new(
         repository: Arc<WorkflowRepository>,
-        connections: Arc<ConnectionsFacade>,
+        engine: Arc<dyn Engine>,
         agent_catalog: Arc<AgentCatalog>,
     ) -> Self {
         Self {
             repository,
-            connections,
+            engine: Some(engine),
             agent_catalog,
         }
+    }
+
+    /// For work on workflows' own records that asks the engine nothing, such
+    /// as what is done to them when the server starts.
+    pub fn without_engine(
+        repository: Arc<WorkflowRepository>,
+        agent_catalog: Arc<AgentCatalog>,
+    ) -> Self {
+        Self {
+            repository,
+            engine: None,
+            agent_catalog,
+        }
+    }
+
+    fn engine(&self) -> Result<&dyn Engine, ServiceError> {
+        self.engine.as_deref().ok_or_else(|| {
+            ServiceError::DatabaseError(
+                "Failed to validate connections: no engine to ask".to_owned(),
+            )
+        })
     }
 
     /// Create a new workflow with metadata
@@ -867,7 +882,7 @@ impl WorkflowService {
         // Validate connection existence in database. Candidate suggestions are
         // appended to "not found" errors for when the LLM picked the wrong id.
         let conn_errors: Vec<String> =
-            tenant_connection_issues(&self.connections, tenant_id, &workflow, &effective_catalog)
+            tenant_connection_issues(self.engine()?, tenant_id, &workflow, &effective_catalog)
                 .await?
                 .into_iter()
                 .map(|issue| issue.message)
@@ -1093,14 +1108,11 @@ impl WorkflowService {
                 .deactivated_triggers
                 .iter()
                 .any(|t| t.trigger_type == TriggerType::Channel)
+                && let Some(engine) = &self.engine
             {
-                reconcile_channel_webhooks(
-                    self.repository.pool(),
-                    &WebhookManager::new(self.connections.clone()),
-                    &deleted.deactivated_triggers,
-                    tenant_id,
-                )
-                .await;
+                engine
+                    .reconcile_channel_webhooks(tenant_id, &deleted.deactivated_triggers)
+                    .await;
             }
         }
 
@@ -1359,7 +1371,7 @@ impl WorkflowService {
         // Validate connection existence in database, converting each issue to
         // the same format.
         for issue in
-            tenant_connection_issues(&self.connections, tenant_id, &workflow, &catalog).await?
+            tenant_connection_issues(self.engine()?, tenant_id, &workflow, &catalog).await?
         {
             all_issues.push(
                 crate::api::utils::reference_validation::ValidationIssue::error(

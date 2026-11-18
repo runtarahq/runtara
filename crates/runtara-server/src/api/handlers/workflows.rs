@@ -7,6 +7,7 @@
 //! - Maps service errors to HTTP status codes
 //! - Returns standardized API responses
 
+use crate::engine::Engine;
 use axum::{
     extract::{Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
@@ -37,12 +38,9 @@ use crate::api::services::workflows::{ServiceError, WorkflowService};
 use crate::auth::AuthContext;
 use crate::middleware::tenant_auth::Source;
 use crate::product_events::{EventSource, EventType, ProductEvent, ProductEventSink};
-use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::{
-    CommandEffect, ExecutionEngine, PauseOutcome, QueueRequest, ResumeOutcome, StopOutcome,
-    TriggerSource,
+    CommandEffect, PauseOutcome, QueueRequest, ResumeOutcome, StopOutcome, TriggerSource,
 };
-use runtara_connections::ConnectionsFacade;
 
 use crate::types::MemoryTier;
 
@@ -177,13 +175,13 @@ pub struct CompileWorkflowQuery {
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(pool, connections, request, agent_catalog, events, ctx, source), fields(workflow_name = %request.name))]
+#[instrument(skip(pool, engine, request, agent_catalog, events, ctx, source), fields(workflow_name = %request.name))]
 #[allow(clippy::too_many_arguments)]
 pub async fn create_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     crate::middleware::tenant_auth::CallerId(user_id): crate::middleware::tenant_auth::CallerId,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
+    State(engine): State<Arc<dyn Engine>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     State(events): State<ProductEventSink>,
     Extension(ctx): Extension<AuthContext>,
@@ -192,7 +190,7 @@ pub async fn create_workflow_handler(
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
+    let service = WorkflowService::new(repository, engine.clone(), agent_catalog.clone());
 
     // Delegate to service
     match service
@@ -321,9 +319,8 @@ pub async fn update_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
+    State(engine): State<Arc<dyn Engine>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
-    State(_runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path(workflow_id): Path<String>,
     State(events): State<ProductEventSink>,
     Extension(ctx): Extension<AuthContext>,
@@ -351,11 +348,7 @@ pub async fn update_workflow_handler(
         return (StatusCode::FORBIDDEN, Json(denial.json_body()));
     }
 
-    let service = WorkflowService::new(
-        repository.clone(),
-        connections.clone(),
-        agent_catalog.clone(),
-    );
+    let service = WorkflowService::new(repository.clone(), engine.clone(), agent_catalog.clone());
 
     // Collect referenced capabilities before the graph is moved into the service, so a
     // successful save can emit one `agent.capability_used` per distinct capability.
@@ -399,37 +392,29 @@ pub async fn update_workflow_handler(
 
     // Queue compilation asynchronously instead of blocking
     // The compilation worker will process this in the background
-    let compilation_status = if let Some(valkey_config) = crate::valkey::ValkeyConfig::from_env() {
-        let redis_url = valkey_config.connection_url();
+    let compilation_status = if engine.queues_compilations() {
         // This compile is a side effect of the update — hand the worker a pre-built event
         // attributed to the updating caller/surface, so the resulting `workflow.compiled` is
         // not an anonymous worker event.
         let compiled_event = ProductEvent::from_auth(EventType::WorkflowCompiled, &ctx)
             .resource(&workflow_id, "workflow")
             .source(source);
-        match crate::workers::compilation_worker::enqueue_compilation_with_event(
-            &redis_url,
-            &tenant_id,
-            &workflow_id,
-            version_num,
-            false,
-            compiled_event,
-        )
-        .await
+        match engine
+            .enqueue_compilation(
+                &tenant_id,
+                &workflow_id,
+                version_num,
+                false,
+                Some(compiled_event),
+            )
+            .await
         {
             Ok(enqueued) => {
                 // Stamp a "queued" progress entry so the frontend's first
-                // poll sees a real stage instead of `unknown`. Cheap; only
-                // runs when the redis manager is already initialized.
-                if let Ok(m) = crate::valkey::get_or_create_manager(&redis_url).await {
-                    crate::valkey::compilation_progress::mark_queued(
-                        &m,
-                        &tenant_id,
-                        &workflow_id,
-                        version_num,
-                    )
+                // poll sees a real stage instead of `unknown`.
+                engine
+                    .mark_compilation_queued(&tenant_id, &workflow_id, version_num)
                     .await;
-                }
                 if enqueued {
                     "queued"
                 } else {
@@ -494,7 +479,7 @@ pub async fn patch_version_graph_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
+    State(engine): State<Arc<dyn Engine>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     State(events): State<ProductEventSink>,
     Extension(ctx): Extension<AuthContext>,
@@ -521,7 +506,7 @@ pub async fn patch_version_graph_handler(
         return (StatusCode::FORBIDDEN, Json(denial.json_body()));
     }
 
-    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
+    let service = WorkflowService::new(repository, engine.clone(), agent_catalog.clone());
 
     // Collect referenced capabilities before the graph is moved into the service.
     let capabilities = collect_workflow_capabilities(&request.execution_graph);
@@ -571,12 +556,12 @@ pub async fn patch_version_graph_handler(
     tag = "workflow-controller"
 )]
 #[allow(clippy::too_many_arguments)]
-#[instrument(skip(pool, connections, request, agent_catalog, user_id, role), fields(workflow_id = %workflow_id, version = %version))]
+#[instrument(skip(pool, engine, request, agent_catalog, user_id, role), fields(workflow_id = %workflow_id, version = %version))]
 pub async fn toggle_track_events_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
+    State(engine): State<Arc<dyn Engine>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 
     Path((workflow_id, version)): Path<(String, i32)>,
@@ -602,7 +587,7 @@ pub async fn toggle_track_events_handler(
         return (StatusCode::FORBIDDEN, Json(denial.json_body()));
     }
 
-    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
+    let service = WorkflowService::new(repository, engine.clone(), agent_catalog.clone());
 
     // Delegate to service
     match service
@@ -643,12 +628,12 @@ pub async fn toggle_track_events_handler(
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(pool, connections, request, agent_catalog, user_id, role), fields(workflow_id = %workflow_id))]
+#[instrument(skip(pool, engine, request, agent_catalog, user_id, role), fields(workflow_id = %workflow_id))]
 pub async fn update_workflow_slug_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
+    State(engine): State<Arc<dyn Engine>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     Path(workflow_id): Path<String>,
     Json(request): Json<UpdateWorkflowSlugRequest>,
@@ -672,7 +657,7 @@ pub async fn update_workflow_slug_handler(
         return (StatusCode::FORBIDDEN, Json(denial.json_body()));
     }
 
-    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
+    let service = WorkflowService::new(repository, engine.clone(), agent_catalog.clone());
     match service
         .update_workflow_slug(&tenant_id, &workflow_id, &request.slug)
         .await
@@ -710,13 +695,12 @@ pub async fn update_workflow_slug_handler(
     tag = "workflow-controller"
 )]
 #[allow(clippy::too_many_arguments)]
-#[instrument(skip(pool, runtime_client, agent_catalog, user_id, role), fields(workflow_id = %workflow_id))]
+#[instrument(skip(pool, engine, user_id, role), fields(workflow_id = %workflow_id))]
 pub async fn publish_workflow_agent_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
     State(pool): State<PgPool>,
-    State(runtime_client): State<Option<Arc<crate::runtime_client::RuntimeClient>>>,
-    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path(workflow_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
@@ -780,14 +764,7 @@ pub async fn publish_workflow_agent_handler(
         }
     };
 
-    let compilation_service =
-        crate::api::services::compilation::CompilationService::new(repository, runtime_client)
-            .with_agent_catalog(agent_catalog)
-            .with_direct_compilation(
-                crate::api::services::compilation::direct_compilation_settings_from_config(),
-            );
-
-    match compilation_service
+    match engine
         .publish_workflow_agent(&tenant_id, &workflow_id, version, slug)
         .await
     {
@@ -845,7 +822,7 @@ pub async fn publish_workflow_agent_handler(
 pub async fn list_workflows_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
+    State(engine): State<Arc<dyn Engine>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 
     Query(query): Query<ListWorkflowsQuery>,
@@ -854,7 +831,7 @@ pub async fn list_workflows_handler(
 
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
+    let service = WorkflowService::new(repository, engine.clone(), agent_catalog.clone());
 
     // Delegate to service with pagination (0-based pages; the service normalizes)
     let page = query.page.unwrap_or(0);
@@ -922,7 +899,7 @@ pub async fn list_workflows_handler(
 pub async fn get_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
+    State(engine): State<Arc<dyn Engine>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 
     Path(workflow_id): Path<String>,
@@ -930,7 +907,7 @@ pub async fn get_workflow_handler(
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
+    let service = WorkflowService::new(repository, engine.clone(), agent_catalog.clone());
 
     // Delegate to service
     match service
@@ -965,14 +942,14 @@ pub async fn get_workflow_handler(
 pub async fn list_workflow_versions_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
+    State(engine): State<Arc<dyn Engine>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 
     Path(workflow_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
+    let service = WorkflowService::new(repository, engine.clone(), agent_catalog.clone());
 
     // Delegate to service
     match service.list_versions(&tenant_id, &workflow_id).await {
@@ -1006,7 +983,7 @@ pub async fn delete_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
+    State(engine): State<Arc<dyn Engine>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     State(events): State<ProductEventSink>,
     Extension(ctx): Extension<AuthContext>,
@@ -1033,7 +1010,7 @@ pub async fn delete_workflow_handler(
         return (StatusCode::FORBIDDEN, Json(denial.json_body()));
     }
 
-    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
+    let service = WorkflowService::new(repository, engine.clone(), agent_catalog.clone());
 
     // Delegate to service
     match service.delete_workflow(&tenant_id, &workflow_id).await {
@@ -1077,7 +1054,7 @@ pub async fn clone_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     crate::middleware::tenant_auth::CallerId(user_id): crate::middleware::tenant_auth::CallerId,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
+    State(engine): State<Arc<dyn Engine>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     State(events): State<ProductEventSink>,
     Extension(ctx): Extension<AuthContext>,
@@ -1087,7 +1064,7 @@ pub async fn clone_workflow_handler(
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
+    let service = WorkflowService::new(repository, engine.clone(), agent_catalog.clone());
 
     // Delegate to service
     match service
@@ -1148,13 +1125,12 @@ pub async fn clone_workflow_handler(
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(pool, runtime_client, _connections, ctx, source, events), fields(workflow_id = %workflow_id, version = %version))]
+#[instrument(skip(pool, engine, ctx, source, events), fields(workflow_id = %workflow_id, version = %version))]
 #[allow(clippy::too_many_arguments)]
 pub async fn compile_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(runtime_client): State<Option<Arc<crate::runtime_client::RuntimeClient>>>,
-    State(_connections): State<Arc<ConnectionsFacade>>,
+    State(engine): State<Arc<dyn Engine>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     State(events): State<ProductEventSink>,
     Path((workflow_id, version)): Path<(String, String)>,
@@ -1217,7 +1193,7 @@ pub async fn compile_workflow_handler(
         force_recompile = match cached_image {
             Ok(Some(image_id)) => {
                 !closure
-                    .may_reuse_cached_image(runtime_client.as_deref(), &tenant_id, &image_id)
+                    .may_reuse_cached_image(engine.as_ref(), &tenant_id, &image_id)
                     .await
             }
             Ok(None) => false,
@@ -1232,18 +1208,9 @@ pub async fn compile_workflow_handler(
         // returns the stale terminal state — the rebuild's toolbar lights
         // up green instantly even though a real rebuild is starting. The
         // mark_queued write is a no-op if Valkey isn't configured.
-        if let Some(valkey_config) = crate::valkey::ValkeyConfig::from_env() {
-            let redis_url = valkey_config.connection_url();
-            if let Ok(m) = crate::valkey::get_or_create_manager(&redis_url).await {
-                crate::valkey::compilation_progress::mark_queued(
-                    &m,
-                    &tenant_id,
-                    &workflow_id,
-                    version_num,
-                )
-                .await;
-            }
-        }
+        engine
+            .mark_compilation_queued(&tenant_id, &workflow_id, version_num)
+            .await;
         let repository = WorkflowRepository::new(pool.clone());
         if let Err(e) = repository
             .invalidate_compilation(&tenant_id, &workflow_id, version_num)
@@ -1263,9 +1230,7 @@ pub async fn compile_workflow_handler(
     // Route compilation through the queue if Valkey is available.
     // This ensures all compilations are serialized through the compilation worker,
     // preventing OOM from concurrent compiler processes.
-    if let Some(valkey_config) = crate::valkey::ValkeyConfig::from_env() {
-        let redis_url = valkey_config.connection_url();
-
+    if engine.queues_compilations() {
         // Direct WASM is the only compile path now; defer the cache decision
         // to CompilationService so it can evaluate the desired compiler mode
         // before deciding whether the cache is fresh.
@@ -1281,15 +1246,15 @@ pub async fn compile_workflow_handler(
         let compiled_event = ProductEvent::from_auth(EventType::WorkflowCompiled, &ctx)
             .resource(&workflow_id, "workflow")
             .source(source);
-        match crate::workers::compilation_worker::enqueue_compilation_with_event(
-            &redis_url,
-            &tenant_id,
-            &workflow_id,
-            version_num,
-            force_recompile,
-            compiled_event,
-        )
-        .await
+        match engine
+            .enqueue_compilation(
+                &tenant_id,
+                &workflow_id,
+                version_num,
+                force_recompile,
+                Some(compiled_event),
+            )
+            .await
         {
             Ok(_) => {
                 tracing::info!(
@@ -1313,15 +1278,10 @@ pub async fn compile_workflow_handler(
 
         // Wait for the compilation worker to process the request (up to 5 minutes)
         let timeout = std::time::Duration::from_secs(300);
-        let completed = crate::workers::compilation_worker::wait_for_compilation(
-            &redis_url,
-            &tenant_id,
-            &workflow_id,
-            version_num,
-            timeout,
-        )
-        .await
-        .unwrap_or(false);
+        let completed = engine
+            .wait_for_compilation(&tenant_id, &workflow_id, version_num, timeout)
+            .await
+            .unwrap_or(false);
 
         if !completed {
             let error_response = json!({
@@ -1385,17 +1345,10 @@ pub async fn compile_workflow_handler(
 
     // Fallback: Valkey not configured, compile directly (still protected by semaphore)
     tracing::warn!("Valkey not configured, compiling directly (no queue)");
-    let repository = Arc::new(WorkflowRepository::new(pool));
-    // Same catalog as the queued path: rate-limited retry defaults, suspends
-    // and workflow-agent classification all come from it.
-    let compilation_service =
-        crate::api::services::compilation::CompilationService::new(repository, runtime_client)
-            .with_agent_catalog(agent_catalog)
-            .with_direct_compilation(
-                crate::api::services::compilation::direct_compilation_settings_from_config(),
-            );
-
-    match compilation_service
+    // The engine compiles with the same catalog as the queued path:
+    // rate-limited retry defaults, suspends and workflow-agent classification
+    // all come from it.
+    match engine
         .compile_workflow(&tenant_id, &workflow_id, version_num, force_recompile)
         .await
     {
@@ -1569,6 +1522,7 @@ pub struct CompilationProgressResponse {
 pub async fn compilation_progress_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
+    State(engine): State<Arc<dyn Engine>>,
     Path((workflow_id, version)): Path<(String, String)>,
 ) -> (StatusCode, Json<Value>) {
     let version_num = match version.parse::<i32>() {
@@ -1584,15 +1538,9 @@ pub async fn compilation_progress_handler(
     };
 
     // Redis first — covers every state from `queued` through `registering`.
-    if let Some(valkey_config) = crate::valkey::ValkeyConfig::from_env() {
-        let redis_url = valkey_config.connection_url();
-        if let Ok(manager) = crate::valkey::get_or_create_manager(&redis_url).await
-            && let Some(p) = crate::valkey::compilation_progress::read_progress(
-                &manager,
-                &tenant_id,
-                &workflow_id,
-                version_num,
-            )
+    {
+        if let Some(p) = engine
+            .compilation_progress(&tenant_id, &workflow_id, version_num)
             .await
         {
             let status = if p.stage == "queued" {
@@ -1871,22 +1819,18 @@ pub struct ValidateMappingsQuery {
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(pool, connections, agent_catalog), fields(workflow_id = %workflow_id))]
+#[instrument(skip(pool, engine, agent_catalog), fields(workflow_id = %workflow_id))]
 pub async fn validate_mappings_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
+    State(engine): State<Arc<dyn Engine>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     Path(workflow_id): Path<String>,
     Query(query): Query<ValidateMappingsQuery>,
 ) -> (StatusCode, Json<Value>) {
     // Create repositories and service
     let workflow_repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(
-        workflow_repository,
-        connections.clone(),
-        agent_catalog.clone(),
-    );
+    let service = WorkflowService::new(workflow_repository, engine.clone(), agent_catalog.clone());
 
     // Validate mappings
     match service
@@ -1970,7 +1914,7 @@ pub async fn validate_mappings_handler(
 #[instrument(skip(engine, request, headers), fields(workflow_id = %workflow_id))]
 pub async fn execute_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path(workflow_id): Path<String>,
     Query(query): Query<ExecuteWorkflowQuery>,
     headers: HeaderMap,
@@ -2079,7 +2023,7 @@ impl InstanceDetailQuery {
 #[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn get_execution_metrics_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path(instance_id): Path<String>,
     Query(query): Query<InstanceDetailQuery>,
 ) -> (StatusCode, Json<Value>) {
@@ -2117,7 +2061,7 @@ pub async fn get_execution_metrics_handler(
 #[instrument(skip(engine), fields(workflow_id = %workflow_id, instance_id = %instance_id))]
 pub async fn get_instance_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path((workflow_id, instance_id)): Path<(String, String)>,
     Query(query): Query<InstanceDetailQuery>,
 ) -> (StatusCode, Json<Value>) {
@@ -2172,7 +2116,7 @@ pub async fn get_instance_handler(
 #[instrument(skip(engine), fields(workflow_id = %workflow_id))]
 pub async fn list_instances_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path(workflow_id): Path<String>,
     Query(query): Query<ListInstancesQuery>,
 ) -> (StatusCode, Json<Value>) {
@@ -2215,11 +2159,11 @@ pub async fn list_instances_handler(
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(_pool, runtime_client), fields(instance_id = %instance_id))]
+#[instrument(skip(_pool, client), fields(instance_id = %instance_id))]
 pub async fn list_instance_checkpoints_handler(
-    crate::middleware::tenant_auth::OrgId(_tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(_pool): State<PgPool>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
+    State(client): State<Arc<dyn Engine>>,
     Path((_workflow_id, instance_id)): Path<(String, String)>,
     Query(query): Query<ListCheckpointsQuery>,
 ) -> (StatusCode, Json<Value>) {
@@ -2233,18 +2177,15 @@ pub async fn list_instance_checkpoints_handler(
         return (StatusCode::BAD_REQUEST, Json(error_response));
     }
 
-    // Check if runtime client is available
-    let client = match runtime_client {
-        Some(c) => c,
-        None => {
-            let error_response = json!({
-                "success": false,
-                "error": "Runtime client not configured",
-                "message": "Checkpoints require runtara-environment connection",
-            });
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(error_response));
-        }
-    };
+    // Check if the runtime is available
+    if !client.available() {
+        let error_response = json!({
+            "success": false,
+            "error": "Runtime client not configured",
+            "message": "Checkpoints require runtara-environment connection",
+        });
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(error_response));
+    }
 
     // Normalize pagination. The offset is what makes `page` mean anything:
     // a limit on its own re-reads rows `0..size` for every page asked for.
@@ -2256,7 +2197,7 @@ pub async fn list_instance_checkpoints_handler(
 
     // Fetch checkpoints via runtara management SDK
     match client
-        .list_checkpoints(&instance_id, Some(size), Some(offset))
+        .list_checkpoints(&tenant_id, &instance_id, Some(size), Some(offset))
         .await
     {
         Ok(result) => {
@@ -2329,7 +2270,7 @@ pub async fn list_instance_checkpoints_handler(
 #[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn replay_instance_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     match engine.replay(&tenant_id, &instance_id).await {
@@ -2384,7 +2325,7 @@ fn outcome_data(effect: CommandEffect) -> Value {
 #[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn stop_instance_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     match engine.stop(&tenant_id, &instance_id).await {
@@ -2438,7 +2379,7 @@ pub async fn stop_instance_handler(
 #[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn pause_instance_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     match engine.pause(&tenant_id, &instance_id).await {
@@ -2501,7 +2442,7 @@ pub async fn pause_instance_handler(
 #[instrument(skip(engine), fields(instance_id = %instance_id))]
 pub async fn resume_instance_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path(instance_id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     let not_resumable = |status: String| {
@@ -2665,12 +2606,12 @@ fn map_service_error_to_response(error: ServiceError) -> (StatusCode, Json<Value
     tag = "workflow-controller"
 )]
 #[allow(clippy::too_many_arguments)]
-#[instrument(skip(pool, connections, agent_catalog, user_id, role), fields(workflow_id = %workflow_id, version_number = %version_number))]
+#[instrument(skip(pool, engine, agent_catalog, user_id, role), fields(workflow_id = %workflow_id, version_number = %version_number))]
 pub async fn set_current_version_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
+    State(engine): State<Arc<dyn Engine>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 
     Path((workflow_id, version_number)): Path<(String, i32)>,
@@ -2695,7 +2636,7 @@ pub async fn set_current_version_handler(
         return (StatusCode::FORBIDDEN, Json(denial.json_body()));
     }
 
-    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
+    let service = WorkflowService::new(repository, engine.clone(), agent_catalog.clone());
 
     // Delegate to service
     match service
@@ -2732,8 +2673,8 @@ pub(crate) fn graph_validate_routes(
         ConnectionsConfig, ConnectionsState, crypto::noop::NoOpCipher,
         integration_compatibility::IntegrationCompatibility,
     };
-    let connections = Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
-        ConnectionsConfig {
+    let connections = Arc::new(runtara_connections::ConnectionsFacade::new(
+        ConnectionsState::from_config(ConnectionsConfig {
             sealed: runtara_connections::sealed::SealedCredentials::for_tests(),
             agent_access: std::sync::Arc::new(runtara_connections::EveryAgent),
             db_pool: pool.clone(),
@@ -2746,22 +2687,26 @@ pub(crate) fn graph_validate_routes(
             agent_catalog: catalog.clone(),
             connection_events: None,
             oauth: Default::default(),
-        },
-    )));
+        }),
+    ));
     axum::Router::new().route(
         "/api/runtime/workflows/graph/validate",
         axum::routing::post(
             move |org: crate::middleware::tenant_auth::OrgId,
                   query: Query<ValidateGraphQuery>,
                   body: Json<Value>| {
-                let (pool, catalog, connections) =
-                    (pool.clone(), catalog.clone(), connections.clone());
+                // The handler asks the engine which connections the tenant has.
+                let engine: Arc<dyn Engine> = Arc::new(
+                    crate::engine::LocalEngine::without_runtime(pool.clone())
+                        .with_connections(connections.clone()),
+                );
+                let (pool, catalog) = (pool.clone(), catalog.clone());
                 async move {
                     validate_graph_handler(
                         org,
                         State(pool),
                         State(catalog),
-                        State(connections),
+                        State(engine),
                         query,
                         body,
                     )
@@ -2802,12 +2747,12 @@ pub struct ValidateGraphQuery {
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(pool, catalog, connections, body))]
+#[instrument(skip(pool, catalog, engine, body))]
 pub async fn validate_graph_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(catalog): State<std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>>,
-    State(connections): State<Arc<ConnectionsFacade>>,
+    State(engine): State<Arc<dyn Engine>>,
     Query(query): Query<ValidateGraphQuery>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
@@ -2918,7 +2863,7 @@ pub async fn validate_graph_handler(
             }
             // The save gate's check that every connection a step pins exists.
             match crate::api::services::workflows::tenant_connection_issues(
-                &connections,
+                engine.as_ref(),
                 &tenant_id,
                 &workflow,
                 &catalog,
@@ -3206,16 +3151,16 @@ pub async fn get_workflow_dependents_handler(
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(pool, connections))]
+#[instrument(skip(pool, engine))]
 pub async fn get_version_schemas_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
+    State(engine): State<Arc<dyn Engine>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     Path((workflow_id, version)): Path<(String, i32)>,
 ) -> Result<Json<VersionSchemasResponse>, (StatusCode, Json<ErrorResponse>)> {
     let repo = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repo, connections.clone(), agent_catalog.clone());
+    let service = WorkflowService::new(repo, engine.clone(), agent_catalog.clone());
 
     match service
         .get_version_schemas(&tenant_id, &workflow_id, version)
@@ -3270,14 +3215,14 @@ pub async fn get_version_schemas_handler(
 pub async fn move_workflow_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
+    State(engine): State<Arc<dyn Engine>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     Path(id): Path<String>,
     Json(request): Json<MoveWorkflowRequest>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
+    let service = WorkflowService::new(repository, engine.clone(), agent_catalog.clone());
 
     match service.move_workflow(&tenant_id, &id, &request.path).await {
         Ok(response) => {
@@ -3305,12 +3250,12 @@ pub async fn move_workflow_handler(
 pub async fn list_folders_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
+    State(engine): State<Arc<dyn Engine>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
+    let service = WorkflowService::new(repository, engine.clone(), agent_catalog.clone());
 
     match service.list_folders(&tenant_id).await {
         Ok(response) => (
@@ -3342,13 +3287,13 @@ pub async fn list_folders_handler(
 pub async fn rename_folder_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<ConnectionsFacade>>,
+    State(engine): State<Arc<dyn Engine>>,
     State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     Json(request): Json<RenameFolderRequest>,
 ) -> (StatusCode, Json<Value>) {
     // Create repository and service
     let repository = Arc::new(WorkflowRepository::new(pool.clone()));
-    let service = WorkflowService::new(repository, connections.clone(), agent_catalog.clone());
+    let service = WorkflowService::new(repository, engine.clone(), agent_catalog.clone());
 
     match service
         .rename_folder(&tenant_id, &request.old_path, &request.new_path)
@@ -3470,7 +3415,8 @@ mod create_request_wire_tests {
 mod checkpoint_pagination_tests {
     use super::*;
     use crate::middleware::tenant_auth::OrgId;
-    use crate::runtime_client::RuntimeClientConfig;
+    use crate::runtime_client::{RuntimeClient, RuntimeClientConfig};
+    use crate::workers::execution_engine::ExecutionEngine;
     use runtara_core::persistence::{Persistence, memory::InMemoryPersistence};
     use runtara_environment::execution_timeout::ExecutionTimeoutPolicy;
     use runtara_environment::handlers::EnvironmentHandlerState;
@@ -3545,10 +3491,24 @@ mod checkpoint_pagination_tests {
     }
 
     async fn checkpoints_page(client: &Arc<RuntimeClient>, page: i32, size: i32) -> Value {
+        // The handler asks the engine; this one is the runtime under test.
+        let (events, _dropped) = tokio::sync::mpsc::channel(1);
+        let executions = Arc::new(ExecutionEngine::new(
+            lazy_pool(),
+            Arc::new(WorkflowRepository::new(lazy_pool())),
+            Some(Arc::clone(client)),
+            None,
+            crate::product_events::ProductEventSink::new(events),
+        ));
+        let engine: Arc<dyn Engine> = Arc::new(crate::engine::LocalEngine::new(
+            Some(Arc::clone(client)),
+            executions,
+            lazy_pool(),
+        ));
         let (status, Json(body)) = list_instance_checkpoints_handler(
             OrgId("tenant-1".to_string()),
             State(lazy_pool()),
-            State(Some(Arc::clone(client))),
+            State(engine),
             Path(("wf-1".to_string(), INSTANCE.to_string())),
             Query(ListCheckpointsQuery {
                 page: Some(page),

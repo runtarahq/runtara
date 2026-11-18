@@ -1,3 +1,4 @@
+use crate::engine::Engine;
 use crate::runtime_types::ListEventsOptions;
 use axum::{
     Json,
@@ -19,8 +20,7 @@ use tracing::{debug, error};
 use utoipa::ToSchema;
 
 use crate::api::handlers::common::execution_error_response;
-use crate::runtime_client::RuntimeClient;
-use crate::workers::execution_engine::{ExecutionEngine, QueueRequest, TriggerSource};
+use crate::workers::execution_engine::{QueueRequest, TriggerSource};
 
 /// Request body for starting a chat session with an initial message
 #[derive(Debug, Deserialize, ToSchema)]
@@ -161,8 +161,7 @@ pub(crate) enum ChatEvent {
 pub async fn chat_handler(
     org_id: crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path(workflow_id): Path<String>,
     Json(request): Json<ChatRequest>,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
@@ -179,7 +178,6 @@ pub async fn chat_handler(
     start_chat_stream(
         org_id,
         pool,
-        runtime_client,
         engine,
         ChatStreamParams {
             workflow_id,
@@ -213,8 +211,7 @@ pub async fn chat_handler(
 pub async fn chat_start_handler(
     org_id: crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
-    State(runtime_client): State<Option<Arc<RuntimeClient>>>,
-    State(engine): State<Arc<ExecutionEngine>>,
+    State(engine): State<Arc<dyn Engine>>,
     Path(workflow_id): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
@@ -233,7 +230,6 @@ pub async fn chat_start_handler(
     start_chat_stream(
         org_id,
         pool,
-        runtime_client,
         engine,
         ChatStreamParams {
             workflow_id,
@@ -257,16 +253,15 @@ struct ChatStreamParams {
 async fn start_chat_stream(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     pool: PgPool,
-    runtime_client: Option<Arc<RuntimeClient>>,
-    engine: Arc<ExecutionEngine>,
+    engine: Arc<dyn Engine>,
     params: ChatStreamParams,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
-    let runtime_client = runtime_client.ok_or_else(|| {
-        (
+    if !engine.available() {
+        return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"success": false, "message": "Runtime client not configured"})),
-        )
-    })?;
+        ));
+    }
 
     let inputs = json!({
         "data": params.data,
@@ -296,7 +291,7 @@ async fn start_chat_stream(
     let instance_id = result.instance_id.to_string();
 
     // Build the SSE stream that polls for events
-    let stream = build_event_stream(runtime_client, instance_id, params.workflow_id);
+    let stream = build_event_stream(engine, tenant_id, instance_id, params.workflow_id);
 
     let sse = Sse::new(stream).keep_alive(KeepAlive::default());
 
@@ -310,7 +305,8 @@ async fn start_chat_stream(
 }
 
 pub(crate) fn build_event_stream(
-    client: Arc<RuntimeClient>,
+    client: Arc<dyn Engine>,
+    tenant_id: String,
     instance_id: String,
     _workflow_id: String,
 ) -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
@@ -331,14 +327,14 @@ pub(crate) fn build_event_stream(
 
         while !completed && start_time.elapsed() < max_duration {
             // Check instance status
-            match client.get_instance_info(&instance_id).await {
+            match client.get_instance_info(&tenant_id, &instance_id).await {
                 Ok(info) => {
                     let status_str = format!("{:?}", info.status);
                     if info.status.is_terminal() {
                         match info.status {
                             crate::runtime_types::InstanceStatus::Completed => {
                                 // Fetch remaining events before sending done
-                                if let Ok(result) = client.list_events(&instance_id, Some(ListEventsOptions {
+                                if let Ok(result) = client.list_events(&tenant_id, &instance_id, Some(ListEventsOptions {
                                     event_type: Some("custom".to_string()),
                                     sort_order: Some(crate::runtime_types::EventSortOrder::Asc),
                                     limit: Some(100),
@@ -428,7 +424,7 @@ pub(crate) fn build_event_stream(
                 ..Default::default()
             };
 
-            match client.list_events(&instance_id, Some(options)).await {
+            match client.list_events(&tenant_id, &instance_id, Some(options)).await {
                 Ok(result) => {
                     let count = result.events.len() as u32;
                     for event in result.events {

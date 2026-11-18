@@ -366,7 +366,7 @@ mod tests {
         let server = SmoMcpServer::new(
             pool,
             Arc::new(ObjectStoreManager::new()),
-            None,
+            crate::engine::without_runtime(),
             "tenant-1".into(),
             internal_router,
         );
@@ -461,7 +461,7 @@ mod tests {
             SmoMcpServer::new(
                 pool.clone(),
                 Arc::new(ObjectStoreManager::new()),
-                None,
+                crate::engine::without_runtime(),
                 tenant.into(),
                 internal_router.clone(),
             )
@@ -552,7 +552,7 @@ mod tests {
         let server = SmoMcpServer::new(
             pool.clone(),
             Arc::new(ObjectStoreManager::new()),
-            None,
+            crate::engine::without_runtime(),
             "validate-gate-tenant".into(),
             crate::api::handlers::workflows::graph_validate_routes(pool, catalog),
         );
@@ -623,7 +623,7 @@ mod validate_db_tests {
         SmoMcpServer::new(
             pool.clone(),
             Arc::new(ObjectStoreManager::new()),
-            None,
+            crate::engine::without_runtime(),
             tenant.into(),
             crate::api::handlers::workflows::graph_validate_routes(pool.clone(), Arc::new(catalog)),
         )
