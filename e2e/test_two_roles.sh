@@ -13,8 +13,10 @@
 #   2. what each holds  the API's environment has no key, no runtime database
 #                       and no way to seal; the engine has no public listener
 #   3. runs             a workflow is made, compiled and run through the API,
-#                       on both executors; one is run and waited for, and
-#                       one is started by a message into a conversation
+#                       on both executors; one is run and waited for, one
+#                       is started by a message into a conversation, and
+#                       one is published as an agent and called by another:
+#                       each compiled on an executor, none in the engine
 #   4. a connection     made through the API, sealed by seal, and used
 #   5. certificates     the engine's listener takes the API's certificate and
 #                       not an executor's; the run channel refuses the API's
@@ -568,6 +570,54 @@ echo "${RESP}" | jq -e '[.data[] | select(.kind == "run_ended")][0].body.status 
     || { print_error "a conversation's run was not carried to its end: ${RESP}"; exit 1; }
 [ "$(curl -sS "${CONVERSATION}" | jq -r '.data.key')" = "two-roles" ] \
     || { print_error "a conversation is not read through the API"; exit 1; }
+# A workflow published as an agent is compiled on an executor too, and a
+# workflow that calls it is compiled with it: the compiler asks the engine
+# for the tenant's published agent as it asks for any component.
+CHILD_GRAPH='{
+  "name": "Shout Echo Child", "durable": false,
+  "steps": { "finish": { "stepType": "Finish", "id": "finish", "inputMapping": {
+      "echoed": { "valueType": "reference", "value": "data.text" },
+      "marker": { "valueType": "immediate", "value": "from-child" } } } },
+  "entryPoint": "finish", "executionPlan": [], "variables": {},
+  "inputSchema": { "text": { "type": "string", "required": true } }, "outputSchema": {}
+}'
+RESP=$(api_post /workflows/create '{"name":"Shout Echo Child","description":"published as an agent","slug":"shout-echo"}')
+CHILD=$(echo "${RESP}" | jq -r '.data.id // empty')
+[ -n "${CHILD}" ] || { print_error "create failed: ${RESP}"; exit 1; }
+RESP=$(api_post "/workflows/${CHILD}/update" "{\"executionGraph\": ${CHILD_GRAPH}}")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "update failed: ${RESP}"; exit 1; }
+RESP=$(curl -sS --max-time 900 -X POST -H 'Content-Type: application/json' "${API}/workflows/${CHILD}/publish-agent")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] && [ "$(echo "${RESP}" | jq -r '.data.agentId')" = "shout-echo" ] \
+    || { print_error "a workflow was not published as an agent through an executor: ${RESP}"; exit 1; }
+PARENT_GRAPH='{
+  "name": "Parent Of Shout Echo",
+  "steps": {
+    "call": { "stepType": "Agent", "id": "call", "agentId": "shout-echo", "capabilityId": "run",
+              "inputMapping": { "text": { "valueType": "reference", "value": "data.msg" } } },
+    "finish": { "stepType": "Finish", "id": "finish", "inputMapping": {
+        "childEcho": { "valueType": "reference", "value": "steps.call.outputs.echoed" },
+        "childMarker": { "valueType": "reference", "value": "steps.call.outputs.marker" } } }
+  },
+  "entryPoint": "call", "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
+  "variables": {}, "inputSchema": { "msg": { "type": "string", "required": true } }, "outputSchema": {}
+}'
+RESP=$(api_post /workflows/create '{"name":"Parent Of Shout Echo","description":"calls a published agent"}')
+PARENT=$(echo "${RESP}" | jq -r '.data.id // empty')
+[ -n "${PARENT}" ] || { print_error "create failed: ${RESP}"; exit 1; }
+RESP=$(api_post "/workflows/${PARENT}/update" "{\"executionGraph\": ${PARENT_GRAPH}}")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "update failed: ${RESP}"; exit 1; }
+PARENT_VERSION=$(curl -sS "${API}/workflows/${PARENT}/versions" \
+    | jq -r '[.data[]?.version // .data[]?.versionNumber // empty] | max // 1')
+RESP=$(api_post "/workflows/${PARENT}/versions/${PARENT_VERSION}/compile" '{}' 900)
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "a workflow that calls a published agent did not compile on an executor: ${RESP}"; exit 1; }
+api_post "/workflows/${PARENT}/versions/${PARENT_VERSION}/set-current" '{}' >/dev/null
+RESP=$(api_post "/workflows/${PARENT}/execute" '{"inputs": {"data": {"msg": "hello-live"}}}')
+CALLER=$(echo "${RESP}" | jq -er '.data.instanceId') || { print_error "execute failed: ${RESP}"; exit 1; }
+all_complete 120 "${CALLER}"
+RESP=$(curl -sS "${API}/workflows/instances/${CALLER}")
+echo "${RESP}" | jq -e '[.. | objects | select(.childEcho? == "hello-live" and .childMarker? == "from-child")] | length > 0' >/dev/null \
+    || { print_error "a workflow did not run the agent published through an executor: ${RESP}"; exit 1; }
 # The agents the API describes are the ones the engine runs.
 [ "$(curl -sS "${API}/agents" | jq -r '(.agents // .data // .) | length')" -gt 0 ] \
     || { print_error "the engine's agents are not listed through the API"; exit 1; }
