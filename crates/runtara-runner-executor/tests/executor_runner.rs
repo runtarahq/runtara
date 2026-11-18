@@ -80,6 +80,7 @@ struct Deployment {
     runner: Arc<dyn Runner>,
     persistence: Arc<dyn Persistence>,
     workflow: runtara_artifact_store::Digest,
+    artifacts: Arc<FilesystemArtifactStore>,
     registry: Arc<Registry>,
     executors: Vec<AnExecutor>,
     executor_tls: PathBuf,
@@ -120,13 +121,14 @@ async fn deployment_of(max_runs: &[usize]) -> Deployment {
         persistence: persistence.clone(),
         event_observer: None,
         services: HostServices::default(),
-        artifacts,
+        artifacts: artifacts.clone(),
     })
     .unwrap();
     let mut deployment = Deployment {
         runner,
         persistence,
         workflow,
+        artifacts,
         registry: prepared.executors,
         executors: Vec::new(),
         executor_tls,
@@ -481,4 +483,210 @@ async fn an_executor_whose_host_is_gone_is_passed_over_soon() {
         "{:?}",
         started.elapsed()
     );
+}
+
+// ---- A compile placed on an executor (docs/compiler-on-an-executor.md) ----
+
+/// The directory the built components are in.
+fn components_dir() -> PathBuf {
+    std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/wasm32-wasip2/release")
+        })
+}
+
+/// The compiler that asks its host for what it reads, over the workflow API.
+fn compiler() -> Vec<u8> {
+    let path = components_dir().join("runtara-compile-guest.wasm");
+    std::fs::read(&path).unwrap_or_else(|_| {
+        panic!(
+            "missing {}: scripts/build-agent-components.sh builds it",
+            path.display()
+        )
+    })
+}
+
+fn compile_input(graph: Value) -> runtara_workflows::CompilationInput {
+    let catalog =
+        runtara_dsl::agent_meta::AgentCatalog::from_meta_dir(&components_dir()).expect("catalog");
+    runtara_workflows::CompilationInput {
+        tenant_id: "tenant-x".into(),
+        workflow_id: "placed".into(),
+        version: 3,
+        execution_graph: serde_json::from_value(graph).expect("graph"),
+        track_events: false,
+        child_workflows: vec![],
+        agent_catalog: Some(Arc::new(catalog)),
+        progress_callback: None,
+        agent_slug: None,
+    }
+}
+
+fn compile_options(
+    output_dir: PathBuf,
+    extra: PathBuf,
+) -> runtara_workflows::DirectWorkflowCompileOptions {
+    runtara_workflows::DirectWorkflowCompileOptions {
+        output_dir,
+        components_dir: components_dir(),
+        extra_component_dirs: vec![extra],
+        source_checksum: Some("source".into()),
+        // As an engine with executors compiles: a run there is given WASI
+        // and nothing else to link.
+        stdlib: Some(runtara_workflows::direct_wasm::DirectStdlibMode::Fused),
+    }
+}
+
+fn an_agent_graph() -> Value {
+    json!({
+        "name": "Placed",
+        "entryPoint": "echo",
+        "steps": {
+            "echo": {"id": "echo", "stepType": "Agent", "agentId": "utils", "capabilityId": "return-input",
+                     "inputMapping": {"value": {"valueType": "immediate", "value": 7}}},
+            "finish": {"id": "finish", "stepType": "Finish",
+                       "inputMapping": {"out": {"valueType": "reference", "value": "steps.echo.outputs"}}}
+        },
+        "executionPlan": [{"fromStep": "echo", "toStep": "finish"}],
+        "variables": {}, "inputSchema": {}, "outputSchema": {}
+    })
+}
+
+impl Deployment {
+    /// Places a compile of `graph` with an executor and answers what its
+    /// compiler said.
+    async fn compile_elsewhere(
+        &self,
+        graph: Value,
+        options: &runtara_workflows::DirectWorkflowCompileOptions,
+        timeout: Duration,
+    ) -> Result<runtara_environment::runner::CompiledElsewhere, String> {
+        let compiler = self.artifacts.put(&compiler()).await.unwrap();
+        let (request, components) =
+            runtara_workflows::compile_request::request(&compile_input(graph), options).unwrap();
+        self.runner
+            .compile_elsewhere(runtara_environment::runner::CompileElsewhere {
+                tenant_id: "tenant-x".into(),
+                compiler,
+                request: serde_json::to_vec(&request).unwrap(),
+                components,
+                memory_bytes: 3 * 1024 * 1024 * 1024,
+                timeout,
+            })
+            .await
+            .expect("a runner over executors places compiles")
+    }
+}
+
+/// The compiler runs as a guest of `runtara-run` on an executor, asks the
+/// run channel for its request and for each component it reads, hands back
+/// what it composed, and that is the build a compile in this process makes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_compile_placed_on_an_executor_makes_what_one_in_process_does() {
+    use runtara_workflows::compile_request::{GuestOutcome, apply};
+    use sha2::Digest as _;
+
+    let deployment = deployment().await;
+    let temp = tempfile::tempdir().unwrap();
+    let extra = temp.path().join("staged");
+    let local = runtara_workflows::compile_workflow_direct(
+        compile_input(an_agent_graph()),
+        compile_options(temp.path().join("local"), extra.clone()),
+    )
+    .expect("in process");
+
+    let options = compile_options(temp.path().join("placed"), extra);
+    let compiled = deployment
+        .compile_elsewhere(an_agent_graph(), &options, Duration::from_secs(300))
+        .await
+        .expect("compiled on an executor");
+    let made = compiled
+        .made
+        .expect("the composed component was handed back");
+    let GuestOutcome::Compiled {
+        outcome,
+        workflow_wasm,
+    } = serde_json::from_slice(&compiled.outcome).expect("an outcome")
+    else {
+        panic!(
+            "the compile failed: {}",
+            String::from_utf8_lossy(&compiled.outcome)
+        );
+    };
+    let digest: String = sha2::Sha256::digest(&made)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(
+        digest, workflow_wasm,
+        "what it handed back is what it named"
+    );
+
+    let placed = apply(*outcome, &made, "placed", 3, &options).expect("applied");
+    assert_eq!(
+        std::fs::read(&placed.binary_path).unwrap(),
+        std::fs::read(&local.binary_path).unwrap(),
+        "the same bytes as a compile in this process"
+    );
+    assert_eq!(placed.binary_checksum, local.binary_checksum);
+    assert_eq!(placed.trusted_pins, local.trusted_pins);
+
+    // The compiler's machine code is kept once for the executor, under the
+    // platform's name and not the tenant's.
+    let kept: Vec<String> = std::fs::read_dir(deployment.executors[0].state.join("compiled"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        kept,
+        [runtara_environment::runner::provider::COMPILER_TENANT]
+    );
+
+    // A second compile, of another tenant's, starts from that.
+    let again = deployment
+        .compile_elsewhere(an_agent_graph(), &options, Duration::from_secs(300))
+        .await
+        .expect("compiled again");
+    assert_eq!(again.made.as_deref(), Some(made.as_slice()));
+}
+
+/// A graph that does not compile is the compiler's answer, not a failure to
+/// place it: the same failure a compile in this process gives.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_graph_that_does_not_compile_is_answered_by_the_compiler() {
+    use runtara_workflows::compile_request::GuestOutcome;
+
+    let deployment = deployment().await;
+    let temp = tempfile::tempdir().unwrap();
+    let mut graph = an_agent_graph();
+    graph["entryPoint"] = json!("a-step-that-is-not-there");
+    let options = compile_options(temp.path().join("placed"), temp.path().join("staged"));
+    let compiled = deployment
+        .compile_elsewhere(graph, &options, Duration::from_secs(300))
+        .await
+        .expect("the compiler answered");
+    assert!(compiled.made.is_none(), "nothing was composed");
+    assert!(matches!(
+        serde_json::from_slice(&compiled.outcome).expect("an outcome"),
+        GuestOutcome::Failed(_)
+    ));
+}
+
+/// With no executor here, the compile fails: nothing is compiled anywhere
+/// else instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_compile_with_no_executor_to_take_it_fails() {
+    let mut deployment = deployment().await;
+    for executor in deployment.executors.drain(..) {
+        executor.serving.abort();
+        executor.registrar.leave().await;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let options = compile_options(temp.path().join("placed"), temp.path().join("staged"));
+    let refused = deployment
+        .compile_elsewhere(an_agent_graph(), &options, Duration::from_secs(30))
+        .await
+        .expect_err("no executor is here");
+    assert!(refused.contains("did not take the compile"), "{refused}");
 }
