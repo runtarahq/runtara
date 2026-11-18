@@ -43,7 +43,7 @@ pub struct OperationRequestPage {
     pub size: i32,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, ToSchema, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperationQueue {
     pub workflow_id: String,

@@ -78,6 +78,10 @@ pub struct Registered {
 pub const SERVER_NAME: &str = "runtara-server";
 /// The name in the executor's certificate.
 pub const EXECUTOR_NAME: &str = "runtara-executor";
+/// The name in the API role's certificate, when the server's API and its
+/// engine are two processes. It is accepted where the engine listens for the
+/// API, and nowhere an executor's is.
+pub const API_NAME: &str = "runtara-api";
 
 /// A tenant as a path segment: 1 to 128 of `[A-Za-z0-9_-]`.
 pub fn valid_tenant(tenant: &str) -> bool {

@@ -444,8 +444,52 @@ use runtime_client::RuntimeClient;
 pub struct ApiDoc;
 
 /// Application state shared across all handlers
+/// What the API's own routes are answered from. Nothing here reaches a
+/// connection's credentials or a run: what a handler needs of those, it asks
+/// of `engine`.
 #[derive(Clone)]
 struct AppState {
+    pool: PgPool,
+    valkey_conn: Option<redis::aio::ConnectionManager>,
+    engine: Arc<dyn crate::engine::Engine>,
+    agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
+    events: product_events::ProductEventSink,
+}
+
+impl axum::extract::FromRef<AppState> for Arc<dyn crate::engine::Engine> {
+    fn from_ref(state: &AppState) -> Self {
+        state.engine.clone()
+    }
+}
+
+impl axum::extract::FromRef<AppState> for PgPool {
+    fn from_ref(state: &AppState) -> PgPool {
+        state.pool.clone()
+    }
+}
+
+impl axum::extract::FromRef<AppState> for Arc<runtara_dsl::agent_meta::AgentCatalog> {
+    fn from_ref(state: &AppState) -> Arc<runtara_dsl::agent_meta::AgentCatalog> {
+        state.agent_catalog.clone()
+    }
+}
+
+impl axum::extract::FromRef<AppState> for product_events::ProductEventSink {
+    fn from_ref(state: &AppState) -> product_events::ProductEventSink {
+        state.events.clone()
+    }
+}
+
+impl axum::extract::FromRef<AppState> for Option<redis::aio::ConnectionManager> {
+    fn from_ref(state: &AppState) -> Option<redis::aio::ConnectionManager> {
+        state.valkey_conn.clone()
+    }
+}
+
+/// What the routes the engine serves are answered from: the engine's own
+/// holdings, which the API's routes are given none of.
+#[derive(Clone)]
+struct ServedState {
     pool: PgPool,
     object_store_manager: Arc<ObjectStoreManager>,
     /// Trigger stream publisher for async executions (None if Valkey not configured)
@@ -471,70 +515,70 @@ struct AppState {
     events: product_events::ProductEventSink,
 }
 
-impl axum::extract::FromRef<AppState> for Arc<dyn crate::engine::Engine> {
-    fn from_ref(state: &AppState) -> Self {
+impl axum::extract::FromRef<ServedState> for Arc<dyn crate::engine::Engine> {
+    fn from_ref(state: &ServedState) -> Self {
         state.engine.clone()
     }
 }
 
-// Implement FromRef to allow extracting PgPool from AppState
-impl axum::extract::FromRef<AppState> for PgPool {
-    fn from_ref(state: &AppState) -> PgPool {
+// Implement FromRef to allow extracting PgPool from ServedState
+impl axum::extract::FromRef<ServedState> for PgPool {
+    fn from_ref(state: &ServedState) -> PgPool {
         state.pool.clone()
     }
 }
 
-// Implement FromRef to allow extracting ObjectStoreManager from AppState
-impl axum::extract::FromRef<AppState> for Arc<ObjectStoreManager> {
-    fn from_ref(state: &AppState) -> Arc<ObjectStoreManager> {
+// Implement FromRef to allow extracting ObjectStoreManager from ServedState
+impl axum::extract::FromRef<ServedState> for Arc<ObjectStoreManager> {
+    fn from_ref(state: &ServedState) -> Arc<ObjectStoreManager> {
         state.object_store_manager.clone()
     }
 }
 
-// Implement FromRef to allow extracting the agent catalog from AppState.
-impl axum::extract::FromRef<AppState> for Arc<runtara_dsl::agent_meta::AgentCatalog> {
-    fn from_ref(state: &AppState) -> Arc<runtara_dsl::agent_meta::AgentCatalog> {
+// Implement FromRef to allow extracting the agent catalog from ServedState.
+impl axum::extract::FromRef<ServedState> for Arc<runtara_dsl::agent_meta::AgentCatalog> {
+    fn from_ref(state: &ServedState) -> Arc<runtara_dsl::agent_meta::AgentCatalog> {
         state.agent_catalog.clone()
     }
 }
 
-// Implement FromRef to allow extracting the product-event sink from AppState.
-impl axum::extract::FromRef<AppState> for product_events::ProductEventSink {
-    fn from_ref(state: &AppState) -> product_events::ProductEventSink {
+// Implement FromRef to allow extracting the product-event sink from ServedState.
+impl axum::extract::FromRef<ServedState> for product_events::ProductEventSink {
+    fn from_ref(state: &ServedState) -> product_events::ProductEventSink {
         state.events.clone()
     }
 }
 
-// Implement FromRef to allow extracting runtime_client from AppState
-// Implement FromRef to allow extracting trigger_stream from AppState
-impl axum::extract::FromRef<AppState>
+// Implement FromRef to allow extracting runtime_client from ServedState
+// Implement FromRef to allow extracting trigger_stream from ServedState
+impl axum::extract::FromRef<ServedState>
     for Option<Arc<api::repositories::trigger_stream::TriggerStreamPublisher>>
 {
     fn from_ref(
-        state: &AppState,
+        state: &ServedState,
     ) -> Option<Arc<api::repositories::trigger_stream::TriggerStreamPublisher>> {
         state.trigger_stream.clone()
     }
 }
 
-// Implement FromRef to allow extracting valkey_conn from AppState
-impl axum::extract::FromRef<AppState> for Option<redis::aio::ConnectionManager> {
-    fn from_ref(state: &AppState) -> Option<redis::aio::ConnectionManager> {
+// Implement FromRef to allow extracting valkey_conn from ServedState
+impl axum::extract::FromRef<ServedState> for Option<redis::aio::ConnectionManager> {
+    fn from_ref(state: &ServedState) -> Option<redis::aio::ConnectionManager> {
         state.valkey_conn.clone()
     }
 }
 
-// Implement FromRef to allow extracting connections facade from AppState
-impl axum::extract::FromRef<AppState> for Arc<runtara_connections::ConnectionsFacade> {
-    fn from_ref(state: &AppState) -> Arc<runtara_connections::ConnectionsFacade> {
+// Implement FromRef to allow extracting connections facade from ServedState
+impl axum::extract::FromRef<ServedState> for Arc<runtara_connections::ConnectionsFacade> {
+    fn from_ref(state: &ServedState) -> Arc<runtara_connections::ConnectionsFacade> {
         state.connections.clone()
     }
 }
 
-// Implement FromRef to allow extracting the unified execution engine from AppState
-// Implement FromRef to allow extracting AgentsService from AppState
-impl axum::extract::FromRef<AppState> for api::services::operators::AgentsService {
-    fn from_ref(state: &AppState) -> api::services::operators::AgentsService {
+// Implement FromRef to allow extracting the unified execution engine from ServedState
+// Implement FromRef to allow extracting AgentsService from ServedState
+impl axum::extract::FromRef<ServedState> for api::services::operators::AgentsService {
+    fn from_ref(state: &ServedState) -> api::services::operators::AgentsService {
         state.agents.clone()
     }
 }
@@ -812,6 +856,1042 @@ async fn my_tenants_handler(
 /// 96 MB leaves headroom above the base64-encoded size of a 50 MB file.
 const TENANT_REQUEST_BODY_LIMIT_BYTES: usize = 96 * 1024 * 1024;
 
+/// What the API's routes are built from. None of it is the engine's but the
+/// interface to it.
+struct ApiParts {
+    pool: PgPool,
+    engine: Arc<dyn crate::engine::Engine>,
+    agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
+    events: product_events::ProductEventSink,
+    valkey_conn: Option<redis::aio::ConnectionManager>,
+    auth_state: auth::AuthState,
+    mcp_auth_state: auth::AuthState,
+    auth_providers: auth::AuthProviders,
+    oidc_cache: Arc<api::handlers::oidc_discovery::OidcDiscoveryCache>,
+    mcp_session_store: Option<Arc<dyn SessionStore>>,
+    membership_policy: auth::MembershipPolicy,
+    tenant_id: String,
+}
+
+/// Everything the public listener answers: the API's own routes, the routes
+/// that hand the engine what it serves, and MCP.
+fn api_app(parts: ApiParts) -> Router {
+    let ApiParts {
+        pool,
+        engine: engine_api,
+        agent_catalog,
+        events: product_event_sink,
+        valkey_conn,
+        auth_state,
+        mcp_auth_state,
+        auth_providers,
+        oidc_cache,
+        mcp_session_store,
+        membership_policy,
+        tenant_id,
+    } = parts;
+
+    // CORS — configured via CORS_ALLOWED_ORIGINS env var.
+    // Supports: "*" (any origin), comma-separated origins, or defaults to localhost for dev.
+    let cors = middleware::cors::build_cors_layer();
+
+    // Entitlement-gated sub-routers: each one is mounted with a route-layer
+    // that short-circuits with 403 ENTITLEMENT_REQUIRED when the corresponding
+    // feature is disabled for the running tenant. Built separately so the gate
+    // is colocated with the routes it protects; merged into tenant_routes
+    // below so they pick up the same JWT auth layer and AppState.
+    let api_keys_router: Router<AppState> = Router::new()
+        .route(
+            "/api/runtime/api-keys",
+            post(api::handlers::api_keys::create_api_key)
+                .get(api::handlers::api_keys::list_api_keys),
+        )
+        .route(
+            "/api/runtime/api-keys/{id}",
+            delete(api::handlers::api_keys::revoke_api_key),
+        )
+        .route(
+            "/api/runtime/api-keys/users/{user_id}/revoke",
+            post(api::handlers::api_keys::revoke_user_keys),
+        )
+        .route_layer(from_fn(middleware::entitlement::require_api));
+
+    // Create router for tenant-scoped endpoints (requires JWT authentication)
+    let tenant_routes = Router::new()
+        // Execution listing endpoint
+        .route(
+            "/api/runtime/executions",
+            get(api::handlers::executions::list_all_executions_handler),
+        )
+        .route(
+            "/api/runtime/operations/views",
+            get(api::handlers::operations::list_operation_views)
+                .post(api::handlers::operations::create_operation_view),
+        )
+        .route(
+            "/api/runtime/operations/views/{id}",
+            put(api::handlers::operations::update_operation_view)
+                .delete(api::handlers::operations::delete_operation_view),
+        )
+        .route(
+            "/api/runtime/operations/processes",
+            get(api::handlers::operations::operation_processes),
+        )
+        .route(
+            "/api/runtime/operations/queues",
+            get(api::handlers::operations::operation_queues),
+        )
+        .route(
+            "/api/runtime/operations/requests/query",
+            post(api::handlers::operations::query_operation_requests),
+        )
+        .route(
+            "/api/runtime/executions/query",
+            post(api::handlers::executions::query_executions_handler),
+        )
+        .route(
+            "/api/runtime/executions/summary",
+            post(api::handlers::executions::execution_summary_handler),
+        )
+        // Workflow endpoints (refactored - using 3-layer architecture)
+        .route(
+            "/api/runtime/workflows/create",
+            post(api::handlers::workflows::create_workflow_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/update",
+            post(api::handlers::workflows::update_workflow_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/versions/{version}/graph",
+            put(api::handlers::workflows::patch_version_graph_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/versions/{version}/track-events",
+            put(api::handlers::workflows::toggle_track_events_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/slug",
+            put(api::handlers::workflows::update_workflow_slug_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/publish-agent",
+            post(api::handlers::workflows::publish_workflow_agent_handler),
+        )
+        .route(
+            "/api/runtime/workflows",
+            get(api::handlers::workflows::list_workflows_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}",
+            get(api::handlers::workflows::get_workflow_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/versions",
+            get(api::handlers::workflows::list_workflow_versions_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/versions/{version}/compile",
+            post(api::handlers::workflows::compile_workflow_handler)
+                .route_layer(from_fn(crate::tenant_quota::limit_compilations)),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/versions/{version}/compilation-progress",
+            get(api::handlers::workflows::compilation_progress_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/execute",
+            post(api::handlers::workflows::execute_workflow_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/chat",
+            post(api::handlers::chat::chat_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/chat/start",
+            post(api::handlers::chat::chat_start_handler),
+        )
+        // Session endpoints (session-based event handling for WaitForSignal)
+        .route(
+            "/api/runtime/workflows/{id}/sessions",
+            post(api::handlers::sessions::create_session),
+        )
+        .route(
+            "/api/runtime/sessions/{sessionId}/events",
+            post(api::handlers::sessions::submit_event)
+                .get(api::handlers::sessions::session_event_stream),
+        )
+        .route(
+            "/api/runtime/sessions/{sessionId}/deliveries",
+            get(api::handlers::sessions::list_session_deliveries),
+        )
+        .route(
+            "/api/runtime/sessions/{sessionId}/deliveries/{messageId}",
+            get(api::handlers::sessions::get_session_delivery),
+        )
+        .route(
+            "/api/runtime/sessions/{sessionId}/deliveries/{messageId}/resolve",
+            post(api::handlers::sessions::resolve_session_delivery),
+        )
+        .route(
+            "/api/runtime/sessions/{sessionId}/pending-input",
+            get(api::handlers::sessions::session_pending_input),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/instances",
+            get(api::handlers::workflows::list_instances_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/instances/{instanceId}",
+            get(api::handlers::workflows::get_instance_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/instances/{instanceId}/checkpoints",
+            get(api::handlers::workflows::list_instance_checkpoints_handler),
+        )
+        .route(
+            "/api/runtime/workflows/instances/{instanceId}",
+            get(api::handlers::workflows::get_execution_metrics_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/delete",
+            post(api::handlers::workflows::delete_workflow_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/clone",
+            post(api::handlers::workflows::clone_workflow_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/schedule",
+            post(api::handlers::workflows::schedule_workflow_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/versions/{versionNumber}/set-current",
+            post(api::handlers::workflows::set_current_version_handler),
+        )
+        .route(
+            "/api/runtime/workflows/instances/{instanceId}/stop",
+            post(api::handlers::workflows::stop_instance_handler),
+        )
+        .route(
+            "/api/runtime/workflows/instances/{instanceId}/pause",
+            post(api::handlers::workflows::pause_instance_handler),
+        )
+        .route(
+            "/api/runtime/workflows/instances/{instanceId}/resume",
+            post(api::handlers::workflows::resume_instance_handler),
+        )
+        .route(
+            "/api/runtime/workflows/instances/{instanceId}/replay",
+            post(api::handlers::workflows::replay_instance_handler),
+        )
+        .route(
+            "/api/runtime/workflows/graph/validate",
+            post(api::handlers::workflows::validate_graph_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{workflowId}/validate-mappings",
+            post(api::handlers::workflows::validate_mappings_handler),
+        )
+        .route(
+            "/api/runtime/workflows/instances/{instanceId}/steps/{stepId}/subinstances",
+            get(api::handlers::workflows::get_step_subinstances_handler),
+        )
+        // Step Events endpoint (track-events mode - raw events)
+        .route(
+            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/step-events",
+            get(api::handlers::step_events::get_step_events),
+        )
+        // Step Summaries endpoint (paired step records)
+        .route(
+            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/steps",
+            get(api::handlers::step_summaries::get_step_summaries),
+        )
+        // Scope ancestors endpoint (for hierarchical step execution call stack)
+        .route(
+            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/scopes/{scopeId}/ancestors",
+            get(api::handlers::step_events::get_scope_ancestors),
+        )
+        // Pending human input endpoint (for AI Agent human-in-the-loop)
+        .route(
+            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/pending-input",
+            get(api::handlers::step_events::get_pending_input),
+        )
+        // Workflow runtime actions (generic action surface; currently backed by signals)
+        .route(
+            "/api/runtime/workflows/{workflowId}/actions",
+            get(api::handlers::step_events::list_workflow_open_actions),
+        )
+        .route(
+            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions",
+            get(api::handlers::step_events::list_workflow_instance_open_actions),
+        )
+        .route(
+            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions/{actionId}/submit",
+            post(api::handlers::step_events::submit_workflow_action),
+        )
+        // Signal delivery endpoint (submit human input to waiting AI Agent)
+        .route(
+            "/api/runtime/signals/{instanceId}",
+            post(api::handlers::step_events::submit_signal),
+        )
+        // Dependency tracking endpoints
+        .route(
+            "/api/runtime/workflows/{id}/dependencies",
+            get(api::handlers::workflows::get_workflow_dependencies_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/dependents",
+            get(api::handlers::workflows::get_workflow_dependents_handler),
+        )
+        // Version-aware schema endpoint (reads from execution_graph)
+        .route(
+            "/api/runtime/workflows/{id}/versions/{version}/schemas",
+            get(api::handlers::workflows::get_version_schemas_handler),
+        )
+        // Folder management endpoints
+        .route(
+            "/api/runtime/workflows/folders",
+            get(api::handlers::workflows::list_folders_handler),
+        )
+        .route(
+            "/api/runtime/workflows/folders/rename",
+            put(api::handlers::workflows::rename_folder_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/move",
+            put(api::handlers::workflows::move_workflow_handler),
+        )
+        // NOTE: Connection CRUD, OAuth authorize, and type discovery routes are now
+        // served by runtara-connections crate — see connections_tenant_routes below.
+        // Metrics endpoints
+        .route(
+            "/api/runtime/metrics/workflows/{workflow_id}",
+            get(api::metrics::get_workflow_metrics),
+        )
+        .route(
+            "/api/runtime/metrics/workflows/{workflow_id}/stats",
+            get(api::metrics::get_workflow_stats),
+        )
+        .route(
+            "/api/runtime/metrics/tenant",
+            get(api::metrics::get_tenant_metrics),
+        )
+        // Analytics endpoints
+        .route(
+            "/api/runtime/analytics/system",
+            get(api::analytics::get_system_analytics_handler),
+        )
+        // Reporting endpoints are mounted through reports_router.
+        // Rate limit analytics are served by runtara-connections.
+        // Triggers are served by the engine: see `triggers_served` below.
+        // API Key management endpoints — defined in `api_keys_router` above and merged below.
+        // Entitlements snapshot endpoint
+        .route(
+            "/api/runtime/entitlements",
+            get(api::handlers::entitlements::get_entitlements_handler),
+        )
+        // Agents are served by the engine: see `Served::Agents` below.
+        // Step type endpoints
+        .route(
+            "/api/runtime/steps",
+            get(api::handlers::workflows::list_step_types_handler),
+        )
+        // Metadata endpoints
+        .route(
+            "/api/runtime/metadata/workflow/step-types",
+            get(api::metadata::get_workflow_step_types_handler),
+        )
+        .route(
+            "/api/runtime/metadata/llm-models",
+            get(api::metadata::get_llm_models_handler),
+        )
+        // Specification endpoints (serve pre-generated specs)
+        .route(
+            "/api/runtime/specs/versions",
+            get(api::handlers::specs::get_spec_versions),
+        )
+        .route(
+            "/api/runtime/specs/dsl",
+            get(api::handlers::specs::get_dsl_spec),
+        )
+        .route(
+            "/api/runtime/specs/dsl/steps",
+            get(api::handlers::specs::list_step_types),
+        )
+        .route(
+            "/api/runtime/specs/dsl/steps/{stepType}",
+            get(api::handlers::specs::get_step_type_schema),
+        )
+        .route(
+            "/api/runtime/specs/dsl/changelog",
+            get(api::handlers::specs::get_dsl_changelog),
+        )
+        .route(
+            "/api/runtime/specs/dsl/{version}",
+            get(api::handlers::specs::get_dsl_spec_version),
+        )
+        // Entitlement-gated sub-router: carries its own ENTITLEMENT_REQUIRED
+        // layer (see `api_keys_router` above) so disabling `api`
+        // short-circuits before the inner handlers run.
+        .merge(api_keys_router)
+        .with_state(AppState {
+            pool: pool.clone(),
+            valkey_conn: valkey_conn.clone(),
+            engine: engine_api.clone(),
+            agent_catalog: agent_catalog.clone(),
+            events: product_event_sink.clone(),
+        })
+        // Reject API-key-authenticated requests when the `api` feature is
+        // off. Sits *between* auth (outermost) and the per-feature gates
+        // (innermost), so the AuthContext is already populated when this
+        // runs but feature gates haven't yet decided whether the route
+        // itself is open. Session/JWT users on the same routes are
+        // unaffected.
+        .route_layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
+        // Enforce the per-route role permission map (no-op unless membership is Required).
+        // Inside auth so AuthContext (role) and the matched route are populated when it runs.
+        .route_layer(from_fn(crate::middleware::authorization::authorize(
+            membership_policy,
+        )))
+        // Apply JWT authentication middleware to all tenant-scoped routes
+        .route_layer(from_fn_with_state(
+            auth_state.clone(),
+            crate::middleware::auth::authenticate,
+        ))
+        // Raise the body limit above Axum's 2 MB default so base64-encoded
+        // file inputs (workflow `file` fields) are not rejected with 413
+        // (SYN-457). See TENANT_REQUEST_BODY_LIMIT_BYTES.
+        .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES));
+
+    let agent_routes = {
+        let to_agents = || {
+            crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Agents).layer(
+                from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
+            )
+        };
+        Router::new()
+            .nest("/api/runtime/agents", to_agents())
+            .nest("/api/runtime/_internal", to_agents())
+    };
+
+    let trigger_routes = Router::new().nest(
+        "/api/runtime/triggers",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Triggers).layer(
+            from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
+        ),
+    );
+
+    // Whatever under `/api/runtime` is not one of the API's own routes.
+    let connections_tenant_routes = Router::new().nest(
+        "/api/runtime",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Connections).layer(
+            from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
+        ),
+    );
+
+    let object_model_routes = Router::new().nest(
+        "/api/runtime/object-model",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::ObjectModel).layer(
+            from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
+        ),
+    );
+
+    // Create router for public/global endpoints (no tenant auth required)
+    let readiness_providers = auth_providers.clone();
+
+    let public_routes = Router::new()
+        .route("/health", get(health_handler))
+        .route(
+            "/ready",
+            get(move || {
+                let providers = readiness_providers.clone();
+                async move { readiness_handler(providers).await }
+            }),
+        )
+        // Unauthenticated: the permission map is static and the same for every tenant.
+        .route("/api/runtime/permissions", get(permissions_handler));
+
+    let event_routes = Router::new().nest(
+        "/api/runtime/events",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Events),
+    );
+
+    // A chat channel's webhook is the engine's, which answers that there is
+    // none if it serves no channels.
+    let channel_routes = Router::new().nest(
+        "/api/runtime/events/webhook",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Channels),
+    );
+
+    // Build internal router for MCP in-process calls (no network hop).
+    // MCP tools pre-inject AuthContext into extensions, so auth middleware
+    // detects it and skips JWT validation.
+    //
+    // The connections routes must be nested under `/api/runtime` here exactly
+    // as they are in `public_app` below — otherwise MCP connection-discovery
+    // tools (list_connections, list_integrations, get_integration) 404 because
+    // their `/api/runtime/connections*` targets exist only on the public app.
+    //
+    // `event_routes` is merged here too so the `execute_workflow_sync` MCP tool
+    // (which POSTs to `/api/runtime/events/http-sync/{workflow_id}`) resolves
+    // in-process instead of hitting the router fallback and returning a bare 404
+    // in every deployment. `event_routes` is moved into `public_app` below, so
+    // clone it here.
+    // `event_routes` is the one group that carries no authorization layer on the public app —
+    // webhook ingest is authenticated by the unguessable id in the URL, not by a caller. In
+    // process, though, `execute_workflow_sync` reaches it as a real identity, so the internal
+    // copy gets the same gate every other MCP-reachable route has. Without it that single tool
+    // would run a workflow for a caller whose role or credential scope forbids executing one.
+    let internal_event_routes = Router::new().nest(
+        "/api/runtime/events",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::EventsForCallers),
+    );
+
+    let internal_router = Router::new()
+        .merge(tenant_routes.clone())
+        .merge(object_model_routes.clone())
+        .merge(connections_tenant_routes.clone())
+        .merge(trigger_routes.clone())
+        .merge(agent_routes.clone())
+        .merge(public_routes.clone())
+        .merge(internal_event_routes);
+
+    // Build MCP (Model Context Protocol) router with JWT authentication.
+    // Uses .layer() (not .route_layer()) because the MCP transport is a
+    // fallback_service, which route_layer would skip.
+    let mcp_router = mcp::create_mcp_router(
+        pool.clone(),
+        engine_api.clone(),
+        tenant_id.clone(),
+        internal_router,
+        config::mcp_allowed_hosts().to_vec(),
+        mcp_session_store,
+    )
+    // Innermost, after auth: MCP session state is kept under the caller's
+    // tenant (see `mcp::scope_session_tenant`).
+    .layer(from_fn(crate::mcp::scope_session_tenant))
+    // Apply the `mcp` entitlement gate at the transport entry. Disabling
+    // the feature short-circuits with 403 ENTITLEMENT_REQUIRED before any
+    // MCP tool handler is reached. Per-tool gates also exist as a second
+    // line of defense — see `mcp::entitlement`. Uses .layer() (not
+    // .route_layer()) for the same reason as auth above: the MCP transport
+    // is a fallback_service that route_layer would skip.
+    .layer(from_fn(crate::middleware::entitlement::require_mcp))
+    // Entitlement invariant: MCP requires the `api` feature (SYN-523).
+    // Without this gate, `mcp=true, api=false` behaved asymmetrically —
+    // API-key MCP clients were rejected by `api_key_auth_guard` below while
+    // JWT MCP clients sailed through. Gating the transport on `api` makes
+    // the invariant uniform for every auth method. Uses .layer() (not
+    // .route_layer()) for the same fallback_service reason as `require_mcp`.
+    .layer(from_fn(crate::middleware::entitlement::require_api))
+    // Reject API-key-authenticated MCP requests when `api` is off. Between
+    // `mcp` gate (inner) and auth (outer); same shape as on tenant and
+    // object-model routes.
+    .layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
+    .layer(from_fn_with_state(
+        mcp_auth_state,
+        crate::middleware::auth::authenticate,
+    ));
+
+    let oauth_callback_routes = Router::new().nest(
+        "/api/oauth",
+        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::OAuthCallbacks),
+    );
+
+    // =========================================================================
+    // Public API server — accessible externally / via API gateway
+    // =========================================================================
+    // OIDC discovery routes (public, no auth) — serves OAuth/OIDC metadata for MCP clients
+    let oidc_routes = Router::new()
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(api::handlers::oidc_discovery::oauth_protected_resource_handler),
+        )
+        .route(
+            "/.well-known/openid-configuration",
+            get(api::handlers::oidc_discovery::openid_configuration_handler),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(api::handlers::oidc_discovery::openid_configuration_handler),
+        )
+        .with_state(oidc_cache);
+
+    // `/me` — authenticated identity/role view for the SPA. Only the auth middleware
+    // (which attaches AuthContext incl. the Valkey role); no per-resource authorization
+    // gate, since every authenticated caller may read their own identity.
+    let me_routes = Router::new()
+        .route("/api/runtime/me", get(me_handler))
+        .route_layer(from_fn_with_state(
+            auth_state.clone(),
+            crate::middleware::auth::authenticate,
+        ));
+
+    // `/me/tenants` — where the caller may act. Authenticated without the membership
+    // check of the tenant the request resolves to: it checks every served tenant itself.
+    let my_tenants_routes = Router::new()
+        .route(
+            "/api/runtime/me/tenants",
+            get({
+                let auth_state = auth_state.clone();
+                move |axum::Extension(auth): axum::Extension<crate::auth::AuthContext>| {
+                    my_tenants_handler(auth_state.clone(), auth)
+                }
+            }),
+        )
+        .route_layer(from_fn_with_state(
+            auth_state.clone(),
+            crate::middleware::auth::authenticate_identity,
+        ));
+
+    let public_app = Router::new()
+        .merge(tenant_routes)
+        .merge(connections_tenant_routes)
+        .merge(trigger_routes)
+        .merge(agent_routes)
+        .merge(oauth_callback_routes)
+        .merge(object_model_routes)
+        .merge(me_routes)
+        .merge(my_tenants_routes)
+        .merge(public_routes)
+        .merge(event_routes)
+        .merge(channel_routes)
+        .merge(oidc_routes)
+        .nest("/mcp", mcp_router);
+
+    // Only expose OpenAPI docs when explicitly enabled (disabled in production)
+    let public_app = if std::env::var("ENABLE_OPENAPI_DOCS").is_ok() {
+        public_app.route(
+            "/api/runtime/openapi/docs.json",
+            get(|| async { Json(ApiDoc::openapi()) }),
+        )
+    } else {
+        public_app
+    };
+
+    public_app
+        .layer(from_fn(
+            middleware::security_headers::security_headers_middleware,
+        ))
+        .layer(cors)
+        .layer(TraceLayer::new_for_http())
+        .layer(from_fn(middleware::http_metrics::http_metrics_middleware))
+        // Outermost: credential headers are marked sensitive before any
+        // layer or handler can log them.
+        .layer(middleware::sensitive_headers::layer())
+}
+
+/// What every role's start-up establishes first: configuration, telemetry,
+/// who authenticates callers, and the shared Valkey connection.
+struct Common {
+    tenant_id: String,
+    execution_timeout_policy: runtara_environment::execution_timeout::ExecutionTimeoutPolicy,
+    root_span: tracing::Span,
+    auth_providers: auth::AuthProviders,
+    auth_kind: auth::provider::AuthProviderKind,
+    oidc_cache: Arc<api::handlers::oidc_discovery::OidcDiscoveryCache>,
+    redis_manager: Option<redis::aio::ConnectionManager>,
+    membership_policy: auth::MembershipPolicy,
+    auth_state: auth::AuthState,
+    mcp_auth_state: auth::AuthState,
+    mcp_session_store: Option<Arc<dyn SessionStore>>,
+}
+
+async fn common_start(pool: &PgPool) -> Result<Common, Box<dyn std::error::Error>> {
+    // Load all env-derived configuration up front; fails fast on missing/invalid.
+    let server_config = config::Config::from_env()?;
+
+    // Initialize OpenTelemetry with Datadog integration
+    // Must be called BEFORE any tracing macros are used
+    observability::init_telemetry()?;
+
+    // The agent catalog is now sourced from the component dispatcher's
+    // `<agent>.meta.json` sidecars at boot — the bundle-emit step generates
+    // those from the macro derives, so any inconsistency surfaces at build
+    // time. The boot-time `validate_agent_metadata_or_panic()` checked
+    // self-consistency of the compile-time aggregator in `runtara-agents`,
+    // which is now vestigial; the check is removed.
+    println!("✓ Configured for tenant: {}", server_config.tenant_id);
+    println!("✓ Direct workflow compiler: direct-only");
+    println!(
+        "Max concurrent executions: {} (CPU cores: {})",
+        server_config.max_concurrent_executions,
+        num_cpus::get()
+    );
+
+    // Get version for logging context
+    let version = env!("BUILD_VERSION");
+    let commit = env!("BUILD_COMMIT");
+
+    let tenant_id = server_config.tenant_id.clone();
+    let execution_timeout_policy = server_config.execution_timeout_policy;
+    config::init(server_config);
+
+    // Create a root span with global context that will be included in all logs
+    let root_span = tracing::info_span!(
+        "runtime",
+        tenant_id = %tenant_id,
+        version = %version,
+        commit = %commit,
+        service = "runtara-server"
+    );
+    let _guard = root_span.clone().entered();
+
+    // Operator-visible summary of the resolved entitlement snapshot — what
+    // this process will actually enforce. Logged once at boot so an operator
+    // never has to re-derive it from env vars and JSON layers.
+    config::entitlements().log_summary();
+    // Warn on valid-but-surprising entitlement combinations (e.g. mcp=true
+    // with api=false silently breaks hosted MCP-over-HTTP — SYN-433 Finding 5).
+    config::entitlements().warn_risky_combinations();
+
+    // Validate Redis configuration (required for checkpoints)
+    if let Err(e) = config::validate_checkpoint_config() {
+        eprintln!("❌ Configuration error: {}", e);
+        eprintln!("   Redis/Valkey is required for checkpoint storage.");
+        eprintln!("   Please set VALKEY_HOST environment variable.");
+        std::process::exit(1);
+    }
+    println!("✓ Redis configuration validated");
+
+    // Build the auth providers selected by AUTH_PROVIDER (default: oidc).
+    let auth_providers = auth::AuthProviders::from_env(tenant_id.clone()).await;
+    println!(
+        "✓ Auth provider: {} (API + MCP)",
+        auth_providers.kind.as_str()
+    );
+
+    // Read the OIDC issuer for the OIDC discovery cache. In non-oidc modes we still
+    // expose the `.well-known/*` endpoints when an issuer is configured, so MCP clients
+    // that rely on upstream discovery keep working; if unset we fall back to the
+    // configured tenant's public base URL.
+    let oidc_issuer = std::env::var("OAUTH2_ISSUER").unwrap_or_else(|_| {
+        std::env::var("PUBLIC_BASE_URL").unwrap_or_else(|_| "http://localhost".to_string())
+    });
+    let oidc_cache = Arc::new(api::handlers::oidc_discovery::OidcDiscoveryCache::new(
+        oidc_issuer,
+    ));
+    println!("✓ OIDC discovery cache initialized");
+
+    println!("✓ Database connected successfully");
+
+    let auth_kind = auth_providers.kind;
+
+    // Build the single, process-wide Valkey/Redis connection manager. Every
+    // subsystem that needs Redis — connections facade rate limiting, trigger
+    // stream publisher, compilation worker, cron scheduler, MCP/handler
+    // utility calls — clones this manager instead of opening its own TCP
+    // connection per call.
+    let redis_url = crate::valkey::build_redis_url();
+    let redis_manager: Option<redis::aio::ConnectionManager> = match redis_url {
+        Some(url) => match crate::valkey::init_shared_manager(&url).await {
+            Ok(m) => {
+                println!("✓ Shared Valkey connection manager initialized");
+                Some(m)
+            }
+            Err(e) => {
+                if config::mcp_session_store() == config::McpSessionStore::Valkey {
+                    eprintln!(
+                        "❌ Configuration error: failed to initialize shared Valkey connection manager: {}",
+                        e
+                    );
+                    eprintln!(
+                        "   RUNTARA_MCP_SESSION_STORE=valkey requires a working Valkey connection."
+                    );
+                    std::process::exit(1);
+                }
+                eprintln!(
+                    "⚠ Failed to initialize shared Valkey connection manager: {}",
+                    e
+                );
+                None
+            }
+        },
+        None => {
+            if config::mcp_session_store() == config::McpSessionStore::Valkey {
+                eprintln!(
+                    "❌ Configuration error: RUNTARA_MCP_SESSION_STORE=valkey requires VALKEY_HOST."
+                );
+                std::process::exit(1);
+            }
+            None
+        }
+    };
+
+    // Per-tenant rate limits share their buckets through Valkey.
+    if let Some(manager) = redis_manager.clone() {
+        crate::tenant_quota::install(manager.clone());
+        crate::tenant_status::install(manager);
+    }
+    // Per-tenant Valkey membership enforcement policy. Built here, after the
+    // shared manager, so the policy default can see whether Valkey is actually configured.
+    // The auth middleware consumes both; they ride on AuthState.
+    let membership_policy = auth::MembershipPolicy::from_env(auth_kind, redis_manager.is_some());
+    // Publish to the process-wide accessor so handler-level ownership checks see the same
+    // policy the route gate enforces.
+    auth::set_membership_policy(membership_policy);
+    println!("✓ Auth membership policy: {}", membership_policy.as_str());
+
+    let auth_state = auth::AuthState {
+        provider: auth_providers.api.clone(),
+        pool: pool.clone(),
+        valkey: redis_manager.clone(),
+        membership_policy,
+    };
+    let mcp_auth_state = auth::AuthState {
+        provider: auth_providers.mcp.clone(),
+        pool: pool.clone(),
+        valkey: redis_manager.clone(),
+        membership_policy,
+    };
+
+    let mcp_session_store: Option<Arc<dyn SessionStore>> = match config::mcp_session_store() {
+        config::McpSessionStore::Local => {
+            println!("✓ MCP session recovery store: local");
+            None
+        }
+        config::McpSessionStore::Valkey => {
+            let Some(manager) = redis_manager.clone() else {
+                eprintln!(
+                    "❌ Configuration error: RUNTARA_MCP_SESSION_STORE=valkey requires a shared Valkey connection manager."
+                );
+                std::process::exit(1);
+            };
+            println!(
+                "✓ MCP session recovery store: valkey (ttl={}s)",
+                config::mcp_session_ttl_seconds()
+            );
+            Some(Arc::new(mcp::ValkeyMcpSessionStore::new(
+                manager,
+                tenant_id.clone(),
+                config::mcp_session_ttl_seconds(),
+            )))
+        }
+    };
+
+    drop(_guard);
+    let _ = (version, commit);
+    Ok(Common {
+        tenant_id,
+        execution_timeout_policy,
+        root_span,
+        auth_providers,
+        auth_kind,
+        oidc_cache,
+        redis_manager,
+        membership_policy,
+        auth_state,
+        mcp_auth_state,
+        mcp_session_store,
+    })
+}
+
+/// Starts what a server process runs for itself, whatever its role: a watch
+/// on its database pool, the drain of the product events it emits, and its
+/// heartbeat in the log.
+fn start_own_work(
+    workers: &crate::roles::Workers,
+    own: crate::roles::Role,
+    shutdown_coordinator: &Arc<crate::shutdown::ShutdownCoordinator>,
+    pool: &PgPool,
+    redis_manager: Option<redis::aio::ConnectionManager>,
+    product_event_rx: tokio::sync::mpsc::Receiver<product_events::ProductEvent>,
+    product_events_config: product_events::ProductEventConfig,
+) {
+    // Spawn background task to warn when pool usage is high
+    let pool_monitor = pool.clone();
+    workers.detached(own, "database pool monitor", async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            let size = pool_monitor.size();
+            let idle = pool_monitor.num_idle();
+            let active = size as usize - idle;
+            let usage_pct = if size > 0 {
+                (active * 100) / size as usize
+            } else {
+                0
+            };
+            if usage_pct >= 75 {
+                tracing::warn!(
+                    pool_size = size,
+                    pool_idle = idle,
+                    pool_active = active,
+                    usage_pct,
+                    "Database pool under pressure"
+                );
+            }
+        }
+    });
+
+    // Product-analytics pipeline: spawn the single drain (consumer) now that the shutdown
+    // signal exists. The channel + sink were built earlier (so the sink could be injected
+    // into the connections crate); the drain owns `product_event_rx` and ships batches to
+    // Valkey (`XADD`) for smo-management's per-tenant consumer to persist. `XADD` is
+    // non-blocking, so the drain reuses the shared connection manager rather than needing a
+    // dedicated one. Retention now lives in smo-management, next to the table it sweeps.
+    match redis_manager {
+        Some(manager) => {
+            let drain = product_events::ProductEventDrain::new(
+                manager,
+                product_event_rx,
+                product_events_config,
+                shutdown_coordinator.signal(),
+            );
+            workers.intake(
+                own,
+                "product events drain",
+                shutdown_coordinator,
+                drain.run(),
+            );
+        }
+        None => {
+            println!(
+                "⚠ Valkey not configured, skipping product events drain; \
+                 emitted events will fill the in-memory channel and then be dropped"
+            );
+        }
+    }
+
+    // Spawn heartbeat task for log pipeline monitoring
+    workers.detached(own, "heartbeat log", async {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600)); // 1 hour
+        loop {
+            interval.tick().await;
+            tracing::info!(heartbeat = true, "ping");
+        }
+    });
+}
+
+/// Starts the API's consumer of member control events, if there is a Valkey
+/// to read them from.
+fn start_member_control_events(
+    workers: &crate::roles::Workers,
+    shutdown_coordinator: &Arc<crate::shutdown::ShutdownCoordinator>,
+    pool: &PgPool,
+    auth_kind: auth::provider::AuthProviderKind,
+    membership_policy: auth::MembershipPolicy,
+) {
+    let Some(valkey) = valkey::ValkeyConfig::from_env() else {
+        return;
+    };
+    // Control-event consumer, one per served tenant (SYN-939): revokes a removed/disabled
+    // member's API keys when `runtara-cloud` appends a `member_removed` event to the tenant's
+    // `{tenant}:control` stream. Scoped to the tenant (row-level security) like the trigger
+    // worker, and joined on shutdown via the same intake coordinator.
+    for control_tenant in config::served_tenants() {
+        let control_pool = pool.clone();
+        let control_config = valkey.clone();
+        let control_shutdown = shutdown_coordinator.signal();
+        let control_tenant = control_tenant.clone();
+        let control_sweep =
+            crate::valkey::control_events::ReconcileSweep::for_auth(auth_kind, membership_policy);
+        let scope = control_tenant.clone();
+        workers.intake(
+            crate::roles::Role::Api,
+            "member control events",
+            shutdown_coordinator,
+            scoped(scope, async move {
+                crate::valkey::control_events::run(
+                    control_pool,
+                    control_config,
+                    control_tenant,
+                    control_sweep,
+                    control_shutdown,
+                )
+                .await;
+            }),
+        );
+    }
+}
+
+/// Binds the public listener and serves `public_app` on it until the
+/// shutdown flag is set.
+async fn serve_public(
+    public_app: Router,
+    auth_kind: auth::provider::AuthProviderKind,
+    shutdown_signal: crate::shutdown::ShutdownSignal,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Get port/host from environment variables or use defaults
+    let port = std::env::var("SERVER_PORT")
+        .unwrap_or_else(|_| "7001".to_string())
+        .parse::<u16>()
+        .unwrap_or(7001);
+    let host = std::env::var("SERVER_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let public_addr = format!("{}:{}", host, port);
+
+    // Safety: refuse to boot in a non-OIDC provider mode on a non-loopback public bind.
+    // Matches the valkey validation pattern above: print the error and exit with a
+    // non-zero status so container orchestrators and systemd surface a clean failure.
+    if let Err(msg) = crate::bind::enforce_loopback_for_unauthenticated(auth_kind, &host) {
+        eprintln!("❌ Configuration error: {msg}");
+        std::process::exit(1);
+    }
+
+    // Cap concurrent TCP connections so a slow-loris attack or a connection
+    // storm can't exhaust file descriptors and take the whole server down.
+    // Configurable via MAX_CONNECTIONS; see `conn_limit`.
+    let max_connections = crate::conn_limit::max_connections_from_env();
+
+    // Start public API server
+    let public_listener = crate::conn_limit::LimitedListener::new(
+        tokio::net::TcpListener::bind(&public_addr).await?,
+        max_connections,
+    );
+    tracing::info!(
+        port = port,
+        address = %public_addr,
+        max_connections = max_connections,
+        "Public API server started"
+    );
+
+    // Ready banner with a clickable UI link. Printed to stdout (not via
+    // tracing) so it shows regardless of RUST_LOG — the first thing a local
+    // or `docker compose up` user looks for once the listeners are bound.
+    {
+        // Wildcard / loopback binds aren't useful as clickable links; show
+        // localhost instead so the printed URL is something you can open.
+        let shown_host = if host == "0.0.0.0" || host == "::" || crate::bind::is_loopback(&host) {
+            "localhost"
+        } else {
+            host.as_str()
+        };
+        let origin = format!("http://{shown_host}:{port}");
+        println!("\n  Runtara {} is ready.\n", env!("BUILD_VERSION"));
+        println!("    API:     {origin}");
+        println!("    Health:  {origin}/health\n");
+    }
+
+    // The public API server stops accepting as soon as SIGTERM flips
+    // `shutdown_signal` (no new external intake). Running guests don't call
+    // this listener: agent calls are in-process host imports and the embedded
+    // core stays up until the drain below finishes.
+    let public_shutdown = shutdown_signal;
+    // A served tenant's path segment is stripped before routing (see
+    // `middleware::tenant_path`), so it wraps the finished router. The tenant
+    // it names scopes the request's database work, authenticated or not.
+    let public_app = public_app.layer(from_fn(
+        crate::middleware::tenant_path::scope_requested_tenant,
+    ));
+    let public_app = tower::Layer::layer(
+        &tower::util::MapRequestLayer::new(
+            crate::middleware::tenant_path::strip_tenant_segment::<axum::body::Body>,
+        ),
+        public_app,
+    );
+    let public_server = axum::serve(
+        public_listener,
+        axum::ServiceExt::<axum::extract::Request>::into_make_service(public_app),
+    )
+    .with_graceful_shutdown(async move { public_shutdown.wait().await });
+
+    if let Err(e) = public_server.await {
+        tracing::error!(error = %e, "Public API server error");
+    }
+    Ok(())
+}
+
 /// How a host composes the server beyond its environment configuration.
 #[derive(Default, Clone)]
 pub struct ServerOptions {
@@ -871,16 +1951,233 @@ pub async fn start_with(
     // Starting, and every worker started here, is the platform's own work:
     // it reaches every tenant's rows, and says so. A worker for one tenant
     // enters that tenant's scope; a request starts in none.
-    runtara_store_postgres::tenant_scope::system(start_as_platform(pool, options)).await
+    let roles = match crate::roles::Roles::from_env() {
+        Ok(roles) => roles,
+        Err(msg) => {
+            eprintln!("❌ Configuration error: {msg}");
+            std::process::exit(1);
+        }
+    };
+    if roles.runs(crate::roles::Role::Engine) {
+        runtara_store_postgres::tenant_scope::system(start_as_platform(pool, options, roles)).await
+    } else {
+        runtara_store_postgres::tenant_scope::system(start_as_api(pool, options)).await
+    }
+}
+
+/// Starts the API role alone: it takes requests, and asks an engine in
+/// another process for everything that is the engine's. It holds no runtime
+/// database, no key, no way to seal and no component, and is given the way
+/// to none of them.
+async fn start_as_api(
+    pool: PgPool,
+    options: ServerOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::roles::Role;
+    let workers = crate::roles::Workers::new(crate::roles::Roles::only(Role::Api));
+    let given = crate::roles::given_to_the_api_role();
+    if !given.is_empty() {
+        eprintln!(
+            "❌ RUNTARA_ROLE=api was given {}. The API role holds none of the engine's: \
+             unset {} for this process.",
+            given.join(", "),
+            if given.len() == 1 { "it" } else { "them" },
+        );
+        std::process::exit(1);
+    }
+    let engine_at = match crate::roles::engine_at() {
+        Ok(engine_at) => engine_at,
+        Err(msg) => {
+            eprintln!("❌ Configuration error: {msg}");
+            std::process::exit(1);
+        }
+    };
+    if let Some(source) = options.entitlements.clone() {
+        config::install_entitlement_source(source);
+    }
+
+    // What agents there are, read from their descriptions alone. The engine
+    // loads the components; this process describes them to whoever edits a
+    // workflow, and runs none.
+    let Some(components_dir) = std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
+        .filter(|dir| !dir.to_string_lossy().trim().is_empty())
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!(
+            "❌ RUNTARA_ROLE=api needs RUNTARA_AGENT_COMPONENTS_DIR: the directory of the \
+             runtara_agent_*.meta.json files of the release the engine runs"
+        );
+        std::process::exit(1);
+    };
+    let described = match runtara_component_host::dispatcher::metadata_from_dir(&components_dir) {
+        Ok(described) if !described.catalog.agents().is_empty() => described,
+        Ok(_) => {
+            eprintln!(
+                "❌ {} holds no runtara_agent_*.meta.json file",
+                components_dir.display()
+            );
+            std::process::exit(1);
+        }
+        Err(error) => {
+            eprintln!("❌ Agents' descriptions could not be read: {error:#}");
+            std::process::exit(1);
+        }
+    };
+    config::install_release_agents(
+        described
+            .catalog
+            .agents()
+            .iter()
+            .map(|agent| agent.id.clone()),
+    );
+
+    let Common {
+        tenant_id,
+        execution_timeout_policy: _,
+        root_span,
+        auth_providers,
+        auth_kind,
+        oidc_cache,
+        redis_manager,
+        membership_policy,
+        auth_state,
+        mcp_auth_state,
+        mcp_session_store,
+    } = common_start(&pool).await?;
+    let _guard = root_span.enter();
+
+    println!(
+        "✓ {} agent(s) described from {}",
+        described.catalog.agents().len(),
+        components_dir.display()
+    );
+    let agent_catalog = Arc::new(runtara_agents::extractors::augment_catalog(
+        &described.catalog,
+    ));
+    if let Err(error) = runtara_agents::derived::register(described.declared_connection_types) {
+        eprintln!("❌ Connection types declared by agents: {error}");
+        std::process::exit(1);
+    }
+
+    let product_events_config = product_events::ProductEventConfig::from_env();
+    let (product_event_tx, product_event_rx) =
+        tokio::sync::mpsc::channel(product_events_config.channel_capacity());
+    let product_event_sink = product_events::ProductEventSink::new(product_event_tx);
+
+    let engine =
+        match crate::engine::remote::RemoteEngine::connect(&engine_at.url, &engine_at.tls_dir) {
+            Ok(engine) => engine,
+            Err(msg) => {
+                eprintln!("❌ The engine at {} cannot be called: {msg}", engine_at.url);
+                std::process::exit(1);
+            }
+        };
+    // The API starts whether or not the engine answers yet: what it is asked
+    // that is the engine's says so until it does.
+    if engine.learn().await {
+        println!("✓ Engine at {} answers", engine_at.url);
+    } else {
+        println!("⚠ Engine at {} does not answer yet", engine_at.url);
+    }
+    workers.detached(
+        Role::Api,
+        "watch on the engine",
+        engine.keep_asking_what_it_is(),
+    );
+    let engine_api: Arc<dyn crate::engine::Engine> = engine;
+    // A tenant's published workflow-agents are staged where the engine is.
+    workflow_agents::ask_engine_elsewhere(engine_api.clone());
+
+    let shutdown_coordinator = Arc::new(crate::shutdown::ShutdownCoordinator::new(
+        config::shutdown_grace(),
+    ));
+    let shutdown_signal = shutdown_coordinator.signal();
+    start_own_work(
+        &workers,
+        Role::Api,
+        &shutdown_coordinator,
+        &pool,
+        redis_manager.clone(),
+        product_event_rx,
+        product_events_config,
+    );
+    start_member_control_events(
+        &workers,
+        &shutdown_coordinator,
+        &pool,
+        auth_kind,
+        membership_policy,
+    );
+
+    let public_app = api_app(ApiParts {
+        pool: pool.clone(),
+        engine: engine_api,
+        agent_catalog,
+        events: product_event_sink,
+        valkey_conn: redis_manager,
+        auth_state,
+        mcp_auth_state,
+        auth_providers,
+        oidc_cache,
+        mcp_session_store,
+        membership_policy,
+        tenant_id,
+    });
+
+    workers.log_started();
+    let signal_coordinator = shutdown_coordinator.clone();
+    let signal_task = runtara_store_postgres::tenant_scope::spawn(async move {
+        if let Err(e) = wait_for_shutdown_signal().await {
+            tracing::error!(error = %e, "Signal handler failed");
+        }
+        tracing::info!("Shutdown signal received");
+        signal_coordinator.request_shutdown();
+    });
+    serve_public(public_app, auth_kind, shutdown_signal).await?;
+    shutdown_coordinator.request_shutdown();
+    signal_task.abort();
+    shutdown_coordinator.drain_intake().await;
+    observability::shutdown_telemetry().await;
+    Ok(())
 }
 
 async fn start_as_platform(
     pool: PgPool,
     mut options: ServerOptions,
+    roles: crate::roles::Roles,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // One process runs both of the server's roles. Each piece of background
-    // work below is started for the role it belongs to.
-    let workers = crate::roles::Workers::new(crate::roles::Roles::all());
+    // This process runs the engine, and the API too unless another process
+    // does. Each piece of background work below is started for the role it
+    // belongs to.
+    let workers = crate::roles::Workers::new(roles);
+    // An engine that is a process of its own does not hold the keys that open
+    // connections' secrets either: it is given a seal of its own.
+    if !roles.runs(crate::roles::Role::Api)
+        && !runtara_connections::sealed::mode::SealMode::from_env()
+            .is_ok_and(|mode| mode.is_remote())
+    {
+        eprintln!(
+            "❌ RUNTARA_ROLE=engine needs a seal of its own (RUNTARA_SEAL_MODE=unix or mtls, \
+             docs/seal.md): an engine split from its API is not where the keys that open \
+             connections' secrets are kept"
+        );
+        std::process::exit(1);
+    }
+    let listen = match crate::roles::engine_listen() {
+        Ok(Some(listen)) => Some(listen),
+        Ok(None) if roles.runs(crate::roles::Role::Api) => None,
+        Ok(None) => {
+            eprintln!(
+                "❌ RUNTARA_ROLE=engine needs RUNTARA_ENGINE_LISTEN: the address the API \
+                 role reaches the engine at"
+            );
+            std::process::exit(1);
+        }
+        Err(msg) => {
+            eprintln!("❌ Configuration error: {msg}");
+            std::process::exit(1);
+        }
+    };
     if let Some(source) = options.entitlements.clone() {
         config::install_entitlement_source(source);
     }
@@ -982,125 +2279,20 @@ async fn start_as_platform(
         });
     }
 
-    // Load all env-derived configuration up front; fails fast on missing/invalid.
-    let server_config = config::Config::from_env()?;
-
-    // Initialize OpenTelemetry with Datadog integration
-    // Must be called BEFORE any tracing macros are used
-    observability::init_telemetry()?;
-
-    // The agent catalog is now sourced from the component dispatcher's
-    // `<agent>.meta.json` sidecars at boot — the bundle-emit step generates
-    // those from the macro derives, so any inconsistency surfaces at build
-    // time. The boot-time `validate_agent_metadata_or_panic()` checked
-    // self-consistency of the compile-time aggregator in `runtara-agents`,
-    // which is now vestigial; the check is removed.
-    println!("✓ Configured for tenant: {}", server_config.tenant_id);
-    println!("✓ Direct workflow compiler: direct-only");
-    println!(
-        "Max concurrent executions: {} (CPU cores: {})",
-        server_config.max_concurrent_executions,
-        num_cpus::get()
-    );
-
-    // Get version for logging context
-    let version = env!("BUILD_VERSION");
-    let commit = env!("BUILD_COMMIT");
-
-    let tenant_id = server_config.tenant_id.clone();
-    let execution_timeout_policy = server_config.execution_timeout_policy;
-    config::init(server_config);
-
-    // Create a root span with global context that will be included in all logs
-    let root_span = tracing::info_span!(
-        "runtime",
-        tenant_id = %tenant_id,
-        version = %version,
-        commit = %commit,
-        service = "runtara-server"
-    );
+    let Common {
+        tenant_id,
+        execution_timeout_policy,
+        root_span,
+        auth_providers,
+        auth_kind,
+        oidc_cache,
+        redis_manager,
+        membership_policy,
+        auth_state,
+        mcp_auth_state,
+        mcp_session_store,
+    } = common_start(&pool).await?;
     let _guard = root_span.enter();
-
-    // Operator-visible summary of the resolved entitlement snapshot — what
-    // this process will actually enforce. Logged once at boot so an operator
-    // never has to re-derive it from env vars and JSON layers.
-    config::entitlements().log_summary();
-    // Warn on valid-but-surprising entitlement combinations (e.g. mcp=true
-    // with api=false silently breaks hosted MCP-over-HTTP — SYN-433 Finding 5).
-    config::entitlements().warn_risky_combinations();
-
-    // Validate Redis configuration (required for checkpoints)
-    if let Err(e) = config::validate_checkpoint_config() {
-        eprintln!("❌ Configuration error: {}", e);
-        eprintln!("   Redis/Valkey is required for checkpoint storage.");
-        eprintln!("   Please set VALKEY_HOST environment variable.");
-        std::process::exit(1);
-    }
-    println!("✓ Redis configuration validated");
-
-    // Build the auth providers selected by AUTH_PROVIDER (default: oidc).
-    let auth_providers = auth::AuthProviders::from_env(tenant_id.clone()).await;
-    println!(
-        "✓ Auth provider: {} (API + MCP)",
-        auth_providers.kind.as_str()
-    );
-
-    // Read the OIDC issuer for the OIDC discovery cache. In non-oidc modes we still
-    // expose the `.well-known/*` endpoints when an issuer is configured, so MCP clients
-    // that rely on upstream discovery keep working; if unset we fall back to the
-    // configured tenant's public base URL.
-    let oidc_issuer = std::env::var("OAUTH2_ISSUER").unwrap_or_else(|_| {
-        std::env::var("PUBLIC_BASE_URL").unwrap_or_else(|_| "http://localhost".to_string())
-    });
-    let oidc_cache = Arc::new(api::handlers::oidc_discovery::OidcDiscoveryCache::new(
-        oidc_issuer,
-    ));
-    println!("✓ OIDC discovery cache initialized");
-
-    println!("✓ Database connected successfully");
-
-    let auth_kind = auth_providers.kind;
-
-    // Build the single, process-wide Valkey/Redis connection manager. Every
-    // subsystem that needs Redis — connections facade rate limiting, trigger
-    // stream publisher, compilation worker, cron scheduler, MCP/handler
-    // utility calls — clones this manager instead of opening its own TCP
-    // connection per call.
-    let redis_url = crate::valkey::build_redis_url();
-    let redis_manager: Option<redis::aio::ConnectionManager> = match redis_url {
-        Some(url) => match crate::valkey::init_shared_manager(&url).await {
-            Ok(m) => {
-                println!("✓ Shared Valkey connection manager initialized");
-                Some(m)
-            }
-            Err(e) => {
-                if config::mcp_session_store() == config::McpSessionStore::Valkey {
-                    eprintln!(
-                        "❌ Configuration error: failed to initialize shared Valkey connection manager: {}",
-                        e
-                    );
-                    eprintln!(
-                        "   RUNTARA_MCP_SESSION_STORE=valkey requires a working Valkey connection."
-                    );
-                    std::process::exit(1);
-                }
-                eprintln!(
-                    "⚠ Failed to initialize shared Valkey connection manager: {}",
-                    e
-                );
-                None
-            }
-        },
-        None => {
-            if config::mcp_session_store() == config::McpSessionStore::Valkey {
-                eprintln!(
-                    "❌ Configuration error: RUNTARA_MCP_SESSION_STORE=valkey requires VALKEY_HOST."
-                );
-                std::process::exit(1);
-            }
-            None
-        }
-    };
 
     // Admission admits work the runner must then execute, and an admitted
     // request holds its reservation until it terminates or parks. A ceiling
@@ -1139,11 +2331,6 @@ async fn start_as_platform(
         }
     }
 
-    // Per-tenant rate limits share their buckets through Valkey.
-    if let Some(manager) = redis_manager.clone() {
-        crate::tenant_quota::install(manager.clone());
-        crate::tenant_status::install(manager);
-    }
     // A tenant not served now keeps its parked runs parked.
     runtara_environment::wake_scheduler::set_wake_gate(Arc::new(
         crate::tenant_status::TenantWakeGate,
@@ -1164,52 +2351,6 @@ async fn start_as_platform(
     runtara_component_host::api_launches::set_default_call_limiter(Arc::new(
         crate::tenant_quota::WorkflowCallLimiter,
     ));
-
-    // Per-tenant Valkey membership enforcement policy. Built here, after the
-    // shared manager, so the policy default can see whether Valkey is actually configured.
-    // The auth middleware consumes both; they ride on AuthState.
-    let membership_policy = auth::MembershipPolicy::from_env(auth_kind, redis_manager.is_some());
-    // Publish to the process-wide accessor so handler-level ownership checks see the same
-    // policy the route gate enforces.
-    auth::set_membership_policy(membership_policy);
-    println!("✓ Auth membership policy: {}", membership_policy.as_str());
-
-    let auth_state = auth::AuthState {
-        provider: auth_providers.api.clone(),
-        pool: pool.clone(),
-        valkey: redis_manager.clone(),
-        membership_policy,
-    };
-    let mcp_auth_state = auth::AuthState {
-        provider: auth_providers.mcp.clone(),
-        pool: pool.clone(),
-        valkey: redis_manager.clone(),
-        membership_policy,
-    };
-
-    let mcp_session_store: Option<Arc<dyn SessionStore>> = match config::mcp_session_store() {
-        config::McpSessionStore::Local => {
-            println!("✓ MCP session recovery store: local");
-            None
-        }
-        config::McpSessionStore::Valkey => {
-            let Some(manager) = redis_manager.clone() else {
-                eprintln!(
-                    "❌ Configuration error: RUNTARA_MCP_SESSION_STORE=valkey requires a shared Valkey connection manager."
-                );
-                std::process::exit(1);
-            };
-            println!(
-                "✓ MCP session recovery store: valkey (ttl={}s)",
-                config::mcp_session_ttl_seconds()
-            );
-            Some(Arc::new(mcp::ValkeyMcpSessionStore::new(
-                manager,
-                tenant_id.clone(),
-                config::mcp_session_ttl_seconds(),
-            )))
-        }
-    };
 
     // Build the component dispatcher (embedded wasmtime) once at startup and
     // share its Arc with every service that needs it — the compilation worker
@@ -1539,36 +2680,6 @@ async fn start_as_platform(
             Err(e) => eprintln!("   \u{26a0} Reserved slug check failed (continuing): {e}"),
         }
     }
-
-    // Spawn background task to warn when pool usage is high
-    let pool_monitor = pool.clone();
-    workers.detached(
-        crate::roles::Role::Api,
-        "database pool monitor",
-        async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-            loop {
-                interval.tick().await;
-                let size = pool_monitor.size();
-                let idle = pool_monitor.num_idle();
-                let active = size as usize - idle;
-                let usage_pct = if size > 0 {
-                    (active * 100) / size as usize
-                } else {
-                    0
-                };
-                if usage_pct >= 75 {
-                    tracing::warn!(
-                        pool_size = size,
-                        pool_idle = idle,
-                        pool_active = active,
-                        usage_pct,
-                        "Database pool under pressure"
-                    );
-                }
-            }
-        },
-    );
 
     let object_model_pool_config = config::object_model_pool_config();
 
@@ -1967,34 +3078,24 @@ async fn start_as_platform(
         );
     }
 
-    // Product-analytics pipeline: spawn the single drain (consumer) now that the shutdown
-    // signal exists. The channel + sink were built earlier (so the sink could be injected
-    // into the connections crate); the drain owns `product_event_rx` and ships batches to
-    // Valkey (`XADD`) for smo-management's per-tenant consumer to persist. `XADD` is
-    // non-blocking, so the drain reuses the shared connection manager rather than needing a
-    // dedicated one. Retention now lives in smo-management, next to the table it sweeps.
-    match redis_manager.clone() {
-        Some(manager) => {
-            let drain = product_events::ProductEventDrain::new(
-                manager,
-                product_event_rx,
-                product_events_config,
-                shutdown_signal.clone(),
-            );
-            workers.intake(
-                crate::roles::Role::Api,
-                "product events drain",
-                &shutdown_coordinator,
-                drain.run(),
-            );
-        }
-        None => {
-            println!(
-                "⚠ Valkey not configured, skipping product events drain; \
-                 emitted events will fill the in-memory channel and then be dropped"
-            );
-        }
-    }
+    // What this process runs for itself, and the API's consumer of member
+    // control events when it runs the API.
+    start_own_work(
+        &workers,
+        crate::roles::Role::Engine,
+        &shutdown_coordinator,
+        &pool,
+        redis_manager.clone(),
+        product_event_rx,
+        product_events_config,
+    );
+    start_member_control_events(
+        &workers,
+        &shutdown_coordinator,
+        &pool,
+        auth_kind,
+        membership_policy,
+    );
 
     // Initialize Valkey-based workers (optional but recommended)
     let valkey_config = valkey::ValkeyConfig::from_env();
@@ -2101,37 +3202,6 @@ async fn start_as_platform(
                         trigger_shutdown,
                         trigger_events,
                         permits_for_worker,
-                    )
-                    .await;
-                }),
-            );
-        }
-
-        // Control-event consumer, one per served tenant (SYN-939): revokes a removed/disabled
-        // member's API keys when `runtara-cloud` appends a `member_removed` event to the tenant's
-        // `{tenant}:control` stream. Scoped to the tenant (row-level security) like the trigger
-        // worker, and joined on shutdown via the same intake coordinator.
-        for control_tenant in config::served_tenants() {
-            let control_pool = pool.clone();
-            let control_config = config.clone();
-            let control_shutdown = shutdown_signal.clone();
-            let control_tenant = control_tenant.clone();
-            let control_sweep = crate::valkey::control_events::ReconcileSweep::for_auth(
-                auth_kind,
-                membership_policy,
-            );
-            let scope = control_tenant.clone();
-            workers.intake(
-                crate::roles::Role::Api,
-                "member control events",
-                &shutdown_coordinator,
-                scoped(scope, async move {
-                    crate::valkey::control_events::run(
-                        control_pool,
-                        control_config,
-                        control_tenant,
-                        control_sweep,
-                        control_shutdown,
                     )
                     .await;
                 }),
@@ -2372,383 +3442,6 @@ async fn start_as_platform(
     }
     println!("✓ Cron scheduler started (durable outbox)");
 
-    // CORS — configured via CORS_ALLOWED_ORIGINS env var.
-    // Supports: "*" (any origin), comma-separated origins, or defaults to localhost for dev.
-    let cors = middleware::cors::build_cors_layer();
-
-    // Entitlement-gated sub-routers: each one is mounted with a route-layer
-    // that short-circuits with 403 ENTITLEMENT_REQUIRED when the corresponding
-    // feature is disabled for the running tenant. Built separately so the gate
-    // is colocated with the routes it protects; merged into tenant_routes
-    // below so they pick up the same JWT auth layer and AppState.
-    let api_keys_router: Router<AppState> = Router::new()
-        .route(
-            "/api/runtime/api-keys",
-            post(api::handlers::api_keys::create_api_key)
-                .get(api::handlers::api_keys::list_api_keys),
-        )
-        .route(
-            "/api/runtime/api-keys/{id}",
-            delete(api::handlers::api_keys::revoke_api_key),
-        )
-        .route(
-            "/api/runtime/api-keys/users/{user_id}/revoke",
-            post(api::handlers::api_keys::revoke_user_keys),
-        )
-        .route_layer(from_fn(middleware::entitlement::require_api));
-
-    // Create router for tenant-scoped endpoints (requires JWT authentication)
-    let tenant_routes = Router::new()
-        // Execution listing endpoint
-        .route(
-            "/api/runtime/executions",
-            get(api::handlers::executions::list_all_executions_handler),
-        )
-        .route(
-            "/api/runtime/operations/views",
-            get(api::handlers::operations::list_operation_views)
-                .post(api::handlers::operations::create_operation_view),
-        )
-        .route(
-            "/api/runtime/operations/views/{id}",
-            put(api::handlers::operations::update_operation_view)
-                .delete(api::handlers::operations::delete_operation_view),
-        )
-        .route(
-            "/api/runtime/operations/processes",
-            get(api::handlers::operations::operation_processes),
-        )
-        .route(
-            "/api/runtime/operations/queues",
-            get(api::handlers::operations::operation_queues),
-        )
-        .route(
-            "/api/runtime/operations/requests/query",
-            post(api::handlers::operations::query_operation_requests),
-        )
-        .route(
-            "/api/runtime/executions/query",
-            post(api::handlers::executions::query_executions_handler),
-        )
-        .route(
-            "/api/runtime/executions/summary",
-            post(api::handlers::executions::execution_summary_handler),
-        )
-        // Workflow endpoints (refactored - using 3-layer architecture)
-        .route(
-            "/api/runtime/workflows/create",
-            post(api::handlers::workflows::create_workflow_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/update",
-            post(api::handlers::workflows::update_workflow_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/versions/{version}/graph",
-            put(api::handlers::workflows::patch_version_graph_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/versions/{version}/track-events",
-            put(api::handlers::workflows::toggle_track_events_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/slug",
-            put(api::handlers::workflows::update_workflow_slug_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/publish-agent",
-            post(api::handlers::workflows::publish_workflow_agent_handler),
-        )
-        .route(
-            "/api/runtime/workflows",
-            get(api::handlers::workflows::list_workflows_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}",
-            get(api::handlers::workflows::get_workflow_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/versions",
-            get(api::handlers::workflows::list_workflow_versions_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/versions/{version}/compile",
-            post(api::handlers::workflows::compile_workflow_handler)
-                .route_layer(from_fn(crate::tenant_quota::limit_compilations)),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/versions/{version}/compilation-progress",
-            get(api::handlers::workflows::compilation_progress_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/execute",
-            post(api::handlers::workflows::execute_workflow_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/chat",
-            post(api::handlers::chat::chat_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/chat/start",
-            post(api::handlers::chat::chat_start_handler),
-        )
-        // Session endpoints (session-based event handling for WaitForSignal)
-        .route(
-            "/api/runtime/workflows/{id}/sessions",
-            post(api::handlers::sessions::create_session),
-        )
-        .route(
-            "/api/runtime/sessions/{sessionId}/events",
-            post(api::handlers::sessions::submit_event)
-                .get(api::handlers::sessions::session_event_stream),
-        )
-        .route(
-            "/api/runtime/sessions/{sessionId}/deliveries",
-            get(api::handlers::sessions::list_session_deliveries),
-        )
-        .route(
-            "/api/runtime/sessions/{sessionId}/deliveries/{messageId}",
-            get(api::handlers::sessions::get_session_delivery),
-        )
-        .route(
-            "/api/runtime/sessions/{sessionId}/deliveries/{messageId}/resolve",
-            post(api::handlers::sessions::resolve_session_delivery),
-        )
-        .route(
-            "/api/runtime/sessions/{sessionId}/pending-input",
-            get(api::handlers::sessions::session_pending_input),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/instances",
-            get(api::handlers::workflows::list_instances_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/instances/{instanceId}",
-            get(api::handlers::workflows::get_instance_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/instances/{instanceId}/checkpoints",
-            get(api::handlers::workflows::list_instance_checkpoints_handler),
-        )
-        .route(
-            "/api/runtime/workflows/instances/{instanceId}",
-            get(api::handlers::workflows::get_execution_metrics_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/delete",
-            post(api::handlers::workflows::delete_workflow_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/clone",
-            post(api::handlers::workflows::clone_workflow_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/schedule",
-            post(api::handlers::workflows::schedule_workflow_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/versions/{versionNumber}/set-current",
-            post(api::handlers::workflows::set_current_version_handler),
-        )
-        .route(
-            "/api/runtime/workflows/instances/{instanceId}/stop",
-            post(api::handlers::workflows::stop_instance_handler),
-        )
-        .route(
-            "/api/runtime/workflows/instances/{instanceId}/pause",
-            post(api::handlers::workflows::pause_instance_handler),
-        )
-        .route(
-            "/api/runtime/workflows/instances/{instanceId}/resume",
-            post(api::handlers::workflows::resume_instance_handler),
-        )
-        .route(
-            "/api/runtime/workflows/instances/{instanceId}/replay",
-            post(api::handlers::workflows::replay_instance_handler),
-        )
-        .route(
-            "/api/runtime/workflows/graph/validate",
-            post(api::handlers::workflows::validate_graph_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{workflowId}/validate-mappings",
-            post(api::handlers::workflows::validate_mappings_handler),
-        )
-        .route(
-            "/api/runtime/workflows/instances/{instanceId}/steps/{stepId}/subinstances",
-            get(api::handlers::workflows::get_step_subinstances_handler),
-        )
-        // Step Events endpoint (track-events mode - raw events)
-        .route(
-            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/step-events",
-            get(api::handlers::step_events::get_step_events),
-        )
-        // Step Summaries endpoint (paired step records)
-        .route(
-            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/steps",
-            get(api::handlers::step_summaries::get_step_summaries),
-        )
-        // Scope ancestors endpoint (for hierarchical step execution call stack)
-        .route(
-            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/scopes/{scopeId}/ancestors",
-            get(api::handlers::step_events::get_scope_ancestors),
-        )
-        // Pending human input endpoint (for AI Agent human-in-the-loop)
-        .route(
-            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/pending-input",
-            get(api::handlers::step_events::get_pending_input),
-        )
-        // Workflow runtime actions (generic action surface; currently backed by signals)
-        .route(
-            "/api/runtime/workflows/{workflowId}/actions",
-            get(api::handlers::step_events::list_workflow_open_actions),
-        )
-        .route(
-            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions",
-            get(api::handlers::step_events::list_workflow_instance_open_actions),
-        )
-        .route(
-            "/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions/{actionId}/submit",
-            post(api::handlers::step_events::submit_workflow_action),
-        )
-        // Signal delivery endpoint (submit human input to waiting AI Agent)
-        .route(
-            "/api/runtime/signals/{instanceId}",
-            post(api::handlers::step_events::submit_signal),
-        )
-        // Dependency tracking endpoints
-        .route(
-            "/api/runtime/workflows/{id}/dependencies",
-            get(api::handlers::workflows::get_workflow_dependencies_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/dependents",
-            get(api::handlers::workflows::get_workflow_dependents_handler),
-        )
-        // Version-aware schema endpoint (reads from execution_graph)
-        .route(
-            "/api/runtime/workflows/{id}/versions/{version}/schemas",
-            get(api::handlers::workflows::get_version_schemas_handler),
-        )
-        // Folder management endpoints
-        .route(
-            "/api/runtime/workflows/folders",
-            get(api::handlers::workflows::list_folders_handler),
-        )
-        .route(
-            "/api/runtime/workflows/folders/rename",
-            put(api::handlers::workflows::rename_folder_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/move",
-            put(api::handlers::workflows::move_workflow_handler),
-        )
-        // NOTE: Connection CRUD, OAuth authorize, and type discovery routes are now
-        // served by runtara-connections crate — see connections_tenant_routes below.
-        // Metrics endpoints
-        .route(
-            "/api/runtime/metrics/workflows/{workflow_id}",
-            get(api::metrics::get_workflow_metrics),
-        )
-        .route(
-            "/api/runtime/metrics/workflows/{workflow_id}/stats",
-            get(api::metrics::get_workflow_stats),
-        )
-        .route(
-            "/api/runtime/metrics/tenant",
-            get(api::metrics::get_tenant_metrics),
-        )
-        // Analytics endpoints
-        .route(
-            "/api/runtime/analytics/system",
-            get(api::analytics::get_system_analytics_handler),
-        )
-        // Reporting endpoints are mounted through reports_router.
-        // Rate limit analytics are served by runtara-connections.
-        // Triggers are served by the engine: see `triggers_served` below.
-        // API Key management endpoints — defined in `api_keys_router` above and merged below.
-        // Entitlements snapshot endpoint
-        .route(
-            "/api/runtime/entitlements",
-            get(api::handlers::entitlements::get_entitlements_handler),
-        )
-        // Agents are served by the engine: see `Served::Agents` below.
-        // Step type endpoints
-        .route(
-            "/api/runtime/steps",
-            get(api::handlers::workflows::list_step_types_handler),
-        )
-        // Metadata endpoints
-        .route(
-            "/api/runtime/metadata/workflow/step-types",
-            get(api::metadata::get_workflow_step_types_handler),
-        )
-        .route(
-            "/api/runtime/metadata/llm-models",
-            get(api::metadata::get_llm_models_handler),
-        )
-        // Specification endpoints (serve pre-generated specs)
-        .route(
-            "/api/runtime/specs/versions",
-            get(api::handlers::specs::get_spec_versions),
-        )
-        .route(
-            "/api/runtime/specs/dsl",
-            get(api::handlers::specs::get_dsl_spec),
-        )
-        .route(
-            "/api/runtime/specs/dsl/steps",
-            get(api::handlers::specs::list_step_types),
-        )
-        .route(
-            "/api/runtime/specs/dsl/steps/{stepType}",
-            get(api::handlers::specs::get_step_type_schema),
-        )
-        .route(
-            "/api/runtime/specs/dsl/changelog",
-            get(api::handlers::specs::get_dsl_changelog),
-        )
-        .route(
-            "/api/runtime/specs/dsl/{version}",
-            get(api::handlers::specs::get_dsl_spec_version),
-        )
-        // Entitlement-gated sub-router: carries its own ENTITLEMENT_REQUIRED
-        // layer (see `api_keys_router` above) so disabling `api`
-        // short-circuits before the inner handlers run.
-        .merge(api_keys_router)
-        .with_state(AppState {
-            pool: pool.clone(),
-            object_store_manager: object_store_manager.clone(),
-            trigger_stream: trigger_stream.clone(),
-            valkey_conn: valkey_conn.clone(),
-            connections: connections_facade.clone(),
-            engine: engine_api.clone(),
-            agents: agents_service.clone(),
-            agent_catalog: agent_catalog.clone(),
-            events: product_event_sink.clone(),
-        })
-        // Reject API-key-authenticated requests when the `api` feature is
-        // off. Sits *between* auth (outermost) and the per-feature gates
-        // (innermost), so the AuthContext is already populated when this
-        // runs but feature gates haven't yet decided whether the route
-        // itself is open. Session/JWT users on the same routes are
-        // unaffected.
-        .route_layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
-        // Enforce the per-route role permission map (no-op unless membership is Required).
-        // Inside auth so AuthContext (role) and the matched route are populated when it runs.
-        .route_layer(from_fn(crate::middleware::authorization::authorize(
-            membership_policy,
-        )))
-        // Apply JWT authentication middleware to all tenant-scoped routes
-        .route_layer(from_fn_with_state(
-            auth_state.clone(),
-            crate::middleware::auth::authenticate,
-        ))
-        // Raise the body limit above Axum's 2 MB default so base64-encoded
-        // file inputs (workflow `file` fields) are not rejected with 413
-        // (SYN-457). See TENANT_REQUEST_BODY_LIMIT_BYTES.
-        .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES));
-
     // Agents are the engine's: it is the engine that loaded them, and that runs
     // one on request. What agents there are, what each can do, and whether
     // their components loaded is asked of it.
@@ -2779,7 +3472,7 @@ async fn start_as_platform(
                 "/api/runtime/agents/{name}/capabilities/{capability_id}/test",
                 post(api::handlers::agent_testing::test_agent_handler),
             )
-            .with_state(AppState {
+            .with_state(ServedState {
                 pool: pool.clone(),
                 object_store_manager: object_store_manager.clone(),
                 trigger_stream: trigger_stream.clone(),
@@ -2796,16 +3489,6 @@ async fn start_as_platform(
             )))
             .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES)),
     );
-    let agent_routes = {
-        let to_agents = || {
-            crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Agents).layer(
-                from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
-            )
-        };
-        Router::new()
-            .nest("/api/runtime/agents", to_agents())
-            .nest("/api/runtime/_internal", to_agents())
-    };
 
     // Triggers are the engine's: making or changing one may register a webhook
     // at its provider, with the connection's sealed secret. The API
@@ -2825,7 +3508,7 @@ async fn start_as_platform(
                     .put(api::handlers::triggers::update_invocation_trigger)
                     .delete(api::handlers::triggers::delete_invocation_trigger),
             )
-            .with_state(AppState {
+            .with_state(ServedState {
                 pool: pool.clone(),
                 object_store_manager: object_store_manager.clone(),
                 trigger_stream: trigger_stream.clone(),
@@ -2841,12 +3524,6 @@ async fn start_as_platform(
                 membership_policy,
             )))
             .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES)),
-    );
-    let trigger_routes = Router::new().nest(
-        "/api/runtime/triggers",
-        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Triggers).layer(
-            from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
-        ),
     );
 
     // Connections crate routes (CRUD, OAuth authorize, type discovery, rate limit analytics)
@@ -2876,13 +3553,6 @@ async fn start_as_platform(
                 .layer(from_fn(crate::middleware::authorization::authorize(
                     membership_policy,
                 ))),
-        ),
-    );
-    // Whatever under `/api/runtime` is not one of the API's own routes.
-    let connections_tenant_routes = Router::new().nest(
-        "/api/runtime",
-        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Connections).layer(
-            from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
         ),
     );
 
@@ -3011,30 +3681,11 @@ async fn start_as_platform(
         // handler already reads up to 50 MB via to_bytes, but Axum's 2 MB
         // default body limit rejected them first with 413 (SYN-457).
         .layer(DefaultBodyLimit::max(TENANT_REQUEST_BODY_LIMIT_BYTES));
+
     // The engine serves a tenant's object model: its database is reached
     // with a sealed password. The API authenticates the caller and hands the
     // request over.
     local_engine.serves(crate::engine::Served::ObjectModel, object_model_served);
-    let object_model_routes = Router::new().nest(
-        "/api/runtime/object-model",
-        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::ObjectModel).layer(
-            from_fn_with_state(auth_state.clone(), crate::middleware::auth::authenticate),
-        ),
-    );
-
-    // Create router for public/global endpoints (no tenant auth required)
-    let readiness_providers = auth_providers.clone();
-    let public_routes = Router::new()
-        .route("/health", get(health_handler))
-        .route(
-            "/ready",
-            get(move || {
-                let providers = readiness_providers.clone();
-                async move { readiness_handler(providers).await }
-            }),
-        )
-        // Unauthenticated: the permission map is static and the same for every tenant.
-        .route("/api/runtime/permissions", get(permissions_handler));
 
     // Event capture routes (webhook endpoints — no JWT auth required).
     // These are called by external services (Shopify, etc.) and use the
@@ -3056,7 +3707,7 @@ async fn start_as_platform(
                 .delete(api::handlers::events::capture_http_event)
                 .patch(api::handlers::events::capture_http_event),
         )
-        .with_state(AppState {
+        .with_state(ServedState {
             pool: pool.clone(),
             object_store_manager: object_store_manager.clone(),
             trigger_stream: trigger_stream.clone(),
@@ -3074,6 +3725,7 @@ async fn start_as_platform(
         .layer(DefaultBodyLimit::max(
             api::handlers::events::webhook_max_body_bytes(),
         ));
+
     // A trigger's HTTP events are the engine's: each is checked against its
     // connection's sealed secret before a run is accepted. Whoever sends one
     // is not authenticated, so the API hands it over as it arrived. The same
@@ -3087,124 +3739,41 @@ async fn start_as_platform(
                 membership_policy,
             ))),
     );
+
     local_engine.serves(crate::engine::Served::Events, events_served);
-    let event_routes = Router::new().nest(
-        "/api/runtime/events",
-        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Events),
-    );
 
-    // Initialize channel router for conversational triggers (Telegram, Slack, Teams).
-    // The router is always available — it looks up connection + trigger from DB per request.
-    let channel_routes =
-        if let (Some(rc), Some(_ts), Some(vc)) = (&runtime_client, &trigger_stream, &valkey_conn) {
-            let channel_router = Arc::new(channels::session::ChannelRouter::new(
-                rc.clone(),
-                pool.clone(),
-                connections_facade.clone(),
-                execution_engine.clone(),
-                vc.clone(),
-            ));
-            // Dispatches messages a previous process acknowledged but did not
-            // finish, retries pending ones, and purges handled ones.
-            workers.detached(
-                crate::roles::Role::Engine,
-                "channel intake",
-                channel_router.clone().run_intake_worker(),
-            );
-            println!("✓ Channel router initialized");
-
-            // The engine serves a channel's webhook: the call is checked
-            // against its connection's sealed secret, and the conversation it
-            // belongs to runs there. The API hands it over as it arrived.
-            local_engine.serves(
-                crate::engine::Served::Channels,
-                channels::routes(channel_router)
-                    // Defense in depth: these public, unauthenticated channel-ingest
-                    // routes buffer the whole body (Bytes extractor) before auth, so
-                    // cap it. Bot Framework / chat activities are a few KB; the
-                    // shared webhook cap is generous enough for mailgun payloads.
-                    .layer(DefaultBodyLimit::max(
-                        api::handlers::events::webhook_max_body_bytes(),
-                    )),
-            );
-            Router::new().nest(
-                "/api/runtime/events/webhook",
-                crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Channels),
-            )
-        } else {
-            Router::new()
-        };
-
-    // Build internal router for MCP in-process calls (no network hop).
-    // MCP tools pre-inject AuthContext into extensions, so auth middleware
-    // detects it and skips JWT validation.
-    //
-    // The connections routes must be nested under `/api/runtime` here exactly
-    // as they are in `public_app` below — otherwise MCP connection-discovery
-    // tools (list_connections, list_integrations, get_integration) 404 because
-    // their `/api/runtime/connections*` targets exist only on the public app.
-    //
-    // `event_routes` is merged here too so the `execute_workflow_sync` MCP tool
-    // (which POSTs to `/api/runtime/events/http-sync/{workflow_id}`) resolves
-    // in-process instead of hitting the router fallback and returning a bare 404
-    // in every deployment. `event_routes` is moved into `public_app` below, so
-    // clone it here.
-    // `event_routes` is the one group that carries no authorization layer on the public app —
-    // webhook ingest is authenticated by the unguessable id in the URL, not by a caller. In
-    // process, though, `execute_workflow_sync` reaches it as a real identity, so the internal
-    // copy gets the same gate every other MCP-reachable route has. Without it that single tool
-    // would run a workflow for a caller whose role or credential scope forbids executing one.
-    let internal_event_routes = Router::new().nest(
-        "/api/runtime/events",
-        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::EventsForCallers),
-    );
-
-    let internal_router = Router::new()
-        .merge(tenant_routes.clone())
-        .merge(object_model_routes.clone())
-        .merge(connections_tenant_routes.clone())
-        .merge(trigger_routes.clone())
-        .merge(agent_routes.clone())
-        .merge(public_routes.clone())
-        .merge(internal_event_routes);
-
-    // Build MCP (Model Context Protocol) router with JWT authentication.
-    // Uses .layer() (not .route_layer()) because the MCP transport is a
-    // fallback_service, which route_layer would skip.
-    let mcp_router = mcp::create_mcp_router(
-        pool.clone(),
-        object_store_manager.clone(),
-        engine_api.clone(),
-        tenant_id.clone(),
-        internal_router,
-        config::mcp_allowed_hosts().to_vec(),
-        mcp_session_store,
-    )
-    // Innermost, after auth: MCP session state is kept under the caller's
-    // tenant (see `mcp::scope_session_tenant`).
-    .layer(from_fn(crate::mcp::scope_session_tenant))
-    // Apply the `mcp` entitlement gate at the transport entry. Disabling
-    // the feature short-circuits with 403 ENTITLEMENT_REQUIRED before any
-    // MCP tool handler is reached. Per-tool gates also exist as a second
-    // line of defense — see `mcp::entitlement`. Uses .layer() (not
-    // .route_layer()) for the same reason as auth above: the MCP transport
-    // is a fallback_service that route_layer would skip.
-    .layer(from_fn(crate::middleware::entitlement::require_mcp))
-    // Entitlement invariant: MCP requires the `api` feature (SYN-523).
-    // Without this gate, `mcp=true, api=false` behaved asymmetrically —
-    // API-key MCP clients were rejected by `api_key_auth_guard` below while
-    // JWT MCP clients sailed through. Gating the transport on `api` makes
-    // the invariant uniform for every auth method. Uses .layer() (not
-    // .route_layer()) for the same fallback_service reason as `require_mcp`.
-    .layer(from_fn(crate::middleware::entitlement::require_api))
-    // Reject API-key-authenticated MCP requests when `api` is off. Between
-    // `mcp` gate (inner) and auth (outer); same shape as on tenant and
-    // object-model routes.
-    .layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
-    .layer(from_fn_with_state(
-        mcp_auth_state,
-        crate::middleware::auth::authenticate,
-    ));
+    // Chat channels (conversational triggers). The engine serves a channel's
+    // webhook: the call is checked against its connection's sealed secret, and
+    // the conversation it belongs to runs there. The API hands it over as it
+    // arrived.
+    if let (Some(rc), Some(_ts), Some(vc)) = (&runtime_client, &trigger_stream, &valkey_conn) {
+        let channel_router = Arc::new(channels::session::ChannelRouter::new(
+            rc.clone(),
+            pool.clone(),
+            connections_facade.clone(),
+            execution_engine.clone(),
+            vc.clone(),
+        ));
+        // Dispatches messages a previous process acknowledged but did not
+        // finish, retries pending ones, and purges handled ones.
+        workers.detached(
+            crate::roles::Role::Engine,
+            "channel intake",
+            channel_router.clone().run_intake_worker(),
+        );
+        println!("✓ Channel router initialized");
+        local_engine.serves(
+            crate::engine::Served::Channels,
+            channels::routes(channel_router)
+                // Defense in depth: these public, unauthenticated channel-ingest
+                // routes buffer the whole body (Bytes extractor) before auth, so
+                // cap it. Bot Framework / chat activities are a few KB; the
+                // shared webhook cap is generous enough for mailgun payloads.
+                .layer(DefaultBodyLimit::max(
+                    api::handlers::events::webhook_max_body_bytes(),
+                )),
+        );
+    }
 
     // OAuth2 callback route (public, no JWT — called by OAuth provider redirect)
     // Now served by the runtara-connections crate
@@ -3215,193 +3784,50 @@ async fn start_as_platform(
             runtara_connections::oauth_callback_router(connections_config.clone()),
         ),
     );
-    let oauth_callback_routes = Router::new().nest(
-        "/api/oauth",
-        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::OAuthCallbacks),
-    );
 
-    // =========================================================================
-    // Public API server — accessible externally / via API gateway
-    // =========================================================================
-    // OIDC discovery routes (public, no auth) — serves OAuth/OIDC metadata for MCP clients
-    let oidc_routes = Router::new()
-        .route(
-            "/.well-known/oauth-protected-resource",
-            get(api::handlers::oidc_discovery::oauth_protected_resource_handler),
+    // Where the engine listens for an API role in another process. A request
+    // that arrives there is answered in the scope of the tenant it is for, and
+    // not in this start-up's: the listener's tasks are started in no scope.
+    if let Some(listen) = listen {
+        match crate::engine::remote::serve_api_role(
+            listen.address,
+            &listen.tls_dir,
+            crate::engine::listener::router(engine_api.clone()),
         )
-        .route(
-            "/.well-known/openid-configuration",
-            get(api::handlers::oidc_discovery::openid_configuration_handler),
-        )
-        .route(
-            "/.well-known/oauth-authorization-server",
-            get(api::handlers::oidc_discovery::openid_configuration_handler),
-        )
-        .with_state(oidc_cache);
-
-    // `/me` — authenticated identity/role view for the SPA. Only the auth middleware
-    // (which attaches AuthContext incl. the Valkey role); no per-resource authorization
-    // gate, since every authenticated caller may read their own identity.
-    let me_routes = Router::new()
-        .route("/api/runtime/me", get(me_handler))
-        .route_layer(from_fn_with_state(
-            auth_state.clone(),
-            crate::middleware::auth::authenticate,
-        ));
-
-    // `/me/tenants` — where the caller may act. Authenticated without the membership
-    // check of the tenant the request resolves to: it checks every served tenant itself.
-    let my_tenants_routes = Router::new()
-        .route(
-            "/api/runtime/me/tenants",
-            get({
-                let auth_state = auth_state.clone();
-                move |axum::Extension(auth): axum::Extension<crate::auth::AuthContext>| {
-                    my_tenants_handler(auth_state.clone(), auth)
-                }
-            }),
-        )
-        .route_layer(from_fn_with_state(
-            auth_state.clone(),
-            crate::middleware::auth::authenticate_identity,
-        ));
-
-    let public_app = Router::new()
-        .merge(tenant_routes)
-        .merge(connections_tenant_routes)
-        .merge(trigger_routes)
-        .merge(agent_routes)
-        .merge(oauth_callback_routes)
-        .merge(object_model_routes)
-        .merge(me_routes)
-        .merge(my_tenants_routes)
-        .merge(public_routes)
-        .merge(event_routes)
-        .merge(channel_routes)
-        .merge(oidc_routes)
-        .nest("/mcp", mcp_router);
-
-    // Only expose OpenAPI docs when explicitly enabled (disabled in production)
-    let public_app = if std::env::var("ENABLE_OPENAPI_DOCS").is_ok() {
-        public_app.route(
-            "/api/runtime/openapi/docs.json",
-            get(|| async { Json(ApiDoc::openapi()) }),
-        )
-    } else {
-        public_app
-    };
-
-    let public_app = public_app
-        .layer(from_fn(
-            middleware::security_headers::security_headers_middleware,
-        ))
-        .layer(cors)
-        .layer(TraceLayer::new_for_http())
-        .layer(from_fn(middleware::http_metrics::http_metrics_middleware))
-        // Outermost: credential headers are marked sensitive before any
-        // layer or handler can log them.
-        .layer(middleware::sensitive_headers::layer());
-
-    // Get port/host from environment variables or use defaults
-    let port = std::env::var("SERVER_PORT")
-        .unwrap_or_else(|_| "7001".to_string())
-        .parse::<u16>()
-        .unwrap_or(7001);
-    let host = std::env::var("SERVER_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-    let public_addr = format!("{}:{}", host, port);
-
-    // Safety: refuse to boot in a non-OIDC provider mode on a non-loopback public bind.
-    // Matches the valkey validation pattern above: print the error and exit with a
-    // non-zero status so container orchestrators and systemd surface a clean failure.
-    if let Err(msg) = crate::bind::enforce_loopback_for_unauthenticated(auth_kind, &host) {
-        eprintln!("❌ Configuration error: {msg}");
-        std::process::exit(1);
-    }
-
-    // Cap concurrent TCP connections so a slow-loris attack or a connection
-    // storm can't exhaust file descriptors and take the whole server down.
-    // Configurable via MAX_CONNECTIONS; see `conn_limit`.
-    let max_connections = crate::conn_limit::max_connections_from_env();
-
-    // Start public API server
-    let public_listener = crate::conn_limit::LimitedListener::new(
-        tokio::net::TcpListener::bind(&public_addr).await?,
-        max_connections,
-    );
-    tracing::info!(
-        port = port,
-        address = %public_addr,
-        max_connections = max_connections,
-        "Public API server started"
-    );
-
-    // Ready banner with a clickable UI link. Printed to stdout (not via
-    // tracing) so it shows regardless of RUST_LOG — the first thing a local
-    // or `docker compose up` user looks for once the listeners are bound.
-    {
-        // Wildcard / loopback binds aren't useful as clickable links; show
-        // localhost instead so the printed URL is something you can open.
-        let shown_host = if host == "0.0.0.0" || host == "::" || crate::bind::is_loopback(&host) {
-            "localhost"
-        } else {
-            host.as_str()
-        };
-        let origin = format!("http://{shown_host}:{port}");
-        println!("\n  Runtara {} is ready.\n", env!("BUILD_VERSION"));
-        println!("    API:     {origin}");
-        println!("    Health:  {origin}/health\n");
-    }
-
-    // Which background work this process started, by role.
-    {
-        let names = |role: crate::roles::Role| {
-            let mut names: Vec<&str> = workers
-                .started()
-                .into_iter()
-                .filter(|(started, _)| *started == role)
-                .map(|(_, name)| name)
-                .collect();
-            names.sort_unstable();
-            names.dedup();
-            names.join(", ")
-        };
-        tracing::info!(
-            engine = %names(crate::roles::Role::Engine),
-            api = %names(crate::roles::Role::Api),
-            "Background work started"
-        );
-    }
-    // Spawn heartbeat task for log pipeline monitoring
-    workers.detached(crate::roles::Role::Api, "heartbeat log", async {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600)); // 1 hour
-        loop {
-            interval.tick().await;
-            tracing::info!(heartbeat = true, "ping");
+        .await
+        {
+            Ok((address, serving)) => {
+                tokio::spawn(serving);
+                println!("✓ Engine listening for the API role on {address} (mutual TLS)");
+            }
+            Err(msg) => {
+                eprintln!("❌ RUNTARA_ENGINE_LISTEN: {msg}");
+                std::process::exit(1);
+            }
         }
+    }
+
+    // The API's routes: its own, and the mounts that hand the engine what it
+    // serves.
+    let public_app = roles.runs(crate::roles::Role::Api).then(|| {
+        api_app(ApiParts {
+            pool: pool.clone(),
+            engine: engine_api.clone(),
+            agent_catalog: agent_catalog.clone(),
+            events: product_event_sink.clone(),
+            valkey_conn: valkey_conn.clone(),
+            auth_state,
+            mcp_auth_state,
+            auth_providers: auth_providers.clone(),
+            oidc_cache,
+            mcp_session_store,
+            membership_policy,
+            tenant_id: tenant_id.clone(),
+        })
     });
 
-    // The public API server stops accepting as soon as SIGTERM flips
-    // `shutdown_signal` (no new external intake). Running guests don't call
-    // this listener: agent calls are in-process host imports and the embedded
-    // core stays up until the drain below finishes.
-    let public_shutdown = shutdown_signal.clone();
-    // A served tenant's path segment is stripped before routing (see
-    // `middleware::tenant_path`), so it wraps the finished router. The tenant
-    // it names scopes the request's database work, authenticated or not.
-    let public_app = public_app.layer(from_fn(
-        crate::middleware::tenant_path::scope_requested_tenant,
-    ));
-    let public_app = tower::Layer::layer(
-        &tower::util::MapRequestLayer::new(
-            crate::middleware::tenant_path::strip_tenant_segment::<axum::body::Body>,
-        ),
-        public_app,
-    );
-    let public_server = axum::serve(
-        public_listener,
-        axum::ServiceExt::<axum::extract::Request>::into_make_service(public_app),
-    )
-    .with_graceful_shutdown(async move { public_shutdown.wait().await });
+    // Which background work this process started, by role.
+    workers.log_started();
 
     // Install SIGINT / SIGTERM handlers that flip the shutdown flag. Runs
     // concurrently with the server — exiting is driven by the flag, not by
@@ -3415,8 +3841,12 @@ async fn start_as_platform(
         signal_coordinator.request_shutdown();
     });
 
-    if let Err(e) = public_server.await {
-        tracing::error!(error = %e, "Public API server error");
+    match public_app {
+        Some(public_app) => serve_public(public_app, auth_kind, shutdown_signal.clone()).await?,
+        None => {
+            println!("\n  Runtara {} engine is ready.\n", env!("BUILD_VERSION"));
+            shutdown_signal.clone().wait().await;
+        }
     }
 
     // Make sure the flag is set even if the public server stopped for

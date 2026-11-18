@@ -19,7 +19,7 @@ use crate::types::{ExecutionStatus, TerminationType};
 /// Extended execution data with metadata from the workflow record.
 ///
 /// Used when fetching a single execution with full details.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionWithMetadata {
     pub instance: WorkflowInstanceDto,
     pub workflow_name: Option<String>,

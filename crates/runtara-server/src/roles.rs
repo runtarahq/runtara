@@ -55,6 +55,109 @@ impl Roles {
     }
 }
 
+impl Roles {
+    /// The roles `RUNTARA_ROLE` names: `all` (the default), `api` or `engine`.
+    pub fn from_env() -> Result<Self, String> {
+        Self::named(std::env::var("RUNTARA_ROLE").ok().as_deref())
+    }
+
+    fn named(role: Option<&str>) -> Result<Self, String> {
+        match role.map(str::trim).filter(|role| !role.is_empty()) {
+            None | Some("all") => Ok(Self::all()),
+            Some("api") => Ok(Self::only(Role::Api)),
+            Some("engine") => Ok(Self::only(Role::Engine)),
+            Some(other) => Err(format!(
+                "RUNTARA_ROLE is `{other}`; it is `all`, `api` or `engine`"
+            )),
+        }
+    }
+}
+
+fn set(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// Where the engine listens for the API role, and its certificate.
+pub struct EngineListen {
+    pub address: std::net::SocketAddr,
+    pub tls_dir: std::path::PathBuf,
+}
+
+/// `RUNTARA_ENGINE_LISTEN`, if the engine is to listen for an API role in
+/// another process, with `RUNTARA_ENGINE_TLS_DIR`: the server's directory
+/// from `runtara-executor init-pki`, which is `RUNTARA_EXECUTOR_TLS_DIR`'s
+/// when that is set and this is not.
+pub fn engine_listen() -> Result<Option<EngineListen>, String> {
+    let Some(address) = set("RUNTARA_ENGINE_LISTEN") else {
+        return Ok(None);
+    };
+    let address = address
+        .parse()
+        .map_err(|_| format!("RUNTARA_ENGINE_LISTEN is `{address}`, which is not an address"))?;
+    let tls_dir = set("RUNTARA_ENGINE_TLS_DIR")
+        .or_else(|| set("RUNTARA_EXECUTOR_TLS_DIR"))
+        .ok_or(
+            "RUNTARA_ENGINE_LISTEN needs RUNTARA_ENGINE_TLS_DIR: the server's directory from \
+             `runtara-executor init-pki`",
+        )?;
+    Ok(Some(EngineListen {
+        address,
+        tls_dir: tls_dir.into(),
+    }))
+}
+
+/// Where the API role reaches the engine, and its certificate.
+pub struct EngineAt {
+    pub url: String,
+    pub tls_dir: std::path::PathBuf,
+}
+
+/// `RUNTARA_ENGINE_URL` and `RUNTARA_ENGINE_TLS_DIR` (the API's directory
+/// from `runtara-executor init-pki --api-dir`), which the API role needs.
+pub fn engine_at() -> Result<EngineAt, String> {
+    let url = set("RUNTARA_ENGINE_URL").ok_or(
+        "RUNTARA_ROLE=api needs RUNTARA_ENGINE_URL: where the engine listens, as https://host:port",
+    )?;
+    let tls_dir = set("RUNTARA_ENGINE_TLS_DIR").ok_or(
+        "RUNTARA_ROLE=api needs RUNTARA_ENGINE_TLS_DIR: the API's directory from \
+         `runtara-executor init-pki --api-dir`",
+    )?;
+    Ok(EngineAt {
+        url,
+        tls_dir: tls_dir.into(),
+    })
+}
+
+/// What the API role is not to be given: the way to the runtime database, a
+/// key that opens or wraps connections' secrets, the way to seal, an
+/// executor's side of the run channel, and the store of compiled workflows.
+/// It needs none of them, and a process that takes requests from outside is
+/// not where they are kept.
+const NOT_FOR_THE_API: &[&str] = &[
+    "RUNTARA_DATABASE_URL",
+    "RUNTARA_CONNECTIONS_ENCRYPTION_KEY",
+    "RUNTARA_CONNECTIONS_RETIRED_KEYS",
+    "RUNTARA_SEAL_WRAPPING_KEY",
+    "RUNTARA_SEAL_SOCKET",
+    "RUNTARA_SEAL_ADDRESS",
+    "RUNTARA_SEAL_TLS_DIR",
+    "RUNTARA_EXECUTOR_TLS_DIR",
+    "RUNTARA_ARTIFACT_STORE_URL",
+    "RUNTARA_ENGINE_LISTEN",
+];
+
+/// Which of what the API role is not to be given this process was given.
+pub fn given_to_the_api_role() -> Vec<&'static str> {
+    NOT_FOR_THE_API
+        .iter()
+        .copied()
+        .filter(|name| set(name).is_some())
+        .collect()
+}
+
 /// Starts the server's background work, each piece for the role it belongs
 /// to. Work for a role this process does not run is not started.
 pub struct Workers {
@@ -103,6 +206,26 @@ impl Workers {
         }
     }
 
+    /// Says in the log what was started, for each role.
+    pub fn log_started(&self) {
+        let names = |role: Role| {
+            let mut names: Vec<&str> = self
+                .started()
+                .into_iter()
+                .filter(|(started, _)| *started == role)
+                .map(|(_, name)| name)
+                .collect();
+            names.sort_unstable();
+            names.dedup();
+            names.join(", ")
+        };
+        tracing::info!(
+            engine = %names(Role::Engine),
+            api = %names(Role::Api),
+            "Background work started"
+        );
+    }
+
     /// What was started, by role and name. A piece started once per tenant
     /// is named once per tenant.
     pub fn started(&self) -> Vec<(Role, &'static str)> {
@@ -126,6 +249,16 @@ mod tests {
         assert!(!Roles::only(Role::Api).runs(Role::Engine));
         assert!(Roles::only(Role::Engine).runs(Role::Engine));
         assert!(!Roles::only(Role::Engine).runs(Role::Api));
+    }
+
+    #[test]
+    fn a_role_is_named_or_is_both() {
+        assert_eq!(Roles::named(None), Ok(Roles::all()));
+        assert_eq!(Roles::named(Some("")), Ok(Roles::all()));
+        assert_eq!(Roles::named(Some("all")), Ok(Roles::all()));
+        assert_eq!(Roles::named(Some(" api ")), Ok(Roles::only(Role::Api)));
+        assert_eq!(Roles::named(Some("engine")), Ok(Roles::only(Role::Engine)));
+        assert!(Roles::named(Some("both")).is_err());
     }
 
     #[tokio::test]

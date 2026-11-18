@@ -19,6 +19,11 @@
 //!   of the task that makes it, which does not leave the process;
 //! - nothing is handed across but values: no pool, no client, no callback.
 
+pub mod listener;
+pub mod remote;
+mod wire;
+
+use std::future::Future;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -85,6 +90,39 @@ pub enum Served {
     /// The same, asked by a caller the API authenticated, whose role is held
     /// to what it may run.
     EventsForCallers,
+}
+
+impl Served {
+    /// Every part.
+    pub(crate) const ALL: &'static [Served] = &[
+        Served::Connections,
+        Served::OAuthCallbacks,
+        Served::ObjectModel,
+        Served::Channels,
+        Served::Agents,
+        Served::Triggers,
+        Served::Events,
+        Served::EventsForCallers,
+    ];
+
+    /// The part's name, as it is written between two processes.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Served::Connections => "connections",
+            Served::OAuthCallbacks => "o-auth-callbacks",
+            Served::ObjectModel => "object-model",
+            Served::Channels => "channels",
+            Served::Agents => "agents",
+            Served::Triggers => "triggers",
+            Served::Events => "events",
+            Served::EventsForCallers => "events-for-callers",
+        }
+    }
+
+    /// The part of that name.
+    pub(crate) fn named(name: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|part| part.name() == name)
+    }
 }
 
 /// What the API asks of the engine. See the module.
@@ -350,6 +388,16 @@ pub trait Engine: Send + Sync {
         tenant_id: &str,
         image_id: &str,
     ) -> Result<Option<ImageSummary>, RuntimeError>;
+
+    // ---- Workflows published as agents -----------------------------------
+
+    /// The agents a tenant published from its workflows, which its other
+    /// workflows may use beside the built-in ones.
+    async fn workflow_agents(&self, tenant_id: &str) -> Vec<runtara_dsl::agent_meta::AgentInfo>;
+
+    /// Takes a published workflow-agent out of use, when its workflow is
+    /// deleted.
+    async fn unstage_workflow_agent(&self, tenant_id: &str, slug: &str) -> Result<(), String>;
 
     // ---- Connections, as a workflow names them ----------------------------
 
@@ -963,6 +1011,16 @@ impl Engine for LocalEngine {
         image_id: &str,
     ) -> Result<Option<ImageSummary>, RuntimeError> {
         self.runtime()?.get_image(image_id, tenant_id).await
+    }
+
+    async fn workflow_agents(&self, tenant_id: &str) -> Vec<runtara_dsl::agent_meta::AgentInfo> {
+        crate::workflow_agents::staged_tenant_agents(tenant_id)
+    }
+
+    async fn unstage_workflow_agent(&self, tenant_id: &str, slug: &str) -> Result<(), String> {
+        crate::workflow_agents::unstage(tenant_id, slug)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     async fn tenant_connections(&self, tenant_id: &str) -> Result<Vec<ConnectionRef>, String> {

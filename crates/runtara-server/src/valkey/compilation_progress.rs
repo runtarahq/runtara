@@ -79,7 +79,7 @@ impl CompilationStage {
 }
 
 /// Snapshot read back for the GET /compilation-progress endpoint.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct CompilationProgress {
     pub stage: String,
     pub stage_index: u8,

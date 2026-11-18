@@ -1080,7 +1080,8 @@ impl WorkflowService {
         // that already composed it keep their baked copy. Best-effort — a
         // cleanup failure must not resurrect the workflow.
         if let Some(slug) = slug
-            && let Err(e) = crate::workflow_agents::unstage(tenant_id, &slug).await
+            && let Some(engine) = &self.engine
+            && let Err(e) = engine.unstage_workflow_agent(tenant_id, &slug).await
         {
             tracing::warn!(
                 tenant_id,

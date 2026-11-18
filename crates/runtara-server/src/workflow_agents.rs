@@ -270,10 +270,32 @@ fn data_dir() -> PathBuf {
     }
 }
 
-/// Load the tenant's published workflow-agent metadata. Missing dir → empty;
-/// an unparseable sidecar is skipped with a warning (one bad publish must not
-/// blind validation to the rest).
+/// The engine in another process, for a process that stages no agents of its
+/// own: the API role. It asks the engine what a tenant published.
+static ENGINE_ELSEWHERE: OnceLock<Arc<dyn crate::engine::Engine>> = OnceLock::new();
+
+/// Have this process ask `engine` for tenants' published workflow-agents,
+/// instead of reading a staging directory it does not have.
+pub fn ask_engine_elsewhere(engine: Arc<dyn crate::engine::Engine>) {
+    let _ = ENGINE_ELSEWHERE.set(engine);
+}
+
+/// The tenant's published workflow-agent metadata: what is staged here, or
+/// what the engine says where the engine is another process.
 pub fn load_tenant_agents(tenant_id: &str) -> Vec<AgentInfo> {
+    match ENGINE_ELSEWHERE.get() {
+        // Its callers are not asynchronous, and the engine is a call away.
+        Some(engine) => tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(engine.workflow_agents(tenant_id))
+        }),
+        None => staged_tenant_agents(tenant_id),
+    }
+}
+
+/// Load the tenant's published workflow-agent metadata from where it is
+/// staged. Missing dir → empty; an unparseable sidecar is skipped with a
+/// warning (one bad publish must not blind validation to the rest).
+pub fn staged_tenant_agents(tenant_id: &str) -> Vec<AgentInfo> {
     let dir = staging_dir(tenant_id);
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();

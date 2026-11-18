@@ -135,7 +135,7 @@ pub struct ListAllExecutionsResponse {
 }
 
 /// Filter parameters passed to repository
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionFilters {
     pub search: Option<String>,
     pub run_label: Option<String>,
@@ -223,7 +223,7 @@ impl ExecutionSummaryRequest {
     }
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, ToSchema, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionSummary {
     pub total: i64,

@@ -53,10 +53,48 @@ fn compiler_provenance_matches(
     lowering_mode: Option<&str>,
     component_release: Option<&str>,
 ) -> bool {
-    let current_lowering_mode = crate::config::workflow_lowering_tag();
+    let current = compiles_by();
     template_major == Some(runtara_workflows::TEMPLATE_MAJOR_VERSION)
-        && lowering_mode == Some(current_lowering_mode.as_str())
-        && component_release == current_component_release()
+        && lowering_mode == Some(current.lowering_mode.as_str())
+        && component_release == current.component_release.as_deref()
+}
+
+/// What makes one compiler's artifacts another's: its lowering mode and the
+/// release of components it composes from.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CompilesBy {
+    pub lowering_mode: String,
+    pub component_release: Option<String>,
+}
+
+/// What an engine in another process compiles by, once it has said. A process
+/// that only takes requests compiles nothing, and judges whether an artifact
+/// is current by the engine's compiler and not by its own configuration.
+static ENGINE_COMPILES_BY: std::sync::RwLock<Option<CompilesBy>> = std::sync::RwLock::new(None);
+
+/// Record what the engine in another process compiles by.
+pub fn set_engine_compiles_by(by: CompilesBy) {
+    *ENGINE_COMPILES_BY
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(by);
+}
+
+/// What this process compiles by.
+pub fn own_compiles_by() -> CompilesBy {
+    CompilesBy {
+        lowering_mode: crate::config::workflow_lowering_tag(),
+        component_release: current_component_release().map(str::to_owned),
+    }
+}
+
+/// What artifacts are compiled by: by the engine elsewhere if this process
+/// has one, and by this process otherwise.
+fn compiles_by() -> CompilesBy {
+    ENGINE_COMPILES_BY
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .unwrap_or_else(own_compiles_by)
 }
 
 /// The index digest of the release this server compiles by; `None` when it
@@ -83,7 +121,7 @@ pub fn set_installed_trusted_pins(pins: impl IntoIterator<Item = String>) {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = pins;
 }
 
-fn installed_trusted_pins() -> Vec<String> {
+pub fn installed_trusted_pins() -> Vec<String> {
     INSTALLED_TRUSTED_PINS
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

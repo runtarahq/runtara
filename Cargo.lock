@@ -5817,6 +5817,7 @@ dependencies = [
  "runtara-database-contract",
  "runtara-dsl",
  "runtara-environment",
+ "runtara-executor",
  "runtara-object-store",
  "runtara-runner-executor",
  "runtara-store-postgres",

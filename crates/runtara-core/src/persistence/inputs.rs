@@ -387,7 +387,7 @@ pub fn canonical_payload(payload: &Value) -> Vec<u8> {
 }
 
 /// Request discovery page; count and records share the same store snapshot.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct InputRequestPage {
     /// Deterministically ordered actionable requests.
     pub requests: Vec<InputRequest>,
@@ -396,7 +396,7 @@ pub struct InputRequestPage {
 }
 
 /// Input failures are typed across persistence and transport adapters.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
 pub enum InputError {
     /// Missing or foreign-owned root/request; deliberately indistinguishable.
     #[error("input request not found")]

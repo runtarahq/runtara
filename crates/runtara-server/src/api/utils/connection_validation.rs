@@ -13,7 +13,7 @@ use super::reference_validation::{IssueCategory, ValidationIssue};
 /// Lightweight view of a tenant connection used by the validator to suggest
 /// candidates when a referenced connection is missing. Decoupled from
 /// `ConnectionDto` so this module doesn't pull in runtara-connections.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConnectionRef {
     pub id: String,
     pub integration_id: Option<String>,

@@ -97,7 +97,7 @@ async fn deployment_of(max_runs: &[usize]) -> Deployment {
     let dir = tempfile::tempdir().unwrap();
     let server_tls = dir.path().join("server-tls");
     let executor_tls = dir.path().join("executor-tls");
-    runtara_executor::pki::init(&server_tls, &executor_tls, false).unwrap();
+    runtara_executor::pki::init(&server_tls, &executor_tls, None, false).unwrap();
 
     // A port for the run channel: taken, read and given back.
     let run_channel = std::net::TcpListener::bind("127.0.0.1:0")

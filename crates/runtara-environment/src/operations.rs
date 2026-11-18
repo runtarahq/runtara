@@ -40,7 +40,7 @@ pub(crate) fn push_state_order(query: &mut QueryBuilder<'_, Postgres>, sort: &St
 }
 
 /// A queue row, including only the explicitly selected state fields.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx::FromRow, serde::Serialize, serde::Deserialize)]
 pub struct RequestRow {
     /// Owning run.
     pub instance_id: String,
@@ -63,7 +63,7 @@ pub struct RequestRow {
 }
 
 /// Request page and its matching total from the same snapshot.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct RequestPage {
     /// Requested page.
     pub rows: Vec<RequestRow>,

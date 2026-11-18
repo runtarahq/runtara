@@ -13,6 +13,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The API and the engine as two processes.** `RUNTARA_ROLE=api` runs what
+  takes requests from outside, and `RUNTARA_ROLE=engine` what runs
+  workflows, keeps their state and uses connections' secrets; `all`, the
+  default, is one process as before. The API role opens no runtime
+  database, loads no key and no component, reaches no seal, and refuses to
+  start if it is given the way to any of them. It asks the engine over
+  mutual TLS (`RUNTARA_ENGINE_URL`, `RUNTARA_ENGINE_LISTEN`,
+  `RUNTARA_ENGINE_TLS_DIR`) with a certificate of its own, which
+  `runtara-executor init-pki --api-dir` issues and which the engine's
+  listener alone accepts. The engine role binds no public listener and
+  starts only with a seal of its own. Runs do not depend on the API: they
+  outlive it, and an engine that is away is a `503` that says so, with
+  nothing started. More than one API may stand in front of one engine. The
+  engine still takes the API's word for who is calling; see
+  `docs/roles.md`.
 - **seal as a process of its own.** seal, which holds connection secrets
   and sends their requests, ran in the server's process, which could
   therefore open every credential. `RUNTARA_SEAL_MODE=unix` or `mtls` has

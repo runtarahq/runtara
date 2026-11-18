@@ -1,8 +1,9 @@
 # Separating the public API from the engine
 
 A plan. Phases 0 (branch `feature/row-security-fails-closed`), 1 (branch
-`feature/seal-out-of-process`, on top of it) and 2 (branch
-`feature/engine-interface`, on top of that) are implemented; the rest is not. This file is removed when the work lands and `docs/`
+`feature/seal-out-of-process`, on top of it), 2 (branch
+`feature/engine-interface`, on top of that) and 3 (branch
+`feature/engine-roles`, on top of that) are implemented; the rest is not. This file is removed when the work lands and `docs/`
 describes the result instead.
 
 ## The goal
@@ -86,7 +87,7 @@ references are where to start reading, to be confirmed as each phase begins.
 | Runtime database | no | yes | no |
 | Keys that open secrets | no | no | yes |
 | May ask seal to use a secret | no | yes | — |
-| Tenants' public keys (to seal new secrets) | yes | yes | — |
+| Tenants' public keys (to seal new secrets) | no | yes | — |
 | Run channel, executor certificates | no | yes | no |
 | Compiles and runs workflow or agent code | no | yes | no |
 | Artifact store credentials | no | yes | no |
@@ -268,7 +269,8 @@ process, with no change in behaviour. Implemented on
   | Role | Work |
   |---|---|
   | Engine | trigger workers, compilation worker, execution outbox relay, admission reconcilers, control children, session delivery, cron, channel intake, unconfirmed OAuth sweep, platform OAuth apps reload, artifact restaging, invocation and trigger stream clean-up, object model pool monitor, and everything `runtara-environment` starts |
-  | API | member control events (revoking a removed member's API keys), product events, the database pool monitor, the heartbeat log |
+  | API | member control events (revoking a removed member's API keys) |
+  | Each process, whatever its role (since Phase 3) | the product events drain, the database pool monitor, the heartbeat log |
 
 What Phase 3 takes from here, none of it left undone by this phase:
 
@@ -293,35 +295,105 @@ unknown path under `/api/runtime/object-model`, `/api/runtime/triggers`,
 unauthenticated before it is not found, and a wrong method on those routes
 is answered by the engine.
 
-## Phase 3: two roles and the wire between them
+## Phase 3: done
 
-1. **`RUNTARA_ROLE` is `all` (default), `api` or `engine`.** The same binary.
-   - `api` opens no runtime pool, loads no encryption or wrapping key, no
-     executor certificates and no component bundle, starts no engine
-     worker, and refuses to start if it is given any of them.
-   - `engine` binds no public listener.
-2. **`Engine` over mutual TLS.** A remote implementation for the API role
-   and a router for the engine role (`RUNTARA_ENGINE_LISTEN`,
-   `RUNTARA_ENGINE_URL`), with the listener, certificate checks and
-   3-second connect timeout the executor work already has in
-   `runtara-executor`'s `tls` module. JSON bodies; event streams and
-   run-and-wait as held responses with a deadline.
-3. **Certificates name the role.** The API role's certificate is accepted on
-   the engine listener only, an executor's on the run channel only; neither
-   is accepted on the other.
-4. **What the API role still does itself:** terminates requests, limits
-   bodies and rates, verifies tokens and keys to refuse early, CRUD on
-   definitions in the server database, graph validation (pure, already
-   sandboxed when `RUNTARA_VALIDATOR_WASM` is set), the MCP protocol and its
-   sessions, and sealing a newly entered secret to the tenant's public key.
-5. **More than one API process** may run in front of one engine. The engine
-   stays one process, as the server is today.
+The server runs as its API alone, its engine alone, or both, and the two
+talk over mutual TLS. Implemented on `feature/engine-roles`; `docs/roles.md`
+says how to run it.
 
-**Tests:** a new e2e script starts an API process, an engine process, a seal
-process and two executors, and runs the scenarios the executor script runs,
-plus: the API process's environment holds no key and no runtime database
-URL; killing the API process loses no run; an engine that is away gives the
-caller a clear error and no half-started run.
+- **`RUNTARA_ROLE` is `all` (the default), `api` or `engine`**, in the same
+  binary (`crates/runtara-server/src/roles.rs`). Start-up is in three
+  parts: what every role establishes first, the engine's path (which also
+  builds the API's routes when it runs them), and the API's own.
+  - **`api`** opens no runtime database, loads no encryption or wrapping
+    key, reaches no seal, loads no component and starts none of the
+    engine's work. It refuses to start if it is given the way to any of
+    them: `RUNTARA_DATABASE_URL`, the connection encryption keys, the seal
+    wrapping key or seal's address, an executor certificate directory, the
+    artifact store, or an address to listen on as an engine. Its routes
+    are built by a function that is handed the database, Valkey, the
+    engine interface, the agent catalog, product events and what
+    authenticates a caller, and nothing else.
+  - **`engine`** binds no public listener, and starts only with a seal of
+    its own (decision 1).
+  - **`all`** is unchanged, and also listens for the API role when it is
+    given `RUNTARA_ENGINE_LISTEN`.
+- **`Engine` over mutual TLS** (`crates/runtara-server/src/engine/`). Each
+  operation is written once, as a named message with its answer
+  (`wire.rs`); the engine's router answers one in the scope of the tenant
+  it names (`listener.rs`); the API's side is an `Engine` that asks
+  (`remote.rs`). It uses the listener, certificate checks and 3-second
+  connect timeout of `runtara-executor`'s `tls` module. Bodies are JSON. A
+  call that is held until work is done (run and wait, compile, run an
+  agent, a request the engine serves) has a deadline of fifteen minutes,
+  the others one minute; a request the engine serves is handed over as it
+  arrived and its answer streamed back.
+- **Certificates name the role.** `runtara-executor init-pki --api-dir`
+  issues a third certificate, for `runtara-api`, good for calling only.
+  The engine's listener accepts that one alone, and the run channel an
+  executor's alone.
+- **What the caller is.** A request handed over carries the caller the API
+  authenticated in a header of the API's own, which is dropped if it came
+  from outside. This is the API's word, as it was in one process; Phase 4
+  replaces it with the caller's token.
+- **An engine that is away** is the error of the operation that was asked,
+  saying so (a 503 for starting a run, and for any request the engine
+  serves). A call that was never sent says nothing was done; one that was
+  sent and not answered says it may have been. The API starts, and keeps
+  answering for its own records, whether or not the engine answers.
+- **More than one API process** runs in front of one engine. The engine
+  stays one process.
+- **Background work by role.** The engine starts all of its own. The API
+  starts the consumer of member control events. The watch on the database
+  pool, the product events drain and the heartbeat are each process's own,
+  whatever its role.
+
+Three things the API's code read from the process it ran in turned out to
+be the engine's, and are now asked of it:
+
+- **Whether a compiled workflow is current** was judged by this process's
+  lowering mode, component release and installed trusted built-ins. The
+  engine says what it compiles by and runs, and the API judges by that.
+- **A tenant's published workflow-agents** were read from a staging
+  directory beside the artifact store. The API asks the engine for them,
+  and asks it to take one out of use when its workflow is deleted.
+- **What agents there are** (decision 4): the API reads the
+  `runtara_agent_*.meta.json` files of the release the engine runs, from
+  `RUNTARA_AGENT_COMPONENTS_DIR`, and loads no component. It uses them to
+  check what a workflow names. The routes that list agents and run one on
+  request stay the engine's.
+
+Left as it was, on purpose:
+
+- **A newly entered secret is sealed by the engine**, not by the API. The
+  plan had the API seal it to the tenant's public key. Connections are a
+  part of the API the engine serves whole (Phase 2), so the secret crosses
+  the API in the request that carries it either way, and from there goes
+  to the engine over mutual TLS.
+- **Database migrations run in whichever process starts.** An API given a
+  role that cannot change the schema (Phase 4) starts with
+  `SKIP_MIGRATIONS=true`, after the engine.
+- **The engine has no health endpoint of its own.** What says it is up is
+  the API's log (`The engine answers`) and its answers.
+
+**Tests.** The wire has unit tests in one process and over real mutual TLS
+(`engine::remote::tests`): a request crosses as it arrived, a caller named
+from outside is not the caller, an operation is answered as the engine in
+this process answers it, each channel takes its own certificate only, and
+an engine that is not listening is never sent anything. Two scripts run it
+end to end:
+
+- `e2e/test_two_roles.sh` starts seal, an engine, two executors and an API
+  whose environment is written out in full: what each role refuses and
+  holds; runs through the API on both executors; a run that is waited for;
+  a connection sealed by seal and used; which certificate each channel
+  takes; runs that outlive a killed API; an engine that is away, to which
+  the API answers 503 and starts nothing, and that comes back; a second
+  API.
+- `TWO_ROLES=true e2e/test_served_tenants.sh` runs the two-tenant test
+  with the server as two processes on database roles bound by row-level
+  security, which is what shows the tenant's scope entered on the engine's
+  side.
 
 ## Phase 4: the engine decides, not the API role
 
@@ -369,9 +441,9 @@ tenant, or a certificate an executor or the run channel accepts.
 
 - An overlay for the evaluation stack that runs the three processes, next to
   `docker-compose.executor.yml`.
-- `docs/` pages for the roles, their settings, and what each must not be
-  given; `AGENTS.md` gains the rule that handler code reaches the engine
-  through `Engine` only.
+- `docs/roles.md` (written with Phase 3) grows into the page for the
+  deployment: the overlay, the database roles and the Valkey users of
+  Phase 4.
 - A hosted deployment maps onto this directly: the proxy in front routes
   public traffic to API processes and refuses the engine, run channel,
   executor and seal ports; the engine and seal run on hosts the proxy does
@@ -391,7 +463,9 @@ tenant, or a certificate an executor or the run channel accepts.
 ## Decisions
 
 1. **In-process seal is the default.** A single process runs seal in itself,
-   with the startup warning seal asks for. The split roles refuse it.
+   with the startup warning seal asks for. The split roles refuse it: the
+   engine role starts only with a seal of its own, and the API role is
+   given no way to one.
 2. **Where the keys live once seal is separate: with seal.** There is no
    key service. Self-hosting keeps them in a directory on seal's host,
    with a wrapping key file. A hosted deployment keeps them in a bucket
@@ -414,8 +488,9 @@ tenant, or a certificate an executor or the run channel accepts.
 
 ## Order and size
 
-Phases 0, 1 and 2 are done. Phase 2 was the
+Phases 0, 1, 2 and 3 are done. Phase 2 was the
 bulk: about 25 to 30 operations and 50 to 60 call sites, done in the six
-groups above. Phase 3 is mostly transport once Phase 2 holds. Phase 4 changes
+groups above. Phase 3 was mostly transport once Phase 2 held, and found
+three more things the API's code took from its own process. Phase 4 changes
 who verifies, and needs Phase 3. Each phase leaves a server that runs as one
 process exactly as before.

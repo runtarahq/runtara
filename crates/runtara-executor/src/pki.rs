@@ -14,7 +14,7 @@ use rcgen::{
     KeyUsagePurpose,
 };
 
-use crate::protocol::{EXECUTOR_NAME, SERVER_NAME};
+use crate::protocol::{API_NAME, EXECUTOR_NAME, SERVER_NAME};
 use crate::tls::{CA_FILE, CERTIFICATE_FILE, KEY_FILE};
 
 /// How long the certificates are good for.
@@ -35,6 +35,14 @@ fn validity(params: &mut CertificateParams) {
 
 /// A new CA and the server's and the executor's certificates from it.
 pub fn issue() -> Result<(Issued, Issued), String> {
+    let (server, executor, _) = issue_with_api()?;
+    Ok((server, executor))
+}
+
+/// A new CA and three certificates from it: the server's, the executor's,
+/// and the API role's, for a server whose API and engine are two processes.
+/// The server's is then the engine's.
+pub fn issue_with_api() -> Result<(Issued, Issued, Issued), String> {
     let failed = |error: rcgen::Error| error.to_string();
     let ca_key = KeyPair::generate().map_err(failed)?;
     let mut ca = CertificateParams::new(Vec::<String>::new()).map_err(failed)?;
@@ -47,16 +55,21 @@ pub fn issue() -> Result<(Issued, Issued), String> {
     let ca_pem = ca.self_signed(&ca_key).map_err(failed)?.pem();
     let issuer = Issuer::from_params(&ca, &ca_key);
 
-    let side = |name: &str| -> Result<Issued, String> {
+    let side = |name: &str, serves: bool| -> Result<Issued, String> {
         let key = KeyPair::generate().map_err(failed)?;
         let mut params = CertificateParams::new(vec![name.to_owned()]).map_err(failed)?;
         params.distinguished_name.push(DnType::CommonName, name);
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        // Each side is a server to the other's client.
-        params.extended_key_usages = vec![
-            ExtendedKeyUsagePurpose::ServerAuth,
-            ExtendedKeyUsagePurpose::ClientAuth,
-        ];
+        // The server and the executor are each a server to the other's
+        // client. The API role only ever calls.
+        params.extended_key_usages = if serves {
+            vec![
+                ExtendedKeyUsagePurpose::ServerAuth,
+                ExtendedKeyUsagePurpose::ClientAuth,
+            ]
+        } else {
+            vec![ExtendedKeyUsagePurpose::ClientAuth]
+        };
         validity(&mut params);
         let certificate = params.signed_by(&key, &issuer).map_err(failed)?;
         Ok(Issued {
@@ -65,7 +78,11 @@ pub fn issue() -> Result<(Issued, Issued), String> {
             key_pem: key.serialize_pem(),
         })
     };
-    Ok((side(SERVER_NAME)?, side(EXECUTOR_NAME)?))
+    Ok((
+        side(SERVER_NAME, true)?,
+        side(EXECUTOR_NAME, true)?,
+        side(API_NAME, false)?,
+    ))
 }
 
 fn write(directory: &Path, issued: &Issued) -> Result<(), String> {
@@ -91,20 +108,30 @@ fn write(directory: &Path, issued: &Issued) -> Result<(), String> {
 }
 
 /// Makes the deployment's certificates and writes the server's files to
-/// `server` and the executor's to `executor`. Refuses to replace a key that
-/// is already there unless `replace`.
-pub fn init(server: &Path, executor: &Path, replace: bool) -> Result<(), String> {
+/// `server`, the executor's to `executor`, and the API role's to `api` if it
+/// is given one. Refuses to replace a key that is already there unless
+/// `replace`.
+pub fn init(
+    server: &Path,
+    executor: &Path,
+    api: Option<&Path>,
+    replace: bool,
+) -> Result<(), String> {
     if !replace {
-        for directory in [server, executor] {
+        for directory in [Some(server), Some(executor), api].into_iter().flatten() {
             if directory.join(KEY_FILE).exists() {
                 return Err(format!(
-                    "{} already holds a key; pass --replace to make new certificates for both sides",
+                    "{} already holds a key; pass --replace to make new certificates for every side",
                     directory.display()
                 ));
             }
         }
     }
-    let (for_server, for_executor) = issue()?;
+    let (for_server, for_executor, for_api) = issue_with_api()?;
     write(server, &for_server)?;
-    write(executor, &for_executor)
+    write(executor, &for_executor)?;
+    match api {
+        Some(api) => write(api, &for_api),
+        None => Ok(()),
+    }
 }

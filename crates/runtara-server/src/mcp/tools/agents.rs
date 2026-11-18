@@ -214,11 +214,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_published_workflow_agent_is_known_to_agent_lookup_for_its_tenant_only() {
-        use std::sync::Arc;
-
         use runtara_dsl::agent_meta::workflow_agent_info;
 
-        use crate::api::repositories::object_model::ObjectStoreManager;
         // No other test uses these tenants, so code that resolves a tenant's
         // agents while `DATA_DIR` points here never sees the one staged below.
         const PUBLISHER: &str = "lookup-publisher";
@@ -252,7 +249,6 @@ mod tests {
         let server = |tenant: &str| {
             SmoMcpServer::new(
                 pool.clone(),
-                Arc::new(ObjectStoreManager::new()),
                 crate::engine::without_runtime(),
                 tenant.into(),
                 crate::api::handlers::operators::agent_lookup_routes(),

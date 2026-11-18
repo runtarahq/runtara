@@ -2029,8 +2029,6 @@ mod tests {
         use axum::http::{StatusCode, Uri};
         use axum::routing::{get, post};
 
-        use crate::api::repositories::object_model::ObjectStoreManager;
-
         let graph = serde_json::json!({
             "name": "Parent",
             "steps": {"finish": {"stepType": "Finish", "id": "finish", "inputMapping": {}}},
@@ -2077,7 +2075,6 @@ mod tests {
             .unwrap();
         let server = SmoMcpServer::new(
             pool,
-            Arc::new(ObjectStoreManager::new()),
             crate::engine::without_runtime(),
             "deploy-validation-tenant".into(),
             router,
@@ -2127,8 +2124,6 @@ mod tests {
         use axum::http::StatusCode;
         use axum::response::IntoResponse;
         use axum::routing::{get, post};
-
-        use crate::api::repositories::object_model::ObjectStoreManager;
 
         type Params = Query<std::collections::HashMap<String, String>>;
         // The `workflowId` and graph of each graph validation, and the
@@ -2186,7 +2181,6 @@ mod tests {
             .unwrap();
         let server = SmoMcpServer::new(
             pool,
-            Arc::new(ObjectStoreManager::new()),
             crate::engine::without_runtime(),
             "deploy-version-tenant".into(),
             router,

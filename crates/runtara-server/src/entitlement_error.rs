@@ -24,8 +24,11 @@ pub mod codes {
     pub const TENANT_STATUS_UNAVAILABLE: &str = "TENANT_STATUS_UNAVAILABLE";
 }
 
+/// The name of a limit: one of [`LIMITS`].
+type LimitName = &'static str;
+
 /// The three documented entitlement denials.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EntitlementDenial {
     /// A feature gate ran and the feature is disabled for this tenant.
     /// Wire `code`: `ENTITLEMENT_REQUIRED`.
@@ -40,7 +43,8 @@ pub enum EntitlementDenial {
     LimitExceeded {
         /// Stable camelCase limit identifier matching the entitlement snapshot
         /// field name (e.g. `"maxApiKeys"`).
-        limit: &'static str,
+        #[serde(deserialize_with = "known_limit")]
+        limit: LimitName,
         /// The configured maximum the caller would breach.
         maximum: u64,
     },
@@ -52,6 +56,24 @@ pub enum EntitlementDenial {
     /// The tenant's status could not be read, so it is not served (fails
     /// closed). Wire `code`: `TENANT_STATUS_UNAVAILABLE`; HTTP 503.
     TenantStatusUnavailable,
+}
+
+/// The limits a denial names. One read back from another process is one of
+/// these, or is not named.
+const LIMITS: &[&str] = &[
+    "maxApiKeys",
+    "maxConcurrentExecutions",
+    "maxWorkflows",
+    "objectModelBulkRequestLimit",
+];
+
+fn known_limit<'de, D: serde::Deserializer<'de>>(from: D) -> Result<&'static str, D::Error> {
+    let name = <String as serde::Deserialize>::deserialize(from)?;
+    Ok(LIMITS
+        .iter()
+        .copied()
+        .find(|known| *known == name)
+        .unwrap_or("limit"))
 }
 
 impl EntitlementDenial {
