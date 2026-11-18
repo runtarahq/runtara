@@ -399,3 +399,103 @@ mod tests {
         assert!(value > 1_577_836_800_000);
     }
 }
+
+/// The runtime of a call with no run behind it (a test of one capability):
+/// nothing of it is kept past the call. Its checkpoints live only as long as
+/// it does, no signal reaches it, and what it says of itself goes nowhere.
+/// It does not sleep or wait: there is no run to wake.
+#[derive(Default)]
+pub struct CallWithNoRun {
+    checkpoints: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+}
+
+#[async_trait::async_trait]
+impl RuntimeHost for CallWithNoRun {
+    fn instance_id(&self) -> Result<String, String> {
+        Ok(String::new())
+    }
+    async fn custom_event(&self, _kind: String, _payload: Vec<u8>) -> Result<(), String> {
+        Ok(())
+    }
+    fn debug_mode_enabled(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn breakpoint_pause(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn heartbeat(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn poll_signal(&self) -> Result<Option<RuntimeSignalInfo>, String> {
+        Ok(None)
+    }
+    async fn is_cancelled(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn check_signals(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn poll_custom_signal(&self, _checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+        Ok(None)
+    }
+    async fn get_checkpoint(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+        Ok(self
+            .checkpoints
+            .lock()
+            .expect("a call's checkpoints poisoned")
+            .get(&checkpoint_id)
+            .cloned())
+    }
+    async fn has_checkpoints(&self) -> Result<Option<bool>, String> {
+        Ok(Some(
+            !self
+                .checkpoints
+                .lock()
+                .expect("a call's checkpoints poisoned")
+                .is_empty(),
+        ))
+    }
+    async fn checkpoint(
+        &self,
+        checkpoint_id: String,
+        state: Vec<u8>,
+    ) -> Result<RuntimeCheckpointResult, String> {
+        let mut checkpoints = self
+            .checkpoints
+            .lock()
+            .expect("a call's checkpoints poisoned");
+        let found = checkpoints.get(&checkpoint_id).cloned();
+        if found.is_none() {
+            checkpoints.insert(checkpoint_id, state);
+        }
+        Ok(RuntimeCheckpointResult {
+            found: found.is_some(),
+            state: found.unwrap_or_default(),
+            pending_signal: None,
+            custom_signal: None,
+        })
+    }
+    async fn handle_checkpoint_signal(
+        &self,
+        _signal_type: String,
+        _command_id: String,
+    ) -> Result<bool, String> {
+        Ok(false)
+    }
+    async fn record_retry_attempt(
+        &self,
+        _checkpoint_id: String,
+        _attempt_number: u32,
+        _error_message: Option<String>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    async fn durable_sleep_checkpoint(
+        &self,
+        _checkpoint_id: String,
+        _state: Vec<u8>,
+        _ms: u64,
+    ) -> Result<(), String> {
+        Err("a call with no run behind it does not sleep".into())
+    }
+}

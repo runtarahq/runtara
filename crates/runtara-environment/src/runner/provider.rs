@@ -38,7 +38,7 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use super::{
     CompileElsewhere, CompiledElsewhere, ContainerMetrics, LaunchLifecycle, LaunchOptions, Result,
     RunExitReport, Runner, RunnerError, RunnerHandle, RunnerOccupancy, RunnerParts, StartGate,
-    StartGateOutcome, publish_terminal, run_launch_lifecycle,
+    StartGateOutcome, TestElsewhere, TestedElsewhere, publish_terminal, run_launch_lifecycle,
 };
 use crate::launch_queue::LaunchKind;
 use crate::runtime_host::PersistenceRuntimeHost;
@@ -665,34 +665,37 @@ const COMPILE_GRACE: Duration = Duration::from_secs(30);
 /// meanwhile.
 const PLACE_PATIENCE: Duration = Duration::from_secs(10);
 
-/// Places one compile with `provider` and waits for what its compiler
-/// answers. The launch is served the compile's request, the components it
-/// names and its outcome, and nothing else of the workflow API
-/// ([`ApiLaunches::begin_compile`]).
-async fn place_compile(
+/// A guest that is not a run, placed with `provider`: what it ended with.
+struct Placed {
+    posted: Option<runtara_workflow_api::PostedOutcome>,
+    made: Option<Vec<u8>>,
+}
+
+/// Places a guest that is not a run with `provider` and waits for what it
+/// posts. `begin` starts serving its launch; `kept_under` is the tenant its
+/// provider keeps the artifact for.
+#[allow(clippy::too_many_arguments)]
+async fn place_guest(
     provider: Arc<dyn Provider>,
     launches: Arc<ApiLaunches>,
     channel: &RunChannel,
     workflows: &Arc<LaunchWorkflows>,
     mut spec: Value,
-    compile: CompileElsewhere,
-) -> std::result::Result<CompiledElsewhere, String> {
-    let binding = Binding {
-        tenant_id: compile.tenant_id,
-        instance_id: String::new(),
-        launch_id: format!("compile-{}", uuid::Uuid::new_v4().simple()),
-        root_lease_epoch: 0,
-    };
+    binding: Binding,
+    artifact: runtara_artifact_store::Digest,
+    kept_under: &str,
+    timeout: Duration,
+    what: &str,
+) -> std::result::Result<Placed, String> {
     let launch = binding.launch_id.clone();
-    launches.begin_compile(binding.clone(), compile.request, compile.components)?;
     // Whatever happens from here, the launch is no longer served afterwards.
     let ended = async {
         channel.attach(&mut spec, &launches, &binding)?;
-        // Its runner may fetch the compiler, and no other artifact, from
-        // before it is placed until the compile is over.
-        let _served = workflows.serve(&launch, compile.compiler.clone());
+        // Its runner may fetch this artifact, and no other, from before it
+        // is placed until it is over.
+        let _served = workflows.serve(&launch, artifact.clone());
         let kept_as = Binding {
-            tenant_id: COMPILER_TENANT.to_owned(),
+            tenant_id: kept_under.to_owned(),
             ..binding.clone()
         };
         let patient_until = tokio::time::Instant::now() + PLACE_PATIENCE;
@@ -700,11 +703,11 @@ async fn place_compile(
             tokio::time::sleep(WAIT).await;
         }
         let run = provider
-            .place(spec, compile.compiler.as_str(), &kept_as)
+            .place(spec, artifact.as_str(), &kept_as)
             .await
-            .map_err(|error| format!("{} did not take the compile: {error}", provider.name()))?;
+            .map_err(|error| format!("{} did not take {what}: {error}", provider.name()))?;
         launches.open_start(&launch);
-        let deadline = tokio::time::Instant::now() + compile.timeout + COMPILE_GRACE;
+        let deadline = tokio::time::Instant::now() + timeout + COMPILE_GRACE;
         loop {
             if launches.posted(&launch) {
                 return Ok(());
@@ -719,15 +722,15 @@ async fn place_compile(
             if let Some(end) = end {
                 return Err(match end {
                     ProviderEnd::Exited(code) => {
-                        format!("the compiler ended with {code} and no outcome")
+                        format!("{what} ended with {code} and no outcome")
                     }
-                    ProviderEnd::Failed(why) => format!("the compiler was not run: {why}"),
-                    ProviderEnd::Lost(why) => format!("the compiler was lost: {why}"),
+                    ProviderEnd::Failed(why) => format!("{what} was not run: {why}"),
+                    ProviderEnd::Lost(why) => format!("{what} was lost: {why}"),
                 });
             }
             if tokio::time::Instant::now() >= deadline {
                 provider.stop(&run).await;
-                return Err("the compiler ran past its time".to_owned());
+                return Err(format!("{what} ran past its time"));
             }
         }
     }
@@ -735,10 +738,46 @@ async fn place_compile(
     let made = launches.made(&launch);
     let posted = launches.finish(&launch);
     ended?;
-    match posted {
-        Some(runtara_workflow_api::PostedOutcome::Completed(outcome)) => {
-            Ok(CompiledElsewhere { outcome, made })
-        }
+    Ok(Placed { posted, made })
+}
+
+/// Places one compile with `provider` and waits for what its compiler
+/// answers. The launch is served the compile's request, the components it
+/// names and its outcome, and nothing else of the workflow API
+/// ([`ApiLaunches::begin_compile`]).
+async fn place_compile(
+    provider: Arc<dyn Provider>,
+    launches: Arc<ApiLaunches>,
+    channel: &RunChannel,
+    workflows: &Arc<LaunchWorkflows>,
+    spec: Value,
+    compile: CompileElsewhere,
+) -> std::result::Result<CompiledElsewhere, String> {
+    let binding = Binding {
+        tenant_id: compile.tenant_id,
+        instance_id: String::new(),
+        launch_id: format!("compile-{}", uuid::Uuid::new_v4().simple()),
+        root_lease_epoch: 0,
+    };
+    launches.begin_compile(binding.clone(), compile.request, compile.components)?;
+    let placed = place_guest(
+        provider,
+        launches,
+        channel,
+        workflows,
+        spec,
+        binding,
+        compile.compiler,
+        COMPILER_TENANT,
+        compile.timeout,
+        "the compile",
+    )
+    .await?;
+    match placed.posted {
+        Some(runtara_workflow_api::PostedOutcome::Completed(outcome)) => Ok(CompiledElsewhere {
+            outcome,
+            made: placed.made,
+        }),
         Some(runtara_workflow_api::PostedOutcome::Failed(error)) => Err(format!(
             "the compiler failed: {} ({})",
             error.message, error.code
@@ -749,10 +788,91 @@ async fn place_compile(
     }
 }
 
+/// Places one test of an agent's capability with `provider`: a standalone
+/// launch with no run behind it, given what a test call is given
+/// ([`ApiLaunches::begin_test`]). The artifact is the tenant's own, and is
+/// kept for that tenant.
+async fn place_test(
+    provider: Arc<dyn Provider>,
+    launches: Arc<ApiLaunches>,
+    channel: &RunChannel,
+    workflows: &Arc<LaunchWorkflows>,
+    spec: Value,
+    test: TestElsewhere,
+) -> std::result::Result<TestedElsewhere, String> {
+    use runtara_component_host::api_launches::StandaloneControl;
+    let binding = Binding {
+        tenant_id: test.tenant_id.clone(),
+        instance_id: String::new(),
+        launch_id: format!("test-{}", uuid::Uuid::new_v4().simple()),
+        root_lease_epoch: 0,
+    };
+    let control = if test.acts_for_tenant {
+        StandaloneControl::Tenant
+    } else {
+        StandaloneControl::Denied
+    };
+    // The call's own runtime, for as long as the call lasts.
+    let runtime: Arc<dyn RuntimeHost> =
+        Arc::new(runtara_component_host::runtime_host::CallWithNoRun::default());
+    launches.begin_test(
+        binding.clone(),
+        test.input,
+        control,
+        Arc::downgrade(&runtime),
+    )?;
+    let placed = place_guest(
+        provider,
+        launches,
+        channel,
+        workflows,
+        spec,
+        binding,
+        test.artifact,
+        &test.tenant_id,
+        test.timeout,
+        "the test",
+    )
+    .await?;
+    match placed.posted {
+        Some(runtara_workflow_api::PostedOutcome::Completed(output)) => {
+            Ok(TestedElsewhere::Completed(output))
+        }
+        Some(runtara_workflow_api::PostedOutcome::Failed(error)) => Ok(TestedElsewhere::Failed {
+            code: error.code,
+            message: error.message,
+        }),
+        Some(runtara_workflow_api::PostedOutcome::Suspended(_)) => Ok(TestedElsewhere::Failed {
+            code: "TEST_SUSPENDED".into(),
+            message: "the capability waits or sleeps, which a test call does not".into(),
+        }),
+        None => Err("the test posted no outcome".to_owned()),
+    }
+}
+
 #[async_trait]
 impl Runner for ProviderRunner {
     fn runner_type(&self) -> &'static str {
         self.provider.name()
+    }
+
+    async fn test_elsewhere(
+        &self,
+        test: TestElsewhere,
+    ) -> Option<std::result::Result<TestedElsewhere, String>> {
+        let spec = self.provider.guest_spec(test.memory_bytes, test.timeout)?;
+        let (channel, workflows) = (self.run_channel.as_ref()?, self.workflows.as_ref()?);
+        Some(
+            place_test(
+                self.provider.clone(),
+                self.launches.clone(),
+                channel,
+                workflows,
+                spec,
+                test,
+            )
+            .await,
+        )
     }
 
     async fn compile_elsewhere(
