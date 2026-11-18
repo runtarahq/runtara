@@ -1742,6 +1742,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A workflow that calls a published agent which sleeps or waits compiles
+  where compiles are checked.** Such an agent runs as a child run and is
+  composed into nobody, so a build does not record it; a server that
+  compiles outside its own process (in the compiler's sandbox, or on an
+  executor) refused the build for leaving it out. The server now tells
+  those agents by its own catalog.
 - **`connector_gen` takes a spec that writes `const`, and `check` finds the
   fixture `fetch` saved.** JSON Schema's `const` is not OpenAPI 3.0's, and
   openapi-generator refused a 3.0 spec that has it; `fetch` now writes

@@ -1,11 +1,13 @@
 # The compiler on an executor
 
-Phases 1 and 2 are built. The compiler runs as a guest of `runtara-run` on
+Built, all three phases. The compiler runs as a guest of `runtara-run` on
 an executor and makes the bytes a compile in process makes
-([what phase 1 found](#what-phase-1-found)), and an engine whose runner is
+([what phase 1 found](#what-phase-1-found)); a server whose runner is
 executors places its compiles there and nowhere else
-([as built](#as-built)). Phase 3 (publishing an agent end to end, the
-compose files, the remaining documents) is not.
+([as built](#as-built)); and a workflow published as an agent, and one that
+calls it, are compiled there end to end ([what phase 3
+found](#what-phase-3-found)). A warm compiler for each tenant is not
+started.
 
 ## What is wanted
 
@@ -156,8 +158,8 @@ would leave such a deployment compiling natively.
   names; a server with executors that has neither does not start. This
   holds for one process as for an engine of its own: with executors,
   nothing is compiled in the server.
-- Publishing a workflow as an agent goes the same way in code
-  (`compile_published_agent`), and is not yet tested end to end.
+- Publishing a workflow as an agent goes the same way
+  (`compile_published_agent`).
 
 Tested: `compile_placed`'s unit tests against a runner that is stood in
 for (a compile placed for its tenant; one no executor takes; a compiler
@@ -171,6 +173,35 @@ compiled; with one it is, and the executor keeps the compiler under the
 platform's name), which was also run on Linux with the sandbox in full:
 the server placed the compiler on an executor under seccomp and Landlock,
 and ran what it made.
+
+### What phase 3 found
+
+- **A workflow that calls a published agent which parks was refused.** A
+  workflow-agent whose version sleeps or waits is not composed into its
+  caller: a call to it starts that version as a child run. So a build does
+  not record it among the agents it composed, and the engine's check that
+  a build records every agent the graph calls refused such a build. That
+  check runs for a compile outside the server's process, so it had only
+  ever run for an engine of its own with the sandbox, where this case was
+  not tried; with executors it runs for every server that has them. The
+  engine now leaves out, by *its own* catalog, the agents the compiler
+  leaves out by the catalog it is sent (`agents_a_build_composes`). An
+  agent that does not park, or that the engine does not know, is still held
+  to the build's record.
+- **Publishing and calling work through an executor.** The compiler is
+  served a tenant's published agent as it is served any component, by its
+  digest.
+- **The image and the compose files needed nothing but words.** The staged
+  components carry the compiler to place, the image's
+  `RUNTARA_AGENT_COMPONENTS_DIR` is where the server looks for it, and
+  `docker-compose.executor.yml` sets the runner. Not run here: the compose
+  stack itself, on an image built from this branch.
+
+Tested: `e2e/test_two_roles.sh` publishes a workflow as an agent and runs a
+workflow that calls it, each compiled on an executor by an engine that
+never loads the compiler; `e2e/test_executor_runner.sh` runs the agent
+parity, child run fan-out and child run deadline suites against a server
+with executors, which compile there.
 
 ### What it costs
 
@@ -255,7 +286,7 @@ the same bytes.
    stood in for: a compile that is placed, one that no executor takes, one
    whose compiler ends without an outcome, one whose component is not the
    one named.
-3. **Publishing an agent, end to end, and the documents.** `compile_published_agent`
+3. **Publishing an agent, end to end, and the documents.** Done. `compile_published_agent`
    on the same path. `e2e/test_executor_runner.sh` and
    `e2e/test_two_roles.sh` compile through an executor and hold that the
    engine's process never loaded the compiler; `docker-compose.executor.yml`
