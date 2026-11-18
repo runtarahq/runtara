@@ -1,9 +1,11 @@
 # The compiler on an executor
 
-Phase 1 is built: the compiler runs as a guest of `runtara-run` on an
-executor and makes the bytes a compile in process makes
-([what phase 1 found](#what-phase-1-found)). The engine does not place its
-compiles there yet: that is phases 2 and 3.
+Phases 1 and 2 are built. The compiler runs as a guest of `runtara-run` on
+an executor and makes the bytes a compile in process makes
+([what phase 1 found](#what-phase-1-found)), and an engine whose runner is
+executors places its compiles there and nowhere else
+([as built](#as-built)). Phase 3 (publishing an agent end to end, the
+compose files, the remaining documents) is not.
 
 ## What is wanted
 
@@ -133,6 +135,39 @@ would leave such a deployment compiling natively.
 - **`runtara-executor`** — nothing.
 - **`runtara-component-host`** — nothing.
 
+### As built
+
+- `compile_executor::Untrusted` is the half any compiler outside this
+  process's trust shares: it makes the request and applies what came back
+  only if the component is the one the outcome names. The sandbox
+  (`compile_sandbox.rs`) and the placed compiler (`compile_placed.rs`) are
+  each a `Compiler` under it. What the engine records of a build it checks
+  or derives itself afterwards, for any of them
+  (`api::services::compilation`).
+- `compile_placed.rs` is the compiler placed with the runner. It is chosen
+  at start, before the runner exists, and given the runner when it is up;
+  the compiler's bytes are put in the artifact store then, for its runner
+  to fetch. It asks for 3 GiB and five minutes, as the sandbox does.
+- At start (`server.rs`): with `RUNTARA_RUNNER=executor` and no compile
+  executor of a host's own, the placed compiler is installed and the
+  sandbox is not loaded, whatever `RUNTARA_COMPILER_WASM` says. The
+  compiler to place is `runtara-compile-guest.wasm` in
+  `RUNTARA_AGENT_COMPONENTS_DIR`, or what `RUNTARA_COMPILE_GUEST_WASM`
+  names; a server with executors that has neither does not start. This
+  holds for one process as for an engine of its own: with executors,
+  nothing is compiled in the server.
+- Publishing a workflow as an agent goes the same way in code
+  (`compile_published_agent`), and is not yet tested end to end.
+
+Tested: `compile_placed`'s unit tests against a runner that is stood in
+for (a compile placed for its tenant; one no executor takes; a compiler
+that ended without an outcome; an outcome that is not one, or that says it
+compiled and handed nothing back; a compile before the runner is up; one
+asked for from inside the runtime), `e2e/test_two_roles.sh` (an engine
+with executors says it compiles on one, never loads the compiler, compiles
+and runs workflows, and refuses to start without the compiler to place)
+and `e2e/test_scalable_executors.sh`.
+
 ### What it costs
 
 - **A slot.** A compile takes one of an executor's run slots for as long
@@ -210,7 +245,7 @@ the same bytes.
    component-integration tests) that runs it sandboxed against
    `ApiLaunches::begin_compile` and gets the bytes a compile in process
    makes. This settles the three unknowns above.
-2. **The engine places compiles.** The placement entry, the
+2. **The engine places compiles.** Done. The placement entry, the
    `CompileExecutor`, the shared checks, and the rule that an engine with
    executors compiles nowhere else. Unit tests against a provider that is
    stood in for: a compile that is placed, one that no executor takes, one

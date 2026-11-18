@@ -111,8 +111,9 @@ placed as a run on an executor: the sandbox is in the engine's process,
 which is the same confinement the engine gives a workflow it runs itself
 (a Wasmtime store), and not a process of its own. So a flaw in Wasmtime
 itself is not contained, as it would be by an executor's sandbox. Placing
-compiles on executors is planned in
-[compiler-on-an-executor.md](compiler-on-an-executor.md): the obstacle
+compiles on executors is built since
+([compiler-on-an-executor.md](compiler-on-an-executor.md)), for an engine
+whose runner is executors: the obstacle
 named here at first (the guest and the engine's embedded workflow API
 speaking different `wasi:http`) does not hold on an executor, whose runs
 are given both. The stages a compile reports

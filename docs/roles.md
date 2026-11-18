@@ -41,7 +41,8 @@ The background to this, and what is still to come, is in
 | `RUNTARA_ENGINE_LISTEN` | **refused** | the address it listens on for the API, `host:port` |
 | `RUNTARA_ENGINE_TLS_DIR` | its certificate directory | its certificate directory |
 | `RUNTARA_ENGINE_HEALTH_LISTEN` | **refused** | optional: where it says it is up, `host:port` |
-| `RUNTARA_COMPILER_WASM` | unused | required: the compiler's WASI command, `runtara-compile-sandboxed.wasm`, which ships beside the components |
+| `RUNTARA_COMPILER_WASM` | unused | required without executors: the compiler's WASI command for a sandbox in the engine's process, `runtara-compile-sandboxed.wasm`, which ships beside the components. With executors (`RUNTARA_RUNNER=executor`) it is not loaded: workflows are compiled on one |
+| `RUNTARA_COMPILE_GUEST_WASM` | unused | optional, with executors: the compiler that is placed on one, when it is not `runtara-compile-guest.wasm` beside the components |
 | `RUNTARA_CONVERSATION_QUEUE_BOUND` | unused | optional: how many messages one conversation holds while its run is busy; 32 without it ([native-chat.md](native-chat.md)) |
 
 An API that is given something marked **refused** does not start, and names
@@ -177,6 +178,20 @@ start without it. A single process may be given it too; without it, it
 compiles in its own process as before. The file is
 `runtara-compile-sandboxed.wasm`, beside the components in a release
 (`agents/` in the bundle, `/opt/runtara/agents/` in the image).
+
+**With executors, a workflow is compiled on one**
+([compiler-on-an-executor.md](compiler-on-an-executor.md)), and the engine
+does not load the compiler at all. The compiler is placed as a guest, like
+a run: in a `runtara-run` that can open no file and make no socket, on a
+host with no database. It is given the compile's request and the component
+files the request names, which it asks the engine for over the run channel,
+and nothing else of the workflow API. So a flaw in Wasmtime itself, which
+the sandbox in the engine's process would not contain, lands where there
+is nothing to take. There is no compiling anywhere else instead: a compile
+no executor takes fails, and a server with executors that has not the
+compiler to place (`runtara-compile-guest.wasm`, beside the components)
+does not start. What the compiler hands back the engine checks as it does
+the sandbox's.
 
 Loading the compiler, loading the source, and everything after the build
 (the records, the image, what is approved to run) stay the engine's. A

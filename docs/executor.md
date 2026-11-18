@@ -180,8 +180,12 @@ after `up` to change it while the stack runs.
 
 ## How a run goes
 
-1. The server compiles the workflow (with the workflow stdlib composed in:
-   a run on an executor is given WASI and nothing else to link).
+1. The server has the workflow compiled, on an executor too: the compiler
+   is placed as a guest like a run, and the server takes back what it
+   composed and checks it
+   ([compiler-on-an-executor.md](compiler-on-an-executor.md)). The workflow
+   stdlib is composed in: a run on an executor is given WASI and nothing
+   else to link.
 2. The launch is placed with the executor that has the most room: `POST
    /v1/runs` with the workflow's SHA-256, the guest's limits and the run
    protocol's fields (the launch, the run channel's endpoint and the launch's
