@@ -2224,20 +2224,22 @@ async fn start_as_intake(
         }),
     );
 
-    let identity = runtara_executor::tls::Identity::load(&intake_at.tls_dir)?;
-    let listener = runtara_executor::tls::bind(intake_at.listen).await?;
-    let address = listener.local_addr()?;
     const SERVES: &[crate::engine::Served] = &[
         crate::engine::Served::Events,
         crate::engine::Served::OAuthCallbacks,
     ];
-    tokio::spawn(runtara_executor::tls::serve(
-        listener,
-        identity.server_config()?,
-        crate::engine::remote::API_NAME,
-        crate::engine::listener::router_for_intake(local, SERVES),
-    ));
-    println!("✓ Intake listening for the API role on {address} (mutual TLS)");
+    if let Some(address) = intake_at.listen {
+        let identity = runtara_executor::tls::Identity::load(&intake_at.tls_dir)?;
+        let listener = runtara_executor::tls::bind(address).await?;
+        let address = listener.local_addr()?;
+        tokio::spawn(runtara_executor::tls::serve(
+            listener,
+            identity.server_config()?,
+            crate::engine::remote::API_NAME,
+            crate::engine::listener::router_for_intake(local.clone(), SERVES),
+        ));
+        println!("✓ Intake listening for the API role on {address} (mutual TLS)");
+    }
 
     let shutdown_coordinator = Arc::new(crate::shutdown::ShutdownCoordinator::new(
         config::shutdown_grace(),
@@ -2275,6 +2277,37 @@ async fn start_as_intake(
             }
         });
         println!("✓ Intake health on http://{address}/health");
+    }
+    // A listener of intake's own for what anyone may send: a deployment
+    // routes those paths here at its edge, and none of it passes through the
+    // API. Plain HTTP, behind whatever terminates TLS, as the API's is.
+    if let Some(address) = intake_at.public {
+        let listener = crate::conn_limit::LimitedListener::new(
+            tokio::net::TcpListener::bind(address)
+                .await
+                .map_err(|error| {
+                    format!("RUNTARA_INTAKE_PUBLIC_LISTEN: cannot listen on {address}: {error}")
+                })?,
+            crate::conn_limit::max_connections_from_env(),
+        );
+        let app = crate::engine::listener::router_for_anyone(local.clone(), SERVES)
+            .route("/health", get(health_handler))
+            .layer(from_fn(
+                middleware::security_headers::security_headers_middleware,
+            ))
+            .layer(middleware::cors::build_cors_layer())
+            .layer(TraceLayer::new_for_http())
+            .layer(from_fn(middleware::http_metrics::http_metrics_middleware))
+            .layer(middleware::sensitive_headers::layer());
+        let stop = shutdown_signal.clone();
+        tokio::spawn(async move {
+            let served = axum::serve(listener, app.into_make_service())
+                .with_graceful_shutdown(async move { stop.wait().await });
+            if let Err(error) = served.await {
+                tracing::error!(%error, "Intake's public listener stopped");
+            }
+        });
+        println!("✓ Intake listening for anyone on http://{address}");
     }
     println!("\n  Runtara {} intake is ready.\n", env!("BUILD_VERSION"));
     shutdown_signal.clone().wait().await;

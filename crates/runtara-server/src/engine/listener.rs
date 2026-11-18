@@ -90,6 +90,54 @@ pub fn router_for_intake(engine: Arc<dyn Engine>, parts: &'static [Served]) -> a
     })
 }
 
+/// Answers what anyone sends intake itself, on a listener of intake's own:
+/// the requests of `parts` at the paths the API serves them at, and nothing
+/// else. What arrives here has passed through no other process, so nothing
+/// it says of itself is taken: no caller, and no word of the API's.
+pub fn router_for_anyone(engine: Arc<dyn Engine>, parts: &'static [Served]) -> axum::Router {
+    axum::Router::new().fallback(move |request: Request| {
+        let engine = engine.clone();
+        async move {
+            // A served tenant's segment is taken out of the path and
+            // recorded, as the API's listener does before it routes.
+            let mut request = crate::middleware::tenant_path::strip_tenant_segment(request);
+            // The path as this router first saw it still has that segment,
+            // and is what a part would otherwise be routed by.
+            request
+                .extensions_mut()
+                .remove::<axum::extract::OriginalUri>();
+            for said_by_the_api in [wire::PRESENTED, wire::REQUESTED_TENANT, wire::EVENT_SOURCE] {
+                request.headers_mut().remove(said_by_the_api);
+            }
+            request.extensions_mut().remove::<AuthContext>();
+            request
+                .extensions_mut()
+                .remove::<crate::product_events::EventSource>();
+            let path = request.uri().path();
+            let named = request
+                .extensions()
+                .get::<crate::middleware::tenant_path::RequestedTenant>()
+                .is_some();
+            let part = if path.starts_with("/api/runtime/events/") {
+                if !named
+                    && crate::middleware::tenant_path::is_an_event_of_no_tenant_among_several(path)
+                {
+                    return StatusCode::NOT_FOUND.into_response();
+                }
+                Served::Events
+            } else if path.starts_with("/api/oauth/") && !named {
+                Served::OAuthCallbacks
+            } else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            if !parts.contains(&part) {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            engine.serve(part, request).await
+        }
+    })
+}
+
 /// The caller of a call, verified. `Ok(None)` if the call came with nothing
 /// presented; `Err` is what is answered instead of the call.
 async fn caller_of(

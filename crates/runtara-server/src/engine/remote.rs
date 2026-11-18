@@ -1564,6 +1564,95 @@ mod tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
+    /// On a listener of its own, intake answers what anyone may send at the
+    /// paths the API serves it at, and nothing else; and takes nothing a
+    /// request says of itself in the API's words.
+    #[tokio::test]
+    async fn intakes_own_listener_serves_only_what_anyone_may_send() {
+        let local = local_without_runtime();
+        for part in [Served::Events, Served::OAuthCallbacks, Served::Connections] {
+            local.serves(
+                part,
+                axum::Router::new().fallback(move |request: axum::extract::Request| async move {
+                    format!(
+                        "{part:?} {} caller={} said={}",
+                        request.uri(),
+                        request
+                            .extensions()
+                            .get::<crate::auth::AuthContext>()
+                            .is_some(),
+                        [wire::PRESENTED, wire::REQUESTED_TENANT, wire::EVENT_SOURCE]
+                            .iter()
+                            .filter(|name| request.headers().contains_key(**name))
+                            .count(),
+                    )
+                }),
+            );
+        }
+        const PARTS: &[Served] = &[Served::Events, Served::OAuthCallbacks];
+        let app = super::super::listener::router_for_anyone(local, PARTS);
+        let ask = |request: http::Request<Body>| {
+            let app = app.clone();
+            async move { text(app.oneshot(request).await.unwrap()).await }
+        };
+        let get = |path: &str| http::Request::get(path).body(Body::empty()).unwrap();
+
+        assert_eq!(
+            ask(get("/api/runtime/events/http/t-1/run?x=1")).await,
+            (
+                StatusCode::OK,
+                "Events /api/runtime/events/http/t-1/run?x=1 caller=false said=0".to_owned()
+            )
+        );
+        assert_eq!(
+            ask(get("/api/oauth/acme/callback?code=c")).await,
+            (
+                StatusCode::OK,
+                "OAuthCallbacks /api/oauth/acme/callback?code=c caller=false said=0".to_owned()
+            )
+        );
+        // What the API would say of a request, said by whoever sent it, is
+        // not heard: no caller, no tenant, no source.
+        let mut planted = http::Request::post("/api/runtime/events/http-sync/w")
+            .header(wire::PRESENTED, "e30=")
+            .header(wire::REQUESTED_TENANT, "victim")
+            .header(wire::EVENT_SOURCE, "mcp")
+            .body(Body::empty())
+            .unwrap();
+        planted.extensions_mut().insert(caller("victim", "mallory"));
+        assert_eq!(
+            ask(planted).await,
+            (
+                StatusCode::OK,
+                "Events /api/runtime/events/http-sync/w caller=false said=0".to_owned()
+            )
+        );
+        // Nothing else of the API is here, a part with a caller least of all.
+        for path in [
+            "/api/runtime/connections",
+            "/api/runtime/workflows",
+            "/api/runtime/events",
+            "/api/oauth",
+            "/engine/v1/served/events/api/runtime/events/http/t-1/run",
+            "/engine/v1/ask/RunSyncForAnyone",
+            "/mcp",
+            "/",
+        ] {
+            assert_eq!(ask(get(path)).await.0, StatusCode::NOT_FOUND, "{path}");
+        }
+        // And only the parts it was started with.
+        let only_events =
+            super::super::listener::router_for_anyone(local_without_runtime(), &[Served::Events]);
+        let (status, _) = text(
+            only_events
+                .oneshot(get("/api/oauth/acme/callback"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
     /// The engine receives nothing anyone may send: a part with no caller
     /// (a webhook, a provider's redirect) is not served by it as it arrived,
     /// to the API or to anyone, whatever is presented with it. Intake

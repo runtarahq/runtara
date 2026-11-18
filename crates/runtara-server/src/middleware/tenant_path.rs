@@ -42,13 +42,7 @@ pub async fn scope_requested_tenant(
         .get::<RequestedTenant>()
         .map(|RequestedTenant(tenant)| tenant.clone())
         .or_else(|| oauth_tenant(request.uri().path(), crate::config::is_served_tenant));
-    // A tenant-less event route resolves its tenant from what it names, and
-    // runs unscoped meanwhile: where tenants share a process, only the
-    // tenant's own form is served (M7.16), as the edge always sends.
-    if named.is_none()
-        && request.uri().path().starts_with("/api/runtime/events/")
-        && crate::config::try_get().is_some_and(|config| config.served_tenants.len() > 1)
-    {
+    if named.is_none() && is_an_event_of_no_tenant_among_several(request.uri().path()) {
         return axum::http::StatusCode::NOT_FOUND.into_response();
     }
     match named {
@@ -57,6 +51,15 @@ pub async fn scope_requested_tenant(
         }
         None => next.run(request).await,
     }
+}
+
+/// Whether `path`, which named no tenant, is an event route in a process
+/// that serves several. A tenant-less event route resolves its tenant from
+/// what it names, and runs unscoped meanwhile: where tenants share a process,
+/// only the tenant's own form is served (M7.16), as the edge always sends.
+pub(crate) fn is_an_event_of_no_tenant_among_several(path: &str) -> bool {
+    path.starts_with("/api/runtime/events/")
+        && crate::config::try_get().is_some_and(|config| config.served_tenants.len() > 1)
 }
 
 /// Runs `work`, which finds whose something a request names is (a trigger,

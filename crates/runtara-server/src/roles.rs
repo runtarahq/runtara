@@ -173,6 +173,7 @@ const NOT_FOR_THE_API: &[&str] = &[
     "RUNTARA_ENGINE_LISTEN",
     "RUNTARA_ENGINE_HEALTH_LISTEN",
     "RUNTARA_INTAKE_LISTEN",
+    "RUNTARA_INTAKE_PUBLIC_LISTEN",
     "RUNTARA_INTAKE_HEALTH_LISTEN",
 ];
 
@@ -201,13 +202,20 @@ pub fn given_to_the_intake_role() -> Vec<&'static str> {
         .collect()
 }
 
-/// What an intake that is a process of its own needs: where it listens for
-/// the API (`RUNTARA_INTAKE_LISTEN`), its certificate
+/// What an intake that is a process of its own needs: where it listens, for
+/// the API (`RUNTARA_INTAKE_LISTEN`), for anyone
+/// (`RUNTARA_INTAKE_PUBLIC_LISTEN`) or both; its certificate
 /// (`RUNTARA_INTAKE_TLS_DIR`, from `runtara-executor init-pki --intake-dir`),
 /// and where the engine listens (`RUNTARA_ENGINE_URL`), which it asks to run
 /// a workflow and wait.
 pub struct IntakeAt {
-    pub listen: std::net::SocketAddr,
+    /// `RUNTARA_INTAKE_LISTEN`: where the API hands it what it received,
+    /// over mutual TLS.
+    pub listen: Option<std::net::SocketAddr>,
+    /// `RUNTARA_INTAKE_PUBLIC_LISTEN`: where it receives what anyone may send
+    /// itself, in plain HTTP behind whatever terminates TLS, so that none of
+    /// it passes through the API.
+    pub public: Option<std::net::SocketAddr>,
     pub tls_dir: std::path::PathBuf,
     pub engine_url: String,
     /// `RUNTARA_INTAKE_HEALTH_LISTEN`: where it says it is up, if anywhere.
@@ -224,11 +232,19 @@ pub fn intake_at() -> Result<IntakeAt, String> {
             })
             .transpose()
     };
+    let listen = address("RUNTARA_INTAKE_LISTEN")?;
+    let public = address("RUNTARA_INTAKE_PUBLIC_LISTEN")?;
+    if listen.is_none() && public.is_none() {
+        return Err(
+            "RUNTARA_ROLE=intake needs somewhere to listen, as host:port: \
+             RUNTARA_INTAKE_PUBLIC_LISTEN, where it receives what anyone may send itself, \
+             RUNTARA_INTAKE_LISTEN, where the API hands it that, or both"
+                .to_owned(),
+        );
+    }
     Ok(IntakeAt {
-        listen: address("RUNTARA_INTAKE_LISTEN")?.ok_or(
-            "RUNTARA_ROLE=intake needs RUNTARA_INTAKE_LISTEN: the address it listens on for \
-             the API, as host:port",
-        )?,
+        listen,
+        public,
         tls_dir: set("RUNTARA_INTAKE_TLS_DIR")
             .ok_or(
                 "RUNTARA_ROLE=intake needs RUNTARA_INTAKE_TLS_DIR: intake's directory from \
