@@ -1602,6 +1602,40 @@ mod tests {
         );
     }
 
+    /// An operation is answered for the tenant its caller acts for, and for
+    /// no other: the tenant an operation names is not the API's to choose.
+    #[tokio::test]
+    async fn an_operation_is_answered_only_for_the_callers_tenant() {
+        let remote = api_side(engine_side());
+        let refused = |answer: Result<StopOutcome, ExecutionError>, with: &str| match answer {
+            Err(ExecutionError::NotConnected(why)) => assert!(why.contains(with), "{why}"),
+            other => panic!("{other:?}"),
+        };
+        // No caller.
+        refused(remote.stop("acme", "run-1").await, "401");
+        // A caller of another tenant.
+        refused(
+            asked_by("mallory@other", remote.stop("acme", "run-1")).await,
+            "403",
+        );
+        // A credential the engine does not accept.
+        refused(
+            asked_by("not a token", remote.stop("acme", "run-1")).await,
+            "401",
+        );
+        // The tenant's own caller is answered as the engine in this process
+        // answers.
+        assert_eq!(
+            format!(
+                "{:?}",
+                asked_by("ann@acme", remote.stop("acme", "run-1")).await
+            ),
+            format!("{:?}", engine_side().stop("acme", "run-1").await),
+        );
+        // What the engine says of itself is no tenant's, and needs no caller.
+        assert!(remote.learn().await);
+    }
+
     /// A provider's redirect is finished by the engine when intake asks: with
     /// what was asked (a path and its query), nothing of the sender's request,
     /// and for intake alone.
