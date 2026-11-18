@@ -21,6 +21,7 @@ runtara-agent-bedrock = { path = "../agents/runtara-agent-bedrock" }
 runtara-agent-bigcommerce = { path = "../agents/runtara-agent-bigcommerce" }
 runtara-agent-compression = { path = "../agents/runtara-agent-compression" }
 runtara-agent-control = { path = "../agents/runtara-agent-control" }
+runtara-agent-conversation = { path = "../agents/runtara-agent-conversation" }
 runtara-agent-crypto = { path = "../agents/runtara-agent-crypto" }
 runtara-agent-csv = { path = "../agents/runtara-agent-csv" }
 runtara-agent-datetime = { path = "../agents/runtara-agent-datetime" }

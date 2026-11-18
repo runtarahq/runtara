@@ -82,6 +82,11 @@ pub const EXECUTOR_NAME: &str = "runtara-executor";
 /// engine are two processes. It is accepted where the engine listens for the
 /// API, and nowhere an executor's is.
 pub const API_NAME: &str = "runtara-api";
+/// The name in the intake role's certificate, when what receives anonymous
+/// traffic is a process of its own (docs/splitting-the-engine.md). The API
+/// verifies it where it hands intake a webhook, and the engine accepts it
+/// for the few operations intake may ask.
+pub const INTAKE_NAME: &str = "runtara-intake";
 
 /// A tenant as a path segment: 1 to 128 of `[A-Za-z0-9_-]`.
 pub fn valid_tenant(tenant: &str) -> bool {

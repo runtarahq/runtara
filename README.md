@@ -44,7 +44,7 @@ Runtara organizes workflows by operational area and keeps builders focused on th
 
 ### Start Workflows From Real Events
 
-Triggers let teams start automations from schedules, HTTP calls, and channel or event-driven entry points without duplicating workflow logic.
+Triggers let teams start automations from schedules, HTTP calls, and event-driven entry points without duplicating workflow logic.
 
 ![Runtara trigger automation catalog](docs/assets/readme/03-trigger-automation-catalog.png)
 
@@ -103,7 +103,7 @@ At a high level, the Rust workspace is organized into three layers:
 
 This repository contains the Rust implementation of the Runtara platform:
 
-- `crates/runtara-server`: application HTTP API, auth, workflows, connections, channels, MCP integration, file storage, object model, and background workers.
+- `crates/runtara-server`: application HTTP API, auth, workflows, connections, MCP integration, file storage, object model, and background workers.
 - `crates/runtara-environment`: image registry, instance lifecycle, runners, and wake scheduling. A library — its management API is served over HTTP by `runtara-server`.
 - `crates/runtara-core`: durable runtime persistence for checkpoints, signals, events, and sleep. A library — `runtara-environment` calls its instance protocol in-process for every workflow; `runtara-server` can also serve it over HTTP on loopback for tests (`RUNTARA_CORE_INSTANCE_API`).
 - `crates/runtara-workflows`: workflow compiler and validation pipeline.

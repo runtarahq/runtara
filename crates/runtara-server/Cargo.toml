@@ -29,6 +29,8 @@ db-integration-tests = []
 # The save-time validator sandbox against a built runtara-validate-guest
 # (RUNTARA_VALIDATOR_WASM).
 validator-sandbox-tests = []
+# The compiler's sandbox against its WASI command (RUNTARA_COMPILER_WASM).
+compiler-sandbox-tests = []
 # The composed control test drives the environment runner with its
 # in-process test precompiler.
 component-integration-tests = ["runtara-environment/db-integration-tests"]
@@ -61,13 +63,13 @@ path = "tests/authz_ownership.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
-name = "workflow_trigger_cleanup"
-path = "tests/workflow_trigger_cleanup.rs"
+name = "conversations"
+path = "tests/conversations.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
-name = "trigger_webhook_secret"
-path = "tests/trigger_webhook_secret.rs"
+name = "workflow_trigger_cleanup"
+path = "tests/workflow_trigger_cleanup.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
@@ -108,11 +110,6 @@ required-features = ["db-integration-tests", "component-integration-tests"]
 name = "wait_for_instances"
 path = "tests/wait_for_instances.rs"
 required-features = ["db-integration-tests", "component-integration-tests"]
-
-[[test]]
-name = "session_delivery"
-path = "tests/session_delivery.rs"
-required-features = ["db-integration-tests", "valkey-integration-tests"]
 
 [[test]]
 name = "compilation_failure_terminality"

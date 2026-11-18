@@ -46,7 +46,7 @@ const HANDED_OVER_LIMIT: usize = 96 * 1024 * 1024;
 /// more than the engine would have taken.
 fn handed_over_limit(part: Served) -> usize {
     match part {
-        Served::Events | Served::EventsForCallers | Served::Channels => {
+        Served::Events => {
             crate::api::handlers::events::webhook_max_body_bytes().min(HANDED_OVER_LIMIT)
         }
         // A redirect from a provider carries its answer in the query.
@@ -198,6 +198,12 @@ impl From<Away> for InputError {
     }
 }
 
+impl From<Away> for crate::api::services::conversations::ConversationError {
+    fn from(away: Away) -> Self {
+        Self::Storage(away.to_string())
+    }
+}
+
 impl From<Away> for WorkflowRuntimeError {
     fn from(away: Away) -> Self {
         Self::Runtime(away.to_string())
@@ -244,17 +250,54 @@ impl RemoteEngine {
     /// To the engine at `engine` (`https://host:port`), with this side's
     /// certificate from `tls_dir`.
     pub fn connect(engine: &str, tls_dir: &std::path::Path) -> Result<Arc<Self>, String> {
+        Self::connect_to(
+            engine,
+            tls_dir,
+            runtara_executor::protocol::SERVER_NAME,
+            true,
+        )
+    }
+
+    /// To intake at `intake`, for the API: the parts of the API intake
+    /// serves are handed to it, and it is asked nothing else.
+    pub fn connect_to_intake(intake: &str, tls_dir: &std::path::Path) -> Result<Arc<Self>, String> {
+        Self::connect_to(
+            intake,
+            tls_dir,
+            runtara_executor::protocol::INTAKE_NAME,
+            false,
+        )
+    }
+
+    /// To the engine at `engine`, for intake: it asks the few operations
+    /// anyone may have done ([`wire::ASKED_BY_INTAKE`]), and judges nothing
+    /// by what the engine says of itself.
+    pub fn connect_as_intake(engine: &str, tls_dir: &std::path::Path) -> Result<Arc<Self>, String> {
+        Self::connect_to(
+            engine,
+            tls_dir,
+            runtara_executor::protocol::SERVER_NAME,
+            false,
+        )
+    }
+
+    fn connect_to(
+        engine: &str,
+        tls_dir: &std::path::Path,
+        server_name: &str,
+        judges_by_it: bool,
+    ) -> Result<Arc<Self>, String> {
         let engine = engine.trim_end_matches('/').to_owned();
         if !engine.starts_with("https://") {
             return Err("the engine's address is not an https:// one".to_owned());
         }
         let identity = tls::Identity::load(tls_dir)?;
         let config = identity.client_config(&identity.ca_pem, None)?;
-        let client = tls::client(config, runtara_executor::protocol::SERVER_NAME)?;
+        let client = tls::client(config, server_name)?;
         Ok(Arc::new(Self {
             transport: Arc::new(Mtls { client, engine }),
             facts: RwLock::new(None),
-            judges_by_it: true,
+            judges_by_it,
         }))
     }
 
@@ -265,6 +308,24 @@ impl RemoteEngine {
             facts: RwLock::new(None),
             judges_by_it: false,
         })
+    }
+
+    /// Runs a workflow and waits, for anyone: what intake asks, having
+    /// received a call to the synchronous trigger.
+    pub async fn run_sync_for_anyone(
+        &self,
+        request: SyncRequest<'_>,
+    ) -> Result<SyncExecution, ExecutionError> {
+        self.ask_within(
+            wire::RunSyncForAnyone {
+                run_label: request.run_label,
+                tenant_id: request.tenant_id.to_owned(),
+                workflow_id: request.workflow_id.to_owned(),
+                inputs: request.inputs,
+            },
+            HELD,
+        )
+        .await
     }
 
     /// Asks the engine what it says of itself, now and then for as long as
@@ -329,13 +390,16 @@ impl RemoteEngine {
             sent: false,
             reason: error.to_string(),
         })?;
-        let request = http::Request::post(format!("{}{}", wire::OPERATIONS, O::NAME))
+        let mut request = http::Request::post(format!("{}{}", wire::OPERATIONS, O::NAME))
             .header(header::CONTENT_TYPE, "application/json")
             .body(Bytes::from(body))
             .map_err(|error| Away {
                 sent: false,
                 reason: error.to_string(),
             })?;
+        if let Some(presented) = presented_header() {
+            request.headers_mut().insert(wire::PRESENTED, presented);
+        }
         let response = self.transport.send(request, within).await?;
         let status = response.status();
         let answer = tokio::time::timeout(
@@ -383,9 +447,21 @@ impl RemoteEngine {
     }
 }
 
+/// What the caller of the current work presented, as it is sent with a call
+/// made for them.
+fn presented_header() -> Option<HeaderValue> {
+    let presented = crate::auth::presented::presented()?;
+    let json = serde_json::to_vec(&presented).ok()?;
+    let mut value =
+        HeaderValue::from_str(&base64::engine::general_purpose::STANDARD.encode(json)).ok()?;
+    value.set_sensitive(true);
+    Some(value)
+}
+
 /// The request the API hands the engine for a part it serves: the request as
-/// it arrived, with what the API established about it in headers of its own.
-/// Headers of those names that came from outside are dropped first.
+/// it arrived, with what its caller presented and what the API says of how
+/// it arrived in headers of its own. Headers of those names that came from
+/// outside are dropped first.
 async fn handed_over(
     part: Served,
     request: axum::extract::Request,
@@ -402,7 +478,7 @@ async fn handed_over(
         .unwrap_or("/");
     let path = format!("{}{}{own}", wire::SERVED, part.name());
 
-    for name in [wire::CALLER, wire::REQUESTED_TENANT, wire::EVENT_SOURCE] {
+    for name in [wire::PRESENTED, wire::REQUESTED_TENANT, wire::EVENT_SOURCE] {
         parts.headers.remove(name);
     }
     // What belongs to the connection the request came on, and not to it.
@@ -418,13 +494,8 @@ async fn handed_over(
         parts.headers.remove(name);
     }
     let bad = || StatusCode::BAD_REQUEST.into_response();
-    if let Some(caller) = parts.extensions.get::<crate::auth::AuthContext>() {
-        let json = serde_json::to_vec(caller).map_err(|_| bad())?;
-        let value = base64::engine::general_purpose::STANDARD.encode(json);
-        parts.headers.insert(
-            wire::CALLER,
-            HeaderValue::from_str(&value).map_err(|_| bad())?,
-        );
+    if let Some(presented) = presented_header() {
+        parts.headers.insert(wire::PRESENTED, presented);
     }
     if let Some(tenant) = parts
         .extensions
@@ -760,36 +831,6 @@ impl Engine for RemoteEngine {
         .await
     }
 
-    async fn list_input_requests(
-        &self,
-        tenant_id: &str,
-        instances: &[String],
-        offset: u64,
-        limit: u32,
-    ) -> InputResult<InputRequestPage> {
-        self.ask(wire::ListInputRequests {
-            tenant_id: tenant_id.to_owned(),
-            instances: instances.to_vec(),
-            offset,
-            limit,
-        })
-        .await
-    }
-
-    async fn get_input_request(
-        &self,
-        tenant_id: &str,
-        instance_id: &str,
-        request: &str,
-    ) -> InputResult<InputRequest> {
-        self.ask(wire::GetInputRequest {
-            tenant_id: tenant_id.to_owned(),
-            instance_id: instance_id.to_owned(),
-            request: request.to_owned(),
-        })
-        .await
-    }
-
     async fn submit_input_response(
         &self,
         tenant_id: &str,
@@ -834,6 +875,84 @@ impl Engine for RemoteEngine {
         self.ask(wire::PendingInputPageOf {
             tenant_id: tenant_id.to_owned(),
             instance_id: instance_id.to_owned(),
+        })
+        .await
+    }
+
+    async fn open_conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        open: OpenConversation,
+    ) -> ConversationResult<ConversationState> {
+        self.ask(wire::OpenConversationWith {
+            tenant_id: tenant_id.to_owned(),
+            workflow_id: workflow_id.to_owned(),
+            key: key.to_owned(),
+            open,
+        })
+        .await
+    }
+
+    async fn conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+    ) -> ConversationResult<ConversationState> {
+        self.ask(wire::ConversationOf {
+            tenant_id: tenant_id.to_owned(),
+            workflow_id: workflow_id.to_owned(),
+            key: key.to_owned(),
+        })
+        .await
+    }
+
+    async fn send_conversation_message(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        message: Message,
+    ) -> ConversationResult<Sent> {
+        self.ask(wire::SendConversationMessage {
+            tenant_id: tenant_id.to_owned(),
+            workflow_id: workflow_id.to_owned(),
+            key: key.to_owned(),
+            message,
+        })
+        .await
+    }
+
+    async fn conversation_events(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        after: i64,
+        limit: u32,
+    ) -> ConversationResult<Vec<ConversationEvent>> {
+        self.ask(wire::ConversationEvents {
+            tenant_id: tenant_id.to_owned(),
+            workflow_id: workflow_id.to_owned(),
+            key: key.to_owned(),
+            after,
+            limit,
+        })
+        .await
+    }
+
+    async fn delete_conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+    ) -> ConversationResult<bool> {
+        self.ask(wire::DeleteConversation {
+            tenant_id: tenant_id.to_owned(),
+            workflow_id: workflow_id.to_owned(),
+            key: key.to_owned(),
         })
         .await
     }
@@ -981,17 +1100,47 @@ impl Engine for RemoteEngine {
         .await
     }
 
-    async fn tenant_connections(&self, tenant_id: &str) -> Result<Vec<ConnectionRef>, String> {
-        self.ask(wire::TenantConnections {
-            tenant_id: tenant_id.to_owned(),
+    async fn api_key_by_hash(
+        &self,
+        key_hash: &str,
+    ) -> Result<crate::api::handlers::api_keys::ApiKey, String> {
+        self.ask(wire::ApiKeyByHash {
+            key_hash: key_hash.to_owned(),
         })
         .await
     }
 
-    async fn reconcile_channel_webhooks(&self, tenant_id: &str, removed: &[InvocationTrigger]) {
-        self.ask(wire::ReconcileChannelWebhooks {
+    async fn set_current_version(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+    ) -> Result<bool, String> {
+        self.ask(wire::SetCurrentVersion {
             tenant_id: tenant_id.to_owned(),
-            removed: removed.to_vec(),
+            workflow_id: workflow_id.to_owned(),
+            version,
+        })
+        .await
+    }
+
+    async fn invalidate_compilation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+    ) -> Result<(), String> {
+        self.ask(wire::InvalidateCompilation {
+            tenant_id: tenant_id.to_owned(),
+            workflow_id: workflow_id.to_owned(),
+            version,
+        })
+        .await
+    }
+
+    async fn tenant_connections(&self, tenant_id: &str) -> Result<Vec<ConnectionRef>, String> {
+        self.ask(wire::TenantConnections {
+            tenant_id: tenant_id.to_owned(),
         })
         .await
     }
@@ -1127,7 +1276,18 @@ pub async fn serve_api_role(
     let config = identity.server_config()?;
     let listener = tls::bind(address).await?;
     let bound = listener.local_addr().map_err(|error| error.to_string())?;
-    Ok((bound, tls::serve(listener, config, API_NAME, router)))
+    // The API's certificate, and intake's, which may ask the few operations
+    // anyone may have done and nothing else ([`super::listener`] tells them
+    // apart).
+    Ok((
+        bound,
+        tls::serve_peers(
+            listener,
+            config,
+            vec![API_NAME, runtara_executor::protocol::INTAKE_NAME],
+            router,
+        ),
+    ))
 }
 
 #[cfg(test)]
@@ -1169,7 +1329,7 @@ mod tests {
                             .extensions()
                             .get::<crate::product_events::EventSource>()
                             .copied();
-                        let forged = request.headers().contains_key(wire::CALLER);
+                        let forged = request.headers().contains_key(wire::PRESENTED);
                         let kept = request
                             .headers()
                             .get("x-signature")
@@ -1193,10 +1353,47 @@ mod tests {
         engine
     }
 
+    /// The engine's verification, for tests: a bearer token `user@tenant` is
+    /// that user acting for that tenant, unless the request names another;
+    /// anything else is nobody.
+    struct ByToken;
+
+    #[async_trait]
+    impl super::super::listener::Callers for ByToken {
+        async fn verify(
+            &self,
+            presented: &crate::auth::presented::Presented,
+        ) -> Result<crate::auth::AuthContext, Response> {
+            let headers = presented.headers();
+            let found = headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .and_then(|token| token.split_once('@'));
+            let Some((user, tenant)) = found else {
+                return Err(StatusCode::UNAUTHORIZED.into_response());
+            };
+            if presented
+                .requested_tenant
+                .as_deref()
+                .is_some_and(|named| named != tenant)
+            {
+                return Err(StatusCode::FORBIDDEN.into_response());
+            }
+            let mut caller = caller(tenant, user);
+            caller.role = Some(crate::authz::Role::Member);
+            Ok(caller)
+        }
+    }
+
+    fn listening(engine: Arc<LocalEngine>) -> axum::Router {
+        super::super::listener::router(engine, Arc::new(ByToken))
+    }
+
     /// The API's side, with the engine in another "process": everything it
     /// asks goes through the wire's two halves.
     fn api_side(engine: Arc<LocalEngine>) -> Arc<RemoteEngine> {
-        RemoteEngine::over(Arc::new(InProcess(super::super::listener::router(engine))))
+        RemoteEngine::over(Arc::new(InProcess(listening(engine))))
     }
 
     fn api(engine: Arc<dyn Engine>) -> axum::Router {
@@ -1211,6 +1408,27 @@ mod tests {
         )
     }
 
+    /// What a caller with the bearer token `token` presented to the API.
+    fn presented(token: &str, named: Option<&str>) -> crate::auth::presented::Presented {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        crate::auth::presented::Presented::of(
+            crate::auth::presented::Door::Api,
+            &headers,
+            &[],
+            named.map(str::to_owned),
+            true,
+        )
+    }
+
+    /// `work`, as the API does it for a caller with the bearer token `token`.
+    async fn asked_by<F: Future>(token: &str, work: F) -> F::Output {
+        crate::auth::presented::presenting(presented(token, None), work).await
+    }
+
     #[tokio::test]
     async fn a_request_the_engine_serves_crosses_as_it_arrived() {
         let api = api(api_side(engine_side()));
@@ -1218,7 +1436,8 @@ mod tests {
             .header("x-signature", "sha256=abc")
             .body(Body::from("the body"))
             .unwrap();
-        request.extensions_mut().insert(caller("acme", "ann"));
+        // What the API's own middleware found is not what crosses.
+        request.extensions_mut().insert(caller("other", "eve"));
         request
             .extensions_mut()
             .insert(crate::middleware::tenant_path::RequestedTenant(
@@ -1227,7 +1446,11 @@ mod tests {
         request
             .extensions_mut()
             .insert(crate::product_events::EventSource::Mcp);
-        let (status, seen) = text(api.oneshot(request).await.unwrap()).await;
+        let (status, seen) =
+            crate::auth::presented::presenting(presented("ann@acme", Some("acme")), async {
+                text(api.oneshot(request).await.unwrap()).await
+            })
+            .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             seen,
@@ -1237,17 +1460,17 @@ mod tests {
         );
     }
 
-    /// What says who the caller is comes from the API and from nowhere else:
-    /// a header of that name sent from outside is dropped, whether or not the
-    /// API authenticated anyone.
+    /// Who the caller is, the engine finds from what the caller presented:
+    /// not from a header of the wire's name sent from outside, and not from
+    /// whom the API says it authenticated.
     #[tokio::test]
-    async fn a_caller_named_from_outside_is_not_the_caller() {
+    async fn the_caller_is_whom_the_engine_finds_and_not_whom_the_api_names() {
         let api = api(api_side(engine_side()));
         let forged = base64::engine::general_purpose::STANDARD
-            .encode(serde_json::to_vec(&caller("victim", "mallory")).unwrap());
+            .encode(serde_json::to_vec(&presented("mallory@victim", None)).unwrap());
         let ask = |authenticated: Option<crate::auth::AuthContext>| {
             let mut request = http::Request::post("/api/runtime/triggers/t-1")
-                .header(wire::CALLER, &forged)
+                .header(wire::PRESENTED, &forged)
                 .header(wire::REQUESTED_TENANT, "victim")
                 .body(Body::empty())
                 .unwrap();
@@ -1255,17 +1478,456 @@ mod tests {
                 request.extensions_mut().insert(caller);
             }
             let api = api.clone();
-            async move { text(api.oneshot(request).await.unwrap()).await.1 }
+            async move { text(api.oneshot(request).await.unwrap()).await }
         };
-        let seen = ask(None).await;
-        assert!(seen.contains("caller=None named=None"), "{seen}");
-        assert!(seen.contains("scope=None"), "{seen}");
-        let seen = ask(Some(caller("acme", "ann"))).await;
+        // Nothing presented to the API: the part is served to nobody, whatever
+        // the request's headers and the API say.
+        let (status, _) = ask(None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = ask(Some(caller("victim", "mallory"))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // Presented by ann of acme: served to her, whomever the API names.
+        let (status, seen) = asked_by("ann@acme", ask(Some(caller("victim", "mallory")))).await;
+        assert_eq!(status, StatusCode::OK);
         assert!(
             seen.contains("caller=Some(\"ann of acme\") named=None"),
             "{seen}"
         );
         assert!(seen.contains("scope=Some(\"acme\")"), "{seen}");
+        // What nobody's verification accepts is answered as the API's own
+        // middleware answers it.
+        let (status, _) = asked_by("not a token", ask(None)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// A part anyone may send to is served without a caller, and what was
+    /// presented with it is not looked at.
+    #[tokio::test]
+    async fn a_part_with_no_caller_is_served_to_whoever_sends() {
+        let local = local_without_runtime();
+        local.serves(
+            Served::Events,
+            axum::Router::new().fallback(|request: axum::extract::Request| async move {
+                format!(
+                    "caller={} header={}",
+                    request
+                        .extensions()
+                        .get::<crate::auth::AuthContext>()
+                        .is_some(),
+                    request.headers().contains_key(wire::PRESENTED),
+                )
+            }),
+        );
+        let remote = api_side(local);
+        let ask = || async {
+            let request = http::Request::post("/api/runtime/events/webhook/t-1")
+                .body(Body::empty())
+                .unwrap();
+            text(remote.serve(Served::Events, request).await).await
+        };
+        assert_eq!(
+            ask().await,
+            (StatusCode::OK, "caller=false header=false".to_owned())
+        );
+        assert_eq!(
+            asked_by("not a token", ask()).await,
+            (StatusCode::OK, "caller=false header=false".to_owned())
+        );
+    }
+
+    /// An operation is answered for the tenant its caller acts for, and for
+    /// no other: the tenant an operation names is not the API's to choose.
+    #[tokio::test]
+    async fn an_operation_is_answered_only_for_the_callers_tenant() {
+        let remote = api_side(engine_side());
+        let refused = |answer: Result<StopOutcome, ExecutionError>, with: &str| match answer {
+            Err(ExecutionError::NotConnected(why)) => assert!(why.contains(with), "{why}"),
+            other => panic!("{other:?}"),
+        };
+        // No caller.
+        refused(remote.stop("acme", "run-1").await, "401");
+        // A caller of another tenant.
+        refused(
+            asked_by("mallory@other", remote.stop("acme", "run-1")).await,
+            "403",
+        );
+        // A credential the engine does not accept.
+        refused(
+            asked_by("not a token", remote.stop("acme", "run-1")).await,
+            "401",
+        );
+        // The tenant's own caller is answered as the engine in this process
+        // answers.
+        assert_eq!(
+            format!(
+                "{:?}",
+                asked_by("ann@acme", remote.stop("acme", "run-1")).await
+            ),
+            format!("{:?}", engine_side().stop("acme", "run-1").await),
+        );
+        // What the engine says of itself is no tenant's, and needs no caller.
+        assert!(remote.learn().await);
+    }
+
+    /// An operation is answered as far as the caller's credential allows,
+    /// whether it changes something or reads.
+    #[tokio::test]
+    async fn an_operation_is_answered_only_as_far_as_the_callers_credential_allows() {
+        use crate::authz::{ApiKeyScope, Permission, PermissionSet};
+        let scoped = |scope: ApiKeyScope| {
+            let mut caller = caller("acme", "ann");
+            caller.api_key_scope = scope;
+            caller
+        };
+        let only = |permission| ApiKeyScope::Restricted(PermissionSet::EMPTY.with(permission));
+        let ask = |name: &'static str, body: &'static str, caller: crate::auth::AuthContext| async move {
+            let engine = engine_side();
+            wire::answer(
+                engine.as_ref(),
+                name,
+                body.as_bytes(),
+                Some(&caller),
+                wire::Peer::Api,
+            )
+            .await
+            .unwrap()
+        };
+        let run = r#"{"tenant_id":"acme","instance_id":"r"}"#;
+        let refused = Err(wire::Refused::NotPermitted);
+
+        // A key that only reads does not stop a run, and reads its history.
+        assert_eq!(
+            ask("Stop", run, scoped(ApiKeyScope::ReadOnly)).await,
+            refused
+        );
+        assert!(
+            ask("GetInstanceInfo", run, scoped(ApiKeyScope::ReadOnly))
+                .await
+                .is_ok()
+        );
+        assert!(ask("Stop", run, caller("acme", "ann")).await.is_ok());
+
+        // A key held to connections reads no run, though it is the tenant's.
+        let connections = only(Permission::ConnectionRead);
+        for name in ["GetInstanceInfo", "GetExecution", "Stop"] {
+            assert_eq!(ask(name, run, scoped(connections)).await, refused, "{name}");
+        }
+        // A key held to running workflows starts a run and sends into a
+        // conversation, and reads no run: what was said is history.
+        let runs = only(Permission::WorkflowExecute);
+        for name in ["GetInstanceInfo", "GetExecution"] {
+            assert_eq!(ask(name, run, scoped(runs)).await, refused, "{name}");
+        }
+        let conversation = r#"{"tenant_id":"acme","workflow_id":"w","key":"k"}"#;
+        assert_eq!(
+            ask("ConversationOf", conversation, scoped(runs)).await,
+            refused
+        );
+        assert!(
+            ask(
+                "ConversationOf",
+                conversation,
+                scoped(ApiKeyScope::ReadOnly)
+            )
+            .await
+            .is_ok()
+        );
+        // What the API lists to every caller, any member may ask.
+        assert!(
+            ask(
+                "WorkflowAgents",
+                r#"{"tenant_id":"acme"}"#,
+                scoped(connections)
+            )
+            .await
+            .is_ok()
+        );
+    }
+
+    /// What intake asks is what anyone may have done, and only intake asks
+    /// it; everything else is the API's to ask, for a caller.
+    #[tokio::test]
+    async fn each_peer_asks_only_what_is_its_to_ask() {
+        let engine = engine_side();
+        let ask = |name: &'static str, body: &'static str, peer: wire::Peer| {
+            let engine = engine.clone();
+            async move {
+                wire::answer(engine.as_ref(), name, body.as_bytes(), None, peer)
+                    .await
+                    .unwrap()
+            }
+        };
+        let sync = r#"{"run_label":null,"tenant_id":"acme","workflow_id":"w","inputs":{}}"#;
+        let stop = r#"{"tenant_id":"acme","instance_id":"r"}"#;
+        // Intake needs no caller for what anyone may have done: the engine
+        // answers (here, that it has no runtime).
+        assert!(
+            ask("RunSyncForAnyone", sync, wire::Peer::Intake)
+                .await
+                .is_ok()
+        );
+        // The API does not ask it, with a caller or without.
+        assert_eq!(
+            ask("RunSyncForAnyone", sync, wire::Peer::Api).await,
+            Err(wire::Refused::NotThePeers)
+        );
+        // Intake asks nothing else, whatever it sends.
+        for name in ["Stop", "GetInstanceInfo", "Queue", "WorkflowAgents"] {
+            assert_eq!(
+                ask(name, stop, wire::Peer::Intake).await,
+                Err(wire::Refused::NotThePeers),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            ask("Facts", "{}", wire::Peer::Intake).await,
+            Err(wire::Refused::NotThePeers)
+        );
+        // Every operation is one or the other's.
+        for name in wire::ASKED_BY_INTAKE {
+            assert!(wire::NAMES.contains(name), "{name}");
+        }
+    }
+
+    /// Every operation says what it needs. The few that need nothing are
+    /// named here, so that a new one is not open by omission.
+    #[test]
+    fn every_operation_for_a_tenant_names_what_it_needs() {
+        let open: Vec<&str> = wire::NEEDS
+            .iter()
+            .filter(|(_, needs)| needs.is_empty())
+            .map(|(name, _)| *name)
+            .collect();
+        // What the engine says of itself and whose a key is are no tenant's;
+        // a tenant's published agents are listed to every caller.
+        assert_eq!(
+            open,
+            [
+                "Facts",
+                "RunSyncForAnyone",
+                "WorkflowAgents",
+                "ApiKeyByHash"
+            ]
+        );
+    }
+
+    /// What an operation needs is what the API's routes that ask it need
+    /// (`permission_for`), so the engine refuses nothing the API allows and
+    /// allows nothing the API refuses.
+    #[test]
+    fn an_operation_needs_what_the_routes_that_ask_it_need() {
+        use crate::authz::Permission::{WorkflowCreate, WorkflowUpdate};
+        use crate::middleware::authorization::permission_for;
+        use http::Method;
+        let get = |path: &str| permission_for(&Method::GET, path).unwrap();
+        let post = |path: &str| permission_for(&Method::POST, path).unwrap();
+        // Each operation, and the routes whose handlers ask it.
+        let asked_by: &[(&str, Vec<crate::authz::Permission>)] = &[
+            (
+                "GetExecution",
+                vec![get("/api/runtime/workflows/instances/{instanceId}")],
+            ),
+            (
+                "GetExecutionWithMetadata",
+                vec![get("/api/runtime/workflows/{id}/instances/{instanceId}")],
+            ),
+            (
+                "ListExecutions",
+                vec![get("/api/runtime/workflows/{id}/instances")],
+            ),
+            (
+                "ListAllExecutions",
+                vec![
+                    get("/api/runtime/executions"),
+                    post("/api/runtime/executions/query"),
+                ],
+            ),
+            (
+                "ExecutionSummaryOf",
+                vec![post("/api/runtime/executions/summary")],
+            ),
+            (
+                "ExecutionListingOptions",
+                vec![post("/api/runtime/operations/requests/query")],
+            ),
+            (
+                "OperationRequests",
+                vec![post("/api/runtime/operations/requests/query")],
+            ),
+            (
+                "OperationQueues",
+                vec![get("/api/runtime/operations/queues")],
+            ),
+            (
+                "AuthorizeExecution",
+                vec![
+                    get("/api/runtime/workflows/{workflowId}/instances/{instanceId}/pending-input"),
+                    get("/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions"),
+                ],
+            ),
+            (
+                "GetInstanceInfo",
+                vec![get(
+                    "/api/runtime/workflows/{workflowId}/instances/{instanceId}/steps",
+                )],
+            ),
+            (
+                "ListEvents",
+                vec![get(
+                    "/api/runtime/workflows/{workflowId}/instances/{instanceId}/step-events",
+                )],
+            ),
+            (
+                "ListStepSummaries",
+                vec![get(
+                    "/api/runtime/workflows/{workflowId}/instances/{instanceId}/steps",
+                )],
+            ),
+            (
+                "GetScopeAncestors",
+                vec![get(
+                    "/api/runtime/workflows/{workflowId}/instances/{instanceId}/scopes/{scopeId}/ancestors",
+                )],
+            ),
+            (
+                "ListCheckpoints",
+                vec![get(
+                    "/api/runtime/workflows/{id}/instances/{instanceId}/checkpoints",
+                )],
+            ),
+            ("GetTenantMetrics", vec![get("/api/runtime/metrics/tenant")]),
+            (
+                "OpenConversationWith",
+                vec![
+                    permission_for(
+                        &Method::PUT,
+                        "/api/runtime/workflows/{id}/conversations/{key}",
+                    )
+                    .unwrap(),
+                ],
+            ),
+            (
+                "ConversationOf",
+                vec![get("/api/runtime/workflows/{id}/conversations/{key}")],
+            ),
+            (
+                "SendConversationMessage",
+                vec![post(
+                    "/api/runtime/workflows/{id}/conversations/{key}/messages",
+                )],
+            ),
+            (
+                "ConversationEvents",
+                vec![get(
+                    "/api/runtime/workflows/{id}/conversations/{key}/events",
+                )],
+            ),
+            (
+                "DeleteConversation",
+                vec![
+                    permission_for(
+                        &Method::DELETE,
+                        "/api/runtime/workflows/{id}/conversations/{key}",
+                    )
+                    .unwrap(),
+                ],
+            ),
+            (
+                "PendingInputPageOf",
+                vec![get(
+                    "/api/runtime/workflows/{workflowId}/instances/{instanceId}/pending-input",
+                )],
+            ),
+            (
+                "ListInstanceActions",
+                vec![get(
+                    "/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions",
+                )],
+            ),
+            (
+                "ListWorkflowActions",
+                vec![get("/api/runtime/workflows/{workflowId}/actions")],
+            ),
+            (
+                "CompilationProgressOf",
+                vec![get(
+                    "/api/runtime/workflows/{id}/versions/{version}/compilation-progress",
+                )],
+            ),
+            // Compiling is asked by the compile route, and by saving a
+            // workflow (the API and MCP's authoring tools).
+            (
+                "GetImage",
+                vec![
+                    post("/api/runtime/workflows/{id}/versions/{version}/compile"),
+                    WorkflowCreate,
+                    WorkflowUpdate,
+                ],
+            ),
+            (
+                "WaitForCompilation",
+                vec![
+                    post("/api/runtime/workflows/{id}/versions/{version}/compile"),
+                    WorkflowCreate,
+                    WorkflowUpdate,
+                ],
+            ),
+            (
+                "IsCompilationPending",
+                vec![
+                    post("/api/runtime/workflows/{id}/versions/{version}/compile"),
+                    WorkflowCreate,
+                    WorkflowUpdate,
+                ],
+            ),
+            // A workflow's connections are checked where it is validated and
+            // where it is saved.
+            (
+                "TenantConnections",
+                vec![
+                    post("/api/runtime/workflows/graph/validate"),
+                    post("/api/runtime/workflows/{workflowId}/validate-mappings"),
+                    post("/api/runtime/workflows/create"),
+                    post("/api/runtime/workflows/{id}/update"),
+                ],
+            ),
+        ];
+        for (name, routes) in asked_by {
+            let needs = wire::NEEDS
+                .iter()
+                .find(|(operation, _)| operation == name)
+                .unwrap_or_else(|| panic!("no operation {name}"))
+                .1;
+            let mut expected = routes.clone();
+            expected.sort_by_key(|permission| permission.as_str());
+            expected.dedup();
+            let mut named = needs.to_vec();
+            named.sort_by_key(|permission| permission.as_str());
+            assert_eq!(named, expected, "{name}");
+        }
+    }
+
+    /// An operation that names its caller is answered for the caller the
+    /// engine found, not the one the API wrote.
+    #[tokio::test]
+    async fn an_operation_names_the_caller_the_engine_found() {
+        let mut operation = wire::SubmitWorkflowAction {
+            auth: {
+                let mut forged = caller("acme", "mallory");
+                forged.role = Some(crate::authz::Role::Owner);
+                forged
+            },
+            workflow_id: "w".to_owned(),
+            instance_id: "i".to_owned(),
+            request_id: "r".to_owned(),
+            operation_id: "o".to_owned(),
+            payload: serde_json::Value::Null,
+        };
+        let mut found = caller("acme", "ann");
+        found.role = Some(crate::authz::Role::Viewer);
+        wire::Operation::of_caller(&mut operation, &found);
+        assert_eq!(operation.auth.user_id, "ann");
+        assert_eq!(operation.auth.role, Some(crate::authz::Role::Viewer));
     }
 
     /// What anyone may send is not read past what the engine takes of it.
@@ -1282,7 +1944,7 @@ mod tests {
         let request = http::Request::post("/api/runtime/triggers/t-1")
             .body(Body::from(oversized))
             .unwrap();
-        let answer = engine.serve(Served::Triggers, request).await;
+        let answer = asked_by("ann@acme", engine.serve(Served::Triggers, request)).await;
         assert_eq!(answer.status(), StatusCode::OK);
         assert!(handed_over_limit(Served::Events) <= HANDED_OVER_LIMIT);
     }
@@ -1293,15 +1955,24 @@ mod tests {
         let remote = api_side(local.clone());
         // An error with its fields, and a plain answer.
         assert_eq!(
-            format!("{:?}", remote.stop("acme", "run-1").await),
+            format!(
+                "{:?}",
+                asked_by("ann@acme", remote.stop("acme", "run-1")).await
+            ),
             format!("{:?}", local.stop("acme", "run-1").await),
         );
         assert_eq!(
-            format!("{:?}", remote.tenant_connections("acme").await),
+            format!(
+                "{:?}",
+                asked_by("ann@acme", remote.tenant_connections("acme")).await
+            ),
             format!("{:?}", local.tenant_connections("acme").await),
         );
         assert_eq!(
-            format!("{:?}", remote.get_instance_info("acme", "run-1").await),
+            format!(
+                "{:?}",
+                asked_by("ann@acme", remote.get_instance_info("acme", "run-1")).await
+            ),
             format!("{:?}", local.get_instance_info("acme", "run-1").await),
         );
         // What the engine says of itself is learnt, and until then assumed.
@@ -1323,11 +1994,13 @@ mod tests {
             "two operations share a name"
         );
 
-        let engine = super::super::listener::router(engine_side());
+        let engine = listening(engine_side());
+        let by_ann = presented_header_of(&presented("ann@acme", None));
         let ask = |method: http::Method, path: &str, body: &'static str| {
             let request = http::Request::builder()
                 .method(method)
                 .uri(path)
+                .header(wire::PRESENTED, &by_ann)
                 .body(Body::from(body))
                 .unwrap();
             let engine = engine.clone();
@@ -1364,6 +2037,10 @@ mod tests {
             ask(post, "/api/runtime/workflows", "").await,
             StatusCode::NOT_FOUND
         );
+    }
+
+    fn presented_header_of(presented: &crate::auth::presented::Presented) -> String {
+        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(presented).unwrap())
     }
 
     /// A transport to an engine that is not there.
@@ -1444,7 +2121,7 @@ mod tests {
         let (address, serving) = serve_api_role(
             "127.0.0.1:0".parse().unwrap(),
             &certificates.engine,
-            super::super::listener::router(engine_side()),
+            listening(engine_side()),
         )
         .await
         .unwrap();
@@ -1457,14 +2134,22 @@ mod tests {
             "the API role's certificate is accepted"
         );
         assert_eq!(
-            format!("{:?}", api_role.tenant_connections("acme").await),
+            format!(
+                "{:?}",
+                asked_by("ann@acme", api_role.tenant_connections("acme")).await
+            ),
             "Err(\"this engine holds no connections\")"
         );
-        let mut request = http::Request::post("/api/runtime/triggers/t-1?x=1")
+        // The certificate lets the API ask; it does not let it say for whom.
+        let unasked = format!("{:?}", api_role.tenant_connections("acme").await);
+        assert!(unasked.contains("401"), "{unasked}");
+        let request = http::Request::post("/api/runtime/triggers/t-1?x=1")
             .body(Body::from("over the wire"))
             .unwrap();
-        request.extensions_mut().insert(caller("acme", "ann"));
-        let (status, seen) = text(api(api_role).oneshot(request).await.unwrap()).await;
+        let (status, seen) = asked_by("ann@acme", async {
+            text(api(api_role).oneshot(request).await.unwrap()).await
+        })
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert!(seen.contains("caller=Some(\"ann of acme\")"), "{seen}");
         assert!(seen.ends_with("body=over the wire"), "{seen}");

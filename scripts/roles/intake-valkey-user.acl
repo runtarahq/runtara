@@ -1,0 +1,26 @@
+# The rules of the intake role's Valkey user, for a server whose intake is a
+# process of its own (RUNTARA_ROLE=intake, docs/roles.md). One rule a line; a
+# line that starts with # is a comment. Apply them with the user's name and
+# password:
+#
+#   valkey-cli ACL SETUSER runtara-intake on '><password>' \
+#       $(grep -v '^#' scripts/roles/intake-valkey-user.acl)
+#
+# Intake counts the runs it queues against each tenant's admissions, reads
+# whether a tenant is ready, and writes product events. It cannot write a
+# trigger stream (the engine publishes what intake queued), a compilation
+# queue, a membership, a revocation or a session.
+resetkeys
+resetchannels
+-@all
+# The admissions a queued run is counted in.
+~*:admission:reserved
+# Whether a tenant is ready.
+%R~runtara:tenant_status:*
+# Product events. A stream key of another name
+# (RUNTARA_PRODUCT_EVENTS_STREAM_KEY) is added here.
+~runtara:product_events:*
++@all
+-@admin
+-@dangerous
++info

@@ -29,6 +29,5 @@ There is no database migration or automatic workflow rewrite.
 
 S3, Azure presigning, HTTP credential injection, Object Model, and the connection
 service retain their existing APIs. The server's native S3 client and the
-`runtara-agents` native feature were subsequently removed with
-[workflow-owned channel attachments](../workflow-attachments.md).
+`runtara-agents` native feature were subsequently removed.
 SSH/libssh2 dependencies are gone; OpenSSL remains necessary for database TLS.

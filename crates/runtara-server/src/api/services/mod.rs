@@ -11,10 +11,9 @@ pub mod instance_waits;
 pub mod object_model;
 pub mod operators;
 pub mod pending_inputs;
+pub mod run_activity;
 pub mod schema_validator;
-pub mod session_queue;
 pub mod triggers;
-pub mod webhook_manager;
 pub mod webhook_verification;
 pub mod workflow_runtime;
 pub mod workflows;
@@ -23,6 +22,7 @@ pub mod trusted;
 
 pub mod connection_resolver;
 pub mod control;
+pub mod conversations;
 pub mod database;
 pub mod database_guard;
 

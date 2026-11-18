@@ -13,6 +13,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A conversation with a workflow.** A conversation is a workflow, a key
+  its client chose, and what has been said: found by `(tenant, workflow,
+  key)`, kept until it is deleted, and carried by one run after another. A
+  message can be sent at any time: it starts a run when none is active,
+  answers what a run waits for, and otherwise waits its turn, in order, in
+  a queue of 32 (`RUNTARA_CONVERSATION_QUEUE_BOUND`), past which it is
+  refused with `429 CONVERSATION_QUEUE_FULL`. A message carries its
+  sender's id for it and is sent once, and may carry who is speaking and
+  attachments. Routes: `PUT`, `GET` and `DELETE
+  /api/runtime/workflows/{id}/conversations/{key}`, `POST …/messages`, and
+  `GET …/events`, a page of numbered events or, asked for as an event
+  stream, a stream a client reads on from the last event it saw. A
+  conversation may name a reply workflow, started with each reply and each
+  "waiting for input". Nothing in it names a chat platform
+  (`docs/native-chat.md`).
+- **The `conversation` agent.** `reply` tells the user of a run's
+  conversation something from any step of the run: text, and attachments
+  by where to fetch them. A run that never calls it still answers with what
+  it returns. Available on every tier.
 - **The API and the engine as two processes.** `RUNTARA_ROLE=api` runs what
   takes requests from outside, and `RUNTARA_ROLE=engine` what runs
   workflows, keeps their state and uses connections' secrets; `all`, the
@@ -25,9 +44,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   listener alone accepts. The engine role binds no public listener and
   starts only with a seal of its own. Runs do not depend on the API: they
   outlive it, and an engine that is away is a `503` that says so, with
-  nothing started. More than one API may stand in front of one engine. The
-  engine still takes the API's word for who is calling; see
+  nothing started. More than one API may stand in front of one engine. See
   `docs/roles.md`.
+- **The engine decides, not the API.** An engine in a process of its own
+  verifies for itself who each call is for: the API sends what the caller
+  presented, and the engine answers an operation only for a caller who
+  acts for its tenant, and only as far as the caller's role and API key
+  scope allow, for reading as for changing something. `scripts/roles/` holds a database
+  role for the API (its own records, nothing that starts or admits a run,
+  no working across tenants: `runtara_system` is the engine's) and a
+  Valkey user that cannot write the trigger, compilation or control
+  streams.
+- **Intake as a process of its own.** `RUNTARA_ROLE=intake` receives a
+  trigger's webhooks and the synchronous trigger, where the API is given
+  `RUNTARA_INTAKE_URL`. It holds no runtime database and no key, refuses to
+  start if given either, and is a database role, a Valkey user and a seal
+  caller of its own (`scripts/roles/intake-*`). A webhook is still accepted
+  with the engine away. What checks a trigger's webhook is now kept with
+  the trigger (`invocation_trigger.webhook_verification`, sealed), written
+  by the engine. `runtara-executor init-pki --intake-dir` issues its
+  certificate. Chat channel webhooks and OAuth redirects still go to the
+  engine.
+- **Workflows compiled in a sandbox.** With `RUNTARA_COMPILER_WASM` naming
+  the compiler's WASI command (`runtara-compile-sandboxed.wasm`, which now
+  ships beside the components), a workflow is compiled in a Wasmtime store
+  of its own: no network, no environment, a bound on memory and time, and
+  only the component files to read. It is given no database, key or way to
+  seal, and what it hands back is checked. An engine in a process of its
+  own (`RUNTARA_ROLE=engine`) requires it and refuses to start without it;
+  a single process compiles as before unless given it. A compile in the
+  sandbox makes the same bytes.
+- **The split in the evaluation stack.** `docker-compose.roles.yml` is an
+  overlay that runs seal, the engine and the API as three services, with
+  the certificates, the API's database role and the Valkey users made for
+  it. An engine says it is up on `RUNTARA_ENGINE_HEALTH_LISTEN` (`/health`
+  and nothing else), since it binds no public listener.
 - **seal as a process of its own.** seal, which holds connection secrets
   and sends their requests, ran in the server's process, which could
   therefore open every credential. `RUNTARA_SEAL_MODE=unix` or `mtls` has
@@ -73,6 +124,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existing connections are unchanged. A connection type an agent declares on
   `http_api_key` can fix the format, so its users enter the key alone
   (`docs/adding-an-agent.md`).
+
+- **`connector_gen` generates agents for GraphQL APIs.** A `connector.yaml`
+  with `graphql:` names the vendor's schema (an introspection endpoint, an
+  SDL file or one in the crate), pinned by the sha256 of its sorted SDL, and
+  each capability is an operation of ours in `operations/<name>.graphql`,
+  checked against the schema. Its variables are the step's inputs, and its
+  output is what its one top-level field returns, typed from the fields it
+  selects; a list whose items may be null is a `Vec<Option<T>>`, which the
+  step editor's metadata reads as a list of `T`. An input that may be null is
+  an `Option<Option<T>>`, so an explicit `null` (which overrides a default or
+  clears a value) stays apart from leaving the input out. Queries are reads and
+  mutations side effects; the vendor's own scalars are typed in
+  `graphql.scalars`. `check` also fails when an operation or the endpoint
+  was edited without `fetch`. The OpenAPI path and the existing generated
+  agents are unchanged.
 
 - **BigCommerce agent, generated from BigCommerce's OpenAPI files.**
   Twenty-seven capabilities: list, read, create and update orders, read their
@@ -1075,6 +1141,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The session delivery routes need a permission.** `GET
+  /api/runtime/sessions/{sessionId}/deliveries` and
+  `/deliveries/{messageId}` need `invocation_history:read`, and `POST
+  …/deliveries/{messageId}/resolve` needs `workflow:execute`. They were
+  open to any role and, for reading, any API key scope.
+- **A workflow runs only as the engine approved it.** The engine records,
+  in the runtime database, each version someone who may run it asked to
+  have compiled or run, the image it compiled from that, and the version
+  chosen to run. A run nobody asked for (a schedule, a webhook) is refused
+  with `this version's definition is not the one that was approved to run`
+  if the definition was changed in the database since, until a caller
+  compiles or runs it; editing through the API and compiling, as before,
+  approves it. What was compiled and chosen before is carried over at the
+  first start. Applies to a single process too.
+
 - **seal is at its current revision, which leaves what a credential may do
   to the credential.** seal no longer holds a request to a method, a SigV4
   request to a list of `X-Amz-*` headers, or a copy to a source: where a
@@ -1578,6 +1659,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **BREAKING: the `chat` and `sessions` routes.** `POST
+  /api/runtime/workflows/{id}/chat`, `…/chat/start`, `…/sessions`, and
+  everything under `/api/runtime/sessions/{sessionId}` (events, pending
+  input, deliveries) are gone, with the managed session queue in Valkey and
+  its delivery worker. A chat with a workflow is a conversation: `PUT
+  /api/runtime/workflows/{id}/conversations/{key}`, `POST …/messages`, `GET
+  …/events`. A session was one run and took a message only while that run
+  waited; a conversation takes one at any time. A client that started a
+  chat with no message sends a first message with an empty `payload`. An
+  API key held to `workflow:execute` alone no longer reads a run it
+  started: reading a conversation's events needs
+  `invocation_history:read`. The API role's Valkey user loses the session
+  queue's keys. Needs a console release that uses conversations.
+- **BREAKING: the platform chat channels and the Channel trigger type.**
+  The server no longer receives Telegram, Slack, Teams or Mailgun
+  conversations itself: the `/api/runtime/events/webhook/{platform}/…`
+  routes, the `CHANNEL` trigger type, Telegram's webhook registration, and
+  the `channel_intake` table are gone. A migration deletes existing Channel
+  triggers; nothing reads them. A trigger's response no longer carries
+  `webhookUrl`. Sending a message with the Slack, Teams and Mailgun agents
+  is unchanged, and so are HTTP triggers. A chat platform is to reach a
+  workflow as an integration built on the native conversation
+  (`docs/native-chat.md`), which is not built yet: until it is, no chat
+  platform starts or continues a conversation. The console's Channel
+  trigger option needs removing in runtara-frontend.
+
 - **The isolated-agent experiment.** Agent steps were once compiled, behind
   an operator policy, as children run in Wasmtime stores of their own. New
   compiles stopped producing them, and the runtime kept the path only for
@@ -1620,6 +1727,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is off or any row fails.
 
 ### Fixed
+
+- **`connector_gen` takes a spec that writes `const`, and `check` finds the
+  fixture `fetch` saved.** JSON Schema's `const` is not OpenAPI 3.0's, and
+  openapi-generator refused a 3.0 spec that has it; `fetch` now writes
+  `const: X` as the enum `[X]` (a boolean's `const` is dropped). Where a
+  response has several named examples, `fetch` saved the first as the vendor
+  wrote them and `check` looked for the first in `spec.slice.json`, which is
+  saved with sorted keys, so `check` failed right after `fetch`. Both now
+  take the first by name. The generated agents are unchanged.
 
 - **A restart no longer revokes every API key where membership is not
   enforced.** At start the server revokes the keys of users who are no

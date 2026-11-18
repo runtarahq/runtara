@@ -4857,6 +4857,7 @@ dependencies = [
  "runtara-agent-bigcommerce",
  "runtara-agent-compression",
  "runtara-agent-control",
+ "runtara-agent-conversation",
  "runtara-agent-crypto",
  "runtara-agent-csv",
  "runtara-agent-datetime",
@@ -4913,6 +4914,19 @@ version = "10.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-control-contract",
+ "runtara-dsl",
+ "runtara-workflow-api",
+ "runtara-workflow-sdk",
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.58.0",
+]
+
+[[package]]
+name = "runtara-agent-conversation"
+version = "10.0.0"
+dependencies = [
+ "runtara-agent-macro",
  "runtara-dsl",
  "runtara-workflow-api",
  "runtara-workflow-sdk",

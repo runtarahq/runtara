@@ -2,9 +2,11 @@
 
 The trusted execution mechanism is generic, but the server's credential
 provider is not. Each new trusted capability currently needs a host-side branch.
-This blocks moving channel verification (Slack, Teams, Telegram, Mailgun) out of
-native server code. This refactor is separate from
-[channel intake durability](instance-events-follow-ups.md) and does not block it.
+It was written when the server verified chat channels' webhooks itself
+(Slack, Teams, Telegram, Mailgun). That code is gone from the server
+([native-chat.md](native-chat.md)): a platform's webhook is to be checked as
+its connection type declares, or by the integration's own agent. What follows
+is kept for the trusted capabilities themselves.
 
 ## Current state
 

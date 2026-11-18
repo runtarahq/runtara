@@ -58,6 +58,12 @@ impl AuthProvider for TrustProxyProvider {
     fn kind(&self) -> AuthProviderKind {
         AuthProviderKind::TrustProxy
     }
+
+    fn also_reads(&self) -> Vec<axum::http::HeaderName> {
+        axum::http::HeaderName::from_bytes(self.user_header.as_bytes())
+            .into_iter()
+            .collect()
+    }
 }
 
 #[cfg(test)]

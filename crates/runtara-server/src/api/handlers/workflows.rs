@@ -1211,8 +1211,7 @@ pub async fn compile_workflow_handler(
         engine
             .mark_compilation_queued(&tenant_id, &workflow_id, version_num)
             .await;
-        let repository = WorkflowRepository::new(pool.clone());
-        if let Err(e) = repository
+        if let Err(e) = engine
             .invalidate_compilation(&tenant_id, &workflow_id, version_num)
             .await
         {

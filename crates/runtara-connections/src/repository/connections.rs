@@ -975,63 +975,6 @@ impl ConnectionRepository {
         tx.commit().await
     }
 
-    /// Look up a connection by ID (without tenant filter) including credentials.
-    ///
-    /// SECURITY: Used only by channel webhook routing where the connection_id
-    /// in the URL acts as the authentication token. The webhook URL is only
-    /// known to the connection owner.
-    pub async fn get_channel_connection(
-        &self,
-        id: &str,
-    ) -> Result<Option<ConnectionWithParameters>, sqlx::Error> {
-        let result = sqlx::query_as::<
-            _,
-            (
-                String,                    // id
-                String,                    // tenant_id
-                Option<String>,            // integration_id
-                Option<String>,            // connection_subtype
-                Option<serde_json::Value>, // connection_parameters
-                Option<serde_json::Value>, // rate_limit_config
-                String,                    // credential_format
-            ),
-        >(
-            r#"
-            SELECT id, tenant_id, integration_id, connection_subtype, connection_parameters, rate_limit_config, credential_format
-            FROM connection_data_entity
-            WHERE id = $1
-            "#,
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        result
-            .map(
-                |(
-                    id,
-                    tid,
-                    integration_id,
-                    connection_subtype,
-                    connection_parameters,
-                    rate_limit_config,
-                    credential_format,
-                )| {
-                    let connection_parameters = self.unseal(&tid, &id, connection_parameters)?;
-                    Ok::<_, sqlx::Error>(ConnectionWithParameters {
-                        id,
-                        tenant_id: Some(tid),
-                        integration_id,
-                        connection_subtype,
-                        connection_parameters,
-                        rate_limit_config,
-                        sealed: credential_format == FORMAT_SEAL,
-                    })
-                },
-            )
-            .transpose()
-    }
-
     /// Update connection parameters and status atomically.
     /// Used by OAuth callback to store tokens and set status to ACTIVE.
     ///

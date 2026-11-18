@@ -1,0 +1,39 @@
+# The rules of the API role's Valkey user, for a server run as two processes
+# (RUNTARA_ROLE, docs/roles.md). One rule a line; a line that starts with #
+# is a comment. Apply them with the user's name and password:
+#
+#   valkey-cli ACL SETUSER runtara-api on '><password>' \
+#       $(grep -v '^#' scripts/roles/api-valkey-user.acl)
+#
+# and give the API VALKEY_USER and VALKEY_PASSWORD. The engine's user keeps
+# every key.
+#
+# The API reads who is a member and which tokens are revoked, counts its
+# tenants' quotas, keeps MCP sessions, writes product
+# events, and reads the control stream. It cannot write a trigger stream
+# (runtara:triggers:*), a compilation queue or its progress
+# (*:compilation:*), an admission count (*:admission:*), or add to the
+# control stream.
+resetkeys
+resetchannels
+-@all
+# Who is a member, which tokens are revoked, whether a tenant is ready.
+%R~*:member:*
+%R~member:*
+~*:token:revoked:*
+~token:revoked:*
+%R~runtara:tenant_status:*
+# Quotas the API counts itself.
+~*:quota:api
+~*:quota:compile
+# MCP sessions.
+~runtara:mcp:sessions:*
+# Product events. A stream key of another name
+# (RUNTARA_PRODUCT_EVENTS_STREAM_KEY) is added here.
+~runtara:product_events:*
++@all
+-@admin
+-@dangerous
++info
+# The control stream is read through a consumer group, and never added to.
+(%RW~*:control resetchannels -@all +xgroup +xreadgroup +xack +xautoclaim +xpending +xinfo +xlen +ping)

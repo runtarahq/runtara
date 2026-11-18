@@ -59,6 +59,30 @@ pub async fn scope_requested_tenant(
     }
 }
 
+/// Runs `work`, which finds whose something a request names is (a trigger,
+/// a workflow), where it may look: in the tenant the request is already for;
+/// else in the one tenant this process serves, since what it names can be no
+/// other's; and only where several are served and the request names none,
+/// across them, which is the platform's own to do and is refused a process
+/// whose database role may not (`runtara_system`).
+pub async fn finding_the_tenant<F: std::future::Future>(work: F) -> F::Output {
+    if runtara_store_postgres::tenant_scope::current().is_some() {
+        return work.await;
+    }
+    match only_tenant(crate::config::try_get().map(|config| config.served_tenants.as_slice())) {
+        Some(tenant) => runtara_store_postgres::tenant_scope::scoped(tenant, work).await,
+        None => runtara_store_postgres::tenant_scope::locating(work).await,
+    }
+}
+
+/// The one tenant of `served`, if it is exactly one.
+fn only_tenant(served: Option<&[String]>) -> Option<String> {
+    match served {
+        Some([only]) => Some(only.clone()),
+        _ => None,
+    }
+}
+
 /// The tenants this process serves, for the OAuth callback that names no
 /// tenant: it learns the tenant from the flow, then runs the rest of the
 /// request in that tenant's scope, as [`scope_requested_tenant`] does for a
@@ -110,6 +134,21 @@ fn split_tenant(uri: &Uri, is_served: impl Fn(&str) -> bool) -> Option<(String, 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn what_a_request_names_is_the_only_served_tenants_where_one_is_served() {
+        let served = |tenants: &[&str]| -> Vec<String> {
+            tenants.iter().map(|tenant| (*tenant).to_owned()).collect()
+        };
+        assert_eq!(
+            super::only_tenant(Some(&served(&["acme"]))),
+            Some("acme".to_owned())
+        );
+        // Several served, or none known: it is not for this to say whose.
+        assert_eq!(super::only_tenant(Some(&served(&["acme", "other"]))), None);
+        assert_eq!(super::only_tenant(Some(&served(&[]))), None);
+        assert_eq!(super::only_tenant(None), None);
+    }
+
     use super::*;
 
     fn split(uri: &str) -> Option<(String, String)> {

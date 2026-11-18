@@ -69,7 +69,9 @@ fn parse_webhook_max_body_bytes(raw: Option<&str>) -> usize {
 )]
 pub async fn capture_http_event(
     State(pool): State<PgPool>,
-    State(connections): State<std::sync::Arc<runtara_connections::ConnectionsFacade>>,
+    State(check): State<
+        std::sync::Arc<dyn crate::api::services::webhook_verification::WebhookCheck>,
+    >,
     State(engine): State<std::sync::Arc<dyn crate::engine::Engine>>,
     Path((trigger_id, action)): Path<(String, String)>,
     Query(metadata): Query<crate::api::dto::workflows::RunLabelQuery>,
@@ -128,9 +130,10 @@ pub async fn capture_http_event(
     let trigger_repo = TriggerRepository::new(pool.clone());
     // A webhook is unauthenticated: its tenant is its trigger's, and only a
     // tenant this process serves.
-    let found =
-        runtara_store_postgres::tenant_scope::locating(trigger_repo.get_by_id(&trigger_id, None))
-            .await;
+    let found = crate::middleware::tenant_path::finding_the_tenant(
+        trigger_repo.get_by_id(&trigger_id, None),
+    )
+    .await;
     let trigger = match found {
         Ok(Some(t))
             if crate::config::is_served_tenant(
@@ -167,13 +170,7 @@ pub async fn capture_http_event(
     if let Some(ref body_bytes) = raw_body_bytes
         && let Err(e) = runtara_store_postgres::tenant_scope::scoped(
             tenant_id.clone(),
-            crate::api::services::webhook_verification::verify_webhook(
-                &connections,
-                &trigger.configuration,
-                &tenant_id,
-                &headers,
-                body_bytes,
-            ),
+            check.check(&trigger, &tenant_id, &headers, body_bytes),
         )
         .await
     {

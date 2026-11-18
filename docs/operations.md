@@ -105,7 +105,7 @@ Paths are relative to `crates/`.
 | Concept | Where it comes from | Status |
 |---|---|---|
 | Run status | `queued`, `compiling`, `running`, `suspended`, `completed`, `failed`, `timeout`, `cancelled`; a suspended run has a `suspensionReason` (`waiting_signal`, `waiting_instances`, `paused`, `sleeping`, `shutdown`) | yes |
-| Business key | Run label: set by the execute API (`runLabel`), HTTP event and sync triggers (`?runLabel=`) and `control:start`. Cron, chat, channel and replayed runs have none. Filter is exact match (`runLabel`); `search` also matches it as a substring | yes |
+| Business key | Run label: set by the execute API (`runLabel`), HTTP event and sync triggers (`?runLabel=`) and `control:start`. Cron, chat and replayed runs have none. Filter is exact match (`runLabel`); `search` also matches it as a substring | yes |
 | Parent run | `parentInstanceId` on runs started by `control:start`, with a list filter | yes |
 | State | `stateSchema` on the graph; `SetState` / `GetState` steps (DSL 3.5.0); stored in `instance_state` (64 KiB cap, UTC date-times) | yes |
 | Reading state | One run: `GET /api/runtime/workflows/instances/{id}` returns `state` and `stateUpdatedAt`. The workflow-scoped `GET /workflows/{wf}/instances/{id}`, which the run detail page uses, does not | partly |
@@ -114,7 +114,7 @@ Paths are relative to `crates/`.
 | Listing requests | Per run: `.../instances/{id}/pending-input` and `.../instances/{id}/actions`. Per workflow: `GET /workflows/{wf}/actions` (paging only, no key filter). The list shows `hasPendingInput` per run. Nothing lists requests tenant-wide or by action key | partly |
 | Answering | `POST /api/runtime/signals/{instanceId}` with `{requestId, operationId, payload}` returns a receipt. The first answer wins (`INPUT_ALREADY_ANSWERED`); the same `operationId` replays the receipt; a closed request or ended run is `INPUT_INACTIVE`; a schema failure is `INPUT_INVALID_PAYLOAD` | yes |
 | Answer validation | Server checks types and `required`; for flat field maps it does not enforce `enum`, `pattern` or `min`/`max` (`runtara-dsl/src/input_validation.rs`). The UI form does | partly |
-| Who answered | Not recorded for answers from the UI, API or channels (`acceptance_context` stays empty). `control:send-signal` records the calling run. `audit_events` exists but is written only for API tokens and control mutations | no |
+| Who answered | Not recorded for answers from the UI or the API (`acceptance_context` stays empty). `control:send-signal` records the calling run. `audit_events` exists but is written only for API tokens and control mutations | no |
 | Errors | A run's `error` is a string. The structured error (`code`, `category`, `severity`, `retryable`, `attributes`) is on the failed step, through step summaries (`GET /workflows/{wf}/instances/{id}/steps`). List rows carry no error | partly |
 | Run actions | Stop, pause, resume (`POST /workflows/instances/{id}/stop\|pause\|resume`); replay (`.../replay`) starts a new run of the latest version with the original inputs and no label. There is no retry from the failed step | yes |
 | Other runs from a workflow | Control agent: `get`, `get-state`, `query` (with a state filter), `list-pending-signals`, `send-signal`, `start`, `cancel`, `pause`, `resume` | yes |
@@ -597,8 +597,7 @@ response envelope:
 - `GET/POST /operations/views` and `PUT/DELETE /operations/views/{id}` persist
   tenant-scoped views. Updates and deletion require the current `revision`;
   stale writes receive 409. Each view belongs to exactly one workflow.
-- Answers reuse `/signals`; authenticated session API answers also retain
-  their original actor through queued delivery and receipt retries.
+- Answers reuse `/signals`.
 
 View `formats` contain only generic display options: `kind` (`text`, `number`,
 `date`, `datetime`, `relative`), `decimals`, `prefix`, and `suffix`. For example,

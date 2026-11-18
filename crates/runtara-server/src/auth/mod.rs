@@ -1,5 +1,6 @@
 pub mod jwks;
 pub mod jwt_validator;
+pub mod presented;
 pub mod provider;
 pub mod providers;
 
@@ -205,6 +206,8 @@ pub fn membership_policy() -> MembershipPolicy {
 /// everything else.
 #[derive(Clone)]
 pub struct AuthState {
+    /// Which way in this state authenticates callers of.
+    pub door: presented::Door,
     pub provider: Arc<dyn AuthProvider>,
     pub pool: PgPool,
     /// Per-tenant Valkey handle for membership/revocation reads. `None` when Valkey is not

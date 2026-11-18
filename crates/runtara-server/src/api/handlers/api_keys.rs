@@ -23,7 +23,7 @@ pub struct ApiKey {
     pub org_id: String,
     pub name: String,
     pub key_prefix: String,
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing, default)]
     #[sqlx(default)]
     #[allow(dead_code)]
     #[schema(read_only)]

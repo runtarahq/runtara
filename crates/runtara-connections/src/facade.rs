@@ -366,20 +366,6 @@ impl ConnectionsFacade {
         )
         .await
     }
-    /// Get a connection by ID without tenant filter (for webhook routing).
-    ///
-    /// SECURITY: Used only by channel webhook routing where the connection_id
-    /// in the URL acts as the authentication token.
-    pub async fn get_channel_connection(
-        &self,
-        id: &str,
-    ) -> Result<Option<ConnectionWithParameters>, ConnectionsError> {
-        self.repo()
-            .get_channel_connection(id)
-            .await
-            .map_err(ConnectionsError::Database)
-            .and_then(sealed_only)
-    }
 
     // ── Validation ──────────────────────────────────────────────────────
 
@@ -1038,7 +1024,11 @@ mod signature_tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(!stored.to_string().contains(SECRET));
+        assert!(
+            !crate::sealed::testing::without_sealed(&stored)
+                .to_string()
+                .contains(SECRET)
+        );
         let connection = connection(stored, true);
 
         assert_checks(&facade(Some(sealed)), &connection).await;

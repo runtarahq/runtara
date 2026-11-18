@@ -352,10 +352,10 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         // ── Workflows: execute / run control ─────────────────────────────
         ("POST", "/api/runtime/workflows/{id}/versions/{version}/compile") => WorkflowExecute,
         ("POST", "/api/runtime/workflows/{id}/execute") => WorkflowExecute,
-        ("POST", "/api/runtime/workflows/{id}/chat") => WorkflowExecute,
-        ("POST", "/api/runtime/workflows/{id}/chat/start") => WorkflowExecute,
-        ("POST", "/api/runtime/workflows/{id}/sessions") => WorkflowExecute,
-        ("POST", "/api/runtime/sessions/{sessionId}/events") => WorkflowExecute,
+        // A conversation drives runs of its workflow: opening one, sending
+        // into it and deleting it are the workflow's execution.
+        ("PUT" | "DELETE", "/api/runtime/workflows/{id}/conversations/{key}") => WorkflowExecute,
+        ("POST", "/api/runtime/workflows/{id}/conversations/{key}/messages") => WorkflowExecute,
         ("POST", "/api/runtime/workflows/{id}/schedule") => WorkflowExecute,
         ("POST", "/api/runtime/workflows/instances/{instanceId}/stop") => WorkflowExecute,
         ("POST", "/api/runtime/workflows/instances/{instanceId}/pause") => WorkflowExecute,
@@ -385,8 +385,9 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         ("POST", "/api/runtime/operations/views") => WorkflowUpdate,
         ("PUT" | "DELETE", "/api/runtime/operations/views/{id}") => WorkflowUpdate,
         ("POST", "/api/runtime/operations/requests/query") => InvocationHistoryRead,
-        ("GET", "/api/runtime/sessions/{sessionId}/events") => InvocationHistoryRead,
-        ("GET", "/api/runtime/sessions/{sessionId}/pending-input") => InvocationHistoryRead,
+        // What was said in a conversation is its runs' history.
+        ("GET", "/api/runtime/workflows/{id}/conversations/{key}") => InvocationHistoryRead,
+        ("GET", "/api/runtime/workflows/{id}/conversations/{key}/events") => InvocationHistoryRead,
         ("GET", "/api/runtime/workflows/{id}/instances") => InvocationHistoryRead,
         ("GET", "/api/runtime/workflows/{id}/instances/{instanceId}") => InvocationHistoryRead,
         ("GET", "/api/runtime/workflows/{id}/instances/{instanceId}/checkpoints") => {

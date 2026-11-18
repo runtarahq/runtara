@@ -32,6 +32,13 @@ scoped README files, examples.
 - Workflow agents are standalone component crates under
   `crates/agents/runtara-agent-*`. To add or change an integration agent or a
   connection type, follow `docs/adding-an-agent.md`.
+- A chat with a workflow is a conversation (`docs/native-chat.md`): found by
+  a key, kept by the engine (`api/services/conversations.rs`), carried by
+  one run after another, and answered with the built-in `conversation`
+  agent. The server has no code for a chat platform: one reaches a workflow
+  as an integration on the conversation, made of workflows and agents. Do
+  not add a platform's webhook route, verifier or reply adapter to the
+  server.
 - `crates/runtara-agents` contains host-only support, including connection
   extractors. Do not add a
   normal workflow agent there.
@@ -102,6 +109,36 @@ scoped README files, examples.
   process: no artifact store, no staged agents, no installed component
   release. What it needs of those it asks the engine. Do not add to what the
   API role is given (`roles::given_to_the_api_role` lists what it refuses).
+- The engine takes nothing on the API's word. A call made for a caller
+  crosses with what the caller presented (`auth::presented`), and the
+  engine verifies it (`engine/listener.rs`): work that outlives its request
+  keeps it with `presented::inherit` or `presented::kept`, as it keeps the
+  tenant's scope. Every operation names the permissions it `needs` in
+  `wire.rs`: those of the routes that ask it (`permission_for`), which
+  `engine::remote::tests` holds it to. What makes a workflow runnable is the engine's
+  record in the runtime database (`engine/approvals.rs`), not a row of the
+  server database: do not add a path that runs a definition, an image or a
+  version because the server database names it. The API's side does not
+  write a table the engine's records are in, nor look across tenants; a new
+  table the API reads or writes is granted in
+  `scripts/roles/api-database-role.sql`, and a new Valkey key in
+  `scripts/roles/api-valkey-user.acl`; `docker-compose.roles.yml` carries a
+  copy of both, which a test in `roles.rs` holds to them.
+- A workflow's graph is compiled in a sandbox where one is configured
+  (`compile_sandbox.rs`, `RUNTARA_COMPILER_WASM`), and always in an engine
+  that is a process of its own. What a compile hands back is input: do not
+  record or act on a field of a build's output that the engine has not
+  checked or derived itself (`api/services/compilation.rs`). Give the
+  compiler nothing but the request and the component files.
+- Intake (`RUNTARA_ROLE=intake`, `start_as_intake` in `server.rs`) receives
+  what anyone may send and holds no run state. Do not give it the runtime
+  database, a connection's row or the key that opens one
+  (`roles::given_to_the_intake_role` lists what it refuses). What it needs
+  to check a webhook is kept with the trigger
+  (`api/services/webhook_verification.rs`); what it needs of the engine is
+  an operation in `wire::ASKED_BY_INTAKE`, which does only what the engine
+  does for whoever sent the request. A table or Valkey key it uses is
+  granted in `scripts/roles/intake-*`.
 - Never read, print, log, or commit credential values. Treat `.env*`, tokens,
   connection parameters, and database URLs as sensitive.
 - Do not hand-edit generated artifacts or ignored build outputs.

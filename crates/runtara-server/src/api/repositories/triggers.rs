@@ -223,84 +223,33 @@ impl TriggerRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Merge `patch` (the keys webhook registration manages: `webhook_secret`,
-    /// `platform`) into a trigger's configuration, leaving every other key as
-    /// it is, so an edit saved while the platform was being called is kept.
-    ///
-    /// Applies only while the trigger is still bound to `connection_id`, the
-    /// connection that was registered: a trigger moved to another one since
-    /// must not take this one's platform or secret. Returns whether it applied.
-    pub async fn merge_webhook_keys(
+    /// What checking `id`'s webhook needs, as the engine last wrote it from
+    /// the trigger's connection. See
+    /// [`crate::api::services::webhook_verification`].
+    pub async fn webhook_verification(
         &self,
         id: &str,
-        connection_id: &str,
-        patch: &serde_json::Value,
-    ) -> Result<bool, sqlx::Error> {
-        let result = sqlx::query(
-            r#"
-            UPDATE public.invocation_trigger
-            SET configuration = configuration || $3, updated_at = NOW()
-            WHERE id = $1 AND configuration->>'connection_id' = $2
-            "#,
+    ) -> Result<Option<serde_json::Value>, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT webhook_verification FROM public.invocation_trigger WHERE id = $1",
         )
         .bind(id)
-        .bind(connection_id)
-        .bind(patch)
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected() > 0)
+        .fetch_optional(&self.pool)
+        .await
+        .map(Option::flatten)
     }
 
-    /// Put a trigger's `webhook_secret` back to `previous`, or remove it when
-    /// there was none, but only while it still holds `expected` and is still
-    /// bound to `connection_id`: a secret stored since, e.g. by another
-    /// registration, or a trigger moved to another connection, is left
-    /// alone. Returns whether the secret was restored.
-    pub async fn restore_webhook_secret(
-        &self,
-        id: &str,
-        connection_id: &str,
-        expected: &str,
-        previous: Option<&str>,
-    ) -> Result<bool, sqlx::Error> {
-        let result = sqlx::query(
-            r#"
-            UPDATE public.invocation_trigger
-            SET configuration = CASE
-                    WHEN $4::text IS NULL THEN configuration - 'webhook_secret'
-                    ELSE configuration || jsonb_build_object('webhook_secret', $4::text)
-                END,
-                updated_at = NOW()
-            WHERE id = $1
-              AND configuration->>'connection_id' = $2
-              AND configuration->>'webhook_secret' = $3
-            "#,
-        )
-        .bind(id)
-        .bind(connection_id)
-        .bind(expected)
-        .bind(previous)
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected() > 0)
-    }
-
-    /// The Channel triggers of `tenant_id` whose webhook secret is stored
-    /// readable: each trigger's id, its connection and the secret.
-    pub async fn readable_webhook_secrets(
+    /// The triggers of `tenant_id` that are bound to a connection: each one's
+    /// id, the connection, and what is kept for checking its webhook.
+    pub async fn bound_to_connections(
         &self,
         tenant_id: &str,
-    ) -> Result<Vec<(String, String, String)>, sqlx::Error> {
+    ) -> Result<Vec<(String, String, Option<serde_json::Value>)>, sqlx::Error> {
         sqlx::query_as(
             r#"
-            SELECT id, configuration->>'connection_id', configuration->>'webhook_secret'
+            SELECT id, configuration->>'connection_id', webhook_verification
             FROM public.invocation_trigger
-            WHERE trigger_type = 'CHANNEL'
-              AND tenant_id = $1
-              AND configuration->>'connection_id' IS NOT NULL
-              AND COALESCE(configuration->>'webhook_secret', '') <> ''
-              AND left(configuration->>'webhook_secret', 8) <> '$sealed:'
-            ORDER BY id
+            WHERE tenant_id = $1 AND configuration->>'connection_id' IS NOT NULL
             "#,
         )
         .bind(tenant_id)
@@ -308,50 +257,27 @@ impl TriggerRepository {
         .await
     }
 
-    /// The newest active Channel trigger visible to `tenant_id` that is bound
-    /// to `connection_id` and whose workflow is still live, or `None`.
-    ///
-    /// Channel webhooks are registered per connection, and inbound requests
-    /// are validated against, and routed to, this trigger, so it is the one
-    /// whose secret the platform must hold. Triggers of a dead workflow are
-    /// skipped: they are about to be deactivated, so the webhook must not be
-    /// kept alive for them, nor messages sent to them. Liveness follows the
-    /// orphan rule of [`Self::deactivate_orphaned`]. A `created_at` tie is
-    /// broken by id, so every caller picks the same trigger.
-    ///
-    /// `except_trigger_id` leaves one trigger out, to find the trigger whose
-    /// secret was in use before that one became active.
-    pub async fn newest_live_channel_trigger(
+    /// Keeps `material` for checking `id`'s webhook, while the trigger is
+    /// still bound to `connection_id`.
+    pub async fn set_webhook_verification(
         &self,
+        id: &str,
         connection_id: &str,
-        tenant_id: &str,
-        except_trigger_id: Option<&str>,
-    ) -> Result<Option<InvocationTrigger>, sqlx::Error> {
-        sqlx::query_as::<_, InvocationTrigger>(
+        material: &serde_json::Value,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
             r#"
-            SELECT t.id, t.tenant_id, t.workflow_id, t.trigger_type, t.active, t.configuration,
-                   t.created_at, t.last_run, t.updated_at, t.remote_tenant_id, t.single_instance
-            FROM public.invocation_trigger t
-            WHERE t.trigger_type = 'CHANNEL'
-              AND t.active = true
-              AND t.configuration->>'connection_id' = $1
-              AND t.tenant_id = $2
-              AND ($3::text IS NULL OR t.id <> $3)
-              AND EXISTS (
-                  SELECT 1 FROM workflows w
-                  WHERE w.workflow_id = t.workflow_id
-                    AND w.deleted_at IS NULL
-                    AND w.tenant_id = t.tenant_id
-              )
-            ORDER BY t.created_at DESC, t.id DESC
-            LIMIT 1
+            UPDATE public.invocation_trigger
+            SET webhook_verification = $3
+            WHERE id = $1 AND configuration->>'connection_id' = $2
             "#,
         )
+        .bind(id)
         .bind(connection_id)
-        .bind(tenant_id)
-        .bind(except_trigger_id)
-        .fetch_optional(&self.pool)
-        .await
+        .bind(material)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Deactivate every active trigger of `tenant_id` whose workflow is

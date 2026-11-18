@@ -13,7 +13,8 @@
 #   2. what each holds  the API's environment has no key, no runtime database
 #                       and no way to seal; the engine has no public listener
 #   3. runs             a workflow is made, compiled and run through the API,
-#                       on both executors; one is run and waited for
+#                       on both executors; one is run and waited for, and
+#                       one is started by a message into a conversation
 #   4. a connection     made through the API, sealed by seal, and used
 #   5. certificates     the engine's listener takes the API's certificate and
 #                       not an executor's; the run channel refuses the API's
@@ -56,6 +57,8 @@ SECOND_API_PORT="${TEST_SECOND_API_PORT:-17861}"
 ENGINE_PORT="${TEST_ENGINE_PORT:-17865}"
 # Where the engine would serve the public API, if it served one.
 ENGINE_PUBLIC_PORT="${TEST_ENGINE_PUBLIC_PORT:-17866}"
+# Where the engine says it is up, and nothing else.
+ENGINE_HEALTH_PORT="${TEST_ENGINE_HEALTH_PORT:-17867}"
 TEST_CORE_PORT="${TEST_CORE_PORT:-18861}"
 TEST_ENV_PORT="${TEST_ENV_PORT:-18862}"
 TEST_CORE_HTTP_PORT="${TEST_CORE_HTTP_PORT:-18863}"
@@ -70,6 +73,9 @@ RUNTARA_SERVER_BIN="${RUNTARA_SERVER_BIN:-${TARGET_DIR}/debug/runtara-server}"
 EXECUTOR_BIN="${TARGET_DIR}/debug/runtara-executor"
 COMPONENTS_DIR="${RUNTARA_AGENT_COMPONENTS_DIR:-${PROJECT_ROOT}/target/wasm32-wasip2/release}"
 SQLX_OFFLINE="${SQLX_OFFLINE:-true}"
+# The compiler's WASI command, which an engine that is a process of its own
+# compiles in: RUNTARA_COMPILER_WASM, or built beside the components.
+COMPILER_WASM="${RUNTARA_COMPILER_WASM:-${COMPONENTS_DIR}/runtara-compile-sandboxed.wasm}"
 
 WORK_DIR="$(mktemp -d -t runtara_two_roles_e2e_XXXXXX)"
 # A socket's path is short.
@@ -138,6 +144,8 @@ engine_env() {
     exec env \
     RUNTARA_ROLE=engine \
     RUNTARA_ENGINE_LISTEN="127.0.0.1:${ENGINE_PORT}" \
+    RUNTARA_ENGINE_HEALTH_LISTEN="127.0.0.1:${ENGINE_HEALTH_PORT}" \
+    RUNTARA_COMPILER_WASM="${COMPILER_WASM}" \
     RUNTARA_RUNNER=executor \
     RUNTARA_EXECUTOR_TLS_DIR="${WORK_DIR}/pki-engine" \
     RUNTARA_RUN_CHANNEL_LISTEN="127.0.0.1:${RUN_CHANNEL_PORT}" \
@@ -402,6 +410,10 @@ VALKEY_CONTAINER=$(docker run -d --rm -p "${TEST_VALKEY_PORT}:6379" valkey/valke
 for _ in {1..20}; do (echo > "/dev/tcp/127.0.0.1/${TEST_VALKEY_PORT}") 2>/dev/null && break; sleep 0.5; done
 psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_SERVER}" >/dev/null
 psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_RUNTIME}" >/dev/null
+if [ ! -f "${COMPILER_WASM}" ]; then
+    print_step "Building the compiler's WASI command..."
+    cargo build -p runtara-compile-guest --bin runtara-compile-sandboxed --release --target wasm32-wasip2 >&2
+fi
 start_seal
 
 # --- 1 ------------------------------------------------------------------
@@ -415,13 +427,23 @@ SAID=$(refused_start env -i "${API_ENV[@]}" "SERVER_PORT=${API_PORT}" \
     "${RUNTARA_SERVER_BIN}")
 echo "${SAID}" | grep -q "was given RUNTARA_CONNECTIONS_ENCRYPTION_KEY, RUNTARA_SEAL_SOCKET" \
     || { print_error "an API given a key and the way to seal did not refuse them: ${SAID}"; exit 1; }
+SAID=$(refused_start env -i "${API_ENV[@]}" "SERVER_PORT=${API_PORT}" \
+    "RUNTARA_ENGINE_HEALTH_LISTEN=127.0.0.1:${ENGINE_HEALTH_PORT}" "${RUNTARA_SERVER_BIN}")
+echo "${SAID}" | grep -q "was given RUNTARA_ENGINE_HEALTH_LISTEN" \
+    || { print_error "an API given the engine's health address did not refuse it: ${SAID}"; exit 1; }
 SAID=$(refused_start engine_env env -u RUNTARA_SEAL_MODE -u RUNTARA_SEAL_SOCKET "${RUNTARA_SERVER_BIN}")
 echo "${SAID}" | grep -q "RUNTARA_ROLE=engine needs a seal of its own" \
     || { print_error "an engine with seal in itself did not refuse to start: ${SAID}"; exit 1; }
+SAID=$(refused_start engine_env env -u RUNTARA_COMPILER_WASM "${RUNTARA_SERVER_BIN}")
+echo "${SAID}" | grep -q "RUNTARA_ROLE=engine needs RUNTARA_COMPILER_WASM" \
+    || { print_error "an engine with no sandbox to compile in did not refuse to start: ${SAID}"; exit 1; }
+SAID=$(refused_start engine_env RUNTARA_COMPILER_WASM="${WORK_DIR}/not-a-compiler.wasm" "${RUNTARA_SERVER_BIN}")
+echo "${SAID}" | grep -q "names a compiler that could not be loaded" \
+    || { print_error "an engine whose compiler is not there did not refuse to start: ${SAID}"; exit 1; }
 SAID=$(refused_start engine_env env -u RUNTARA_ENGINE_LISTEN "${RUNTARA_SERVER_BIN}")
 echo "${SAID}" | grep -q "RUNTARA_ROLE=engine needs RUNTARA_ENGINE_LISTEN" \
     || { print_error "an engine with nowhere to listen did not refuse to start: ${SAID}"; exit 1; }
-print_success "an API refuses the engine's holdings; an engine refuses to be unreachable, or to hold seal's keys"
+print_success "an API refuses the engine's holdings; an engine refuses to be unreachable, to hold seal's keys, or to compile in its own process"
 
 # --- 2 ------------------------------------------------------------------
 print_step "2. Starting the engine, two executors and the API..."
@@ -436,6 +458,8 @@ for name in "${API_ENV[@]}"; do
             print_error "the API is given ${name%%=*}"; exit 1 ;;
     esac
 done
+grep -q "Workflows are compiled in a sandbox" "${ENGINE_LOG}" \
+    || { print_error "the engine does not say it compiles in a sandbox"; exit 1; }
 grep -q "Engine at https://127.0.0.1:${ENGINE_PORT} answers" "${API_LOG}" \
     || { print_error "the API does not say the engine answers"; exit 1; }
 if grep -Eq "Embedded runtara|Component dispatcher loaded|Connection secrets are held by seal|Execution engine initialized" "${API_LOG}"; then
@@ -455,7 +479,13 @@ if healthy "${ENGINE_PUBLIC_PORT}"; then
 fi
 (echo > "/dev/tcp/127.0.0.1/${ENGINE_PUBLIC_PORT}") 2>/dev/null \
     && { print_error "the engine listens on the public port"; exit 1; }
-print_success "the API holds no key, no runtime database and no way to seal; the engine has no public listener"
+# Where it is told to, the engine says it is up, and answers nothing else.
+healthy "${ENGINE_HEALTH_PORT}" || { print_error "the engine does not say it is up"; exit 1; }
+for path in /api/runtime/workflows /ready /engine/v1/operations/Facts; do
+    [ "$(http_status "http://127.0.0.1:${ENGINE_HEALTH_PORT}${path}")" = "404" ] \
+        || { print_error "the engine's health listener answers ${path}"; exit 1; }
+done
+print_success "the API holds no key, no runtime database and no way to seal; the engine has no public listener, and says it is up where it is told to"
 
 # --- 3 ------------------------------------------------------------------
 print_step "3. A workflow is made, compiled and run through the API..."
@@ -511,6 +541,22 @@ RESP=$(curl -sS --max-time 180 -X POST -H 'Content-Type: application/json' -d '{
     "${API}/events/http-sync/${ANSWER}")
 echo "${RESP}" | jq -e '.success == true and .outputs.answer == 42' >/dev/null \
     || { print_error "a run that is waited for did not complete: ${RESP}"; exit 1; }
+# A conversation is the engine's to keep and carry, and is asked for through
+# the API: a message starts a run, and what became of it is read back.
+CONVERSATION="${API}/workflows/${ANSWER}/conversations/two-roles"
+RESP=$(curl -sS --max-time 60 -X POST -H 'Content-Type: application/json' \
+    -d '{"id":"m-1","text":"hello"}' "${CONVERSATION}/messages")
+[ "$(echo "${RESP}" | jq -r '.data.state // empty')" = "started" ] \
+    || { print_error "a message did not start a conversation's run through the API: ${RESP}"; exit 1; }
+for _ in $(seq 1 120); do
+    RESP=$(curl -sS --max-time 30 "${CONVERSATION}/events")
+    [ "$(echo "${RESP}" | jq -r '[.data[]? | select(.kind == "run_ended")] | length')" = "1" ] && break
+    sleep 0.5
+done
+echo "${RESP}" | jq -e '[.data[] | select(.kind == "run_ended")][0].body.status == "completed"' >/dev/null \
+    || { print_error "a conversation's run was not carried to its end: ${RESP}"; exit 1; }
+[ "$(curl -sS "${CONVERSATION}" | jq -r '.data.key')" = "two-roles" ] \
+    || { print_error "a conversation is not read through the API"; exit 1; }
 # The agents the API describes are the ones the engine runs.
 [ "$(curl -sS "${API}/agents" | jq -r '(.agents // .data // .) | length')" -gt 0 ] \
     || { print_error "the engine's agents are not listed through the API"; exit 1; }

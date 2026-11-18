@@ -19,6 +19,7 @@
 //!   of the task that makes it, which does not leave the process;
 //! - nothing is handed across but values: no pool, no client, no callback.
 
+pub mod approvals;
 pub mod listener;
 pub mod remote;
 mod wire;
@@ -27,9 +28,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use runtara_core::persistence::inputs::{
-    InputError, InputReceipt, InputRequest, InputRequestPage, InputResult,
-};
+use runtara_core::persistence::inputs::{InputError, InputReceipt, InputResult};
 use runtara_store_postgres::tenant_scope::scoped;
 use serde_json::Value;
 
@@ -37,13 +36,16 @@ use crate::api::dto::agent_testing::TestEngine;
 use crate::api::dto::executions::{ExecutionFilters, ExecutionSummary};
 use crate::api::dto::operations::OperationQueue;
 use crate::api::dto::trigger_event::TriggerEvent;
-use crate::api::dto::triggers::InvocationTrigger;
 use crate::api::dto::workflows::{PageWorkflowInstanceHistoryDto, WorkflowInstanceDto};
 use crate::api::services::agent_testing::{
     AgentTestingService, ServiceError as AgentTestError, TestResult,
 };
 use crate::api::services::compilation::{
     CompilationResultDto, CompilationService, ServiceError as CompilationError,
+};
+use crate::api::services::conversations::{
+    ConversationEvent, ConversationResult, ConversationState, Conversations, EngineRuns, Message,
+    OpenConversation, Sent,
 };
 use crate::api::services::pending_inputs::PendingInputPage;
 use crate::api::services::workflow_runtime::{
@@ -78,8 +80,6 @@ pub enum Served {
     OAuthCallbacks,
     /// A tenant's object model: schemas, instances, SQL and CSV.
     ObjectModel,
-    /// Webhooks of chat channels, each checked against its connection.
-    Channels,
     /// Agents: what there are, what each can do, and running one on request.
     Agents,
     /// Triggers: registering one may register a webhook at its provider.
@@ -87,9 +87,6 @@ pub enum Served {
     /// A trigger's HTTP events, each checked against its connection, from
     /// whoever sends them.
     Events,
-    /// The same, asked by a caller the API authenticated, whose role is held
-    /// to what it may run.
-    EventsForCallers,
 }
 
 impl Served {
@@ -98,11 +95,9 @@ impl Served {
         Served::Connections,
         Served::OAuthCallbacks,
         Served::ObjectModel,
-        Served::Channels,
         Served::Agents,
         Served::Triggers,
         Served::Events,
-        Served::EventsForCallers,
     ];
 
     /// The part's name, as it is written between two processes.
@@ -111,11 +106,19 @@ impl Served {
             Served::Connections => "connections",
             Served::OAuthCallbacks => "o-auth-callbacks",
             Served::ObjectModel => "object-model",
-            Served::Channels => "channels",
             Served::Agents => "agents",
             Served::Triggers => "triggers",
             Served::Events => "events",
-            Served::EventsForCallers => "events-for-callers",
+        }
+    }
+
+    /// Whether the part is served to a caller the API authenticated. The
+    /// others are sent by anyone, and say whose they are themselves: a
+    /// provider's redirect, a webhook.
+    pub(crate) fn has_a_caller(self) -> bool {
+        match self {
+            Served::Connections | Served::ObjectModel | Served::Agents | Served::Triggers => true,
+            Served::OAuthCallbacks | Served::Events => false,
         }
     }
 
@@ -279,21 +282,6 @@ pub trait Engine: Send + Sync {
 
     // ---- Input a run waits for --------------------------------------------
 
-    async fn list_input_requests(
-        &self,
-        tenant_id: &str,
-        instances: &[String],
-        offset: u64,
-        limit: u32,
-    ) -> InputResult<InputRequestPage>;
-
-    async fn get_input_request(
-        &self,
-        tenant_id: &str,
-        instance_id: &str,
-        request: &str,
-    ) -> InputResult<InputRequest>;
-
     async fn submit_input_response(
         &self,
         tenant_id: &str,
@@ -319,6 +307,51 @@ pub trait Engine: Send + Sync {
         tenant_id: &str,
         instance_id: &str,
     ) -> InputResult<PendingInputPage>;
+
+    // ---- Conversations with a workflow ------------------------------------
+
+    /// Opens the conversation `key` names with a workflow, or finds it.
+    async fn open_conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        open: OpenConversation,
+    ) -> ConversationResult<ConversationState>;
+
+    async fn conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+    ) -> ConversationResult<ConversationState>;
+
+    /// Sends a message into a conversation, which starts a run with it,
+    /// answers what its run waits for, or holds it until its turn.
+    async fn send_conversation_message(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        message: Message,
+    ) -> ConversationResult<Sent>;
+
+    /// What a conversation has for its user after event `after`.
+    async fn conversation_events(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        after: i64,
+        limit: u32,
+    ) -> ConversationResult<Vec<ConversationEvent>>;
+
+    async fn delete_conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+    ) -> ConversationResult<bool>;
 
     // ---- Actions a workflow offers while it waits ---------------------------
 
@@ -399,15 +432,38 @@ pub trait Engine: Send + Sync {
     /// deleted.
     async fn unstage_workflow_agent(&self, tenant_id: &str, slug: &str) -> Result<(), String>;
 
+    /// The API key whose hash is `key_hash`, whichever tenant's it is, if it
+    /// is still good. The key is all a caller presented, so its row is looked
+    /// for across tenants, which only the engine may do.
+    async fn api_key_by_hash(
+        &self,
+        key_hash: &str,
+    ) -> Result<crate::api::handlers::api_keys::ApiKey, String>;
+
+    /// Makes `version` the one that runs when a run names none, on the
+    /// engine's own record. `Ok(false)` if the workflow has no such version.
+    async fn set_current_version(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+    ) -> Result<bool, String>;
+
+    /// Forgets what a version was compiled to, so that it is compiled again
+    /// before it next runs: its definition was changed, or a rebuild was
+    /// asked for. The record of compilations is the engine's.
+    async fn invalidate_compilation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+    ) -> Result<(), String>;
+
     // ---- Connections, as a workflow names them ----------------------------
 
     /// The connections a tenant has: what a workflow's steps may name. Their
     /// ids, kinds and titles, and nothing of what they hold.
     async fn tenant_connections(&self, tenant_id: &str) -> Result<Vec<ConnectionRef>, String>;
-
-    /// Takes down, at their providers, the webhooks of chat channel triggers
-    /// that were removed. Best effort: what fails is logged.
-    async fn reconcile_channel_webhooks(&self, tenant_id: &str, removed: &[InvocationTrigger]);
 
     // ---- Compilation, through the queue -------------------------------------
 
@@ -490,6 +546,8 @@ pub struct LocalEngine {
     executions: Arc<ExecutionEngine>,
     /// The server database, which the engine reads definitions from.
     pool: sqlx::PgPool,
+    /// The conversations with workflows, and what carries them.
+    conversations: Conversations,
     /// The agents a compiled workflow may use.
     agent_catalog: Option<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     /// Runs an agent's capability on request, if this server allows it.
@@ -499,6 +557,10 @@ pub struct LocalEngine {
     /// The parts of the API this engine serves, each a router of its own.
     /// They are built after the engine is, from what the engine holds.
     served: std::sync::RwLock<std::collections::HashMap<Served, axum::Router>>,
+    /// The engine that runs workflows, for a process that only receives
+    /// what anyone may send (intake): it has no runtime, and asks that
+    /// engine to run a workflow and wait.
+    runs_elsewhere: Option<Arc<remote::RemoteEngine>>,
 }
 
 impl LocalEngine {
@@ -508,6 +570,11 @@ impl LocalEngine {
         pool: sqlx::PgPool,
     ) -> Self {
         Self {
+            conversations: Conversations::new(
+                pool.clone(),
+                Arc::new(EngineRuns::new(runtime.clone(), executions.clone())),
+            )
+            .with_queue_bound(crate::api::services::conversations::queue_bound_from_env()),
             runtime,
             executions,
             pool,
@@ -515,7 +582,19 @@ impl LocalEngine {
             agent_testing: None,
             connections: None,
             served: std::sync::RwLock::default(),
+            runs_elsewhere: None,
         }
+    }
+
+    /// The conversations this engine keeps, for what carries them.
+    pub fn conversations(&self) -> Conversations {
+        self.conversations.clone()
+    }
+
+    /// For intake: workflows are run by `engine`, in another process.
+    pub fn with_runs_elsewhere(mut self, engine: Arc<remote::RemoteEngine>) -> Self {
+        self.runs_elsewhere = Some(engine);
+        self
     }
 
     /// With the tenants' connections.
@@ -627,6 +706,9 @@ impl Engine for LocalEngine {
     }
 
     async fn run_sync(&self, request: SyncRequest<'_>) -> Result<SyncExecution, ExecutionError> {
+        if let Some(engine) = &self.runs_elsewhere {
+            return engine.run_sync_for_anyone(request).await;
+        }
         self.executions.run_sync(request).await
     }
 
@@ -831,29 +913,6 @@ impl Engine for LocalEngine {
             .await
     }
 
-    async fn list_input_requests(
-        &self,
-        tenant_id: &str,
-        instances: &[String],
-        offset: u64,
-        limit: u32,
-    ) -> InputResult<InputRequestPage> {
-        self.inputs()?
-            .list_input_requests(tenant_id, instances, offset, limit)
-            .await
-    }
-
-    async fn get_input_request(
-        &self,
-        tenant_id: &str,
-        instance_id: &str,
-        request: &str,
-    ) -> InputResult<InputRequest> {
-        self.inputs()?
-            .get_input_request(tenant_id, instance_id, request)
-            .await
-    }
-
     async fn submit_input_response(
         &self,
         tenant_id: &str,
@@ -891,6 +950,61 @@ impl Engine for LocalEngine {
             instance_id,
         )
         .await
+    }
+
+    async fn open_conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        open: OpenConversation,
+    ) -> ConversationResult<ConversationState> {
+        self.conversations
+            .open(tenant_id, workflow_id, key, open)
+            .await
+    }
+
+    async fn conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+    ) -> ConversationResult<ConversationState> {
+        self.conversations.state(tenant_id, workflow_id, key).await
+    }
+
+    async fn send_conversation_message(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        message: Message,
+    ) -> ConversationResult<Sent> {
+        self.conversations
+            .send(tenant_id, workflow_id, key, message)
+            .await
+    }
+
+    async fn conversation_events(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        after: i64,
+        limit: u32,
+    ) -> ConversationResult<Vec<ConversationEvent>> {
+        self.conversations
+            .events(tenant_id, workflow_id, key, after, limit)
+            .await
+    }
+
+    async fn delete_conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+    ) -> ConversationResult<bool> {
+        self.conversations.delete(tenant_id, workflow_id, key).await
     }
 
     async fn list_instance_actions(
@@ -988,6 +1102,9 @@ impl Engine for LocalEngine {
         version: i32,
         force_recompile: bool,
     ) -> Result<CompilationResultDto, CompilationError> {
+        approvals::approve_as_asked(tenant_id, workflow_id, version)
+            .await
+            .map_err(CompilationError::DatabaseError)?;
         self.compiler()
             .compile_workflow(tenant_id, workflow_id, version, force_recompile)
             .await
@@ -1000,6 +1117,9 @@ impl Engine for LocalEngine {
         version: i32,
         slug: String,
     ) -> Result<Value, CompilationError> {
+        approvals::approve_as_asked(tenant_id, workflow_id, version)
+            .await
+            .map_err(CompilationError::DatabaseError)?;
         self.compiler()
             .publish_workflow_agent(tenant_id, workflow_id, version, slug)
             .await
@@ -1023,6 +1143,69 @@ impl Engine for LocalEngine {
             .map_err(|error| error.to_string())
     }
 
+    async fn api_key_by_hash(
+        &self,
+        key_hash: &str,
+    ) -> Result<crate::api::handlers::api_keys::ApiKey, String> {
+        // Within a tenant already named, only that tenant's keys are found.
+        runtara_store_postgres::tenant_scope::locating(
+            crate::api::handlers::api_keys::validate_api_key_by_hash(&self.pool, key_hash),
+        )
+        .await
+    }
+
+    async fn set_current_version(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+    ) -> Result<bool, String> {
+        let repository =
+            crate::api::repositories::workflows::WorkflowRepository::new(self.pool.clone());
+        // The engine's record first: it is the one a run goes by. The server
+        // database's is what the API shows.
+        match repository
+            .version_exists(tenant_id, workflow_id, version)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return Ok(false),
+            Err(error) => return Err(error.to_string()),
+        }
+        if let Some(approvals) = approvals::installed() {
+            let by = approvals::asker().unwrap_or_else(|| "unknown".to_owned());
+            approvals
+                .set_current(tenant_id, workflow_id, version, &by)
+                .await?;
+        }
+        // Whoever chooses the version that runs asks for it to run.
+        approvals::approve_as_asked(tenant_id, workflow_id, version).await?;
+        match repository
+            .set_current_version(tenant_id, workflow_id, version)
+            .await
+        {
+            Ok(()) => Ok(true),
+            Err(sqlx::Error::RowNotFound) => Ok(false),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    async fn invalidate_compilation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+    ) -> Result<(), String> {
+        crate::api::repositories::workflows::WorkflowRepository::new(self.pool.clone())
+            .invalidate_compilation(tenant_id, workflow_id, version)
+            .await
+            .map_err(|error| error.to_string())?;
+        // A caller who changed the definition, or asked for it to be built
+        // again, approves it as it now stands: it is compiled when it next
+        // runs, as it was before the engine kept a record.
+        approvals::approve_as_asked(tenant_id, workflow_id, version).await
+    }
+
     async fn tenant_connections(&self, tenant_id: &str) -> Result<Vec<ConnectionRef>, String> {
         let Some(connections) = &self.connections else {
             return Err("this engine holds no connections".to_owned());
@@ -1040,19 +1223,6 @@ impl Engine for LocalEngine {
             .collect())
     }
 
-    async fn reconcile_channel_webhooks(&self, tenant_id: &str, removed: &[InvocationTrigger]) {
-        let Some(connections) = &self.connections else {
-            return;
-        };
-        crate::api::services::webhook_manager::reconcile_channel_webhooks(
-            &self.pool,
-            &crate::api::services::webhook_manager::WebhookManager::new(connections.clone()),
-            removed,
-            tenant_id,
-        )
-        .await;
-    }
-
     fn queues_compilations(&self) -> bool {
         self.compile_queue().is_some()
     }
@@ -1066,6 +1236,9 @@ impl Engine for LocalEngine {
         compiled: Option<ProductEvent>,
     ) -> Result<bool, CompilationQueueError> {
         let queue = self.queued_compiles()?;
+        approvals::approve_as_asked(tenant_id, workflow_id, version)
+            .await
+            .map_err(CompilationQueueError::ConnectionError)?;
         match compiled {
             Some(compiled) => {
                 crate::workers::compilation_worker::enqueue_compilation_with_event(
@@ -1217,6 +1390,10 @@ impl Engine for LocalEngine {
         // every other call is. The scope is entered here, on the engine's
         // side, and not taken from whatever task handed it over.
         let tenant = tenant_of(part, &request, crate::config::is_served_tenant);
+        let request_asker = request
+            .extensions()
+            .get::<crate::auth::AuthContext>()
+            .map(|caller| caller.user_id.clone());
         let Some(router) = router else {
             return axum::http::StatusCode::NOT_FOUND.into_response();
         };
@@ -1224,6 +1401,14 @@ impl Engine for LocalEngine {
             match router.oneshot(request).await {
                 Ok(response) => response,
                 Err(never) => match never {},
+            }
+        };
+        // What a caller asks of a part the engine serves, it asks as itself.
+        let asker = request_asker;
+        let answered = async move {
+            match asker {
+                Some(asker) => approvals::asked_by(asker, answered).await,
+                None => answered.await,
             }
         };
         match tenant {
@@ -1542,8 +1727,8 @@ mod serving {
         let engine: Arc<dyn Engine> = local_without_runtime();
         let response = engine
             .serve(
-                Served::Channels,
-                Request::post("/api/runtime/events/webhook/slack/c-1")
+                Served::Events,
+                Request::post("/api/runtime/events/http/t-1/run")
                     .body(Body::empty())
                     .unwrap(),
             )

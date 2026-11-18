@@ -1,0 +1,24 @@
+[package]
+name = "runtara-agent-conversation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Conversation agent — a workflow says something to whoever it is talking with — as a WebAssembly component"
+keywords = ["wasm", "component", "agent", "conversation"]
+categories = ["wasm"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wit-bindgen = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+runtara-agent-macro = { workspace = true }
+runtara-dsl = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+runtara-workflow-sdk = { path = "../../runtara-workflow-sdk" }
+runtara-workflow-api = { path = "../../runtara-workflow-api" }

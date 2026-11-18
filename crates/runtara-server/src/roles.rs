@@ -1,10 +1,11 @@
 // Copyright (C) 2026 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The server's two roles, and which background work is whose.
+//! The server's roles, and which background work is whose.
 //!
 //! The API takes requests; the engine owns durable execution and everything
-//! done with a connection's credentials (see [`crate::engine`]). One process
-//! runs both today. Each piece of background work is started for the role it
+//! done with a connection's credentials (see [`crate::engine`]); intake
+//! receives what anyone may send (a trigger's webhooks) and holds no run
+//! state. One process runs all three by default. Each piece of background work is started for the role it
 //! belongs to, so that a process that runs one role starts that role's work
 //! and none of the other's.
 
@@ -13,13 +14,17 @@ use std::sync::Mutex;
 
 use crate::shutdown::ShutdownCoordinator;
 
-/// One of the server's two roles.
+/// One of the server's roles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     /// Takes requests: handlers, MCP, and what keeps them answering.
     Api,
     /// Durable execution, and the use of connections' credentials.
     Engine,
+    /// What anyone may send: a trigger's webhooks, checked and queued. A
+    /// process that runs it alone holds no runtime database and may only ask
+    /// seal whether a signature is good (docs/splitting-the-engine.md).
+    Intake,
 }
 
 /// The roles a process runs.
@@ -27,14 +32,16 @@ pub enum Role {
 pub struct Roles {
     api: bool,
     engine: bool,
+    intake: bool,
 }
 
 impl Roles {
-    /// Both roles, in one process.
+    /// Every role, in one process.
     pub const fn all() -> Self {
         Self {
             api: true,
             engine: true,
+            intake: true,
         }
     }
 
@@ -43,6 +50,7 @@ impl Roles {
         Self {
             api: matches!(role, Role::Api),
             engine: matches!(role, Role::Engine),
+            intake: matches!(role, Role::Intake),
         }
     }
 
@@ -51,12 +59,14 @@ impl Roles {
         match role {
             Role::Api => self.api,
             Role::Engine => self.engine,
+            Role::Intake => self.intake,
         }
     }
 }
 
 impl Roles {
-    /// The roles `RUNTARA_ROLE` names: `all` (the default), `api` or `engine`.
+    /// The roles `RUNTARA_ROLE` names: `all` (the default), `api`, `engine`
+    /// or `intake`.
     pub fn from_env() -> Result<Self, String> {
         Self::named(std::env::var("RUNTARA_ROLE").ok().as_deref())
     }
@@ -66,8 +76,9 @@ impl Roles {
             None | Some("all") => Ok(Self::all()),
             Some("api") => Ok(Self::only(Role::Api)),
             Some("engine") => Ok(Self::only(Role::Engine)),
+            Some("intake") => Ok(Self::only(Role::Intake)),
             Some(other) => Err(format!(
-                "RUNTARA_ROLE is `{other}`; it is `all`, `api` or `engine`"
+                "RUNTARA_ROLE is `{other}`; it is `all`, `api`, `engine` or `intake`"
             )),
         }
     }
@@ -109,6 +120,19 @@ pub fn engine_listen() -> Result<Option<EngineListen>, String> {
     }))
 }
 
+/// `RUNTARA_ENGINE_HEALTH_LISTEN`: where an engine that binds no public
+/// listener says it is up, to whatever checks its health. It answers
+/// `/health` and nothing else, with no TLS: it is for the engine's own host
+/// or container.
+pub fn engine_health_listen() -> Result<Option<std::net::SocketAddr>, String> {
+    let Some(address) = set("RUNTARA_ENGINE_HEALTH_LISTEN") else {
+        return Ok(None);
+    };
+    address.parse().map(Some).map_err(|_| {
+        format!("RUNTARA_ENGINE_HEALTH_LISTEN is `{address}`, which is not an address")
+    })
+}
+
 /// Where the API role reaches the engine, and its certificate.
 pub struct EngineAt {
     pub url: String,
@@ -147,7 +171,83 @@ const NOT_FOR_THE_API: &[&str] = &[
     "RUNTARA_EXECUTOR_TLS_DIR",
     "RUNTARA_ARTIFACT_STORE_URL",
     "RUNTARA_ENGINE_LISTEN",
+    "RUNTARA_ENGINE_HEALTH_LISTEN",
+    "RUNTARA_INTAKE_LISTEN",
+    "RUNTARA_INTAKE_HEALTH_LISTEN",
 ];
+
+/// What the intake role is not to be given: the runtime database, the keys
+/// that open connections' parameters or seal's keys, an executor's
+/// certificate, the artifact store, or the engine's own settings. It
+/// receives what anyone may send, and holds nothing a run is made of.
+const NOT_FOR_INTAKE: &[&str] = &[
+    "RUNTARA_DATABASE_URL",
+    "RUNTARA_CONNECTIONS_ENCRYPTION_KEY",
+    "RUNTARA_CONNECTIONS_RETIRED_KEYS",
+    "RUNTARA_SEAL_WRAPPING_KEY",
+    "RUNTARA_EXECUTOR_TLS_DIR",
+    "RUNTARA_ARTIFACT_STORE_URL",
+    "RUNTARA_ENGINE_LISTEN",
+    "RUNTARA_ENGINE_HEALTH_LISTEN",
+    "RUNTARA_COMPILER_WASM",
+];
+
+/// Which of what the intake role is not to be given this process was given.
+pub fn given_to_the_intake_role() -> Vec<&'static str> {
+    NOT_FOR_INTAKE
+        .iter()
+        .copied()
+        .filter(|name| set(name).is_some())
+        .collect()
+}
+
+/// What an intake that is a process of its own needs: where it listens for
+/// the API (`RUNTARA_INTAKE_LISTEN`), its certificate
+/// (`RUNTARA_INTAKE_TLS_DIR`, from `runtara-executor init-pki --intake-dir`),
+/// and where the engine listens (`RUNTARA_ENGINE_URL`), which it asks to run
+/// a workflow and wait.
+pub struct IntakeAt {
+    pub listen: std::net::SocketAddr,
+    pub tls_dir: std::path::PathBuf,
+    pub engine_url: String,
+    /// `RUNTARA_INTAKE_HEALTH_LISTEN`: where it says it is up, if anywhere.
+    pub health: Option<std::net::SocketAddr>,
+}
+
+pub fn intake_at() -> Result<IntakeAt, String> {
+    let address = |name: &str| -> Result<Option<std::net::SocketAddr>, String> {
+        set(name)
+            .map(|value| {
+                value
+                    .parse()
+                    .map_err(|_| format!("{name} is `{value}`, which is not an address"))
+            })
+            .transpose()
+    };
+    Ok(IntakeAt {
+        listen: address("RUNTARA_INTAKE_LISTEN")?.ok_or(
+            "RUNTARA_ROLE=intake needs RUNTARA_INTAKE_LISTEN: the address it listens on for \
+             the API, as host:port",
+        )?,
+        tls_dir: set("RUNTARA_INTAKE_TLS_DIR")
+            .ok_or(
+                "RUNTARA_ROLE=intake needs RUNTARA_INTAKE_TLS_DIR: intake's directory from \
+                 `runtara-executor init-pki --intake-dir`",
+            )?
+            .into(),
+        engine_url: set("RUNTARA_ENGINE_URL").ok_or(
+            "RUNTARA_ROLE=intake needs RUNTARA_ENGINE_URL: where the engine listens, as \
+             https://host:port",
+        )?,
+        health: address("RUNTARA_INTAKE_HEALTH_LISTEN")?,
+    })
+}
+
+/// `RUNTARA_INTAKE_URL`, for the API: where intake listens, if what anyone
+/// may send goes to a process of its own and not to the engine.
+pub fn intake_url() -> Option<String> {
+    set("RUNTARA_INTAKE_URL")
+}
 
 /// Which of what the API role is not to be given this process was given.
 pub fn given_to_the_api_role() -> Vec<&'static str> {
@@ -222,6 +322,7 @@ impl Workers {
         tracing::info!(
             engine = %names(Role::Engine),
             api = %names(Role::Api),
+            intake = %names(Role::Intake),
             "Background work started"
         );
     }
@@ -238,6 +339,55 @@ impl Workers {
 
 #[cfg(test)]
 mod tests {
+
+    /// The evaluation stack's overlay (`docker-compose.roles.yml`) carries
+    /// what the API's database role and Valkey user are granted, because it
+    /// is one file that runs on its own. They are the two files under
+    /// `scripts/roles`, as they are.
+    #[test]
+    fn the_compose_overlay_grants_what_the_role_files_grant() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let read = |path: &str| std::fs::read_to_string(root.join(path)).unwrap();
+        let overlay = read("docker-compose.roles.yml");
+        // A config's content, as compose hands it over: its block, without
+        // the indentation, and with `$$` for `$`.
+        let content_of = |name: &str| -> String {
+            let start = format!("  {name}:\n    content: |\n");
+            let from = overlay
+                .find(&start)
+                .unwrap_or_else(|| panic!("no config {name}"))
+                + start.len();
+            overlay[from..]
+                .lines()
+                .take_while(|line| line.is_empty() || line.starts_with("      "))
+                .map(|line| line.strip_prefix("      ").unwrap_or(line))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .replace("$$", "$")
+        };
+
+        assert_eq!(
+            content_of("api-database-role").trim_end(),
+            read("scripts/roles/api-database-role.sql").trim_end(),
+            "docker-compose.roles.yml and scripts/roles/api-database-role.sql differ"
+        );
+
+        let rules = read("scripts/roles/api-valkey-user.acl")
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let users = content_of("valkey-users");
+        let api = users
+            .lines()
+            .find(|line| line.starts_with("user runtara-api "))
+            .expect("the API's Valkey user");
+        assert_eq!(
+            api,
+            format!("user runtara-api on >runtara_api {rules}"),
+            "docker-compose.roles.yml and scripts/roles/api-valkey-user.acl differ"
+        );
+    }
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};

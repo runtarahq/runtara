@@ -8,6 +8,7 @@ use serde_json::json;
 use tracing::Instrument;
 
 use crate::api::handlers::api_keys::ApiKey;
+use crate::auth::presented::Presented;
 use crate::auth::{AuthContext, AuthMethod, AuthProviderKind, AuthState, MembershipPolicy};
 use crate::authz::{ApiKeyScope, Role};
 use crate::tenant_quota;
@@ -53,9 +54,12 @@ async fn authenticate_with(
 ) -> Response {
     if let Some(ctx) = request.extensions().get::<AuthContext>().cloned() {
         let span = auth_span(&ctx);
-        return as_tenant(enforce_membership_here, &ctx.org_id, next.run(request))
-            .instrument(span)
-            .await;
+        return crate::engine::approvals::asked_by(
+            ctx.user_id.clone(),
+            as_tenant(enforce_membership_here, &ctx.org_id, next.run(request)),
+        )
+        .instrument(span)
+        .await;
     }
 
     let requested_tenant = request
@@ -63,76 +67,17 @@ async fn authenticate_with(
         .get::<crate::middleware::tenant_path::RequestedTenant>()
         .map(|requested| requested.0.clone());
 
-    // Fast path: RUNTARA-issued API key. Works in every provider mode.
-    if let Some(token) = api_key_token(request.headers()) {
-        let api_key = match validate_api_key(token, &auth_state).await {
-            Ok(key) => key,
-            Err(response) => return response,
-        };
-        // A key is its tenant's: one issued for a tenant this process does not
-        // serve authenticates nobody here.
-        if !crate::config::is_served_tenant(&api_key.org_id) {
-            return crate::auth::provider::AuthError::TenantMismatch(api_key.org_id)
-                .into_http_response();
-        }
-        // …and acts only there, whatever tenant the path names.
-        if let Some(requested) = requested_tenant.filter(|t| *t != api_key.org_id) {
-            return crate::auth::provider::AuthError::TenantMismatch(requested)
-                .into_http_response();
-        }
-        let mut auth_context = api_key_context(&api_key);
-        if enforce_membership_here
-            && let Err(response) = enforce_tenant_status(&auth_state, &auth_context.org_id).await
-        {
-            return response;
-        }
-        // The key inherits the issuing user's current role from Valkey and is
-        // subject to the same revocation denylist.
-        if enforce_membership_here
-            && let Err(response) =
-                enforce_api_key_membership(&auth_state, &api_key, &mut auth_context).await
-        {
-            return response;
-        }
-        if enforce_membership_here
-            && let Err(retry_after_ms) =
-                tenant_quota::take(&auth_context.org_id, tenant_quota::Quota::Api).await
-        {
-            return tenant_quota::refusal(tenant_quota::Quota::Api, retry_after_ms);
-        }
-        let span = auth_span(&auth_context);
-        let tenant = auth_context.org_id.clone();
-        crate::middleware::http_metrics::note_tenant(request.extensions(), &tenant);
-        request.extensions_mut().insert(auth_context);
-        return as_tenant(enforce_membership_here, &tenant, next.run(request))
-            .instrument(span)
-            .await;
-    }
-
-    // Delegate everything else to the configured provider.
-    let mut auth_context = match auth_state
-        .provider
-        .authenticate(request.headers(), requested_tenant.as_deref())
-        .await
-    {
+    let presented = Presented::of(
+        auth_state.door,
+        request.headers(),
+        &auth_state.provider.also_reads(),
+        requested_tenant,
+        enforce_membership_here,
+    );
+    let auth_context = match verify(&auth_state, &presented).await {
         Ok(ctx) => ctx,
-        Err(e) => return e.into_http_response(),
+        Err(response) => return response,
     };
-
-    if enforce_membership_here
-        && let Err(response) = enforce_tenant_status(&auth_state, &auth_context.org_id).await
-    {
-        return response;
-    }
-
-    // Resolve per-tenant membership + token revocation from Valkey, attaching the
-    // caller's role. Governed by `membership_policy`; fails the request closed under
-    // `Required`.
-    if enforce_membership_here
-        && let Err(response) = enforce_membership(&auth_state, &mut auth_context).await
-    {
-        return response;
-    }
 
     // Counted once the caller is known, so nobody else spends the tenant's.
     if enforce_membership_here
@@ -144,11 +89,82 @@ async fn authenticate_with(
 
     let span = auth_span(&auth_context);
     let tenant = auth_context.org_id.clone();
+    let asker = auth_context.user_id.clone();
     crate::middleware::http_metrics::note_tenant(request.extensions(), &tenant);
     request.extensions_mut().insert(auth_context);
-    as_tenant(enforce_membership_here, &tenant, next.run(request))
-        .instrument(span)
+    // What the caller presented goes with the request, for what it asks of
+    // an engine in another process, which verifies it again itself.
+    request.extensions_mut().insert(presented.clone());
+    crate::auth::presented::presenting(
+        presented,
+        // What the caller asks to have compiled or run, the engine in this
+        // process approves as theirs.
+        crate::engine::approvals::asked_by(
+            asker,
+            as_tenant(enforce_membership_here, &tenant, next.run(request)),
+        ),
+    )
+    .instrument(span)
+    .await
+}
+
+/// Who presented `presented`, and the tenant they act for: an API key by its
+/// row, anything else by the configured provider, then the tenant's status
+/// and the caller's membership of it.
+///
+/// It counts nothing against the tenant and enters no scope. The API's
+/// middleware uses it for a request, and the engine for what an API in
+/// another process asks on a caller's behalf.
+pub(crate) async fn verify(
+    auth_state: &AuthState,
+    presented: &Presented,
+) -> Result<AuthContext, Response> {
+    let headers = presented.headers();
+    let requested_tenant = presented.requested_tenant.clone();
+    let enforce_membership_here = presented.as_a_member;
+
+    // Fast path: RUNTARA-issued API key. Works in every provider mode.
+    if let Some(token) = api_key_token(&headers) {
+        let api_key = validate_api_key(token, auth_state).await?;
+        // A key is its tenant's: one issued for a tenant this process does not
+        // serve authenticates nobody here.
+        if !crate::config::is_served_tenant(&api_key.org_id) {
+            return Err(
+                crate::auth::provider::AuthError::TenantMismatch(api_key.org_id)
+                    .into_http_response(),
+            );
+        }
+        // …and acts only there, whatever tenant the path names.
+        if let Some(requested) = requested_tenant.filter(|t| *t != api_key.org_id) {
+            return Err(
+                crate::auth::provider::AuthError::TenantMismatch(requested).into_http_response()
+            );
+        }
+        let mut auth_context = api_key_context(&api_key);
+        if enforce_membership_here {
+            enforce_tenant_status(auth_state, &auth_context.org_id).await?;
+            // The key inherits the issuing user's current role from Valkey and
+            // is subject to the same revocation denylist.
+            enforce_api_key_membership(auth_state, &api_key, &mut auth_context).await?;
+        }
+        return Ok(auth_context);
+    }
+
+    // Delegate everything else to the configured provider.
+    let mut auth_context = auth_state
+        .provider
+        .authenticate(&headers, requested_tenant.as_deref())
         .await
+        .map_err(|e| e.into_http_response())?;
+
+    if enforce_membership_here {
+        enforce_tenant_status(auth_state, &auth_context.org_id).await?;
+        // Resolve per-tenant membership + token revocation from Valkey,
+        // attaching the caller's role. Governed by `membership_policy`; fails
+        // the request closed under `Required`.
+        enforce_membership(auth_state, &mut auth_context).await?;
+    }
+    Ok(auth_context)
 }
 
 /// Runs the rest of a request for `tenant` on the runtime and server
@@ -216,15 +232,36 @@ async fn validate_api_key(token: &str, auth_state: &AuthState) -> Result<ApiKey,
     let key_hash = hex::encode(sha2::Sha256::digest(token.as_bytes()));
 
     // The key is all the caller presented: its row says whose it is. Within
-    // a tenant named in the path only that tenant's keys are found.
-    runtara_store_postgres::tenant_scope::locating(
-        crate::api::handlers::api_keys::validate_api_key_by_hash(&auth_state.pool, &key_hash),
-    )
-    .await
-    .map_err(|e| {
+    // a tenant named in the path only that tenant's keys are found. Looking
+    // across tenants is the engine's to do: an API that is a process of its
+    // own asks it.
+    let found = match KEYS_ELSEWHERE.get() {
+        Some(engine) => engine.api_key_by_hash(&key_hash).await,
+        None => {
+            runtara_store_postgres::tenant_scope::locating(
+                crate::api::handlers::api_keys::validate_api_key_by_hash(
+                    &auth_state.pool,
+                    &key_hash,
+                ),
+            )
+            .await
+        }
+    };
+    found.map_err(|e| {
         tracing::warn!(error = %e, "API key validation failed");
         unauthorized("Invalid or expired API key")
     })
+}
+
+/// The engine in another process, for a process whose database role may not
+/// look across tenants: the API role.
+static KEYS_ELSEWHERE: std::sync::OnceLock<std::sync::Arc<dyn crate::engine::Engine>> =
+    std::sync::OnceLock::new();
+
+/// Have this process ask `engine` whose an API key is, instead of looking for
+/// it across tenants itself.
+pub fn ask_engine_elsewhere(engine: std::sync::Arc<dyn crate::engine::Engine>) {
+    let _ = KEYS_ELSEWHERE.set(engine);
 }
 
 /// Build the `AuthContext` for an API-key request. The key acts as its issuing user — role
@@ -611,6 +648,7 @@ mod tests {
             .connect_lazy("postgres://localhost/runtara_test_unused")
             .expect("lazy pool never connects in these tests");
         AuthState {
+            door: crate::auth::presented::Door::Api,
             provider,
             pool,
             valkey,

@@ -20,7 +20,6 @@ use runtara_server::{
             SubmitWorkflowActionRequest, list_instance_actions, list_workflow_actions,
         },
     },
-    auth::{AuthContext, AuthMethod},
     middleware::tenant_auth::OrgId,
     product_events::ProductEventSink,
     runtime_client::{RuntimeClient, RuntimeClientConfig},
@@ -83,202 +82,6 @@ fn mcp_json(result: rmcp::model::CallToolResult) -> Value {
 }
 
 /// Settle the targeted submission so the legacy message reaches the queue head.
-#[cfg(feature = "valkey-integration-tests")]
-async fn fail_targeted(
-    conn: &mut redis::aio::ConnectionManager,
-    scope: &runtara_server::api::services::session_queue::managed::QueueScope,
-    lease: &runtara_server::api::services::session_queue::managed::Envelope,
-) {
-    use runtara_server::api::services::session_queue::managed::*;
-    block(conn, scope, lease, DeliveryReason::ExplicitFailure)
-        .await
-        .unwrap();
-    fail_blocked(conn, scope, &lease.message_id).await.unwrap();
-}
-
-#[cfg(feature = "valkey-integration-tests")]
-async fn delivery_api_contract(
-    tenant: &str,
-    session: &str,
-    instance: &str,
-    request: &str,
-    mut conn: redis::aio::ConnectionManager,
-    api: Arc<dyn runtara_server::engine::Engine>,
-    client: Arc<RuntimeClient>,
-) {
-    use axum::extract::Query;
-    use runtara_server::api::{handlers::sessions::*, services::session_queue::managed::*};
-    let scope = QueueScope::new(tenant, session).unwrap();
-    let submit = |owner: &str, operation: &str, request_id: Option<&str>| {
-        submit_event(
-            OrgId(owner.into()),
-            Extension(AuthContext::new(
-                owner.into(),
-                "session-operator".into(),
-                AuthMethod::Unauthenticated,
-            )),
-            State(api.clone()),
-            State(Some(conn.clone())),
-            Path(session.into()),
-            Ok(Json(SubmitEventRequest {
-                message_id: "api-targeted".into(),
-                operation_id: operation.into(),
-                message: None,
-                payload: Some(json!({"answer":true})),
-                request_id: request_id.map(str::to_owned),
-            })),
-        )
-    };
-    assert_eq!(
-        submit("foreign", "api-operation", Some(request)).await.0,
-        StatusCode::NOT_FOUND
-    );
-    // Two waits are open: an unnamed message is refused, never retained for
-    // whichever wait delivery happens to find later.
-    let (status, Json(refused)) = submit(tenant, "api-operation", None).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(refused["code"], "INPUT_AMBIGUOUS");
-    assert_eq!(
-        submit(tenant, "api-operation", Some("missing")).await.1.0["code"],
-        "INPUT_NOT_WAITING"
-    );
-    let (status, Json(first)) = submit(tenant, "api-operation", Some(request)).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(first["data"]["state"], "queued");
-    assert_eq!(first["data"]["requestId"], request);
-    // A retry replays its original binding, with or without naming it again.
-    assert_eq!(
-        submit(tenant, "api-operation", Some(request)).await.1.0,
-        first
-    );
-    assert_eq!(submit(tenant, "api-operation", None).await.1.0, first);
-    assert_eq!(
-        submit(tenant, "different", Some(request)).await.0,
-        StatusCode::CONFLICT
-    );
-    assert!(serde_json::from_value::<SubmitEventRequest>(json!({"message":"legacy"})).is_err());
-    let ClaimOutcome::Claimed(targeted) = claim(&mut conn.clone(), &scope, 30_000).await.unwrap()
-    else {
-        panic!("targeted submission claim")
-    };
-    assert_eq!(targeted.actor_id.as_deref(), Some("session-operator"));
-    fail_targeted(&mut conn.clone(), &scope, &targeted).await;
-    // A message retained before submit-time binding has no target at all.
-    enqueue(
-        &mut conn.clone(),
-        &scope,
-        "api-message",
-        "legacy-operation",
-        &json!({"answer":true}),
-    )
-    .await
-    .unwrap();
-    let page = |owner: &str, limit| {
-        list_session_deliveries(
-            OrgId(owner.into()),
-            State(Some(conn.clone())),
-            Path(session.into()),
-            Ok(Query(DeliveryQuery {
-                cursor: "0".into(),
-                limit,
-            })),
-        )
-    };
-    assert_eq!(page("foreign", 50).await.0, StatusCode::NOT_FOUND);
-    assert_eq!(page(tenant, 0).await.0, StatusCode::BAD_REQUEST);
-    let (status, Json(body)) = page(tenant, 50).await;
-    assert_eq!(status, StatusCode::OK);
-    // The failed targeted submission and the unbound legacy message.
-    let deliveries = body["data"]["deliveries"].as_array().unwrap();
-    assert_eq!(deliveries.len(), 2);
-    assert_eq!(body["data"]["nextCursor"], "0");
-    for delivery in deliveries {
-        for field in ["payload", "payload_json", "lease_token", "launch_json"] {
-            assert!(delivery.get(field).is_none());
-        }
-    }
-    let resolve = |owner: &str, body| {
-        resolve_session_delivery(
-            OrgId(owner.into()),
-            State(Some(conn.clone())),
-            State(api.clone()),
-            Path((session.into(), "api-message".into())),
-            Ok(Json(body)),
-        )
-    };
-    let selection = || ResolveDeliveryRequest::Select {
-        instance_id: instance.into(),
-        request_id: request.into(),
-    };
-    assert_eq!(resolve(tenant, selection()).await.0, StatusCode::CONFLICT);
-    // An unbound message is blocked; delivery never selects a wait for it.
-    assert!(matches!(
-        runtara_server::api::services::session_queue::delivery::deliver_session(
-            &mut conn.clone(),
-            &scope,
-            &client,
-        )
-        .await
-        .unwrap(),
-        DeliveryOutcome::Blocked(Envelope {
-            reason: Some(DeliveryReason::NoTarget),
-            ..
-        })
-    ));
-    assert_eq!(
-        resolve("foreign", ResolveDeliveryRequest::Fail).await.0,
-        StatusCode::NOT_FOUND
-    );
-    assert_eq!(
-        resolve(
-            tenant,
-            ResolveDeliveryRequest::Select {
-                instance_id: instance.into(),
-                request_id: "missing".into()
-            }
-        )
-        .await
-        .0,
-        StatusCode::NOT_FOUND
-    );
-    let (a, b) = tokio::join!(resolve(tenant, selection()), resolve(tenant, selection()));
-    assert!(matches!(
-        (a.0, b.0),
-        (StatusCode::OK, StatusCode::CONFLICT) | (StatusCode::CONFLICT, StatusCode::OK)
-    ));
-    let ClaimOutcome::Claimed(lease) = claim(&mut conn.clone(), &scope, 30_000).await.unwrap()
-    else {
-        panic!("resolved queue claim")
-    };
-    assert_eq!(
-        resolve(tenant, ResolveDeliveryRequest::Fail).await.0,
-        StatusCode::CONFLICT
-    );
-    block(
-        &mut conn.clone(),
-        &scope,
-        &lease,
-        DeliveryReason::StaleTarget,
-    )
-    .await
-    .unwrap();
-    let (status, Json(failed)) = resolve(tenant, ResolveDeliveryRequest::Fail).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(failed["data"]["state"], "failed");
-    let (status, Json(found)) = get_session_delivery(
-        OrgId(tenant.into()),
-        State(Some(conn.clone())),
-        Path((session.into(), "api-message".into())),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(found, failed);
-    assert!(matches!(
-        claim(&mut conn, &scope, 30_000).await.unwrap(),
-        ClaimOutcome::Empty
-    ));
-}
-
 #[tokio::test]
 async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
     let url = std::env::var("TEST_ENVIRONMENT_DATABASE_URL")
@@ -490,56 +293,6 @@ async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
             .await
             .is_err()
     );
-    #[cfg(feature = "valkey-integration-tests")]
-    let (session_id, valkey) = {
-        use runtara_server::{
-            api::{handlers::sessions, services::session_queue},
-            valkey::ValkeyConfig,
-        };
-        let config = ValkeyConfig::from_env().expect("isolated Valkey required");
-        let redis = redis::Client::open(config.connection_url()).unwrap();
-        let mut connection = redis::aio::ConnectionManager::new(redis).await.unwrap();
-        let session = Uuid::new_v4().to_string();
-        session_queue::set_session_meta(
-            &mut connection,
-            &tenant,
-            &session,
-            &action.instance_id,
-            &workflow,
-        )
-        .await
-        .unwrap();
-        let (status, Json(session_page)) = sessions::session_pending_input(
-            OrgId(tenant.clone()),
-            State(api.clone()),
-            State(Some(connection.clone())),
-            Path(session.clone()),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(session_page["data"], discovered["data"]);
-        let (status, Json(error)) = sessions::session_pending_input(
-            OrgId("foreign".into()),
-            State(api.clone()),
-            State(Some(connection.clone())),
-            Path(session.clone()),
-        )
-        .await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(error["code"], "INPUT_NOT_FOUND");
-        (session, connection)
-    };
-    #[cfg(feature = "valkey-integration-tests")]
-    delivery_api_contract(
-        &tenant,
-        &session_id,
-        &action.instance_id,
-        &action.request_id,
-        valkey.clone(),
-        api.clone(),
-        client.clone(),
-    )
-    .await;
     let malformed = axum::http::Request::builder()
         .header("content-type", "application/json")
         .body(axum::body::Body::from("{malformed"))
@@ -600,38 +353,6 @@ async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
         )
         .is_err()
     );
-
-    #[cfg(feature = "valkey-integration-tests")]
-    let queued = {
-        use runtara_server::api::services::session_queue::managed::*;
-        let scope = QueueScope::new(&tenant, &session_id).unwrap();
-        let mut connection = valkey.clone();
-        enqueue(
-            &mut connection,
-            &scope,
-            "lost-ack-message",
-            "reply",
-            &json!({"answer":true}),
-        )
-        .await
-        .unwrap();
-        let ClaimOutcome::Claimed(lease) = claim(&mut connection, &scope, 30_000).await.unwrap()
-        else {
-            panic!("queue claim");
-        };
-        let lease = bind(
-            &mut connection,
-            &scope,
-            &lease,
-            &InputTarget {
-                instance_id: action.instance_id.clone(),
-                request_id: action.request_id.clone(),
-            },
-        )
-        .await
-        .unwrap();
-        (scope, lease)
-    };
 
     let submit = |owner: String, operation: &str, payload: Value| {
         step_events::submit_workflow_action(
@@ -707,61 +428,6 @@ async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
             .await
             .is_err()
     );
-    #[cfg(feature = "valkey-integration-tests")]
-    {
-        use runtara_server::api::services::session_queue::managed::*;
-        let mut connection = valkey.clone();
-        // PostgreSQL acceptance committed, but the delivering worker never acked
-        // Valkey. Expire only its lease, then recover with a fresh connection.
-        renew(&mut connection, &queued.0, &queued.1, 1)
-            .await
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        let config = runtara_server::valkey::ValkeyConfig::from_env().unwrap();
-        let mut recovered = redis::aio::ConnectionManager::new(
-            redis::Client::open(config.connection_url()).unwrap(),
-        )
-        .await
-        .unwrap();
-        // Start the production worker with no attached session/SSE handler.
-        // It discovers retained ownership and replays the completed root's receipt.
-        let shutdown = runtara_server::shutdown::ShutdownSignal::new();
-        let worker = tokio::spawn(runtara_server::workers::session_delivery_worker::run(
-            recovered.clone(),
-            client.clone(),
-            pool.clone(),
-            queued.0.tenant_id().to_string(),
-            shutdown.clone(),
-        ));
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            loop {
-                let envelope = get(&mut recovered, &queued.0, "lost-ack-message")
-                    .await
-                    .unwrap();
-                if envelope.state == DeliveryState::Accepted {
-                    break envelope;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        })
-        .await;
-        shutdown.trigger();
-        tokio::time::timeout(std::time::Duration::from_secs(2), worker)
-            .await
-            .unwrap()
-            .unwrap();
-        let envelope = outcome.expect("worker must recover the retained queue without SSE");
-        assert_eq!(
-            envelope.receipt_id.as_deref(),
-            accepted["data"]["receiptId"].as_str()
-        );
-        assert_eq!(envelope.target.unwrap().instance_id, action.instance_id);
-        assert!(matches!(
-            claim(&mut recovered, &queued.0, 30_000).await.unwrap(),
-            ClaimOutcome::Empty
-        ));
-    }
-
     let (status, Json(discovered)) = pending(tenant.clone()).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(discovered["data"]["pendingInputs"], json!([]));
@@ -774,19 +440,6 @@ async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
     assert_eq!(status, StatusCode::CONFLICT);
     // Only a matching receipt bypasses current root liveness.
     assert_eq!(error["code"], "INPUT_INACTIVE");
-    #[cfg(feature = "valkey-integration-tests")]
-    {
-        let (status, Json(session_page)) =
-            runtara_server::api::handlers::sessions::session_pending_input(
-                OrgId(tenant.clone()),
-                State(api.clone()),
-                State(Some(valkey)),
-                Path(session_id),
-            )
-            .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(session_page["data"]["pendingInputs"], json!([]));
-    }
     pool.close().await;
     let (status, Json(error)) = submit(tenant, "reply", json!({"answer":true})).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);

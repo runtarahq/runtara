@@ -5,8 +5,8 @@
 pub mod agent_testing;
 pub mod analytics;
 pub mod api_keys;
-pub mod chat;
 pub mod common;
+pub mod conversations;
 pub mod csv_import_export;
 pub mod entitlements;
 pub mod events;
@@ -16,7 +16,6 @@ pub mod object_model;
 pub mod oidc_discovery;
 pub mod operators;
 pub mod proxy_url;
-pub mod sessions;
 pub mod specs;
 pub mod step_events;
 pub mod step_summaries;

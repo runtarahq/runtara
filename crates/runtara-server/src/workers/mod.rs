@@ -10,5 +10,3 @@ pub mod invocation_cleanup_worker;
 pub mod runtara_dto;
 pub mod step_counter;
 pub mod trigger_worker;
-
-pub mod session_delivery_worker;
