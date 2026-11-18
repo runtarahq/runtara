@@ -104,8 +104,8 @@ the runner:
 
 With executors, there is no falling back to the engine's own sandbox: a
 compile that cannot be placed waits its turn in the compile queue and fails
-if no executor takes it, as a run does. Otherwise the property is only as
-strong as the worst moment.
+if no executor takes it, as a run does (decision 1). Otherwise the property
+is only as strong as the worst moment.
 
 The in-process sandbox stays for a deployment with no executors (one
 process, the evaluation stack). It is the same compiler, and removing it
@@ -206,20 +206,17 @@ Later, not started with these: a warm compiler for each tenant.
 
 ## Decisions
 
+Made.
+
 1. **With executors, no falling back to the engine's sandbox.** A compile
-   no executor takes fails. (Recommended: yes.)
-2. **Compiles share the run slots.** The alternative is a number of slots
-   an executor keeps for compiles, so that a burst of runs cannot hold up
-   every save. (Recommended: share them now; a reserve is one setting to
-   add when it is seen to matter.)
+   no executor takes fails.
+2. **Compiles share the run slots.** A reserve for compiles is one setting
+   to add when it is seen to matter.
 3. **The compiler's machine code is kept once for an executor, not once
-   for each tenant.** Workflows are kept per tenant because a workflow is a
-   tenant's. The compiler is the platform's and the same for all; keeping
-   it per tenant compiles 8.6 MB again for each tenant's first save. Each
-   compile still runs in a process of its own. (Recommended: once.)
+   for each tenant.** It is the platform's and the same for all. Each
+   compile still runs in a process of its own.
 4. **The engine's sandbox stays for a deployment with no executors.**
-   (Recommended: yes.)
-5. **A warm compiler is later.** (Recommended: yes.)
+5. **A warm compiler is later.**
 
 ## Size
 
