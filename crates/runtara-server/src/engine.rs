@@ -532,6 +532,10 @@ pub struct LocalEngine {
     /// The parts of the API this engine serves, each a router of its own.
     /// They are built after the engine is, from what the engine holds.
     served: std::sync::RwLock<std::collections::HashMap<Served, axum::Router>>,
+    /// The engine that runs workflows, for a process that only receives
+    /// what anyone may send (intake): it has no runtime, and asks that
+    /// engine to run a workflow and wait.
+    runs_elsewhere: Option<Arc<remote::RemoteEngine>>,
 }
 
 impl LocalEngine {
@@ -548,7 +552,14 @@ impl LocalEngine {
             agent_testing: None,
             connections: None,
             served: std::sync::RwLock::default(),
+            runs_elsewhere: None,
         }
+    }
+
+    /// For intake: workflows are run by `engine`, in another process.
+    pub fn with_runs_elsewhere(mut self, engine: Arc<remote::RemoteEngine>) -> Self {
+        self.runs_elsewhere = Some(engine);
+        self
     }
 
     /// With the tenants' connections.
@@ -660,6 +671,9 @@ impl Engine for LocalEngine {
     }
 
     async fn run_sync(&self, request: SyncRequest<'_>) -> Result<SyncExecution, ExecutionError> {
+        if let Some(engine) = &self.runs_elsewhere {
+            return engine.run_sync_for_anyone(request).await;
+        }
         self.executions.run_sync(request).await
     }
 

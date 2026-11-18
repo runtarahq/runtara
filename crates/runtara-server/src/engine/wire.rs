@@ -66,6 +66,9 @@ pub(crate) enum Refused {
     /// The caller's role, or what its credential is held to, does not allow
     /// it.
     NotPermitted,
+    /// It is not one this peer may ask: the API asks for callers, and intake
+    /// asks the few things anyone may have done.
+    NotThePeers,
 }
 
 /// What the engine says of itself, which does not change while it runs.
@@ -101,6 +104,20 @@ fn permitted(caller: &AuthContext, needs: &[Permission]) -> bool {
             .is_ok()
     })
 }
+
+/// Who is on the other end of the engine's listener, by its certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Peer {
+    /// The API role, which asks for the callers it authenticated.
+    Api,
+    /// The intake role, which receives what anyone may send.
+    Intake,
+}
+
+/// The operations intake asks, and nobody else. Each does for intake what
+/// the engine does for whoever sends the request intake received: there is
+/// no caller behind it, and it gives intake nothing a sender does not have.
+pub(crate) const ASKED_BY_INTAKE: &[&str] = &["RunSyncForAnyone"];
 
 macro_rules! operations {
     ($(
@@ -154,12 +171,22 @@ macro_rules! operations {
             name: &str,
             body: &[u8],
             caller: Option<&AuthContext>,
+            peer: Peer,
         ) -> Option<Result<Vec<u8>, Refused>> {
+            let for_anyone = ASKED_BY_INTAKE.contains(&name);
             match name {
+                $(stringify!($name) if for_anyone != (peer == Peer::Intake) => {
+                    Some(Err(Refused::NotThePeers))
+                })*
                 $(stringify!($name) => Some(match serde_json::from_slice::<$name>(body) {
                     Err(error) => Err(Refused::Unreadable(error.to_string())),
                     Ok(mut operation) => {
                         let answer = match operation.tenant().map(str::to_owned) {
+                            // What anyone may have done has no caller to
+                            // verify: it is answered in its tenant's scope.
+                            Some(tenant) if for_anyone => {
+                                scoped(tenant, operation.ask(engine)).await
+                            }
                             Some(tenant) => {
                                 match caller {
                                     None => return Some(Err(Refused::NoCaller)),
@@ -245,6 +272,25 @@ operations! {
         tenant_id: &op.tenant_id,
         workflow_id: &op.workflow_id,
         version: op.version,
+        inputs: op.inputs,
+    }).await;
+
+    // Run a workflow and wait, for anyone: what the synchronous trigger does
+    // for whoever calls it with a workflow's id. Intake asks it, having
+    // received such a call. No version is named: the engine runs what it
+    // approved.
+    RunSyncForAnyone {
+        run_label: Option<String>,
+        tenant_id: String,
+        workflow_id: String,
+        inputs: Value,
+    } -> Result<SyncExecution, ExecutionError>,
+    needs [],
+    |engine, op| for Some(&op.tenant_id) => engine.run_sync(SyncRequest {
+        run_label: op.run_label,
+        tenant_id: &op.tenant_id,
+        workflow_id: &op.workflow_id,
+        version: None,
         inputs: op.inputs,
     }).await;
 

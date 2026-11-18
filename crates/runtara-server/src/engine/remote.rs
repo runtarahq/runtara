@@ -244,17 +244,54 @@ impl RemoteEngine {
     /// To the engine at `engine` (`https://host:port`), with this side's
     /// certificate from `tls_dir`.
     pub fn connect(engine: &str, tls_dir: &std::path::Path) -> Result<Arc<Self>, String> {
+        Self::connect_to(
+            engine,
+            tls_dir,
+            runtara_executor::protocol::SERVER_NAME,
+            true,
+        )
+    }
+
+    /// To intake at `intake`, for the API: the parts of the API intake
+    /// serves are handed to it, and it is asked nothing else.
+    pub fn connect_to_intake(intake: &str, tls_dir: &std::path::Path) -> Result<Arc<Self>, String> {
+        Self::connect_to(
+            intake,
+            tls_dir,
+            runtara_executor::protocol::INTAKE_NAME,
+            false,
+        )
+    }
+
+    /// To the engine at `engine`, for intake: it asks the few operations
+    /// anyone may have done ([`wire::ASKED_BY_INTAKE`]), and judges nothing
+    /// by what the engine says of itself.
+    pub fn connect_as_intake(engine: &str, tls_dir: &std::path::Path) -> Result<Arc<Self>, String> {
+        Self::connect_to(
+            engine,
+            tls_dir,
+            runtara_executor::protocol::SERVER_NAME,
+            false,
+        )
+    }
+
+    fn connect_to(
+        engine: &str,
+        tls_dir: &std::path::Path,
+        server_name: &str,
+        judges_by_it: bool,
+    ) -> Result<Arc<Self>, String> {
         let engine = engine.trim_end_matches('/').to_owned();
         if !engine.starts_with("https://") {
             return Err("the engine's address is not an https:// one".to_owned());
         }
         let identity = tls::Identity::load(tls_dir)?;
         let config = identity.client_config(&identity.ca_pem, None)?;
-        let client = tls::client(config, runtara_executor::protocol::SERVER_NAME)?;
+        let client = tls::client(config, server_name)?;
         Ok(Arc::new(Self {
             transport: Arc::new(Mtls { client, engine }),
             facts: RwLock::new(None),
-            judges_by_it: true,
+            judges_by_it,
         }))
     }
 
@@ -265,6 +302,24 @@ impl RemoteEngine {
             facts: RwLock::new(None),
             judges_by_it: false,
         })
+    }
+
+    /// Runs a workflow and waits, for anyone: what intake asks, having
+    /// received a call to the synchronous trigger.
+    pub async fn run_sync_for_anyone(
+        &self,
+        request: SyncRequest<'_>,
+    ) -> Result<SyncExecution, ExecutionError> {
+        self.ask_within(
+            wire::RunSyncForAnyone {
+                run_label: request.run_label,
+                tenant_id: request.tenant_id.to_owned(),
+                workflow_id: request.workflow_id.to_owned(),
+                inputs: request.inputs,
+            },
+            HELD,
+        )
+        .await
     }
 
     /// Asks the engine what it says of itself, now and then for as long as
@@ -1175,7 +1230,18 @@ pub async fn serve_api_role(
     let config = identity.server_config()?;
     let listener = tls::bind(address).await?;
     let bound = listener.local_addr().map_err(|error| error.to_string())?;
-    Ok((bound, tls::serve(listener, config, API_NAME, router)))
+    // The API's certificate, and intake's, which may ask the few operations
+    // anyone may have done and nothing else ([`super::listener`] tells them
+    // apart).
+    Ok((
+        bound,
+        tls::serve_peers(
+            listener,
+            config,
+            vec![API_NAME, runtara_executor::protocol::INTAKE_NAME],
+            router,
+        ),
+    ))
 }
 
 #[cfg(test)]
@@ -1470,9 +1536,15 @@ mod tests {
         let only = |permission| ApiKeyScope::Restricted(PermissionSet::EMPTY.with(permission));
         let ask = |name: &'static str, body: &'static str, caller: crate::auth::AuthContext| async move {
             let engine = engine_side();
-            wire::answer(engine.as_ref(), name, body.as_bytes(), Some(&caller))
-                .await
-                .unwrap()
+            wire::answer(
+                engine.as_ref(),
+                name,
+                body.as_bytes(),
+                Some(&caller),
+                wire::Peer::Api,
+            )
+            .await
+            .unwrap()
         };
         let run = r#"{"tenant_id":"acme","instance_id":"r"}"#;
         let refused = Err(wire::Refused::NotPermitted);
@@ -1511,6 +1583,51 @@ mod tests {
         );
     }
 
+    /// What intake asks is what anyone may have done, and only intake asks
+    /// it; everything else is the API's to ask, for a caller.
+    #[tokio::test]
+    async fn each_peer_asks_only_what_is_its_to_ask() {
+        let engine = engine_side();
+        let ask = |name: &'static str, body: &'static str, peer: wire::Peer| {
+            let engine = engine.clone();
+            async move {
+                wire::answer(engine.as_ref(), name, body.as_bytes(), None, peer)
+                    .await
+                    .unwrap()
+            }
+        };
+        let sync = r#"{"run_label":null,"tenant_id":"acme","workflow_id":"w","inputs":{}}"#;
+        let stop = r#"{"tenant_id":"acme","instance_id":"r"}"#;
+        // Intake needs no caller for what anyone may have done: the engine
+        // answers (here, that it has no runtime).
+        assert!(
+            ask("RunSyncForAnyone", sync, wire::Peer::Intake)
+                .await
+                .is_ok()
+        );
+        // The API does not ask it, with a caller or without.
+        assert_eq!(
+            ask("RunSyncForAnyone", sync, wire::Peer::Api).await,
+            Err(wire::Refused::NotThePeers)
+        );
+        // Intake asks nothing else, whatever it sends.
+        for name in ["Stop", "GetInstanceInfo", "Queue", "WorkflowAgents"] {
+            assert_eq!(
+                ask(name, stop, wire::Peer::Intake).await,
+                Err(wire::Refused::NotThePeers),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            ask("Facts", "{}", wire::Peer::Intake).await,
+            Err(wire::Refused::NotThePeers)
+        );
+        // Every operation is one or the other's.
+        for name in wire::ASKED_BY_INTAKE {
+            assert!(wire::NAMES.contains(name), "{name}");
+        }
+    }
+
     /// Every operation says what it needs. The few that need nothing are
     /// named here, so that a new one is not open by omission.
     #[test]
@@ -1522,7 +1639,15 @@ mod tests {
             .collect();
         // What the engine says of itself and whose a key is are no tenant's;
         // a tenant's published agents are listed to every caller.
-        assert_eq!(open, ["Facts", "WorkflowAgents", "ApiKeyByHash"]);
+        assert_eq!(
+            open,
+            [
+                "Facts",
+                "RunSyncForAnyone",
+                "WorkflowAgents",
+                "ApiKeyByHash"
+            ]
+        );
     }
 
     /// What an operation needs is what the API's routes that ask it need
