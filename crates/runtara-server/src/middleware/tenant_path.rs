@@ -104,7 +104,7 @@ impl runtara_connections::TenantHost for ServedTenants {
 }
 
 /// The served tenant an OAuth redirect's path names.
-fn oauth_tenant(path: &str, is_served: impl Fn(&str) -> bool) -> Option<String> {
+pub(crate) fn oauth_tenant(path: &str, is_served: impl Fn(&str) -> bool) -> Option<String> {
     let (segment, _) = path.strip_prefix("/api/oauth/")?.split_once('/')?;
     (!segment.is_empty() && is_served(segment)).then(|| segment.to_owned())
 }
