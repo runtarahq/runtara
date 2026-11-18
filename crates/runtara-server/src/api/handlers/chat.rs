@@ -134,6 +134,10 @@ pub(crate) enum ChatEvent {
 
 /// Start a chat session with an initial message and stream events via SSE.
 ///
+/// Deprecated: a conversation (`PUT /api/runtime/workflows/{id}/conversations/{key}`,
+/// `POST …/messages`, `GET …/events`) does this and more, and this route is
+/// removed once the console has moved to it.
+///
 /// The workflow executes asynchronously while this endpoint streams execution events
 /// (tool calls, LLM responses, memory operations, pending input requests) as Server-Sent Events.
 ///

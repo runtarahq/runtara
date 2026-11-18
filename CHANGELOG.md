@@ -13,6 +13,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A conversation with a workflow.** A conversation is a workflow, a key
+  its client chose, and what has been said: found by `(tenant, workflow,
+  key)`, kept until it is deleted, and carried by one run after another. A
+  message can be sent at any time: it starts a run when none is active,
+  answers what a run waits for, and otherwise waits its turn, in order, in
+  a queue of 32 (`RUNTARA_CONVERSATION_QUEUE_BOUND`), past which it is
+  refused with `429 CONVERSATION_QUEUE_FULL`. A message carries its
+  sender's id for it and is sent once, and may carry who is speaking and
+  attachments. Routes: `PUT`, `GET` and `DELETE
+  /api/runtime/workflows/{id}/conversations/{key}`, `POST …/messages`, and
+  `GET …/events`, a page of numbered events or, asked for as an event
+  stream, a stream a client reads on from the last event it saw. A
+  conversation may name a reply workflow, started with each reply and each
+  "waiting for input". Nothing in it names a chat platform
+  (`docs/native-chat.md`).
+- **The `conversation` agent.** `reply` tells the user of a run's
+  conversation something from any step of the run: text, and attachments
+  by where to fetch them. A run that never calls it still answers with what
+  it returns. Available on every tier.
 - **The API and the engine as two processes.** `RUNTARA_ROLE=api` runs what
   takes requests from outside, and `RUNTARA_ROLE=engine` what runs
   workflows, keeps their state and uses connections' secrets; `all`, the

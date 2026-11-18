@@ -13,7 +13,8 @@
 #   2. what each holds  the API's environment has no key, no runtime database
 #                       and no way to seal; the engine has no public listener
 #   3. runs             a workflow is made, compiled and run through the API,
-#                       on both executors; one is run and waited for
+#                       on both executors; one is run and waited for, and
+#                       one is started by a message into a conversation
 #   4. a connection     made through the API, sealed by seal, and used
 #   5. certificates     the engine's listener takes the API's certificate and
 #                       not an executor's; the run channel refuses the API's
@@ -540,6 +541,22 @@ RESP=$(curl -sS --max-time 180 -X POST -H 'Content-Type: application/json' -d '{
     "${API}/events/http-sync/${ANSWER}")
 echo "${RESP}" | jq -e '.success == true and .outputs.answer == 42' >/dev/null \
     || { print_error "a run that is waited for did not complete: ${RESP}"; exit 1; }
+# A conversation is the engine's to keep and carry, and is asked for through
+# the API: a message starts a run, and what became of it is read back.
+CONVERSATION="${API}/workflows/${ANSWER}/conversations/two-roles"
+RESP=$(curl -sS --max-time 60 -X POST -H 'Content-Type: application/json' \
+    -d '{"id":"m-1","text":"hello"}' "${CONVERSATION}/messages")
+[ "$(echo "${RESP}" | jq -r '.data.state // empty')" = "started" ] \
+    || { print_error "a message did not start a conversation's run through the API: ${RESP}"; exit 1; }
+for _ in $(seq 1 120); do
+    RESP=$(curl -sS --max-time 30 "${CONVERSATION}/events")
+    [ "$(echo "${RESP}" | jq -r '[.data[]? | select(.kind == "run_ended")] | length')" = "1" ] && break
+    sleep 0.5
+done
+echo "${RESP}" | jq -e '[.data[] | select(.kind == "run_ended")][0].body.status == "completed"' >/dev/null \
+    || { print_error "a conversation's run was not carried to its end: ${RESP}"; exit 1; }
+[ "$(curl -sS "${CONVERSATION}" | jq -r '.data.key')" = "two-roles" ] \
+    || { print_error "a conversation is not read through the API"; exit 1; }
 # The agents the API describes are the ones the engine runs.
 [ "$(curl -sS "${API}/agents" | jq -r '(.agents // .data // .) | length')" -gt 0 ] \
     || { print_error "the engine's agents are not listed through the API"; exit 1; }

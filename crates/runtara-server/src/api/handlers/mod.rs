@@ -7,6 +7,7 @@ pub mod analytics;
 pub mod api_keys;
 pub mod chat;
 pub mod common;
+pub mod conversations;
 pub mod csv_import_export;
 pub mod entitlements;
 pub mod events;

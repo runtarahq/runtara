@@ -1,7 +1,10 @@
 # A native chat, and channels built on it
 
-A plan. Phase 1 is built: the platform channels and the Channel trigger
-are removed. The rest is not.
+Phases 1 and 2 are built: the platform channels and the Channel trigger
+are removed, and the conversation is in the core, with its routes and the
+`conversation` agent. Phase 3 waits for the console
+([what is left](#what-is-left)). Phases 4 and 5, the adapters, are not
+started.
 
 ## What is wanted
 
@@ -194,6 +197,76 @@ Kept, because agents or the conversation use them: the `slack_bot`,
 `teams_bot`, `mailgun` and `telegram_bot` connection types, checking a
 signature with seal, the managed queue and its delivery worker, and what
 verifies the target of a Teams reply.
+
+### As built
+
+`api/services/conversations.rs` is the whole of it, behind the engine's
+interface (`Engine::open_conversation` and four more, each an operation of
+the wire). Three tables of the server database, which the API role is
+granted nothing on: `conversations`, `conversation_messages`,
+`conversation_events`.
+
+- **One loop, safe to repeat** (`Conversations::advance`), run when a
+  message is sent and by the engine's `conversations` worker, under the
+  conversation's row lock. It reads what the active run said, says what it
+  waits for, hands it the next message, starts the next run, and starts the
+  reply workflow. A run's id is made from the conversation's and the
+  message's, so starting it again starts the same run.
+- **A message** is `{id, text?, payload?, sender?, attachments?}`. It
+  starts a run with `data: {message, payload, messageId, sender,
+  attachments, conversation: {id, key, workflowId}}`. Answering a waiting
+  run, `payload` is the answer as it is, and `text` alone is `{"message":
+  text}`. Its state is `queued`, `started`, `delivered` or `failed`; the
+  answer to sending it says which, where that is known at once.
+- **Events** are numbered and kept: `run_started`, `reply`,
+  `waiting_for_input`, `message_delivered`, `message_failed`, `run_ended`,
+  `reply_route_failed`, and `activity`. `run_started` and
+  `message_delivered` carry the message's text and sender, so the events
+  alone are the transcript. `activity` is what the old chat stream
+  showed of a run (model and tool calls), for a client that shows it. A
+  reply is what the run said with `conversation.reply`. A run that said
+  nothing answers with what it returned: `answer.response`, or `answer`,
+  `response` or `message` as a string. A run that replied is not also
+  answered for from its output.
+- **The reply workflow** is started once for each `reply` and each
+  `waiting_for_input`, in order, with `data: {conversation, event: {seq,
+  kind, body}}`. One that cannot be started now is tried again; one that
+  never can be is said so (`reply_route_failed`) and the reply is still
+  read.
+- **The bound** is 32 messages waiting, or
+  `RUNTARA_CONVERSATION_QUEUE_BOUND`. One past it is `429
+  CONVERSATION_QUEUE_FULL`.
+- **Deleting** a conversation deletes what was said in it. A run that
+  carries it is left to end.
+
+What differs from the plan above:
+
+- **The queue is rows of the conversation**, not the Valkey queue of the
+  old sessions: a message waits until its turn, however long, and "once"
+  holds for as long as the conversation does. The managed queue and its
+  delivery worker are still what the old `sessions` routes use.
+- **A reply said by a step that is retried may be said twice.** A step
+  that ran is not run again on resume, so this is a step that failed after
+  saying it.
+- **A conversation is read twice a second while it has something to do**
+  (a run, a message waiting, a reply not yet routed), by one pass of the
+  worker over all of them. Enough for now, and the first thing to change
+  if conversations are many: the run's own events could wake it.
+
+Tested by `tests/conversations.rs` (against the database, with runs stood
+in for), `e2e/test_conversations.sh` (a server, real workflows and the
+agent), and in `e2e/test_two_roles.sh` and `e2e/test_served_tenants.sh`
+(through an API in another process, and under row-level security).
+
+### What is left
+
+Phase 3 is the console's: it moves from `POST /workflows/{id}/chat` and the
+`sessions` routes to the conversation routes, and stops offering the
+Channel trigger type, in runtara-frontend. The console builds against a
+release's `openapi.json`, so that follows a release that has these routes.
+The `chat` and `sessions` routes are kept until then and are removed
+here once the console has moved, with the managed session queue and its
+delivery worker if nothing else uses them by then.
 
 ## What this does to the engine split
 

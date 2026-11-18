@@ -198,6 +198,12 @@ impl From<Away> for InputError {
     }
 }
 
+impl From<Away> for crate::api::services::conversations::ConversationError {
+    fn from(away: Away) -> Self {
+        Self::Storage(away.to_string())
+    }
+}
+
 impl From<Away> for WorkflowRuntimeError {
     fn from(away: Away) -> Self {
         Self::Runtime(away.to_string())
@@ -899,6 +905,84 @@ impl Engine for RemoteEngine {
         self.ask(wire::PendingInputPageOf {
             tenant_id: tenant_id.to_owned(),
             instance_id: instance_id.to_owned(),
+        })
+        .await
+    }
+
+    async fn open_conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        open: OpenConversation,
+    ) -> ConversationResult<ConversationState> {
+        self.ask(wire::OpenConversationWith {
+            tenant_id: tenant_id.to_owned(),
+            workflow_id: workflow_id.to_owned(),
+            key: key.to_owned(),
+            open,
+        })
+        .await
+    }
+
+    async fn conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+    ) -> ConversationResult<ConversationState> {
+        self.ask(wire::ConversationOf {
+            tenant_id: tenant_id.to_owned(),
+            workflow_id: workflow_id.to_owned(),
+            key: key.to_owned(),
+        })
+        .await
+    }
+
+    async fn send_conversation_message(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        message: Message,
+    ) -> ConversationResult<Sent> {
+        self.ask(wire::SendConversationMessage {
+            tenant_id: tenant_id.to_owned(),
+            workflow_id: workflow_id.to_owned(),
+            key: key.to_owned(),
+            message,
+        })
+        .await
+    }
+
+    async fn conversation_events(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        after: i64,
+        limit: u32,
+    ) -> ConversationResult<Vec<ConversationEvent>> {
+        self.ask(wire::ConversationEvents {
+            tenant_id: tenant_id.to_owned(),
+            workflow_id: workflow_id.to_owned(),
+            key: key.to_owned(),
+            after,
+            limit,
+        })
+        .await
+    }
+
+    async fn delete_conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+    ) -> ConversationResult<bool> {
+        self.ask(wire::DeleteConversation {
+            tenant_id: tenant_id.to_owned(),
+            workflow_id: workflow_id.to_owned(),
+            key: key.to_owned(),
         })
         .await
     }
@@ -1734,6 +1818,42 @@ mod tests {
                 )],
             ),
             ("GetTenantMetrics", vec![get("/api/runtime/metrics/tenant")]),
+            (
+                "OpenConversationWith",
+                vec![
+                    permission_for(
+                        &Method::PUT,
+                        "/api/runtime/workflows/{id}/conversations/{key}",
+                    )
+                    .unwrap(),
+                ],
+            ),
+            (
+                "ConversationOf",
+                vec![get("/api/runtime/workflows/{id}/conversations/{key}")],
+            ),
+            (
+                "SendConversationMessage",
+                vec![post(
+                    "/api/runtime/workflows/{id}/conversations/{key}/messages",
+                )],
+            ),
+            (
+                "ConversationEvents",
+                vec![get(
+                    "/api/runtime/workflows/{id}/conversations/{key}/events",
+                )],
+            ),
+            (
+                "DeleteConversation",
+                vec![
+                    permission_for(
+                        &Method::DELETE,
+                        "/api/runtime/workflows/{id}/conversations/{key}",
+                    )
+                    .unwrap(),
+                ],
+            ),
             (
                 "ListInputRequests",
                 vec![post("/api/runtime/sessions/{sessionId}/events")],

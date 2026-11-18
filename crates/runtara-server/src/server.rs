@@ -171,6 +171,12 @@ use runtime_client::RuntimeClient;
         // Chat endpoints
         api::handlers::chat::chat_handler,
         api::handlers::chat::chat_start_handler,
+        // Conversations with a workflow
+        api::handlers::conversations::open_conversation,
+        api::handlers::conversations::get_conversation,
+        api::handlers::conversations::delete_conversation,
+        api::handlers::conversations::send_message,
+        api::handlers::conversations::conversation_events,
         // API Key endpoints
         api::handlers::api_keys::create_api_key,
         api::handlers::api_keys::list_api_keys,
@@ -295,6 +301,14 @@ use runtime_client::RuntimeClient;
             api::dto::agent_testing::TestAgentErrorResponse,
             api::handlers::chat::ChatRequest,
             api::handlers::chat::ChatStartRequest,
+            api::services::conversations::OpenConversation,
+            api::services::conversations::ConversationState,
+            api::services::conversations::ConversationEvent,
+            api::services::conversations::Message,
+            api::services::conversations::MessageState,
+            api::services::conversations::Sender,
+            api::services::conversations::Attachment,
+            api::services::conversations::Sent,
             api::metadata::NotImplementedResponse,
             api::dto::object_model::Condition,
             api::dto::object_model::FilterRequest,
@@ -420,6 +434,7 @@ use runtime_client::RuntimeClient;
     ),
     tags(
         (name = "executions-controller", description = "Execution history and listing API endpoints"),
+        (name = "Conversations", description = "A conversation with a workflow: found by a key, carried by one run after another"),
         (name = "workflow-controller", description = "Workflow management API endpoints"),
         (name = "steps-controller", description = "Step type discovery API endpoints"),
         (name = "agents-controller", description = "Agent discovery API endpoints"),
@@ -1024,6 +1039,21 @@ fn api_app(parts: ApiParts) -> Router {
         .route(
             "/api/runtime/workflows/{id}/chat/start",
             post(api::handlers::chat::chat_start_handler),
+        )
+        // A conversation with a workflow, found by the client's key.
+        .route(
+            "/api/runtime/workflows/{id}/conversations/{key}",
+            put(api::handlers::conversations::open_conversation)
+                .get(api::handlers::conversations::get_conversation)
+                .delete(api::handlers::conversations::delete_conversation),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/conversations/{key}/messages",
+            post(api::handlers::conversations::send_message),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/conversations/{key}/events",
+            get(api::handlers::conversations::conversation_events),
         )
         // Session endpoints (session-based event handling for WaitForSignal)
         .route(
@@ -3696,6 +3726,20 @@ async fn start_as_platform(
                  CONTROL_CAPACITY_UNSATISFIABLE"
             );
         }
+    }
+    // What carries conversations: reads what their runs said, hands them
+    // their next message, and starts their reply workflows.
+    if runtime_client.is_some() {
+        workers.intake(
+            crate::roles::Role::Engine,
+            "conversations",
+            &shutdown_coordinator,
+            crate::api::services::conversations::carry(
+                local_engine.conversations(),
+                shutdown_signal.clone(),
+                std::time::Duration::from_millis(500),
+            ),
+        );
     }
     if let (Some(connection), Some(client)) = (valkey_conn.clone(), runtime_client.clone()) {
         for delivery_tenant_id in config::served_tenants().iter().cloned() {

@@ -42,6 +42,7 @@ The background to this, and what is still to come, is in
 | `RUNTARA_ENGINE_TLS_DIR` | its certificate directory | its certificate directory |
 | `RUNTARA_ENGINE_HEALTH_LISTEN` | **refused** | optional: where it says it is up, `host:port` |
 | `RUNTARA_COMPILER_WASM` | unused | required: the compiler's WASI command, `runtara-compile-sandboxed.wasm`, which ships beside the components |
+| `RUNTARA_CONVERSATION_QUEUE_BOUND` | unused | optional: how many messages one conversation holds while its run is busy; 32 without it ([native-chat.md](native-chat.md)) |
 
 An API that is given something marked **refused** does not start, and names
 what it was given. An engine does not start without
