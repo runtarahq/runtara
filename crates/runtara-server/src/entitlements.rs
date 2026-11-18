@@ -74,8 +74,10 @@ pub struct EntitlementLimits {
 }
 
 /// Agents every tier gets whenever they are registered, whatever the
-/// allowlist says: control (decision D5).
-pub const ALWAYS_ENABLED_AGENTS: &[&str] = &[runtara_dsl::agent_meta::CONTROL_AGENT_ID];
+/// allowlist says: control (decision D5), and conversation, by which a
+/// workflow answers whoever it is talking with.
+pub const ALWAYS_ENABLED_AGENTS: &[&str] =
+    &[runtara_dsl::agent_meta::CONTROL_AGENT_ID, "conversation"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
