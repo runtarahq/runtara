@@ -9,7 +9,7 @@
 # every key.
 #
 # The API reads who is a member and which tokens are revoked, counts its
-# tenants' quotas, keeps MCP sessions and session queues, writes product
+# tenants' quotas, keeps MCP sessions, writes product
 # events, and reads the control stream. It cannot write a trigger stream
 # (runtara:triggers:*), a compilation queue or its progress
 # (*:compilation:*), an admission count (*:admission:*), or add to the
@@ -26,11 +26,8 @@ resetchannels
 # Quotas the API counts itself.
 ~*:quota:api
 ~*:quota:compile
-# MCP sessions, session queues and their index.
+# MCP sessions.
 ~runtara:mcp:sessions:*
-~queue:*
-~runtara:session:*
-~*:session:*
 # Product events. A stream key of another name
 # (RUNTARA_PRODUCT_EVENTS_STREAM_KEY) is added here.
 ~runtara:product_events:*

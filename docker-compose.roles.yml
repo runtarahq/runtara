@@ -191,7 +191,7 @@ configs:
   valkey-users:
     content: |
       user default on >runtara_engine ~* &* +@all
-      user runtara-api on >runtara_api resetkeys resetchannels -@all %R~*:member:* %R~member:* ~*:token:revoked:* ~token:revoked:* %R~runtara:tenant_status:* ~*:quota:api ~*:quota:compile ~runtara:mcp:sessions:* ~queue:* ~runtara:session:* ~*:session:* ~runtara:product_events:* +@all -@admin -@dangerous +info (%RW~*:control resetchannels -@all +xgroup +xreadgroup +xack +xautoclaim +xpending +xinfo +xlen +ping)
+      user runtara-api on >runtara_api resetkeys resetchannels -@all %R~*:member:* %R~member:* ~*:token:revoked:* ~token:revoked:* %R~runtara:tenant_status:* ~*:quota:api ~*:quota:compile ~runtara:mcp:sessions:* ~runtara:product_events:* +@all -@admin -@dangerous +info (%RW~*:control resetchannels -@all +xgroup +xreadgroup +xack +xautoclaim +xpending +xinfo +xlen +ping)
 
   # scripts/roles/api-database-role.sql, as it is.
   api-database-role:

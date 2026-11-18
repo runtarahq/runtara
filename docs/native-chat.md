@@ -1,10 +1,11 @@
 # A native chat, and channels built on it
 
-Phases 1 and 2 are built: the platform channels and the Channel trigger
-are removed, and the conversation is in the core, with its routes and the
-`conversation` agent. Phase 3 waits for the console
-([what is left](#what-is-left)). Phases 4 and 5, the adapters, are not
-started.
+Phases 1 to 3 are built: the platform channels and the Channel trigger
+are removed, the conversation is in the core with its routes and the
+`conversation` agent, and the old `chat` and `sessions` routes are removed
+for it. The console's move is a branch of runtara-frontend, and has an
+order to be merged in ([the order](#the-order)). Phases 4 and 5, the
+adapters, are not started.
 
 ## What is wanted
 
@@ -214,7 +215,10 @@ granted nothing on: `conversations`, `conversation_messages`,
   message's, so starting it again starts the same run.
 - **A message** is `{id, text?, payload?, sender?, attachments?}`. It
   starts a run with `data: {message, payload, messageId, sender,
-  attachments, conversation: {id, key, workflowId}}`. Answering a waiting
+  attachments, conversation: {id, key, workflowId}}`, leaving out what the
+  message does not carry: a first message with an empty `payload` and no
+  text starts a run with no `message`, which is how a client lets the
+  workflow speak first. Answering a waiting
   run, `payload` is the answer as it is, and `text` alone is `{"message":
   text}`. Its state is `queued`, `started`, `delivered` or `failed`; the
   answer to sending it says which, where that is known at once.
@@ -244,7 +248,7 @@ What differs from the plan above:
 - **The queue is rows of the conversation**, not the Valkey queue of the
   old sessions: a message waits until its turn, however long, and "once"
   holds for as long as the conversation does. The managed queue and its
-  delivery worker are still what the old `sessions` routes use.
+  delivery worker went with the `sessions` routes.
 - **A reply said by a step that is retried may be said twice.** A step
   that ran is not run again on resume, so this is a step that failed after
   saying it.
@@ -258,15 +262,27 @@ in for), `e2e/test_conversations.sh` (a server, real workflows and the
 agent), and in `e2e/test_two_roles.sh` and `e2e/test_served_tenants.sh`
 (through an API in another process, and under row-level security).
 
-### What is left
+### The order
 
-Phase 3 is the console's: it moves from `POST /workflows/{id}/chat` and the
-`sessions` routes to the conversation routes, and stops offering the
-Channel trigger type, in runtara-frontend. The console builds against a
-release's `openapi.json`, so that follows a release that has these routes.
-The `chat` and `sessions` routes are kept until then and are removed
-here once the console has moved, with the managed session queue and its
-delivery worker if nothing else uses them by then.
+Phase 3 is in two repositories, and the console builds against a release:
+
+1. The conversation (phase 2) is released.
+2. The console moves to it (runtara-frontend, `feature/conversations`): the
+   chat page opens a conversation under a key of its own, sends each
+   message under its own id, and reads replies from the conversation's
+   events; a run opened from its history is found by the conversation its
+   input names. It stops offering the Channel trigger type. Its client for
+   these routes is written by hand until the generated one has them.
+3. The `chat` and `sessions` routes are removed here
+   (`feature/remove-chat-routes`), with the managed session queue, its
+   delivery worker and their Valkey keys, once a console release that does
+   not use them is the one the release smoke test runs
+   (`RUNTARA_FRONTEND_VERSION`).
+
+What the removal changes for a caller: a key held to running workflows
+(`workflow:execute` alone) could follow the run a chat started, on the chat
+route's stream. It sends into a conversation still, and reads what the
+conversation said only with `invocation_history:read`.
 
 ## What this does to the engine split
 

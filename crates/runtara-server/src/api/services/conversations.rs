@@ -662,7 +662,7 @@ impl Conversations {
                     at.say("reply", body).await?;
                     continue;
                 }
-                for activity in crate::api::handlers::chat::parse_debug_event(
+                for activity in crate::api::services::run_activity::parse_debug_event(
                     said.kind.as_deref(),
                     &said.payload,
                 ) {
@@ -670,7 +670,7 @@ impl Conversations {
                     // which are current; this is a record of one.
                     if matches!(
                         activity,
-                        crate::api::handlers::chat::ChatEvent::WaitingForInput { .. }
+                        crate::api::services::run_activity::Activity::WaitingForInput { .. }
                     ) {
                         continue;
                     }

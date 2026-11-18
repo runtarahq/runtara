@@ -1644,6 +1644,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **BREAKING: the `chat` and `sessions` routes.** `POST
+  /api/runtime/workflows/{id}/chat`, `…/chat/start`, `…/sessions`, and
+  everything under `/api/runtime/sessions/{sessionId}` (events, pending
+  input, deliveries) are gone, with the managed session queue in Valkey and
+  its delivery worker. A chat with a workflow is a conversation: `PUT
+  /api/runtime/workflows/{id}/conversations/{key}`, `POST …/messages`, `GET
+  …/events`. A session was one run and took a message only while that run
+  waited; a conversation takes one at any time. A client that started a
+  chat with no message sends a first message with an empty `payload`. An
+  API key held to `workflow:execute` alone no longer reads a run it
+  started: reading a conversation's events needs
+  `invocation_history:read`. The API role's Valkey user loses the session
+  queue's keys. Needs a console release that uses conversations.
 - **BREAKING: the platform chat channels and the Channel trigger type.**
   The server no longer receives Telegram, Slack, Teams or Mailgun
   conversations itself: the `/api/runtime/events/webhook/{platform}/…`

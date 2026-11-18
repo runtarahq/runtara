@@ -831,36 +831,6 @@ impl Engine for RemoteEngine {
         .await
     }
 
-    async fn list_input_requests(
-        &self,
-        tenant_id: &str,
-        instances: &[String],
-        offset: u64,
-        limit: u32,
-    ) -> InputResult<InputRequestPage> {
-        self.ask(wire::ListInputRequests {
-            tenant_id: tenant_id.to_owned(),
-            instances: instances.to_vec(),
-            offset,
-            limit,
-        })
-        .await
-    }
-
-    async fn get_input_request(
-        &self,
-        tenant_id: &str,
-        instance_id: &str,
-        request: &str,
-    ) -> InputResult<InputRequest> {
-        self.ask(wire::GetInputRequest {
-            tenant_id: tenant_id.to_owned(),
-            instance_id: instance_id.to_owned(),
-            request: request.to_owned(),
-        })
-        .await
-    }
-
     async fn submit_input_response(
         &self,
         tenant_id: &str,
@@ -1642,11 +1612,26 @@ mod tests {
         for name in ["GetInstanceInfo", "GetExecution", "Stop"] {
             assert_eq!(ask(name, run, scoped(connections)).await, refused, "{name}");
         }
-        // A key held to running workflows follows the run it started, and
-        // does not list the tenant's history.
+        // A key held to running workflows starts a run and sends into a
+        // conversation, and reads no run: what was said is history.
         let runs = only(Permission::WorkflowExecute);
-        assert!(ask("GetInstanceInfo", run, scoped(runs)).await.is_ok());
-        assert_eq!(ask("GetExecution", run, scoped(runs)).await, refused);
+        for name in ["GetInstanceInfo", "GetExecution"] {
+            assert_eq!(ask(name, run, scoped(runs)).await, refused, "{name}");
+        }
+        let conversation = r#"{"tenant_id":"acme","workflow_id":"w","key":"k"}"#;
+        assert_eq!(
+            ask("ConversationOf", conversation, scoped(runs)).await,
+            refused
+        );
+        assert!(
+            ask(
+                "ConversationOf",
+                conversation,
+                scoped(ApiKeyScope::ReadOnly)
+            )
+            .await
+            .is_ok()
+        );
         // What the API lists to every caller, any member may ask.
         assert!(
             ask(
@@ -1778,26 +1763,19 @@ mod tests {
                 vec![
                     get("/api/runtime/workflows/{workflowId}/instances/{instanceId}/pending-input"),
                     get("/api/runtime/workflows/{workflowId}/instances/{instanceId}/actions"),
-                    post("/api/runtime/sessions/{sessionId}/deliveries/{messageId}/resolve"),
                 ],
             ),
             (
                 "GetInstanceInfo",
-                vec![
-                    get("/api/runtime/workflows/{workflowId}/instances/{instanceId}/steps"),
-                    get("/api/runtime/sessions/{sessionId}/events"),
-                    post("/api/runtime/workflows/{id}/sessions"),
-                    post("/api/runtime/workflows/{id}/chat"),
-                ],
+                vec![get(
+                    "/api/runtime/workflows/{workflowId}/instances/{instanceId}/steps",
+                )],
             ),
             (
                 "ListEvents",
-                vec![
-                    get("/api/runtime/workflows/{workflowId}/instances/{instanceId}/step-events"),
-                    get("/api/runtime/sessions/{sessionId}/events"),
-                    post("/api/runtime/workflows/{id}/sessions"),
-                    post("/api/runtime/workflows/{id}/chat"),
-                ],
+                vec![get(
+                    "/api/runtime/workflows/{workflowId}/instances/{instanceId}/step-events",
+                )],
             ),
             (
                 "ListStepSummaries",
@@ -1855,21 +1833,10 @@ mod tests {
                 ],
             ),
             (
-                "ListInputRequests",
-                vec![post("/api/runtime/sessions/{sessionId}/events")],
-            ),
-            (
-                "GetInputRequest",
-                vec![post(
-                    "/api/runtime/sessions/{sessionId}/deliveries/{messageId}/resolve",
-                )],
-            ),
-            (
                 "PendingInputPageOf",
-                vec![
-                    get("/api/runtime/sessions/{sessionId}/pending-input"),
-                    get("/api/runtime/workflows/{workflowId}/instances/{instanceId}/pending-input"),
-                ],
+                vec![get(
+                    "/api/runtime/workflows/{workflowId}/instances/{instanceId}/pending-input",
+                )],
             ),
             (
                 "ListInstanceActions",

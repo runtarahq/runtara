@@ -312,7 +312,7 @@ valkey-cli ACL SETUSER runtara-api on '><password>' \
 ```
 
 It reads who is a member and which tokens are revoked, counts its tenants'
-quotas, keeps MCP sessions and session queues, writes product events and
+quotas, keeps MCP sessions, writes product events and
 reads the control stream. It cannot write a trigger stream, a compilation
 queue, an admission count or a membership, or add to the control stream.
 The engine's user keeps every key. Turn the `default` user off, or give it

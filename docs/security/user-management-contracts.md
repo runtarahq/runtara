@@ -225,8 +225,6 @@ shared Valkey can be reasoned about. Each is scoped to its tenant:
 | `runtara:compilation:progress:{tenant}:{workflow}:{version}` | hash | Compilation progress |
 | `runtara:triggers:{tenant}` | stream | Trigger events (prefix configurable) |
 | `runtara:mcp:sessions:{tenant}:{session}` | string | MCP session recovery, under the tenant of the request that made it; another tenant's request cannot restore it |
-| `runtara:session:{<sha256 of tenant, session>}:*` | various | Session queues |
-| `queue:{tenant}:{session}` | list | Session input queue |
 
 The unprefixed `runtara:compilation:{queue,pending,requests}` and
 `runtara:admission:reserved:{tenant}` of earlier versions are drained (queue)

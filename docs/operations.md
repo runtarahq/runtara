@@ -597,8 +597,7 @@ response envelope:
 - `GET/POST /operations/views` and `PUT/DELETE /operations/views/{id}` persist
   tenant-scoped views. Updates and deletion require the current `revision`;
   stale writes receive 409. Each view belongs to exactly one workflow.
-- Answers reuse `/signals`; authenticated session API answers also retain
-  their original actor through queued delivery and receipt retries.
+- Answers reuse `/signals`.
 
 View `formats` contain only generic display options: `kind` (`text`, `number`,
 `date`, `datetime`, `relative`), `decimals`, `prefix`, and `suffix`. For example,
