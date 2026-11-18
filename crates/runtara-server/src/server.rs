@@ -575,6 +575,17 @@ impl axum::extract::FromRef<ServedState> for Arc<runtara_connections::Connection
     }
 }
 
+// The engine checks a webhook against the trigger's connection, read as it is.
+impl axum::extract::FromRef<ServedState>
+    for Arc<dyn api::services::webhook_verification::WebhookCheck>
+{
+    fn from_ref(state: &ServedState) -> Self {
+        Arc::new(api::services::webhook_verification::ByConnection(
+            state.connections.clone(),
+        ))
+    }
+}
+
 // Implement FromRef to allow extracting the unified execution engine from ServedState
 // Implement FromRef to allow extracting AgentsService from ServedState
 impl axum::extract::FromRef<ServedState> for api::services::operators::AgentsService {
@@ -3810,6 +3821,48 @@ async fn start_as_platform(
     // the API authenticated asks for a synchronous run as an operation
     // (`Engine::run_sync`), not through these routes.
     local_engine.serves(crate::engine::Served::Events, events_served);
+
+    // What checking a trigger's webhook needs is kept with the trigger, for
+    // a process that receives webhooks and holds no connection
+    // (`api::services::webhook_verification`). The engine writes it from the
+    // connection when a trigger is saved, and here every little while, so a
+    // connection whose secret is entered again is followed.
+    {
+        let (pool, connections) = (pool.clone(), connections_facade.clone());
+        workers.detached(
+            crate::roles::Role::Engine,
+            "webhook verification material",
+            async move {
+                loop {
+                    for tenant in config::served_tenants() {
+                        let kept = runtara_store_postgres::tenant_scope::scoped(
+                            tenant.clone(),
+                            api::services::webhook_verification::keep_material_current(
+                                &pool,
+                                &connections,
+                                tenant,
+                            ),
+                        )
+                        .await;
+                        match kept {
+                            Ok(0) => {}
+                            Ok(written) => tracing::info!(
+                                tenant_id = %tenant,
+                                written,
+                                "Wrote what checks triggers' webhooks"
+                            ),
+                            Err(error) => tracing::warn!(
+                                tenant_id = %tenant,
+                                %error,
+                                "What checks triggers' webhooks could not be written"
+                            ),
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
+            },
+        );
+    }
 
     // Chat channels (conversational triggers). The engine serves a channel's
     // webhook: the call is checked against its connection's sealed secret, and

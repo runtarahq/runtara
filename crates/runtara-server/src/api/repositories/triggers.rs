@@ -223,6 +223,63 @@ impl TriggerRepository {
         Ok(result.rows_affected() > 0)
     }
 
+    /// What checking `id`'s webhook needs, as the engine last wrote it from
+    /// the trigger's connection. See
+    /// [`crate::api::services::webhook_verification`].
+    pub async fn webhook_verification(
+        &self,
+        id: &str,
+    ) -> Result<Option<serde_json::Value>, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT webhook_verification FROM public.invocation_trigger WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map(Option::flatten)
+    }
+
+    /// The triggers of `tenant_id` that are bound to a connection: each one's
+    /// id, the connection, and what is kept for checking its webhook.
+    pub async fn bound_to_connections(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<(String, String, Option<serde_json::Value>)>, sqlx::Error> {
+        sqlx::query_as(
+            r#"
+            SELECT id, configuration->>'connection_id', webhook_verification
+            FROM public.invocation_trigger
+            WHERE tenant_id = $1 AND configuration->>'connection_id' IS NOT NULL
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// Keeps `material` for checking `id`'s webhook, while the trigger is
+    /// still bound to `connection_id`.
+    pub async fn set_webhook_verification(
+        &self,
+        id: &str,
+        connection_id: &str,
+        material: &serde_json::Value,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE public.invocation_trigger
+            SET webhook_verification = $3
+            WHERE id = $1 AND configuration->>'connection_id' = $2
+            "#,
+        )
+        .bind(id)
+        .bind(connection_id)
+        .bind(material)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Merge `patch` (the keys webhook registration manages: `webhook_secret`,
     /// `platform`) into a trigger's configuration, leaving every other key as
     /// it is, so an edit saved while the platform was being called is kept.
