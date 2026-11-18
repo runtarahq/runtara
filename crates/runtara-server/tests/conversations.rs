@@ -729,6 +729,27 @@ async fn a_message_no_run_can_be_started_for_fails_and_says_why() {
     assert!(sent.detail.unwrap().contains("Workflow not found"));
     assert_eq!(talk.kinds("k").await, ["message_failed"]);
 
+    // A message with nothing to say starts a run with no `message` at all,
+    // not a null one: how a client lets the workflow speak first.
+    talk.runs.refused.lock().unwrap().clear();
+    talk.conversations
+        .send(
+            &talk.tenant,
+            &talk.workflow,
+            "silent",
+            Message {
+                text: None,
+                payload: Some(json!({})),
+                ..text_message("opening", "")
+            },
+        )
+        .await
+        .unwrap();
+    let data = talk.runs_of_workflow()[0].inputs["data"].clone();
+    assert!(data.get("message").is_none() && data.get("sender").is_none());
+    assert_eq!(data["payload"], json!({}));
+    assert_eq!(data["messageId"], "opening");
+
     // A message with nothing in it, or no id, is not a message.
     for message in [
         Message {

@@ -85,11 +85,6 @@ use runtime_client::RuntimeClient;
         api::handlers::workflows::rename_folder_handler,
         api::handlers::step_events::get_step_events,
         api::handlers::step_events::get_pending_input,
-        api::handlers::sessions::session_pending_input,
-        api::handlers::sessions::submit_event,
-        api::handlers::sessions::list_session_deliveries,
-        api::handlers::sessions::get_session_delivery,
-        api::handlers::sessions::resolve_session_delivery,
         api::handlers::step_events::submit_signal,
         api::handlers::step_events::list_workflow_open_actions,
         api::handlers::step_events::list_workflow_instance_open_actions,
@@ -168,9 +163,6 @@ use runtime_client::RuntimeClient;
         api::handlers::triggers::get_invocation_trigger,
         api::handlers::triggers::update_invocation_trigger,
         api::handlers::triggers::delete_invocation_trigger,
-        // Chat endpoints
-        api::handlers::chat::chat_handler,
-        api::handlers::chat::chat_start_handler,
         // Conversations with a workflow
         api::handlers::conversations::open_conversation,
         api::handlers::conversations::get_conversation,
@@ -299,8 +291,6 @@ use runtime_client::RuntimeClient;
             api::dto::agent_testing::TestAgentRequest,
             api::dto::agent_testing::TestAgentResponse,
             api::dto::agent_testing::TestAgentErrorResponse,
-            api::handlers::chat::ChatRequest,
-            api::handlers::chat::ChatStartRequest,
             api::services::conversations::OpenConversation,
             api::services::conversations::ConversationState,
             api::services::conversations::ConversationEvent,
@@ -1032,14 +1022,6 @@ fn api_app(parts: ApiParts) -> Router {
             "/api/runtime/workflows/{id}/execute",
             post(api::handlers::workflows::execute_workflow_handler),
         )
-        .route(
-            "/api/runtime/workflows/{id}/chat",
-            post(api::handlers::chat::chat_handler),
-        )
-        .route(
-            "/api/runtime/workflows/{id}/chat/start",
-            post(api::handlers::chat::chat_start_handler),
-        )
         // A conversation with a workflow, found by the client's key.
         .route(
             "/api/runtime/workflows/{id}/conversations/{key}",
@@ -1054,32 +1036,6 @@ fn api_app(parts: ApiParts) -> Router {
         .route(
             "/api/runtime/workflows/{id}/conversations/{key}/events",
             get(api::handlers::conversations::conversation_events),
-        )
-        // Session endpoints (session-based event handling for WaitForSignal)
-        .route(
-            "/api/runtime/workflows/{id}/sessions",
-            post(api::handlers::sessions::create_session),
-        )
-        .route(
-            "/api/runtime/sessions/{sessionId}/events",
-            post(api::handlers::sessions::submit_event)
-                .get(api::handlers::sessions::session_event_stream),
-        )
-        .route(
-            "/api/runtime/sessions/{sessionId}/deliveries",
-            get(api::handlers::sessions::list_session_deliveries),
-        )
-        .route(
-            "/api/runtime/sessions/{sessionId}/deliveries/{messageId}",
-            get(api::handlers::sessions::get_session_delivery),
-        )
-        .route(
-            "/api/runtime/sessions/{sessionId}/deliveries/{messageId}/resolve",
-            post(api::handlers::sessions::resolve_session_delivery),
-        )
-        .route(
-            "/api/runtime/sessions/{sessionId}/pending-input",
-            get(api::handlers::sessions::session_pending_input),
         )
         .route(
             "/api/runtime/workflows/{id}/instances",
@@ -3741,31 +3697,6 @@ async fn start_as_platform(
             ),
         );
     }
-    if let (Some(connection), Some(client)) = (valkey_conn.clone(), runtime_client.clone()) {
-        for delivery_tenant_id in config::served_tenants().iter().cloned() {
-            let connection = connection.clone();
-            let client = client.clone();
-            let shutdown = shutdown_signal.clone();
-            let delivery_pool = pool.clone();
-            let scope = delivery_tenant_id.clone();
-            workers.intake(
-                crate::roles::Role::Engine,
-                "session delivery",
-                &shutdown_coordinator,
-                scoped(scope, async move {
-                    workers::session_delivery_worker::run(
-                        connection,
-                        client,
-                        delivery_pool,
-                        delivery_tenant_id,
-                        shutdown,
-                    )
-                    .await;
-                }),
-            );
-        }
-    }
-
     // Cron does not publish to Valkey directly. Its durable enqueue remains
     // available during an outage, and the relay delivers it when connectivity
     // returns. Start after the shared engine exists so it uses the exact same

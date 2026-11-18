@@ -366,20 +366,20 @@ operations! {
 
     AuthorizeExecution { workflow_id: String, instance_id: String, tenant_id: String }
         -> Result<InstanceInfo, ExecutionError>,
-    needs [InvocationHistoryRead, WorkflowExecute],
+    needs [InvocationHistoryRead],
     |engine, op| for Some(&op.tenant_id) => engine
         .authorize_execution(&op.workflow_id, &op.instance_id, &op.tenant_id)
         .await;
 
     // ---- A run's own records ------------------------------------------------------
     GetInstanceInfo { tenant_id: String, instance_id: String } -> Result<InstanceInfo, RuntimeError>,
-    needs [InvocationHistoryRead, WorkflowExecute],
+    needs [InvocationHistoryRead],
     |engine, op| for Some(&op.tenant_id) =>
         engine.get_instance_info(&op.tenant_id, &op.instance_id).await;
 
     ListEvents { tenant_id: String, instance_id: String, options: Option<ListEventsOptions> }
         -> Result<ListEventsResult, RuntimeError>,
-    needs [InvocationHistoryRead, WorkflowExecute],
+    needs [InvocationHistoryRead],
     |engine, op| for Some(&op.tenant_id) =>
         engine.list_events(&op.tenant_id, &op.instance_id, op.options).await;
 
@@ -427,20 +427,6 @@ operations! {
         .await;
 
     // ---- Input a run waits for ------------------------------------------------
-    ListInputRequests { tenant_id: String, instances: Vec<String>, offset: u64, limit: u32 }
-        -> InputResult<InputRequestPage>,
-    needs [WorkflowExecute],
-    |engine, op| for Some(&op.tenant_id) => engine
-        .list_input_requests(&op.tenant_id, &op.instances, op.offset, op.limit)
-        .await;
-
-    GetInputRequest { tenant_id: String, instance_id: String, request: String }
-        -> InputResult<InputRequest>,
-    needs [WorkflowExecute],
-    |engine, op| for Some(&op.tenant_id) => engine
-        .get_input_request(&op.tenant_id, &op.instance_id, &op.request)
-        .await;
-
     SubmitInputResponse {
         tenant_id: String,
         instance_id: String,

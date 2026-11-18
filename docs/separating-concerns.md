@@ -268,7 +268,7 @@ process, with no change in behaviour. Implemented on
 
   | Role | Work |
   |---|---|
-  | Engine | trigger workers, compilation worker, execution outbox relay, admission reconcilers, control children, session delivery, conversations, cron, unconfirmed OAuth sweep, platform OAuth apps reload, artifact restaging, invocation and trigger stream clean-up, object model pool monitor, and everything `runtara-environment` starts |
+  | Engine | trigger workers, compilation worker, execution outbox relay, admission reconcilers, control children, conversations, cron, unconfirmed OAuth sweep, platform OAuth apps reload, artifact restaging, invocation and trigger stream clean-up, object model pool monitor, and everything `runtara-environment` starts |
   | API | member control events (revoking a removed member's API keys) |
   | Each process, whatever its role (since Phase 3) | the product events drain, the database pool monitor, the heartbeat log |
 
@@ -449,10 +449,10 @@ The engine decides, not the API role. Implemented on
 
 Where it differs from the plan as it was written:
 
-- **The session delivery routes are gated.** Tracing which routes ask each
-  operation found three with no permission: reading what a session holds
-  now needs `invocation_history:read`, and resolving a held message
-  `workflow:execute`.
+- **The session delivery routes were gated.** Tracing which routes ask each
+  operation found three with no permission. They are gone since, with the
+  sessions: a chat with a workflow is a conversation
+  ([native-chat.md](native-chat.md)).
 - **The API's role keeps `invocation_trigger` to update**, because deleting
   a workflow switches its triggers off in the same transaction.
 - **A compile nobody approved may still happen** (through the compile

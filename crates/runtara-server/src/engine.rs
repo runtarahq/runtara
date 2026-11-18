@@ -28,9 +28,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use runtara_core::persistence::inputs::{
-    InputError, InputReceipt, InputRequest, InputRequestPage, InputResult,
-};
+use runtara_core::persistence::inputs::{InputError, InputReceipt, InputResult};
 use runtara_store_postgres::tenant_scope::scoped;
 use serde_json::Value;
 
@@ -283,21 +281,6 @@ pub trait Engine: Send + Sync {
     ) -> Result<runtara_environment::operations::RequestPage, RuntimeError>;
 
     // ---- Input a run waits for --------------------------------------------
-
-    async fn list_input_requests(
-        &self,
-        tenant_id: &str,
-        instances: &[String],
-        offset: u64,
-        limit: u32,
-    ) -> InputResult<InputRequestPage>;
-
-    async fn get_input_request(
-        &self,
-        tenant_id: &str,
-        instance_id: &str,
-        request: &str,
-    ) -> InputResult<InputRequest>;
 
     async fn submit_input_response(
         &self,
@@ -927,29 +910,6 @@ impl Engine for LocalEngine {
     ) -> Result<runtara_environment::operations::RequestPage, RuntimeError> {
         self.runtime()?
             .operation_requests(tenant_id, workflow_id, key, listing, fields)
-            .await
-    }
-
-    async fn list_input_requests(
-        &self,
-        tenant_id: &str,
-        instances: &[String],
-        offset: u64,
-        limit: u32,
-    ) -> InputResult<InputRequestPage> {
-        self.inputs()?
-            .list_input_requests(tenant_id, instances, offset, limit)
-            .await
-    }
-
-    async fn get_input_request(
-        &self,
-        tenant_id: &str,
-        instance_id: &str,
-        request: &str,
-    ) -> InputResult<InputRequest> {
-        self.inputs()?
-            .get_input_request(tenant_id, instance_id, request)
             .await
     }
 
