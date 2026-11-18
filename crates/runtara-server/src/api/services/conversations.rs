@@ -1047,11 +1047,11 @@ pub fn answer_in(output: Option<&Value>) -> Option<String> {
 /// its own tenant's scope.
 pub async fn carry(
     conversations: Conversations,
-    shutdown: Arc<std::sync::atomic::AtomicBool>,
+    shutdown: crate::shutdown::ShutdownSignal,
     every: Duration,
 ) {
     use runtara_store_postgres::tenant_scope::{scoped, system};
-    while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+    loop {
         match system(conversations.unsettled()).await {
             Ok(unsettled) => {
                 for (conversation, tenant) in unsettled {
@@ -1062,7 +1062,11 @@ pub async fn carry(
             }
             Err(error) => tracing::warn!(%error, "The conversations to advance were not read"),
         }
-        tokio::time::sleep(every).await;
+        tokio::select! {
+            biased;
+            _ = shutdown.clone().wait() => return,
+            _ = tokio::time::sleep(every) => {}
+        }
     }
 }
 

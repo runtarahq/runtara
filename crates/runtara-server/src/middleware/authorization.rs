@@ -355,6 +355,10 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         ("POST", "/api/runtime/workflows/{id}/chat") => WorkflowExecute,
         ("POST", "/api/runtime/workflows/{id}/chat/start") => WorkflowExecute,
         ("POST", "/api/runtime/workflows/{id}/sessions") => WorkflowExecute,
+        // A conversation drives runs of its workflow: opening one, sending
+        // into it and deleting it are the workflow's execution.
+        ("PUT" | "DELETE", "/api/runtime/workflows/{id}/conversations/{key}") => WorkflowExecute,
+        ("POST", "/api/runtime/workflows/{id}/conversations/{key}/messages") => WorkflowExecute,
         ("POST", "/api/runtime/sessions/{sessionId}/events") => WorkflowExecute,
         ("POST", "/api/runtime/workflows/{id}/schedule") => WorkflowExecute,
         ("POST", "/api/runtime/workflows/instances/{instanceId}/stop") => WorkflowExecute,
@@ -386,6 +390,9 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         ("PUT" | "DELETE", "/api/runtime/operations/views/{id}") => WorkflowUpdate,
         ("POST", "/api/runtime/operations/requests/query") => InvocationHistoryRead,
         ("GET", "/api/runtime/sessions/{sessionId}/events") => InvocationHistoryRead,
+        // What was said in a conversation is its runs' history.
+        ("GET", "/api/runtime/workflows/{id}/conversations/{key}") => InvocationHistoryRead,
+        ("GET", "/api/runtime/workflows/{id}/conversations/{key}/events") => InvocationHistoryRead,
         ("GET", "/api/runtime/sessions/{sessionId}/pending-input") => InvocationHistoryRead,
         // What a session has to deliver is part of its run's history; choosing where a held
         // message goes (or failing it) drives the run, like submitting the event did.

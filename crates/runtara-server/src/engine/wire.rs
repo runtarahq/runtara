@@ -482,6 +482,53 @@ operations! {
     |engine, op| for Some(&op.tenant_id) =>
         engine.pending_input_page(&op.tenant_id, &op.instance_id).await;
 
+    // ---- Conversations with a workflow -----------------------------------------
+    OpenConversationWith {
+        tenant_id: String,
+        workflow_id: String,
+        key: String,
+        open: OpenConversation,
+    } -> ConversationResult<ConversationState>,
+    needs [WorkflowExecute],
+    |engine, op| for Some(&op.tenant_id) => engine
+        .open_conversation(&op.tenant_id, &op.workflow_id, &op.key, op.open)
+        .await;
+
+    ConversationOf { tenant_id: String, workflow_id: String, key: String }
+        -> ConversationResult<ConversationState>,
+    needs [InvocationHistoryRead],
+    |engine, op| for Some(&op.tenant_id) =>
+        engine.conversation(&op.tenant_id, &op.workflow_id, &op.key).await;
+
+    SendConversationMessage {
+        tenant_id: String,
+        workflow_id: String,
+        key: String,
+        message: Message,
+    } -> ConversationResult<Sent>,
+    needs [WorkflowExecute],
+    |engine, op| for Some(&op.tenant_id) => engine
+        .send_conversation_message(&op.tenant_id, &op.workflow_id, &op.key, op.message)
+        .await;
+
+    ConversationEvents {
+        tenant_id: String,
+        workflow_id: String,
+        key: String,
+        after: i64,
+        limit: u32,
+    } -> ConversationResult<Vec<ConversationEvent>>,
+    needs [InvocationHistoryRead],
+    |engine, op| for Some(&op.tenant_id) => engine
+        .conversation_events(&op.tenant_id, &op.workflow_id, &op.key, op.after, op.limit)
+        .await;
+
+    DeleteConversation { tenant_id: String, workflow_id: String, key: String }
+        -> ConversationResult<bool>,
+    needs [WorkflowExecute],
+    |engine, op| for Some(&op.tenant_id) =>
+        engine.delete_conversation(&op.tenant_id, &op.workflow_id, &op.key).await;
+
     // ---- Actions a workflow offers while it waits ------------------------------
     ListInstanceActions { tenant_id: String, workflow_id: String, instance_id: String }
         -> Result<Vec<WorkflowRuntimeAction>, WorkflowRuntimeError>,

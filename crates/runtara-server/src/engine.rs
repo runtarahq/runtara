@@ -45,6 +45,10 @@ use crate::api::services::agent_testing::{
 use crate::api::services::compilation::{
     CompilationResultDto, CompilationService, ServiceError as CompilationError,
 };
+use crate::api::services::conversations::{
+    ConversationEvent, ConversationResult, ConversationState, Conversations, EngineRuns, Message,
+    OpenConversation, Sent,
+};
 use crate::api::services::pending_inputs::PendingInputPage;
 use crate::api::services::workflow_runtime::{
     WorkflowActionReceipt, WorkflowRuntimeAction, WorkflowRuntimeActionPage, WorkflowRuntimeError,
@@ -321,6 +325,51 @@ pub trait Engine: Send + Sync {
         instance_id: &str,
     ) -> InputResult<PendingInputPage>;
 
+    // ---- Conversations with a workflow ------------------------------------
+
+    /// Opens the conversation `key` names with a workflow, or finds it.
+    async fn open_conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        open: OpenConversation,
+    ) -> ConversationResult<ConversationState>;
+
+    async fn conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+    ) -> ConversationResult<ConversationState>;
+
+    /// Sends a message into a conversation, which starts a run with it,
+    /// answers what its run waits for, or holds it until its turn.
+    async fn send_conversation_message(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        message: Message,
+    ) -> ConversationResult<Sent>;
+
+    /// What a conversation has for its user after event `after`.
+    async fn conversation_events(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        after: i64,
+        limit: u32,
+    ) -> ConversationResult<Vec<ConversationEvent>>;
+
+    async fn delete_conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+    ) -> ConversationResult<bool>;
+
     // ---- Actions a workflow offers while it waits ---------------------------
 
     async fn list_instance_actions(
@@ -514,6 +563,8 @@ pub struct LocalEngine {
     executions: Arc<ExecutionEngine>,
     /// The server database, which the engine reads definitions from.
     pool: sqlx::PgPool,
+    /// The conversations with workflows, and what carries them.
+    conversations: Conversations,
     /// The agents a compiled workflow may use.
     agent_catalog: Option<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     /// Runs an agent's capability on request, if this server allows it.
@@ -536,6 +587,10 @@ impl LocalEngine {
         pool: sqlx::PgPool,
     ) -> Self {
         Self {
+            conversations: Conversations::new(
+                pool.clone(),
+                Arc::new(EngineRuns::new(runtime.clone(), executions.clone())),
+            ),
             runtime,
             executions,
             pool,
@@ -545,6 +600,11 @@ impl LocalEngine {
             served: std::sync::RwLock::default(),
             runs_elsewhere: None,
         }
+    }
+
+    /// The conversations this engine keeps, for what carries them.
+    pub fn conversations(&self) -> Conversations {
+        self.conversations.clone()
     }
 
     /// For intake: workflows are run by `engine`, in another process.
@@ -929,6 +989,61 @@ impl Engine for LocalEngine {
             instance_id,
         )
         .await
+    }
+
+    async fn open_conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        open: OpenConversation,
+    ) -> ConversationResult<ConversationState> {
+        self.conversations
+            .open(tenant_id, workflow_id, key, open)
+            .await
+    }
+
+    async fn conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+    ) -> ConversationResult<ConversationState> {
+        self.conversations.state(tenant_id, workflow_id, key).await
+    }
+
+    async fn send_conversation_message(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        message: Message,
+    ) -> ConversationResult<Sent> {
+        self.conversations
+            .send(tenant_id, workflow_id, key, message)
+            .await
+    }
+
+    async fn conversation_events(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        after: i64,
+        limit: u32,
+    ) -> ConversationResult<Vec<ConversationEvent>> {
+        self.conversations
+            .events(tenant_id, workflow_id, key, after, limit)
+            .await
+    }
+
+    async fn delete_conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+    ) -> ConversationResult<bool> {
+        self.conversations.delete(tenant_id, workflow_id, key).await
     }
 
     async fn list_instance_actions(
