@@ -395,33 +395,68 @@ end to end:
   security, which is what shows the tenant's scope entered on the engine's
   side.
 
-## Phase 4: the engine decides, not the API role
+## Phase 4: done
 
-Without this phase the split protects keys and the runtime database but a
-broken API role could still tell the engine "this is tenant X".
+The engine decides, not the API role. Implemented on
+`feature/engine-decides`; `docs/roles.md` says how to set it up.
 
-1. **The engine verifies the caller's authority itself.** The API role
-   forwards the token or API key with each call; the engine runs the same
-   verification (JWKS, the `api_keys` table, membership) and takes the
-   tenant from that, never from the API role's word.
-2. **Triggers are checked by the engine.** The API role forwards a webhook
-   as it arrived; the engine looks up the trigger, has seal check the
-   signature, and writes the outbox.
-3. **Only the engine makes a workflow runnable.** Editing a draft is CRUD.
-   Compiling, publishing and setting the current version are engine
-   operations that need a user's authority, and the engine records what it
-   approved in the runtime database. A definition changed in the server
-   database behind the engine's back does not run.
-4. **Database roles.** The API role's Postgres role has no rights on the
-   outbox, admission and compilation tables, nor on anything in the runtime
-   database, nor on `seal_wrapped_key` (empty once seal is separate). The
-   role `runtara_system` is created and granted to the engine's role and
-   not to the API role's, so the API role cannot ask for every tenant
-   (Phase 0 built the check; nothing creates the role yet). Its lookups by
-   id for unauthenticated requests, which today run as the platform, move
-   to the engine with the triggers.
-5. **Valkey users.** The API role's user cannot write the trigger,
-   compilation or control streams.
+1. **The engine verifies the caller's authority itself.** The API holds
+   what a caller presented (the token or API key, the tenant the path
+   named, which way in) for the length of the request
+   (`crates/runtara-server/src/auth/presented.rs`), and sends it with every
+   call it makes for that caller. The engine's listener runs the API's own
+   verification on it (`middleware::auth::verify`: JWKS, the `api_keys`
+   table, the tenant's status, membership) and goes by the caller it finds
+   (`engine/listener.rs`):
+   - an operation for a tenant is answered only for a caller who acts for
+     that tenant, in that tenant's scope;
+   - an operation that changes something is held to the caller's role and
+     API key scope, by the permissions the API's route gate uses
+     (`engine/wire.rs`, `needs`). What reads is answered to any member;
+   - a part of the API that has a caller is served to the caller the engine
+     found; the caller the API names is not read.
+
+   MCP tool calls and streamed answers keep what was presented, as they
+   keep the tenant's scope.
+2. **Triggers are checked by the engine.** They have been since Phases 2
+   and 3: webhooks, channel webhooks and the synchronous trigger are parts
+   of the API the engine serves, handed over as they arrived. The engine
+   looks up the trigger, has seal check the signature and writes the
+   outbox. What Phase 4 adds is that the API's database role cannot reach
+   those tables, and cannot look up a row across tenants.
+3. **Only the engine makes a workflow runnable** (`engine/approvals.rs`).
+   The engine records, in the runtime database, each version someone who
+   may run it asked to have compiled or run, as the definition was then,
+   the image the engine compiled from it, and the version chosen to run
+   when none is named. Every launch goes by those records: a definition
+   changed in the server database since is refused; an image the engine did
+   not compile from it is compiled again and not run. Setting the current
+   version and forgetting a compilation are engine operations, and the API
+   no longer writes `workflow_compilations`. What was compiled and chosen
+   before is carried over once, at the first start.
+4. **Database roles** (`scripts/roles/api-database-role.sql`). The API's
+   role is granted its own records, the compilation tables to read, and
+   nothing of the outbox, admission, connections, keys or the runtime
+   database. `runtara_system` is created and granted to the engine's role
+   alone, so the API's role cannot ask for every tenant. The one lookup the
+   API made across tenants, whose an API key is, is asked of the engine.
+5. **Valkey users** (`scripts/roles/api-valkey-user.acl`). The API's user
+   cannot write the trigger, compilation or control streams, an admission
+   count or a membership.
+
+Where it differs from the plan as it was written:
+
+- **A caller's permission is checked for operations that change
+  something**, not for reads. A read is answered to any verified member of
+  the tenant, so an API key scoped to less than reading runs is held to
+  that by the API and not by the engine.
+- **The API's role keeps `invocation_trigger` to update**, because deleting
+  a workflow switches its triggers off in the same transaction.
+- **A compile nobody approved may still happen** (through the compile
+  queue, were the Valkey rules not applied). Its image is not approved and
+  does not run.
+- **The engine verifies on every call**, with no cache: a request that asks
+  the engine five things is verified five times.
 
 **What a broken API role has after Phase 4:**
 
@@ -437,13 +472,21 @@ It does not have connection secrets or the use of them, checkpoints or run
 data beyond what those users may read, the ability to start a run as a
 tenant, or a certificate an executor or the run channel accepts.
 
+**Tests.** Unit tests cover what crosses (`auth::presented`), the engine's
+side of the wire (`engine::remote::tests`: no caller, another tenant's
+caller, a credential that allows less, a caller the API names) and the
+verdict on a version (`engine::approvals`). `TWO_ROLES=true
+e2e/test_served_tenants.sh` runs the two-tenant test with the API on its
+own database role and Valkey user, and its last section turns each thing
+the API holds against the engine.
+
 ## Phase 5: deployment and documents
 
 - An overlay for the evaluation stack that runs the three processes, next to
   `docker-compose.executor.yml`.
-- `docs/roles.md` (written with Phase 3) grows into the page for the
-  deployment: the overlay, the database roles and the Valkey users of
-  Phase 4.
+- `docs/roles.md` (written with Phase 3, and the database roles and Valkey
+  users with Phase 4) grows into the page for the deployment, with the
+  overlay.
 - A hosted deployment maps onto this directly: the proxy in front routes
   public traffic to API processes and refuses the engine, run channel,
   executor and seal ports; the engine and seal run on hosts the proxy does
@@ -488,7 +531,7 @@ tenant, or a certificate an executor or the run channel accepts.
 
 ## Order and size
 
-Phases 0, 1, 2 and 3 are done. Phase 2 was the
+Phases 0, 1, 2, 3 and 4 are done. Phase 2 was the
 bulk: about 25 to 30 operations and 50 to 60 call sites, done in the six
 groups above. Phase 3 was mostly transport once Phase 2 held, and found
 three more things the API's code took from its own process. Phase 4 changes

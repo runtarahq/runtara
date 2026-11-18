@@ -11,6 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A workflow runs only as the engine approved it.** The engine records,
+  in the runtime database, each version someone who may run it asked to
+  have compiled or run, the image it compiled from that, and the version
+  chosen to run. A run nobody asked for (a schedule, a webhook) is refused
+  with `this version's definition is not the one that was approved to run`
+  if the definition was changed in the database since, until a caller
+  compiles or runs it; editing through the API and compiling, as before,
+  approves it. What was compiled and chosen before is carried over at the
+  first start. Applies to a single process too.
+
 ### Added
 
 - **The API and the engine as two processes.** `RUNTARA_ROLE=api` runs what
@@ -25,9 +37,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   listener alone accepts. The engine role binds no public listener and
   starts only with a seal of its own. Runs do not depend on the API: they
   outlive it, and an engine that is away is a `503` that says so, with
-  nothing started. More than one API may stand in front of one engine. The
-  engine still takes the API's word for who is calling; see
+  nothing started. More than one API may stand in front of one engine. See
   `docs/roles.md`.
+- **The engine decides, not the API.** An engine in a process of its own
+  verifies for itself who each call is for: the API sends what the caller
+  presented, and the engine answers an operation only for a caller who
+  acts for its tenant, and one that changes something only as far as the
+  caller's role and API key scope allow. `scripts/roles/` holds a database
+  role for the API (its own records, nothing that starts or admits a run,
+  no working across tenants: `runtara_system` is the engine's) and a
+  Valkey user that cannot write the trigger, compilation or control
+  streams.
 - **seal as a process of its own.** seal, which holds connection secrets
   and sends their requests, ran in the server's process, which could
   therefore open every credential. `RUNTARA_SEAL_MODE=unix` or `mtls` has
