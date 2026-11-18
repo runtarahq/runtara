@@ -1634,12 +1634,14 @@ async fn common_start(pool: &PgPool) -> Result<Common, Box<dyn std::error::Error
     println!("✓ Auth membership policy: {}", membership_policy.as_str());
 
     let auth_state = auth::AuthState {
+        door: auth::presented::Door::Api,
         provider: auth_providers.api.clone(),
         pool: pool.clone(),
         valkey: redis_manager.clone(),
         membership_policy,
     };
     let mcp_auth_state = auth::AuthState {
+        door: auth::presented::Door::Mcp,
         provider: auth_providers.mcp.clone(),
         pool: pool.clone(),
         valkey: redis_manager.clone(),
