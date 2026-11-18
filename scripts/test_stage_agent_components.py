@@ -39,7 +39,7 @@ class ComponentStagingTests(unittest.TestCase):
             for extension in ("wasm", "meta.json")
         } | set(module.TOOLS)
         self.assertEqual({path.name for path in self.destination.iterdir()}, expected)
-        self.assertEqual(len(expected), 9)
+        self.assertEqual(len(expected), 10)
         self.assertFalse((self.destination / "runtara_agent_sftp.wasm").exists())
         self.assertTrue((self.source / "runtara_agent_sftp.wasm").exists())
 

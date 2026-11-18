@@ -442,6 +442,34 @@ impl StartGate {
     }
 }
 
+/// A workflow compile for a compiler placed as a guest
+/// ([`Runner::compile_elsewhere`]).
+pub struct CompileElsewhere {
+    /// Whose workflow it is.
+    pub tenant_id: String,
+    /// The compiler, in the artifact store: a WASI command that compiles
+    /// one request over the workflow API (`runtara-compile-guest`).
+    pub compiler: runtara_artifact_store::Digest,
+    /// The compile request, as the compiler reads it.
+    pub request: Vec<u8>,
+    /// The files the compiler may fetch, each by its SHA-256.
+    pub components: std::collections::BTreeMap<String, std::path::PathBuf>,
+    /// The compiler's memory.
+    pub memory_bytes: u64,
+    /// How long it may take, from when it is placed.
+    pub timeout: Duration,
+}
+
+/// What a compiler placed as a guest answered. Input to whoever asked: it is
+/// what a guest said.
+#[derive(Debug)]
+pub struct CompiledElsewhere {
+    /// The outcome it posted.
+    pub outcome: Vec<u8>,
+    /// The composed component it handed back, if it did.
+    pub made: Option<Vec<u8>>,
+}
+
 /// Options for launching an instance.
 ///
 /// This is a launch spec and may carry secrets (the guest environment, the
@@ -631,6 +659,17 @@ pub trait Runner: Send + Sync {
     /// composed in, which every runner runs.
     fn links_workflow_stdlib(&self) -> bool {
         false
+    }
+
+    /// Compiles a workflow where this runner runs them: the compiler is
+    /// placed as a guest that is given the request and the components it
+    /// names, and nothing else. `None` from a runner that runs its guests in
+    /// this process, which has nowhere else to place one.
+    async fn compile_elsewhere(
+        &self,
+        _compile: CompileElsewhere,
+    ) -> Option<std::result::Result<CompiledElsewhere, String>> {
+        None
     }
 
     /// Launch an instance without waiting for completion, but only when

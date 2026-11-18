@@ -82,8 +82,11 @@ services:
       RUNTARA_ENGINE_LISTEN: "0.0.0.0:7445"
       RUNTARA_ENGINE_TLS_DIR: /pki
       RUNTARA_ENGINE_HEALTH_LISTEN: "127.0.0.1:7446"
-      # Workflows are compiled in a sandbox of the compiler's own, not in the
-      # engine's process: an engine split from its API starts only with it.
+      # Workflows are compiled in a sandbox of the compiler's own, not natively
+      # in the engine's process: an engine split from its API starts only
+      # with it. With docker-compose.executor.yml the engine does not load it:
+      # workflows are compiled on an executor, by a compiler placed there
+      # (docs/compiler-on-an-executor.md).
       RUNTARA_COMPILER_WASM: /opt/runtara/agents/runtara-compile-sandboxed.wasm
       VALKEY_PASSWORD: runtara_engine
     healthcheck:

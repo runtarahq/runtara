@@ -37,6 +37,134 @@ pub trait CompileExecutor: Send + Sync {
     ) -> std::io::Result<runtara_workflows::compile_request::PublishedAgent>;
 }
 
+/// What a compiler outside this process's trust is shown: the files a
+/// compile may read, as directories (for one that reads them where it is
+/// shown them) and each by its SHA-256 (for one that asks for them).
+pub(crate) struct Shown<'a> {
+    pub components_dir: &'a std::path::Path,
+    pub extra_component_dirs: &'a [std::path::PathBuf],
+    pub by_digest: std::collections::BTreeMap<String, std::path::PathBuf>,
+}
+
+/// A compiler that is not this process: a sandbox in it, or a guest placed
+/// elsewhere. It is handed a request and answers what the compiler said and
+/// the component it handed back. Neither is taken on its word
+/// ([`Untrusted`]).
+pub(crate) trait Compiler: Send + Sync {
+    fn compile(
+        &self,
+        tenant: &str,
+        request: &runtara_workflows::compile_request::CompileRequest,
+        shown: &Shown<'_>,
+    ) -> std::io::Result<(runtara_workflows::compile_request::GuestOutcome, Vec<u8>)>;
+}
+
+/// A [`Compiler`] as where this process compiles: makes the request, and
+/// applies what came back only if the component is the one the outcome
+/// names. What the engine records of the build it checks or derives itself
+/// afterwards (`api::services::compilation`), for any executor.
+pub(crate) struct Untrusted<C>(pub C);
+
+/// The component a compile handed back, if it is the one its outcome names.
+pub(crate) fn made_as_named(named: &str, made: Vec<u8>) -> std::io::Result<Vec<u8>> {
+    use sha2::Digest;
+    let digest: String = sha2::Sha256::digest(&made)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    if digest != named {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the compiler handed back another component than its outcome names",
+        ));
+    }
+    Ok(made)
+}
+
+impl<C: Compiler> CompileExecutor for Untrusted<C> {
+    fn compile(
+        &self,
+        input: CompilationInput,
+        options: DirectWorkflowCompileOptions,
+    ) -> std::io::Result<NativeCompilationResult> {
+        use runtara_workflows::compile_request::{self, GuestOutcome};
+        let (request, by_digest) = compile_request::request(&input, &options)?;
+        let (outcome, made) = self.0.compile(
+            &input.tenant_id,
+            &request,
+            &Shown {
+                components_dir: &options.components_dir,
+                extra_component_dirs: &options.extra_component_dirs,
+                by_digest,
+            },
+        )?;
+        match outcome {
+            GuestOutcome::Compiled {
+                outcome,
+                workflow_wasm,
+            } => compile_request::apply(
+                *outcome,
+                &made_as_named(&workflow_wasm, made)?,
+                &input.workflow_id,
+                input.version,
+                &options,
+            ),
+            GuestOutcome::Failed(failure) => Err(compile_request::apply_failure(failure, &options)),
+        }
+    }
+
+    fn compile_published_agent(
+        &self,
+        tenant: &str,
+        input: runtara_workflows::direct_wasm::DirectCompilationInput,
+        components_dir: &std::path::Path,
+        extra_component_dirs: &[std::path::PathBuf],
+        stdlib: DirectStdlibMode,
+    ) -> std::io::Result<runtara_workflows::compile_request::PublishedAgent> {
+        use runtara_workflows::compile_request::{self, GuestOutcome};
+        let (request, by_digest) = compile_request::request_published_agent(
+            tenant,
+            &input,
+            components_dir,
+            extra_component_dirs,
+            stdlib,
+        )?;
+        let (outcome, made) = self.0.compile(
+            tenant,
+            &request,
+            &Shown {
+                components_dir,
+                extra_component_dirs,
+                by_digest,
+            },
+        )?;
+        match outcome {
+            GuestOutcome::Compiled {
+                outcome,
+                workflow_wasm,
+            } => compile_request::apply_published_agent(
+                *outcome,
+                &made_as_named(&workflow_wasm, made)?,
+                &input.workflow_id,
+                input.version,
+                &input.output_dir,
+            ),
+            GuestOutcome::Failed(failure) => {
+                // The paths a failure names are the compiler's: name the
+                // host's, as a workflow's compile does.
+                let options = DirectWorkflowCompileOptions {
+                    output_dir: input.output_dir.clone(),
+                    components_dir: components_dir.to_path_buf(),
+                    extra_component_dirs: extra_component_dirs.to_vec(),
+                    source_checksum: input.source_checksum.clone(),
+                    stdlib: Some(stdlib),
+                };
+                Err(compile_request::apply_failure(failure, &options))
+            }
+        }
+    }
+}
+
 static EXECUTOR: OnceLock<Arc<dyn CompileExecutor>> = OnceLock::new();
 
 /// Compile workflows with `executor` from now on. Set once, at boot.

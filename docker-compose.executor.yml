@@ -8,6 +8,12 @@
 # in a sandboxed process of its own, in a container that holds no database
 # connection and none of the server's keys. See docs/executor.md.
 #
+# Workflows are compiled there too: the server places the compiler on an
+# executor as a guest like a run, and does not compile in its own process
+# (docs/compiler-on-an-executor.md). The compiler it places is in the image,
+# beside the components. A workflow saved while no executor is up is not
+# compiled until one is.
+#
 # The server is told of no executor: each one tells the server it is here.
 # For more of them, say how many:
 #   RUNTARA_EXECUTORS=3 docker compose -f docker-compose.yml -f docker-compose.executor.yml up

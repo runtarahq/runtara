@@ -347,6 +347,34 @@ pub(crate) fn agents_a_closure_calls<'a>(
     found
 }
 
+/// The agents of `called` a build composes, as this process's `catalog` has
+/// them. A workflow-agent whose published version parks is not composed: a
+/// call to it starts that version as a child run of its own, so nothing
+/// imports or links its component, and a build does not record it. Which
+/// agents those are is read from this process's catalog, as the compiler
+/// reads it from the one it is sent, and not from what the build says.
+pub(crate) fn agents_a_build_composes(
+    called: std::collections::BTreeSet<String>,
+    catalog: Option<&runtara_dsl::agent_meta::AgentCatalog>,
+) -> std::collections::BTreeSet<String> {
+    let Some(catalog) = catalog else {
+        return called;
+    };
+    called
+        .into_iter()
+        .filter(|agent_id| {
+            !catalog.agent(agent_id).is_some_and(|agent| {
+                agent.capabilities.iter().any(|capability| {
+                    capability
+                        .workflow_run
+                        .as_ref()
+                        .is_some_and(|target| target.parks)
+                })
+            })
+        })
+        .collect()
+}
+
 /// Whether a build's metadata records every agent in `called` among the
 /// agents it composed. `Err` names the ones it leaves out; metadata that is
 /// missing leaves out all of them.
@@ -1159,6 +1187,15 @@ impl CompilationService {
             &execution_graph,
             child_workflows.iter().map(|child| &child.execution_graph),
         );
+        // The catalog the compile is given: the runtime's, from the component
+        // dispatcher, so the compiled view of agents matches what the runtime
+        // can invoke, merged with the tenant's PUBLISHED workflow-agents so a
+        // parent can target them.
+        let agent_catalog = self
+            .agent_catalog
+            .as_ref()
+            .map(|base| crate::workflow_agents::catalog_with_workflow_agents(base, tenant_id));
+        let agents_called = agents_a_build_composes(agents_called, agent_catalog.as_deref());
 
         // 4. Build compilation input
         let compilation_input = CompilationInput {
@@ -1168,14 +1205,7 @@ impl CompilationService {
             execution_graph,
             track_events,
             child_workflows,
-            // When configured, the compile uses the runtime catalog from
-            // the component dispatcher so the compiled view of agents
-            // matches what the runtime can actually invoke — merged with the
-            // tenant's PUBLISHED workflow-agents so a parent can target them.
-            agent_catalog: self
-                .agent_catalog
-                .as_ref()
-                .map(|base| crate::workflow_agents::catalog_with_workflow_agents(base, tenant_id)),
+            agent_catalog,
             agent_slug: None,
             progress_callback,
         };
@@ -2866,6 +2896,46 @@ mod tests {
         if !all.is_empty() {
             assert!(records_the_agents_called(Some(&metadata), &all).is_err());
         }
+    }
+
+    #[test]
+    fn a_workflow_agent_that_runs_as_a_child_run_is_not_expected_among_the_composed() {
+        use runtara_dsl::agent_meta::{AgentCatalog, WorkflowRunTarget, workflow_agent_info};
+        let published = |id: &str, parks: bool| {
+            let mut info =
+                workflow_agent_info(id, id, "", &Default::default(), &Default::default());
+            info.capabilities[0].workflow_run = Some(WorkflowRunTarget {
+                workflow_id: format!("wf-{id}"),
+                version: 1,
+                parks,
+            });
+            info
+        };
+        let plain = workflow_agent_info(
+            "utils",
+            "utils",
+            "",
+            &Default::default(),
+            &Default::default(),
+        );
+        let catalog = AgentCatalog::from_agents(vec![
+            plain,
+            published("echo", false),
+            published("waits", true),
+        ]);
+        let called: std::collections::BTreeSet<String> = ["utils", "echo", "waits", "unknown"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        // One that parks starts a child run and is composed by nobody; one
+        // that does not, and one this process does not know, are still held
+        // to the build's record.
+        let composed: Vec<String> = agents_a_build_composes(called.clone(), Some(&catalog))
+            .into_iter()
+            .collect();
+        assert_eq!(composed, ["echo", "unknown", "utils"]);
+        // With no catalog of this process's own, nothing is let off.
+        assert_eq!(agents_a_build_composes(called.clone(), None), called);
     }
 
     #[tokio::test]

@@ -35,6 +35,10 @@ tracing = "0.1"
 [dev-dependencies]
 runtara-core = { path = "../runtara-core", features = ["test-support"] }
 runtara-artifact-store = { path = "../runtara-artifact-store", features = ["test-support"] }
+# A workflow compiled by a compiler placed on an executor, and in process.
+runtara-workflows = { path = "../runtara-workflows" }
+runtara-dsl = { workspace = true }
+sha2 = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
 

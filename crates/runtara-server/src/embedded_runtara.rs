@@ -162,6 +162,22 @@ impl EmbeddedRuntara {
             stdlib = ?stdlib,
             "Workflow runner initialized"
         );
+        // Compiles are placed with this runner, where they are placed at all:
+        // the compiler is kept in the artifact store for its runner to fetch.
+        if crate::compile_placed::installed() {
+            let path = crate::compile_placed::configured()
+                .ok_or_else(|| anyhow::anyhow!("the compiler to place is not configured"))?;
+            let compiler = tokio::fs::read(&path)
+                .await
+                .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
+            crate::compile_placed::runner_is_up(
+                runner.clone(),
+                config.artifacts.as_ref(),
+                &compiler,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("place compiles with the runner: {e}"))?;
+        }
 
         // Start Environment. It owns the image registry, the instance
         // lifecycle and the durable launch queue; guests reach core through the

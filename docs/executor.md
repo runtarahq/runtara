@@ -29,7 +29,10 @@ configured with none of them.
 - **`runtara-run`** is one run. It sandboxes itself before it reads anything,
   loads the compiled workflow from a descriptor it was handed, and gives the
   guest one way out: `wasi:http` to the workflow API origin, over a socket
-  pair to its executor.
+  pair to its executor. (A workflow runs by WASI 0.3 and is given
+  `wasi:http` 0.3. A WASI 0.2 command, which the workflow compiler is, is
+  given `wasi:http` 0.2 to the same origin and no other:
+  [compiler-on-an-executor.md](compiler-on-an-executor.md).)
 
 All three are in the release bundle's `bin/` and in the `runtara` image.
 
@@ -177,8 +180,12 @@ after `up` to change it while the stack runs.
 
 ## How a run goes
 
-1. The server compiles the workflow (with the workflow stdlib composed in:
-   a run on an executor is given WASI and nothing else to link).
+1. The server has the workflow compiled, on an executor too: the compiler
+   is placed as a guest like a run, and the server takes back what it
+   composed and checks it
+   ([compiler-on-an-executor.md](compiler-on-an-executor.md)). The workflow
+   stdlib is composed in: a run on an executor is given WASI and nothing
+   else to link.
 2. The launch is placed with the executor that has the most room: `POST
    /v1/runs` with the workflow's SHA-256, the guest's limits and the run
    protocol's fields (the launch, the run channel's endpoint and the launch's
@@ -217,6 +224,43 @@ An executor that cannot be reached for 30 seconds, or that left or started
 again and no longer holds a run, has lost it: the server recovers the run as
 it recovers any run whose runner went away. An executor's runs end with it,
 and so does a run whose executor closed its socket.
+
+## How a compile goes
+
+With executors a workflow is compiled on one as well
+([compiler-on-an-executor.md](compiler-on-an-executor.md)). The compiler is
+a guest like a run, in a `runtara-run` of its own:
+
+1. The server begins a compile launch: the compile's request, and the
+   component files it names (the release's components and the tenant's
+   published agents), each by its SHA-256.
+2. It places the compiler (`runtara-compile-guest.wasm`, from beside the
+   components) with the executor that has the most room, as it places a
+   run. The executor fetches it by its digest if it does not hold it, and
+   compiles it to machine code once: it is kept under the platform's name,
+   not a tenant's, since it is the same for all.
+3. The compiler asks for its request and for each component it reads, over
+   the socket to its executor, which sends each call on to the run channel
+   as that launch. A compile launch is served its request, those
+   components and its outcome, and nothing else of the workflow API: no
+   connection, no HTTP, no SQL.
+4. It hands back the composed component and posts what it made, or why it
+   failed. The server takes neither on its word: the component must be the
+   one the outcome names, and what the server records of the build it
+   checks or derives itself.
+
+What follows from it:
+
+- **No executor, no compile.** The server does not compile in its own
+  process instead. A compile no executor takes fails, and is asked for
+  again when the workflow is next saved or run.
+- **A compile takes a run's slot** on its executor for as long as it lasts,
+  usually well under a second.
+- **The first compile at an executor** waits for the compiler itself to be
+  compiled to machine code, some seconds, once.
+- **A server with executors does not start without the compiler to place**
+  (`RUNTARA_COMPILE_GUEST_WASM` names it when it is not beside the
+  components).
 
 ## What is different from the embedded runner
 
