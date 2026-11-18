@@ -9,6 +9,7 @@ use runtara_connections::IntegrationCompatibility;
 use runtara_connections::crypto::noop::NoOpCipher;
 use runtara_connections::repository::connections::ConnectionRepository;
 use runtara_connections::sealed::keys::PgKeySource;
+use runtara_connections::sealed::testing::without_sealed;
 use runtara_connections::sealed::{Allowances, SEALED_MARKER, SealedCredentials, is_sealed};
 use runtara_connections::service::connections::{ConnectionService, ServiceError};
 use runtara_connections::types::{CreateConnectionRequest, UpdateConnectionRequest};
@@ -198,7 +199,7 @@ async fn a_sealable_connection_is_stored_sealed_and_says_so() {
     assert_eq!(format, "seal");
     assert!(is_sealed(&stored["token"]));
     assert_eq!(stored["base_url"], "https://api.example.com/v1");
-    assert!(!stored.to_string().contains(SECRET));
+    assert!(!without_sealed(&stored).to_string().contains(SECRET));
 
     // Whoever resolves the connection learns it is sealed, and gets the marker.
     let resolved = fixture
@@ -379,7 +380,10 @@ async fn ai_provider_channel_and_mcp_connections_are_stored_sealed() {
         for field in &sealed_fields {
             assert!(is_sealed(&stored[*field]), "{integration_id}.{field}");
         }
-        assert!(!stored.to_string().contains("CANARY"), "{integration_id}");
+        assert!(
+            !without_sealed(&stored).to_string().contains("CANARY"),
+            "{integration_id}"
+        );
         // What a request presents is the secret that is sent, never one that
         // only verifies.
         let presented = runtara_connections::sealed::request_fields(integration_id, &stored);
@@ -434,7 +438,7 @@ async fn an_edit_keeps_the_sealed_secret_unless_it_moves_the_destination() {
     assert_eq!(moved["base_url"], "https://other.example.com");
     assert!(is_sealed(&moved["token"]));
     assert_ne!(moved["token"], original["token"]);
-    assert!(!moved.to_string().contains(SECRET));
+    assert!(!without_sealed(&moved).to_string().contains(SECRET));
 
     // Entering only a new token keeps the destination and reseals.
     patch(&service, &id, json!({"write": {"token": "another-CANARY"}}))
@@ -447,7 +451,11 @@ async fn an_edit_keeps_the_sealed_secret_unless_it_moves_the_destination() {
         rotated["token"][SEALED_MARKER]["policy"],
         moved["token"][SEALED_MARKER]["policy"]
     );
-    assert!(!rotated.to_string().contains("another-CANARY"));
+    assert!(
+        !without_sealed(&rotated)
+            .to_string()
+            .contains("another-CANARY")
+    );
 }
 
 #[tokio::test]
@@ -644,7 +652,7 @@ async fn existing_connections_are_sealed_in_place() {
     for token in ["access_token", "refresh_token"] {
         assert!(is_sealed(&oauth[token]), "{token}");
     }
-    assert!(!oauth.to_string().contains("CANARY"));
+    assert!(!without_sealed(&oauth).to_string().contains("CANARY"));
     // The rotation guard is now the sealed refresh token's, so that the next
     // rotation is stored.
     let guard: Option<String> = sqlx::query_scalar(
@@ -920,8 +928,8 @@ async fn an_mcp_connections_extra_headers_are_stored_sealed() {
     for header in ["X-Team", "X-Api-Key"] {
         assert!(is_sealed(&stored["extra_headers"][header]), "{header}");
     }
-    assert!(!stored.to_string().contains(SECRET));
-    assert!(!stored.to_string().contains("CANARY"));
+    assert!(!without_sealed(&stored).to_string().contains(SECRET));
+    assert!(!without_sealed(&stored).to_string().contains("CANARY"));
 
     // Nothing shows a value.
     let projection = service
@@ -950,7 +958,7 @@ async fn an_mcp_connections_extra_headers_are_stored_sealed() {
     );
     assert!(is_sealed(&edited["extra_headers"]["X-New"]));
     assert!(edited["extra_headers"].get("X-Api-Key").is_none());
-    assert!(!edited.to_string().contains("CANARY"));
+    assert!(!without_sealed(&edited).to_string().contains("CANARY"));
 
     // A sealed value is this connection's header's: it cannot be supplied.
     let forged = patch(
@@ -1005,11 +1013,12 @@ async fn a_platform_oauth_app_is_stored_sealed_and_read_back() {
     oauth_apps::put(&fixture.pool, &sealed, &app, "zoho-CANARY")
         .await
         .unwrap();
-    let stored: String = sqlx::query_scalar("SELECT to_jsonb(a)::text FROM platform_oauth_app a")
+    let stored: Value = sqlx::query_scalar("SELECT to_jsonb(a) FROM platform_oauth_app a")
         .fetch_one(&fixture.pool)
         .await
         .unwrap();
-    assert!(!stored.contains("CANARY"), "{stored}");
+    let clear = without_sealed(&stored).to_string();
+    assert!(!clear.contains("CANARY"), "{clear}");
     assert_eq!(
         oauth_apps::entered(&fixture.pool).await.unwrap(),
         std::slice::from_ref(&app)
