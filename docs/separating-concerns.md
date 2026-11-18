@@ -507,6 +507,12 @@ Deployment and documents. Implemented on `feature/engine-decides`.
   unit tests: the engine verifying OIDC tokens, membership and roles
   itself.
 
+## After these phases
+
+The engine is still one process that holds everything. Taking the compiler
+and the receiving of anonymous traffic out of it is planned in
+[splitting-the-engine.md](splitting-the-engine.md).
+
 ## What this does not protect against
 
 - **Authorisation mistakes.** If the engine wrongly lets tenant A read
