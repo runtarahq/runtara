@@ -63,6 +63,10 @@ run_test "Stale artifact + trigger replay idempotency (regression)" "${SCRIPT_DI
 run_test "Pending input across concurrent branches (regression)" "${SCRIPT_DIR}/test_pending_input_concurrent_branches.sh"
 run_test "Wake scheduler drains a backlog in batches (regression)" "${SCRIPT_DIR}/test_wake_drain_throughput.sh"
 
+# A conversation with a workflow. Self-contained (own server + Valkey); needs
+# docker, jq and prebuilt components (scripts/build-agent-components.sh).
+run_test "A conversation with a workflow" "${SCRIPT_DIR}/test_conversations.sh"
+
 # Microsoft Teams. These boot their OWN isolated runtara-server + Valkey (docker)
 # on dedicated high ports and mock the Bot Framework, so they are self-contained
 # and do not depend on ./start.sh. They need docker + python3 + openssl.

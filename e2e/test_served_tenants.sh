@@ -522,6 +522,27 @@ for _ in {1..150}; do [ "$(b_runs)" -ge 2 ] && break; sleep 1; done
     || [ "$(curl -sS "${API}/workflows/${B_WF}/instances" | jq '(.data.content // .data // []) | length')" = "0" ] \
     || { print_error "the primary tenant sees the second tenant's runs"; exit 1; }
 echo "  the second tenant's workflow compiled, its webhook and cron ran it as the second tenant; the primary sees none ✓"
+# A conversation is one tenant's: the same key, under each tenant's own
+# workflow, is two conversations, each carried in its tenant's scope by a
+# worker that finds them across tenants.
+talk() { # <workflow> [curl args: who asks]
+    local workflow="$1" resp; shift
+    resp=$(curl -sS --max-time 60 "$@" -X POST -H 'Content-Type: application/json' \
+        -d '{"id":"m-1","text":"hello"}' "${API}/workflows/${workflow}/conversations/shared/messages")
+    [ "$(echo "${resp}" | jq -r '.data.state // empty')" = "started" ] \
+        || { print_error "a message did not start a conversation's run: ${resp}"; exit 1; }
+    for _ in {1..120}; do
+        resp=$(curl -sS --max-time 30 "$@" "${API}/workflows/${workflow}/conversations/shared/events")
+        [ "$(echo "${resp}" | jq -r '[.data[]? | select(.kind == "run_ended" and .body.status == "completed")] | length')" = "1" ] && return 0
+        sleep 0.5
+    done
+    print_error "a conversation's run was not carried to its end: ${resp}"; tail -30 "${TEST_LOG}"; exit 1
+}
+talk "${B_WF}" -H "Authorization: Bearer ${SECOND_KEY}"
+talk "${WF_ID}"
+[ "$(http_status "${API}/workflows/${B_WF}/conversations/shared")" = "404" ] \
+    || { print_error "the primary tenant reads the second tenant's conversation"; exit 1; }
+echo "  a conversation with the same key ran in each tenant, and the primary does not find the second's ✓"
 
 #-------------------------------------------------------------------------
 print_step "4. Neither tenant reads the other's resources by id..."
@@ -682,14 +703,15 @@ SECOND_RUNS=$(runtime_sql "SELECT count(*) FROM instances WHERE tenant_id = '${S
 SEEN=$(as_runtime_role "SELECT set_config('runtara.tenant_id', '${TENANT}', false); SELECT count(*) FROM instances WHERE tenant_id = '${SECOND_TENANT}'" | tail -1)
 [ "${SEEN}" = "0" ] || { print_error "as ${TENANT} the runtime role saw ${SEEN} of the second tenant's runs"; exit 1; }
 echo "  every stage ran on a runtime role bound by row-level security; naming ${TENANT}, it sees none of the second tenant's ${SECOND_RUNS} runs ✓"
-for table in "workflows tenant_id" "invocation_trigger tenant_id" "api_keys org_id"; do
+for table in "workflows tenant_id" "invocation_trigger tenant_id" "api_keys org_id" \
+    "conversations tenant_id" "conversation_messages tenant_id" "conversation_events tenant_id"; do
     set -- ${table}
     OWN=$(server_sql "SELECT count(*) FROM $1 WHERE $2 = '${SECOND_TENANT}'")
     [ "${OWN}" -gt 0 ] || { print_error "the second tenant has no $1 rows to hide"; exit 1; }
     SEEN=$(as_runtime_role "SELECT set_config('runtara.tenant_id', '${TENANT}', false); SELECT count(*) FROM $1 WHERE $2 = '${SECOND_TENANT}'" "${TEST_DB_SERVER}" | tail -1)
     [ "${SEEN}" = "0" ] || { print_error "as ${TENANT} the server role saw ${SEEN} of the second tenant's $1"; exit 1; }
 done
-echo "  on the server database, naming ${TENANT}, it sees none of the second tenant's workflows, triggers or API keys ✓"
+echo "  on the server database, naming ${TENANT}, it sees none of the second tenant's workflows, triggers, API keys or conversations ✓"
 
 #-------------------------------------------------------------------------
 print_step "9. A run's outbound calls wait for its tenant's limit..."
