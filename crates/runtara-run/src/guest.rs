@@ -25,6 +25,25 @@ use wasmtime_wasi_http::{
 
 /// The export a compiled workflow runs by.
 pub const RUN_EXPORT: &str = "wasi:cli/run@0.3.0";
+/// The same entry as a WASI 0.2 command exports it (`wasi:cli/run@0.2.N`):
+/// what a program built for `wasm32-wasip2` is. Its `run` has the signature
+/// of [`RUN_EXPORT`]'s. The workflow compiler is one
+/// (docs/compiler-on-an-executor.md).
+const RUN_EXPORT_02: &str = "wasi:cli/run@0.2.";
+
+/// The entry `component` runs by: [`RUN_EXPORT`], or a WASI 0.2 command's.
+fn run_export(engine: &Engine, component: &Component) -> Option<String> {
+    let mut command = None;
+    for (name, _) in component.component_type().exports(engine) {
+        if name == RUN_EXPORT {
+            return Some(name.to_owned());
+        }
+        if name.starts_with(RUN_EXPORT_02) {
+            command = Some(name.to_owned());
+        }
+    }
+    command
+}
 /// How often the epoch advances: how soon a guest that only computes is
 /// interrupted, and how often it lets the relay's tasks run.
 const EPOCH_TICK: Duration = Duration::from_millis(100);
@@ -46,19 +65,15 @@ pub fn engine() -> Result<Engine, String> {
 }
 
 /// Compiles `wasm` for [`engine`], refusing a component this process could
-/// not run: one that does not export [`RUN_EXPORT`], or that imports
+/// not run: one that exports no `wasi:cli/run`, or that imports
 /// something a run is not given. That is decided as a run decides it, by
 /// linking: a guest is given WASI and `wasi:http`, and an import of anything
 /// else that has a function in it has nothing behind it here. (Interfaces of
 /// types alone, and trusted pins, need nothing behind them.)
 pub fn compile(engine: &Engine, wasm: &[u8]) -> Result<Vec<u8>, String> {
     let component = Component::new(engine, wasm).map_err(|error| format!("{error:#}"))?;
-    if !component
-        .component_type()
-        .exports(engine)
-        .any(|(name, _)| name == RUN_EXPORT)
-    {
-        return Err(format!("the component does not export {RUN_EXPORT}"));
+    if run_export(engine, &component).is_none() {
+        return Err("the component does not export wasi:cli/run".to_owned());
     }
     linker(engine)
         .and_then(|linker| linker.instantiate_pre(&component))
@@ -132,7 +147,9 @@ fn denied() -> SendFuture {
     Box::new(async { Err(HttpError::HttpRequestDenied) })
 }
 
-/// `wasi:http@0.2`: always denied, as on the embedded runner.
+/// `wasi:http@0.2` for a workflow: always denied, as on the embedded runner.
+/// (A WASI 0.2 command has no other `wasi:http`, and reaches the workflow
+/// API origin over it: see [`State::p2_http`].)
 struct Denied;
 
 impl WasiHttpHooks for Denied {
@@ -250,6 +267,8 @@ struct State {
     http: WasiHttpCtx,
     table: ResourceTable,
     denied: Denied,
+    /// Whether the guest is a WASI 0.2 command.
+    command_02: bool,
     api: Api,
     limiter: Limiter,
     deadline: Instant,
@@ -276,11 +295,21 @@ impl WasiHttpView for State {
 }
 
 impl State {
+    /// `wasi:http@0.2`. A guest that runs by [`RUN_EXPORT`] is given
+    /// `wasi:http@0.3` to the workflow API origin and this is denied to it.
+    /// A WASI 0.2 command has only this one, so it is what reaches the same
+    /// origin, over the same socket, and nothing else: no guest is given
+    /// two ways out.
     fn p2_http(&mut self) -> WasiHttpCtxView<'_> {
+        let hooks: &mut dyn WasiHttpHooks = if self.command_02 {
+            &mut self.api
+        } else {
+            &mut self.denied
+        };
         WasiHttpCtxView {
             ctx: &mut self.http,
             table: &mut self.table,
-            hooks: &mut self.denied,
+            hooks,
         }
     }
 }
@@ -367,6 +396,7 @@ pub async unsafe fn run(
         },
         deadline: Instant::now() + limits.lifetime,
         timed_out: false,
+        command_02: run_export(engine, &component).is_some_and(|entry| entry != RUN_EXPORT),
     };
     let mut store = Store::new(engine, state);
     store.limiter(|state| &mut state.limiter);
@@ -389,13 +419,15 @@ pub async unsafe fn run(
     });
 
     let called = async {
+        let entry = run_export(engine, &component)
+            .ok_or_else(|| wasmtime::Error::msg("no wasi:cli/run export"))?;
         let instance = linker.instantiate_async(&mut store, &component).await?;
         let interface = instance
-            .get_export_index(&mut store, None, RUN_EXPORT)
-            .ok_or_else(|| wasmtime::Error::msg(format!("no {RUN_EXPORT} export")))?;
+            .get_export_index(&mut store, None, &entry)
+            .ok_or_else(|| wasmtime::Error::msg(format!("no {entry} export")))?;
         let run = instance
             .get_export_index(&mut store, Some(&interface), "run")
-            .ok_or_else(|| wasmtime::Error::msg(format!("{RUN_EXPORT} has no run")))?;
+            .ok_or_else(|| wasmtime::Error::msg(format!("{entry} has no run")))?;
         let run: TypedFunc<(), (Result<(), ()>,)> = instance.get_typed_func(&mut store, run)?;
         let (ran,) = run.call_async(&mut store, ()).await?;
         Ok::<_, wasmtime::Error>(ran)
