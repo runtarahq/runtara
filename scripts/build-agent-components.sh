@@ -159,8 +159,14 @@ if [ "${RUNTARA_ONLY_WORKFLOW_COMPONENTS:-}" != "1" ]; then
     # runtara_workflow_stdlib.wasm too. The stdlib's own build below must be
     # the last to write that file, or its meta.json names a checksum the file
     # no longer has and no workflow composes.
-    echo "==> runtara-compile-sandboxed"
-    cargo build --release --target wasm32-wasip2 -p runtara-compile-guest --bin runtara-compile-sandboxed
+    #
+    # Two of it: one for a sandbox in the engine's own process, which shows
+    # it the component files, and one that asks its host for them over the
+    # workflow API, for a guest placed on an executor
+    # (docs/compiler-on-an-executor.md).
+    echo "==> runtara-compile-sandboxed, runtara-compile-guest"
+    cargo build --release --target wasm32-wasip2 -p runtara-compile-guest \
+        --bin runtara-compile-sandboxed --bin runtara-compile-guest
 fi
 
 echo "==> runtara-workflow-stdlib"

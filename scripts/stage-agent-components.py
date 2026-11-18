@@ -35,8 +35,10 @@ def component_names(workspace: Path) -> list[str]:
 
 
 # What ships beside the components and is not one: the compiler as a WASI
-# command, which an engine compiles workflows in (RUNTARA_COMPILER_WASM).
-TOOLS = ["runtara-compile-sandboxed.wasm"]
+# command, which an engine compiles workflows in (RUNTARA_COMPILER_WASM), and
+# the one it places on an executor, which asks for its files over the
+# workflow API.
+TOOLS = ["runtara-compile-sandboxed.wasm", "runtara-compile-guest.wasm"]
 
 
 def stage(workspace: Path, source: Path, destination: Path) -> None:
