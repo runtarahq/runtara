@@ -40,10 +40,12 @@ The background to this, and what is still to come, is in
 | `RUNTARA_ENGINE_LISTEN` | **refused** | the address it listens on for the API, `host:port` |
 | `RUNTARA_ENGINE_TLS_DIR` | its certificate directory | its certificate directory |
 | `RUNTARA_ENGINE_HEALTH_LISTEN` | **refused** | optional: where it says it is up, `host:port` |
+| `RUNTARA_COMPILER_WASM` | unused | required: the compiler's WASI command, `runtara-compile-sandboxed.wasm`, which ships beside the components |
 
 An API that is given something marked **refused** does not start, and names
 what it was given. An engine does not start without
-`RUNTARA_ENGINE_LISTEN`, or with seal in itself.
+`RUNTARA_ENGINE_LISTEN`, with seal in itself, or without a sandbox to
+compile in.
 
 The settings both are given must agree: the same tenants, the same
 authentication, the same entitlements, the same Valkey and the same server
@@ -98,6 +100,27 @@ users, from the files under `scripts/roles/`. It needs
 `docker-compose.seal.yml` before it, because the engine starts only with a
 seal of its own, and combines with `docker-compose.executor.yml` (before it
 too). A stack that has already run without it is brought over as it is.
+
+## Compiling
+
+A workflow's graph is something a tenant wrote, and compiling it is the
+most involved thing the engine does with one. With `RUNTARA_COMPILER_WASM`
+the compile step runs in a sandbox of its own: a Wasmtime store with no
+network and no environment, a bound on its memory (3 GiB) and its time
+(five minutes), and of the filesystem only the component files a compile
+reads, read-only. It is given no database, no key and no way to seal. What
+it hands back the engine checks: the component against its digest, and the
+agents it says it composed against the agents the graph calls.
+
+An engine in a process of its own compiles nowhere else, and refuses to
+start without it. A single process may be given it too; without it, it
+compiles in its own process as before. The file is
+`runtara-compile-sandboxed.wasm`, beside the components in a release
+(`agents/` in the bundle, `/opt/runtara/agents/` in the image).
+
+Loading the compiler, loading the source, and everything after the build
+(the records, the image, what is approved to run) stay the engine's. A
+compile in the sandbox makes the same bytes as one in the engine's process.
 
 ## Starting and stopping
 

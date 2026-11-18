@@ -82,6 +82,9 @@ services:
       RUNTARA_ENGINE_LISTEN: "0.0.0.0:7445"
       RUNTARA_ENGINE_TLS_DIR: /pki
       RUNTARA_ENGINE_HEALTH_LISTEN: "127.0.0.1:7446"
+      # Workflows are compiled in a sandbox of the compiler's own, not in the
+      # engine's process: an engine split from its API starts only with it.
+      RUNTARA_COMPILER_WASM: /opt/runtara/agents/runtara-compile-sandboxed.wasm
       VALKEY_PASSWORD: runtara_engine
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:7446/health || exit 1"]

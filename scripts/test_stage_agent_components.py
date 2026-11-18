@@ -26,18 +26,20 @@ class ComponentStagingTests(unittest.TestCase):
         for name in module.component_names(self.root) + ["runtara_agent_sftp"]:
             for extension in ("wasm", "meta.json"):
                 (self.source / f"{name}.{extension}").write_text(name)
+        for tool in module.TOOLS:
+            (self.source / tool).write_text(tool)
 
     def test_stale_removed_agent_is_excluded_and_source_is_preserved(self):
         module.stage(self.root, self.source, self.destination)
         # The agent and the shared components (stdlib and the workflow API's),
-        # each a .wasm and a .meta.json; nothing else.
+        # each a .wasm and a .meta.json, and the compiler; nothing else.
         expected = {
             f"{name}.{extension}"
             for name in module.component_names(self.root)
             for extension in ("wasm", "meta.json")
-        }
+        } | set(module.TOOLS)
         self.assertEqual({path.name for path in self.destination.iterdir()}, expected)
-        self.assertEqual(len(expected), 8)
+        self.assertEqual(len(expected), 9)
         self.assertFalse((self.destination / "runtara_agent_sftp.wasm").exists())
         self.assertTrue((self.source / "runtara_agent_sftp.wasm").exists())
 
@@ -46,6 +48,11 @@ class ComponentStagingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Missing component artifacts"):
             module.stage(self.root, self.source, self.destination)
         self.assertFalse(self.destination.exists())
+
+    def test_the_compiler_ships_with_the_components(self):
+        (self.source / module.TOOLS[0]).unlink()
+        with self.assertRaisesRegex(ValueError, "Missing component artifacts"):
+            module.stage(self.root, self.source, self.destination)
 
     def test_existing_destination_cannot_reintroduce_removed_agent(self):
         self.destination.mkdir()
