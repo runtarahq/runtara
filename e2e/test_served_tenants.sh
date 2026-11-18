@@ -102,6 +102,15 @@ API_ROLE="${TEST_DB_SERVER}_api"
 API_PASSWORD=""
 API_VALKEY_USER="runtara-api"
 API_VALKEY_PASSWORD=""
+# Intake (TWO_ROLES): what receives what anyone may send, which an engine of
+# its own does not. Its own database role, Valkey user, certificate and seal.
+INTAKE_PID=""
+INTAKE_SEAL_PID=""
+TEST_INTAKE_PORT="${TEST_INTAKE_PORT:-17886}"
+TEST_INTAKE_HEALTH_PORT="${TEST_INTAKE_HEALTH_PORT:-17887}"
+INTAKE_ROLE="${TEST_DB_SERVER}_intake"
+INTAKE_PASSWORD=""
+INTAKE_VALKEY_PASSWORD=""
 MADE_RUNTARA_SYSTEM=""
 VALKEY_CONTAINER=""
 TENANT="served_tenants_e2e"
@@ -134,6 +143,8 @@ cleanup() {
         kill "${ENGINE_PID}" 2>/dev/null || true
         wait "${ENGINE_PID}" 2>/dev/null || true
     fi
+    [ -z "${INTAKE_PID}" ] || kill "${INTAKE_PID}" 2>/dev/null || true
+    [ -z "${INTAKE_SEAL_PID}" ] || kill "${INTAKE_SEAL_PID}" 2>/dev/null || true
     [ -z "${SEAL_PID}" ] || kill "${SEAL_PID}" 2>/dev/null || true
     [ -z "${SEAL_DIR}" ] || rm -rf "${SEAL_DIR}"
     if [ -n "${VALKEY_CONTAINER}" ]; then
@@ -144,6 +155,7 @@ cleanup() {
     psql_quiet -d postgres -c "DROP DATABASE IF EXISTS ${TEST_DB_RUNTIME}" >/dev/null 2>&1 || true
     psql_quiet -d postgres -c "DROP ROLE IF EXISTS ${RUNTIME_ROLE}" >/dev/null 2>&1 || true
     psql_quiet -d postgres -c "DROP ROLE IF EXISTS ${API_ROLE}" >/dev/null 2>&1 || true
+    psql_quiet -d postgres -c "DROP ROLE IF EXISTS ${INTAKE_ROLE}" >/dev/null 2>&1 || true
     # `runtara_system` is the cluster's: it is dropped only if this run made it.
     [ -z "${MADE_RUNTARA_SYSTEM}" ] \
         || psql_quiet -d postgres -c "DROP ROLE IF EXISTS runtara_system" >/dev/null 2>&1 || true
@@ -232,6 +244,9 @@ if [ "${TWO_ROLES}" = "true" ]; then
     API_VALKEY_PASSWORD=$(openssl rand -hex 16)
     psql_quiet -d postgres -c "CREATE ROLE ${API_ROLE} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '${API_PASSWORD}'" >/dev/null
     API_DB_URL="postgresql://${API_ROLE}:${API_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}"
+    INTAKE_PASSWORD=$(openssl rand -hex 16)
+    INTAKE_VALKEY_PASSWORD=$(openssl rand -hex 16)
+    psql_quiet -d postgres -c "CREATE ROLE ${INTAKE_ROLE} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '${INTAKE_PASSWORD}'" >/dev/null
     [ "$(psql_quiet -d postgres -c "SELECT count(*) FROM pg_roles WHERE rolname = 'runtara_system'")" = "1" ] \
         || MADE_RUNTARA_SYSTEM=yes
 fi
@@ -297,6 +312,65 @@ TOML
     print_error "seal did not listen"; exit 1
 }
 
+# Intake's seal: the same keys, for a caller that administers nothing.
+start_intakes_seal() {
+    sed -e "s|${SEAL_DIR}/seal.sock|${SEAL_DIR}/seal-intake.sock|" \
+        -e 's|name = "runtara-server"|name = "runtara-intake"|' \
+        -e 's|^admin = true|admin = false|' -e 's|^destroy_keysets = true|destroy_keysets = false|' \
+        -e "s|${SEAL_DIR}/audit.jsonl|${SEAL_DIR}/audit-intake.jsonl|" \
+        "${SEAL_DIR}/seal.toml" > "${SEAL_DIR}/seal-intake.toml"
+    chmod 600 "${SEAL_DIR}/seal-intake.toml"
+    "${SEAL_BIN}" serve --config "${SEAL_DIR}/seal-intake.toml" >>"${TEST_DATA_DIR}/seal-intake.log" 2>&1 &
+    INTAKE_SEAL_PID=$!
+    for _ in {1..40}; do
+        kill -0 "${INTAKE_SEAL_PID}" 2>/dev/null || { print_error "intake's seal exited as it started"; tail -20 "${TEST_DATA_DIR}/seal-intake.log"; exit 1; }
+        [ -S "${SEAL_DIR}/seal-intake.sock" ] && return 0
+        sleep 0.25
+    done
+    print_error "intake's seal did not listen"; exit 1
+}
+
+# Intake: what it is given, in full. It receives the webhooks and the OAuth
+# redirects the API hands it, which an engine of its own does not.
+start_intake() {
+    psql_quiet -d "${TEST_DB_SERVER}" -v intake_role="${INTAKE_ROLE}" \
+        < "${PROJECT_ROOT}/scripts/roles/intake-database-role.sql" >/dev/null
+    # shellcheck disable=SC2046
+    docker exec "${VALKEY_CONTAINER}" valkey-cli ACL SETUSER runtara-intake on ">${INTAKE_VALKEY_PASSWORD}" \
+        $(grep -v '^#' "${PROJECT_ROOT}/scripts/roles/intake-valkey-user.acl") >/dev/null
+    start_intakes_seal
+    (cd "${TEST_DATA_DIR}" && exec env -i \
+    PATH="${PATH}" HOME="${HOME}" \
+    RUNTARA_ROLE=intake \
+    RUNTARA_INTAKE_LISTEN="127.0.0.1:${TEST_INTAKE_PORT}" \
+    RUNTARA_INTAKE_HEALTH_LISTEN="127.0.0.1:${TEST_INTAKE_HEALTH_PORT}" \
+    RUNTARA_INTAKE_TLS_DIR="${TEST_DATA_DIR}/pki-intake" \
+    RUNTARA_ENGINE_URL="https://127.0.0.1:${TEST_ENGINE_PORT}" \
+    RUNTARA_SERVER_DATABASE_URL="postgresql://${INTAKE_ROLE}:${INTAKE_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}" \
+    RUNTARA_REQUIRE_ROW_SECURITY=true \
+    RUNTARA_SEAL_MODE=unix \
+    RUNTARA_SEAL_SOCKET="${SEAL_DIR}/seal-intake.sock" \
+    TENANT_ID="${TENANT}" \
+    RUNTARA_SERVED_TENANTS="${SECOND_TENANT}" \
+    RUNTARA_OAUTH_TENANTLESS_CALLBACK=false \
+    RUST_LOG="warn,runtara_server=info" \
+    AUTH_PROVIDER=local \
+    VALKEY_HOST=127.0.0.1 \
+    VALKEY_PORT="${TEST_VALKEY_PORT}" \
+    VALKEY_USER=runtara-intake \
+    VALKEY_PASSWORD="${INTAKE_VALKEY_PASSWORD}" \
+    OTEL_SDK_DISABLED=true \
+    SKIP_MIGRATIONS=true \
+    "${RUNTARA_SERVER_BIN}") >>"${TEST_LOG}" 2>&1 &
+    INTAKE_PID=$!
+    for _ in {1..60}; do
+        curl -sS -o /dev/null "http://127.0.0.1:${TEST_INTAKE_HEALTH_PORT}/health" 2>/dev/null && return 0
+        kill -0 "${INTAKE_PID}" 2>/dev/null || { print_error "Intake exited during boot."; tail -30 "${TEST_LOG}"; exit 1; }
+        sleep 1
+    done
+    print_error "Intake did not become ready."; exit 1
+}
+
 # The API in front of an engine: what it is given, in full. Stopping "the
 # server" then stops the API; the engine keeps running, as its runs do.
 start_api() {
@@ -304,6 +378,7 @@ start_api() {
     PATH="${PATH}" HOME="${HOME}" \
     RUNTARA_ROLE=api \
     RUNTARA_ENGINE_URL="https://127.0.0.1:${TEST_ENGINE_PORT}" \
+    RUNTARA_INTAKE_URL="https://127.0.0.1:${TEST_INTAKE_PORT}" \
     RUNTARA_ENGINE_TLS_DIR="${TEST_DATA_DIR}/pki-api" \
     RUNTARA_SERVER_DATABASE_URL="${API_DB_URL}" \
     TENANT_ID="${TENANT}" \
@@ -334,7 +409,8 @@ start_server() {
             "$(dirname "${RUNTARA_SERVER_BIN}")/runtara-executor" init-pki \
                 --server-dir "${TEST_DATA_DIR}/pki-engine" \
                 --executor-dir "${TEST_DATA_DIR}/pki-executor" \
-                --api-dir "${TEST_DATA_DIR}/pki-api" >/dev/null
+                --api-dir "${TEST_DATA_DIR}/pki-api" \
+                --intake-dir "${TEST_DATA_DIR}/pki-intake" >/dev/null
             mkdir "${TEST_DATA_DIR}/agent-descriptions"
             cp "${COMPONENTS_DIR}"/runtara_agent_*.meta.json "${TEST_DATA_DIR}/agent-descriptions/"
             if [ ! -f "${COMPILER_WASM}" ]; then
@@ -355,6 +431,7 @@ start_server() {
                 kill -0 "${ENGINE_PID}" 2>/dev/null || { print_error "Engine exited during boot."; tail -30 "${TEST_LOG}"; exit 1; }
             done
             grant_the_api_its_own
+            start_intake
         fi
         start_api
     else

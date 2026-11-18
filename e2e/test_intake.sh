@@ -531,7 +531,30 @@ CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
     --resolve "runtara-intake:${INTAKE_PORT}:127.0.0.1" \
     "https://runtara-intake:${INTAKE_PORT}/engine/v1/served/events/api/runtime/events/http/${TRIGGER}/run" 2>/dev/null || true)
 case "${CODE}" in 2??) print_error "intake answered the engine's certificate (${CODE})"; exit 1 ;; esac
-print_success "intake's certificate asks the engine to run and wait, and nothing else; the API's does not ask that"
+# What anyone may send is not the engine's to receive, from the API either.
+for part in "events/api/runtime/events/http/${TRIGGER}/run" "o-auth-callbacks/api/oauth/${TENANT}/callback?state=s&code=c"; do
+    RESP=$(curl -sS --max-time 30 -w '\n%{http_code}' -X POST \
+        --cacert "${WORK_DIR}/pki-api/ca.pem" --cert "${WORK_DIR}/pki-api/tls.pem" --key "${WORK_DIR}/pki-api/tls.key" \
+        --resolve "runtara-server:${ENGINE_PORT}:127.0.0.1" \
+        "https://runtara-server:${ENGINE_PORT}/engine/v1/served/${part}")
+    [ "${RESP##*$'\n'}" = "403" ] && echo "${RESP}" | grep -q "NOT_FOR_THE_ENGINE" \
+        || { print_error "the engine took what anyone may send from the API's certificate: ${RESP}"; exit 1; }
+done
+print_success "intake's certificate asks the engine to run and wait, and nothing else; the API's does not ask that, and hands the engine nothing anyone may send"
+
+#-------------------------------------------------------------------------
+print_step "6b. A provider's OAuth redirect is received by intake, which asks the engine to finish it..."
+REDIRECT="http://127.0.0.1:${API_PORT}/api/oauth/${TENANT}/callback"
+# A state nobody began: the engine answers as it answers anyone, having
+# looked for the flow in the tenant the redirect names.
+RESP=$(curl -sS --max-time 60 -D - "${REDIRECT}?state=nobody-began-this&code=c1")
+echo "${RESP}" | grep -qiE "Invalid or expired authorization|^location: .*[?&]error=invalid_state" \
+    || { print_error "a redirect with no flow behind it was not answered by the engine: ${RESP}"; exit 1; }
+grep -q "NO_INTAKE" <<< "${RESP}" && { print_error "the redirect found no intake"; exit 1; }
+# What is not a redirect of an OAuth flow is not handed on.
+CODE=$(http_status -X POST "${REDIRECT}?state=s&code=c")
+[ "${CODE}" = "405" ] || { print_error "a POST to the redirect answered ${CODE}, not 405"; exit 1; }
+print_success "a redirect went from the API to intake to the engine, which answered it; intake held nothing to finish it with"
 
 #-------------------------------------------------------------------------
 print_step "7. Without the engine a webhook is still accepted..."

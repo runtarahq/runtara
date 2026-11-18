@@ -13,7 +13,8 @@
 #   2. what each holds  the API's environment has no key, no runtime database
 #                       and no way to seal; the engine has no public listener
 #   3. runs             a workflow is made, compiled and run through the API,
-#                       on both executors; one is run and waited for, one
+#                       on both executors; what anyone may send is refused
+#                       for want of intake, by the API and by the engine; one
 #                       is started by a message into a conversation, and
 #                       one is published as an agent and called by another:
 #                       each compiled on an executor, none in the engine
@@ -550,10 +551,26 @@ ANSWER_VERSION=$(curl -sS "${API}/workflows/${ANSWER}/versions" \
 RESP=$(api_post "/workflows/${ANSWER}/versions/${ANSWER_VERSION}/compile" '{}' 900)
 [ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "compile failed: ${RESP}"; exit 1; }
 api_post "/workflows/${ANSWER}/versions/${ANSWER_VERSION}/set-current" '{}' >/dev/null
-RESP=$(curl -sS --max-time 180 -X POST -H 'Content-Type: application/json' -d '{}' \
-    "${API}/events/http-sync/${ANSWER}")
-echo "${RESP}" | jq -e '.success == true and .outputs.answer == 42' >/dev/null \
-    || { print_error "a run that is waited for did not complete: ${RESP}"; exit 1; }
+# What anyone may send (a webhook, a provider's redirect) is not received by
+# an engine of its own: intake receives it. This deployment has none, so the
+# API has nowhere to hand it, and says so (e2e/test_intake.sh has one).
+for anyones in "${API}/events/http-sync/${ANSWER}" "${API}/events/http/no-such-trigger/run"; do
+    RESP=$(curl -sS --max-time 30 -w '\n%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' "${anyones}")
+    [ "${RESP##*$'\n'}" = "503" ] && echo "${RESP}" | grep -q "NO_INTAKE" \
+        || { print_error "a webhook was not refused for want of intake: ${RESP}"; exit 1; }
+done
+RESP=$(curl -sS --max-time 30 -w '\n%{http_code}' "http://127.0.0.1:${API_PORT}/api/oauth/${TENANT}/callback?state=s&code=c")
+[ "${RESP##*$'\n'}" = "503" ] && echo "${RESP}" | grep -q "NO_INTAKE" \
+    || { print_error "a provider's redirect was not refused for want of intake: ${RESP}"; exit 1; }
+# And the engine takes neither from the API as it arrived, were it sent one.
+for part in "events/api/runtime/events/http/no-such-trigger/run" "o-auth-callbacks/api/oauth/${TENANT}/callback?state=s&code=c"; do
+    RESP=$(curl -sS --max-time 30 -w '\n%{http_code}' -X POST \
+        --cacert "${WORK_DIR}/pki-api/ca.pem" --cert "${WORK_DIR}/pki-api/tls.pem" --key "${WORK_DIR}/pki-api/tls.key" \
+        --resolve "runtara-server:${ENGINE_PORT}:127.0.0.1" \
+        "https://runtara-server:${ENGINE_PORT}/engine/v1/served/${part}")
+    [ "${RESP##*$'\n'}" = "403" ] && echo "${RESP}" | grep -q "NOT_FOR_THE_ENGINE" \
+        || { print_error "the engine took what anyone may send from the API's certificate: ${RESP}"; exit 1; }
+done
 # A conversation is the engine's to keep and carry, and is asked for through
 # the API: a message starts a run, and what became of it is read back.
 CONVERSATION="${API}/workflows/${ANSWER}/conversations/two-roles"
