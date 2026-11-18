@@ -10,6 +10,7 @@ use std::sync::Arc;
 use runtara_connections::auth::provider_auth::{
     ResolvedConnectionAuth, evict_connection_token_caches, resolve_connection_auth,
 };
+use runtara_connections::sealed::testing::without_sealed;
 use runtara_connections::sealed::{
     Allowances, MemoryKeySource, SealedCredentials, SendError, is_sealed,
 };
@@ -63,8 +64,9 @@ async fn stored(sealed: &SealedCredentials, connection: &str, params: &Value) ->
     for field in ["access_token", "refresh_token", "client_secret"] {
         assert!(is_sealed(&stored[field]));
     }
-    assert!(!stored.to_string().contains("CANARY"));
-    assert!(!stored.to_string().contains("csec"));
+    let clear = without_sealed(&stored).to_string();
+    assert!(!clear.contains("CANARY"), "{clear}");
+    assert!(!clear.contains("csec"), "{clear}");
     stored
 }
 
