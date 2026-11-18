@@ -219,6 +219,12 @@ fn peer_is(certificates: Option<&[CertificateDer<'static>]>, name: &str) -> bool
 #[derive(Clone, Copy, Debug)]
 pub struct Peer(pub SocketAddr);
 
+/// Whose certificate a request's connection presented, by its name: in the
+/// extensions of every request [`serve`] and [`serve_peers`] hand their
+/// router.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeerName(pub &'static str);
+
 /// Serves `router` on `listener` over mutual TLS to the peer whose
 /// certificate is for `peer`; anyone else's connection is closed after the
 /// handshake. Runs until dropped.
@@ -228,7 +234,21 @@ pub async fn serve(
     peer: &'static str,
     router: axum::Router,
 ) {
+    serve_peers(listener, config, vec![peer], router).await
+}
+
+/// Serves `router` on `listener` over mutual TLS to the peers whose
+/// certificates are for one of `peers`; anyone else's connection is closed
+/// after the handshake. The router is told which one a request came from
+/// ([`PeerName`]). Runs until dropped.
+pub async fn serve_peers(
+    listener: tokio::net::TcpListener,
+    config: ServerConfig,
+    peers: Vec<&'static str>,
+    router: axum::Router,
+) {
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let peers: Arc<[&'static str]> = peers.into();
     loop {
         let (stream, from) = match listener.accept().await {
             Ok(accepted) => accepted,
@@ -238,18 +258,21 @@ pub async fn serve(
                 continue;
             }
         };
-        let (acceptor, router) = (acceptor.clone(), router.clone());
+        let (acceptor, router, peers) = (acceptor.clone(), router.clone(), peers.clone());
         tokio::spawn(async move {
             let Ok(stream) = acceptor.accept(stream).await else {
                 tracing::debug!(%from, "a TLS handshake failed");
                 return;
             };
-            if !peer_is(stream.get_ref().1.peer_certificates(), peer) {
-                tracing::warn!(%from, peer, "refused a certificate that is not the peer's");
+            let presented = stream.get_ref().1.peer_certificates();
+            let Some(peer) = peers.iter().copied().find(|name| peer_is(presented, name)) else {
+                tracing::warn!(%from, "refused a certificate that is not a peer's");
                 return;
-            }
+            };
             let service = hyper_util::service::TowerToHyperService::new(
-                router.layer(axum::Extension(Peer(from))),
+                router
+                    .layer(axum::Extension(Peer(from)))
+                    .layer(axum::Extension(PeerName(peer))),
             );
             let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
                 .serve_connection(TokioIo::new(stream), service)
