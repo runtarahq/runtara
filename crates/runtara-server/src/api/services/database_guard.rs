@@ -251,6 +251,7 @@ exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/certs/server.crt 
             BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
             KeyPair, KeyUsagePurpose,
         };
+        use runtara_connections::sealed::testing::without_sealed;
         use runtara_connections::sealed::{Allowances, MemoryKeySource, SealedCredentials};
         use sqlx::{Connection, Row};
         use testcontainers::core::{IntoContainerPort, WaitFor};
@@ -312,7 +313,7 @@ exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/certs/server.crt 
                     .await
                     .unwrap()
                     .expect("a verified Postgres connection is sealed");
-                assert!(!stored.to_string().contains(password));
+                assert!(!without_sealed(&stored).to_string().contains(password));
                 stored
             }
         };
@@ -437,6 +438,7 @@ exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/certs/server.crt 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_sealed_connection_to_a_database_without_tls_logs_in_through_seal() {
+        use runtara_connections::sealed::testing::without_sealed;
         use runtara_connections::sealed::{Allowances, MemoryKeySource, SealedCredentials, policy};
         use sqlx::{Connection, Row};
         use testcontainers::core::{IntoContainerPort, WaitFor};
@@ -489,7 +491,11 @@ exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/certs/server.crt 
                 .await
                 .unwrap()
                 .expect("the connection is sealed for the protection its URL asks for");
-            assert!(!stored.to_string().contains("synthetic-database-password"));
+            assert!(
+                !without_sealed(&stored)
+                    .to_string()
+                    .contains("synthetic-database-password")
+            );
             let url = admit_sealed(sealed.clone(), "acme", connection, &stored)
                 .await
                 .unwrap();

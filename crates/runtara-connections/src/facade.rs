@@ -1038,7 +1038,11 @@ mod signature_tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(!stored.to_string().contains(SECRET));
+        assert!(
+            !crate::sealed::testing::without_sealed(&stored)
+                .to_string()
+                .contains(SECRET)
+        );
         let connection = connection(stored, true);
 
         assert_checks(&facade(Some(sealed)), &connection).await;

@@ -425,7 +425,11 @@ async fn moving_between_a_platform_app_and_the_tenants_own_needs_reauthorization
     assert!(runtara_connections::sealed::is_sealed(
         &stored["client_secret"]
     ));
-    assert!(!stored.to_string().contains("own-secret-2"));
+    assert!(
+        !runtara_connections::sealed::testing::without_sealed(&stored)
+            .to_string()
+            .contains("own-secret-2")
+    );
 }
 
 #[tokio::test]

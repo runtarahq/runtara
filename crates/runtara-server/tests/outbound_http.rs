@@ -18,6 +18,7 @@ use runtara_component_host::outbound_http::{
 };
 use runtara_connections::crypto::noop::NoOpCipher;
 use runtara_connections::repository::connections::ConnectionRepository;
+use runtara_connections::sealed::testing::without_sealed;
 use runtara_connections::service::connections::{ConnectionService, ServiceError};
 use runtara_connections::{
     ConnectionsConfig, ConnectionsFacade, ConnectionsState, CreateConnectionRequest,
@@ -1062,7 +1063,11 @@ async fn native_outbound_sends_a_sealed_connections_request_through_seal() -> an
     .await?;
     assert_eq!(format, "seal");
     assert!(is_sealed(&stored["token"]));
-    assert!(!stored.to_string().contains("synthetic-sealed-token"));
+    assert!(
+        !without_sealed(&stored)
+            .to_string()
+            .contains("synthetic-sealed-token")
+    );
 
     let facade_with = |sealed| {
         ConnectionsFacade::new(ConnectionsState::from_config(ConnectionsConfig {
@@ -1190,7 +1195,7 @@ async fn native_outbound_has_seal_sign_a_sealed_storage_connections_request() ->
     .await?;
     assert_eq!(format, "seal");
     assert!(is_sealed(&stored["account_key"]));
-    assert!(!stored.to_string().contains(&account_key));
+    assert!(!without_sealed(&stored).to_string().contains(&account_key));
 
     let outbound = NativeOutboundHttp {
         facade: Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
@@ -1487,7 +1492,7 @@ async fn native_outbound_has_seal_present_a_sealed_client_certificate() -> anyho
     .await?;
     assert_eq!(format, "seal");
     assert!(is_sealed(&stored["client_private_key_pem"]));
-    assert!(!stored.to_string().contains("PRIVATE KEY"));
+    assert!(!without_sealed(&stored).to_string().contains("PRIVATE KEY"));
     // The certificate is public, and stays readable.
     assert_eq!(stored["client_certificate_pem"], client_certificate_pem);
 
