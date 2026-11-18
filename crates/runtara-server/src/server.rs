@@ -870,6 +870,9 @@ struct ApiParts {
     /// Intake, where it is a process of its own: what anyone may send is
     /// handed to it and not to the engine.
     intake: Option<Arc<dyn crate::engine::Engine>>,
+    /// Whether the engine is another process. It receives nothing anyone may
+    /// send, so without intake such an API has nowhere to hand that.
+    engine_is_elsewhere: bool,
     agent_catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
     events: product_events::ProductEventSink,
     valkey_conn: Option<redis::aio::ConnectionManager>,
@@ -889,6 +892,7 @@ fn api_app(parts: ApiParts) -> Router {
         pool,
         engine: engine_api,
         intake,
+        engine_is_elsewhere,
         agent_catalog,
         events: product_event_sink,
         valkey_conn,
@@ -1317,13 +1321,30 @@ fn api_app(parts: ApiParts) -> Router {
         // Unauthenticated: the permission map is static and the same for every tenant.
         .route("/api/runtime/permissions", get(permissions_handler));
 
-    // What anyone may send goes to intake, where it is a process of its own.
+    // What anyone may send (a webhook, a provider's redirect) goes to
+    // intake, where it is a process of its own, or is received here where
+    // the engine is this process. An engine in a process of its own receives
+    // none of it, so an API in front of one with no intake has nowhere to
+    // hand it, and says so.
+    let receives_anyone: Option<Arc<dyn crate::engine::Engine>> = intake
+        .clone()
+        .or_else(|| (!engine_is_elsewhere).then(|| engine_api.clone()));
+    let for_anyone = |part: crate::engine::Served| match &receives_anyone {
+        Some(receiver) => crate::engine::forwarded(receiver.clone(), part),
+        None => Router::new().fallback(|| async {
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(serde_json::json!({
+                    "error": "NO_INTAKE",
+                    "message": "this deployment has no intake to receive what anyone may \
+                                send (RUNTARA_INTAKE_URL, docs/roles.md)",
+                })),
+            )
+        }),
+    };
     let event_routes = Router::new().nest(
         "/api/runtime/events",
-        crate::engine::forwarded(
-            intake.clone().unwrap_or_else(|| engine_api.clone()),
-            crate::engine::Served::Events,
-        ),
+        for_anyone(crate::engine::Served::Events),
     );
 
     // Build internal router for MCP in-process calls (no network hop).
@@ -1421,7 +1442,7 @@ fn api_app(parts: ApiParts) -> Router {
 
     let oauth_callback_routes = Router::new().nest(
         "/api/oauth",
-        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::OAuthCallbacks),
+        for_anyone(crate::engine::Served::OAuthCallbacks),
     );
 
     // =========================================================================
@@ -2163,10 +2184,53 @@ async fn start_as_intake(
             )),
     );
 
+    // A provider's redirect, which finishes an OAuth flow: intake receives it
+    // and holds nothing to finish one with (no connection, no key). It hands
+    // the engine what was asked, a path and its query, and answers the
+    // browser with what the engine says.
+    let asks: Arc<dyn crate::engine::Engine> = local.clone();
+    local.serves(
+        crate::engine::Served::OAuthCallbacks,
+        Router::new().fallback(move |request: axum::extract::Request| {
+            use axum::http::StatusCode;
+            use axum::response::IntoResponse;
+            let engine = asks.clone();
+            async move {
+                if request.method() != axum::http::Method::GET {
+                    return StatusCode::METHOD_NOT_ALLOWED.into_response();
+                }
+                let asked = request
+                    .uri()
+                    .path_and_query()
+                    .map(|asked| asked.as_str().to_owned())
+                    .unwrap_or_default();
+                if !crate::engine::is_an_oauth_redirect(&asked) {
+                    return StatusCode::NOT_FOUND.into_response();
+                }
+                let cookie = crate::engine::a_browsers_cookie(
+                    request
+                        .headers()
+                        .get(axum::http::header::COOKIE)
+                        .and_then(|cookie| cookie.to_str().ok()),
+                );
+                match engine.finish_oauth_redirect(asked, cookie).await {
+                    Ok(back) => back.into_response(),
+                    Err(reason) => {
+                        tracing::warn!(%reason, "An OAuth redirect was not finished");
+                        StatusCode::SERVICE_UNAVAILABLE.into_response()
+                    }
+                }
+            }
+        }),
+    );
+
     let identity = runtara_executor::tls::Identity::load(&intake_at.tls_dir)?;
     let listener = runtara_executor::tls::bind(intake_at.listen).await?;
     let address = listener.local_addr()?;
-    const SERVES: &[crate::engine::Served] = &[crate::engine::Served::Events];
+    const SERVES: &[crate::engine::Served] = &[
+        crate::engine::Served::Events,
+        crate::engine::Served::OAuthCallbacks,
+    ];
     tokio::spawn(runtara_executor::tls::serve(
         listener,
         identity.server_config()?,
@@ -2387,6 +2451,7 @@ async fn start_as_api(
         pool: pool.clone(),
         engine: engine_api,
         intake,
+        engine_is_elsewhere: true,
         agent_catalog,
         events: product_event_sink,
         valkey_conn: redis_manager,
@@ -4089,6 +4154,7 @@ async fn start_as_platform(
             engine: engine_api.clone(),
             // This process receives what anyone may send itself.
             intake: None,
+            engine_is_elsewhere: false,
             agent_catalog: agent_catalog.clone(),
             events: product_event_sink.clone(),
             valkey_conn: valkey_conn.clone(),
