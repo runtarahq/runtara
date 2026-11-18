@@ -165,6 +165,16 @@ class NormalizeTest(unittest.TestCase):
         self.assertEqual(cg.response_examples(sliced), {"op": {"id": 1}})
         self.assertNotIn("examples", sliced["components"])
 
+    def test_of_several_examples_the_first_by_name_is_the_fixture(self):
+        # The slice is saved with sorted keys, so `check` reads the examples in
+        # another order than `fetch` did.
+        spec = spec_with(ok_json({"type": "object"}, examples={
+            "b, written first": {"value": {"id": 2}}, "a": {"value": {"id": 1}}}))
+        sliced = cg.slice_spec(spec, ["op"])
+        saved = json.loads(json.dumps(sliced, sort_keys=True))
+        self.assertEqual(cg.response_examples(sliced), {"op": {"id": 1}})
+        self.assertEqual(cg.response_examples(saved), {"op": {"id": 1}})
+
     def test_example_given_as_a_json_string_is_decoded(self):
         sliced = cg.slice_spec(spec_with(ok_json({"type": "object"}, example='{"id": 1}')), ["op"])
         self.assertEqual(cg.response_examples(sliced), {"op": {"id": 1}})
@@ -616,6 +626,24 @@ class NormalizeTest(unittest.TestCase):
             # Only ever null: no empty `anyOf`, which is no valid schema.
             ({"anyOf": [{"type": "null"}]}, {"nullable": True}),
             ({"items": [{"type": "null"}]}, {"nullable": True}),
+        )
+        for schema, expected in cases:
+            spec = {"components": {"schemas": {"X": copy.deepcopy(schema)}}}
+            cg.normalize_schemas(spec)
+            self.assertEqual(spec["components"]["schemas"]["X"], expected, schema)
+
+    def test_a_const_becomes_an_enum_of_its_value(self):
+        # JSON Schema's `const`, which openapi-generator refuses in a 3.0 spec.
+        cases = (
+            ({"type": "string", "const": "TEXT"}, {"type": "string", "enum": ["TEXT"]}),
+            ({"type": "number", "const": 3}, {"type": "number", "enum": [3]}),
+            # An enum already says it.
+            ({"type": "string", "const": "A", "enum": ["A"]}, {"type": "string", "enum": ["A"]}),
+            # A boolean has no enum to list.
+            ({"type": "boolean", "const": False}, {"type": "boolean"}),
+            # A field named `const` is no keyword.
+            ({"type": "object", "properties": {"const": {"type": "string"}}},
+             {"type": "object", "properties": {"const": {"type": "string"}}}),
         )
         for schema, expected in cases:
             spec = {"components": {"schemas": {"X": copy.deepcopy(schema)}}}

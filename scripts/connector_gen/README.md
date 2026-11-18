@@ -512,8 +512,9 @@ crates/agents/runtara-agent-<id>/
 - JSON Schema forms OpenAPI 3.0 lacks are rewritten by `fetch`: `items: [A, B]`
   (Slack's "A or B") becomes `anyOf: [A, B]`, `type: [string, "null"]` a
   nullable string, a list of several types an `anyOf` (each alternative with
-  the keywords of its type, `items` with `array`), and `type: "null"`, alone
-  or as an alternative, `nullable`.
+  the keywords of its type, `items` with `array`), `type: "null"`, alone
+  or as an alternative, `nullable`, and `const: X` the enum `[X]` (a boolean's
+  `const` is dropped).
 - Tabs after a value (`default: <tab>`) are valid YAML 1.2 that PyYAML cannot
   read; `fetch` drops trailing whitespace before parsing.
 - A Swagger 2.0 spec (Slack's) is converted to OpenAPI 3 before it is sliced:

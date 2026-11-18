@@ -1115,6 +1115,14 @@ def normalize_schemas(sliced: dict) -> None:
                     else:
                         # Only ever null: an empty `anyOf` is no valid schema.
                         del node[key]
+        # JSON Schema's `const` is not OpenAPI 3.0's, and the generator refuses
+        # a spec that has it: the one value a field takes is an `enum` of that
+        # value. A boolean has no enum to list, so its `const` is only dropped.
+        # (A dict here is a field named `const`, not the keyword.)
+        if "const" in node and not isinstance(node["const"], (dict, list)):
+            value = node.pop("const")
+            if not isinstance(value, bool) and value is not None:
+                node.setdefault("enum", [value])
         # Plain `integer` would become i32; vendor ids and amounts outgrow it.
         if node.get("type") == "integer" and "format" not in node:
             node["format"] = "int64"
@@ -1823,7 +1831,10 @@ def decoded_example(example):
 
 
 def response_examples(spec: dict) -> dict:
-    """operationId -> the JSON example of its first 2xx response, if any."""
+    """operationId -> the JSON example of its first 2xx response, if any. Of
+    several named examples it is the first by name, not the first as written:
+    `spec.slice.json` is saved with sorted keys, and `check` has to find the
+    example `fetch` did."""
     examples = {}
     for item in spec["paths"].values():
         for method, op in item.items():
@@ -1833,7 +1844,7 @@ def response_examples(spec: dict) -> dict:
                 media = response.get("content", {}).get("application/json", {})
                 example = media.get("example")
                 if example is None and media.get("examples"):
-                    example = next(iter(media["examples"].values())).get("value")
+                    example = media["examples"][min(media["examples"])].get("value")
                 if code.startswith("2") and example is not None:
                     examples[op["operationId"]] = decoded_example(example)
                     break
