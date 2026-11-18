@@ -38,7 +38,12 @@ def component_names(workspace: Path) -> list[str]:
 # command, which an engine compiles workflows in (RUNTARA_COMPILER_WASM), and
 # the one it places on an executor, which asks for its files over the
 # workflow API.
-TOOLS = ["runtara-compile-sandboxed.wasm", "runtara-compile-guest.wasm"]
+TOOLS = [
+    "runtara-compile-sandboxed.wasm",
+    "runtara-compile-guest.wasm",
+    # The save-time validator, placed on an executor as the compiler is.
+    "runtara-validate-placed.wasm",
+]
 
 
 def stage(workspace: Path, source: Path, destination: Path) -> None:
