@@ -1,10 +1,9 @@
 //! Agents Handlers
 //!
-//! HTTP endpoints for querying agent metadata. The handlers read a single
-//! shared `AgentsService` from `AppState` (built once at startup with the
-//! embedded component dispatcher attached) so component-backed agents
-//! consistently override the legacy registry on every call. The calling
-//! tenant's published workflow-agents are served next to them.
+//! HTTP endpoints for querying agent metadata. What agents there are and
+//! what each can do is the engine's to say, which loaded them; which of them
+//! a tenant's plan includes is decided here. The calling tenant's published
+//! workflow-agents are served next to them.
 
 use axum::{
     extract::{Path, State},
@@ -13,7 +12,7 @@ use axum::{
 };
 
 use crate::api::dto::operators::{AgentInfo, AgentSummary, CapabilityInfo, ListAgentsResponse};
-use crate::api::services::operators::{AgentsService, ServiceError};
+use crate::engine::Engine;
 use crate::entitlement_error::EntitlementDenial;
 use crate::middleware::tenant_auth::OrgId;
 
@@ -28,18 +27,25 @@ use crate::middleware::tenant_auth::OrgId;
 )]
 pub async fn list_agents_handler(
     OrgId(tenant_id): OrgId,
-    State(service): State<AgentsService>,
-) -> Result<Json<ListAgentsResponse>, StatusCode> {
+    State(engine): State<std::sync::Arc<dyn Engine>>,
+) -> Result<Json<ListAgentsResponse>, Response> {
     // Filter against the tenant's materialised allowlist so discovery matches
     // invocation: an agent the per-handler gates would deny must not appear
     // in the listing the SPA and MCP `list_agents` tool render from.
     let allowlist = crate::config::entitlements_for(&tenant_id).materialised_agents();
-    let mut agents = filter_agents_by_allowlist(service.list_agents(), &allowlist);
+    let listing = engine.list_agents(&tenant_id).await.map_err(away)?;
+    let mut agents = filter_agents_by_allowlist(listing.built_in, &allowlist);
     // The tenant's published workflow-agents are its own workflows, not
     // licensed integrations: they are exempt from the allowlist, as on save.
-    agents.extend(service.published_agent_summaries(&tenant_id));
+    agents.extend(listing.published);
     agents.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(Json(ListAgentsResponse { agents }))
+}
+
+/// The engine did not answer: the agents are not known now.
+fn away(reason: String) -> Response {
+    tracing::warn!(%reason, "The engine did not say what agents there are");
+    StatusCode::SERVICE_UNAVAILABLE.into_response()
 }
 
 /// Drop agents that aren't in the tenant's materialised allowlist. Pure
@@ -70,7 +76,7 @@ fn filter_agents_by_allowlist(
 )]
 pub async fn get_agent_handler(
     OrgId(tenant_id): OrgId,
-    State(service): State<AgentsService>,
+    State(engine): State<std::sync::Arc<dyn Engine>>,
     Path(name): Path<String>,
 ) -> Result<Json<AgentInfo>, Response> {
     // Per-agent allowlist check. Surfaces AGENT_NOT_ENABLED with the same
@@ -80,17 +86,14 @@ pub async fn get_agent_handler(
         // which are exempt, as on save. None of them shares an id with a
         // built-in, so a built-in stays denied. Checking the allowlist first
         // keeps the staging-directory read off the common path.
-        return match service.published_agent(&tenant_id, &name) {
+        return match engine.agent(&tenant_id, &name, true).await.map_err(away)? {
             Some(agent) => Ok(Json(agent)),
             None => Err(EntitlementDenial::from(err).into_response()),
         };
     }
-    match service.get_agent(&name) {
-        Ok(agent) => Ok(Json(agent)),
-        Err(ServiceError::AgentNotFound) => Err(StatusCode::NOT_FOUND.into_response()),
-        Err(ServiceError::CapabilityNotFound) => {
-            Err(StatusCode::INTERNAL_SERVER_ERROR.into_response())
-        }
+    match engine.agent(&tenant_id, &name, false).await.map_err(away)? {
+        Some(agent) => Ok(Json(agent)),
+        None => Err(StatusCode::NOT_FOUND.into_response()),
     }
 }
 
@@ -110,31 +113,36 @@ pub async fn get_agent_handler(
 )]
 pub async fn get_capability_handler(
     OrgId(tenant_id): OrgId,
-    State(service): State<AgentsService>,
+    State(engine): State<std::sync::Arc<dyn Engine>>,
     Path((name, capability_id)): Path<(String, String)>,
 ) -> Result<Json<CapabilityInfo>, Response> {
     // Per-agent allowlist check, with the tenant's published workflow-agents
     // exempt as in `get_agent_handler`.
-    let capability = match crate::config::entitlements_for(&tenant_id).require_agent(&name) {
-        Ok(()) => service.get_capability(&name, &capability_id),
-        Err(err) => match service.published_agent(&tenant_id, &name) {
-            Some(agent) => AgentsService::capability_of(agent, &capability_id),
+    let agent = match crate::config::entitlements_for(&tenant_id).require_agent(&name) {
+        Ok(()) => engine.agent(&tenant_id, &name, false).await.map_err(away)?,
+        Err(err) => match engine.agent(&tenant_id, &name, true).await.map_err(away)? {
+            Some(agent) => Some(agent),
             None => return Err(EntitlementDenial::from(err).into_response()),
         },
     };
-    match capability {
-        Ok(capability) => Ok(Json(capability)),
-        Err(ServiceError::AgentNotFound) | Err(ServiceError::CapabilityNotFound) => {
-            Err(StatusCode::NOT_FOUND.into_response())
-        }
-    }
+    // The capability with the given id, ignoring ASCII case.
+    agent
+        .and_then(|agent| {
+            agent
+                .capabilities
+                .into_iter()
+                .find(|capability| capability.id.eq_ignore_ascii_case(&capability_id))
+        })
+        .map(Json)
+        .ok_or_else(|| StatusCode::NOT_FOUND.into_response())
 }
 
-/// The agent lookup routes over a service with no built-in agents, for tests
+/// The agent lookup routes over an engine with no built-in agents, for tests
 /// that reach them through an MCP server's internal router.
 #[cfg(test)]
 pub(crate) fn agent_lookup_routes() -> axum::Router {
     use axum::routing::get;
+    let engine = crate::engine::without_runtime();
     axum::Router::new()
         .route("/api/runtime/agents", get(list_agents_handler))
         .route("/api/runtime/agents/{name}", get(get_agent_handler))
@@ -142,7 +150,7 @@ pub(crate) fn agent_lookup_routes() -> axum::Router {
             "/api/runtime/agents/{name}/capabilities/{capability_id}",
             get(get_capability_handler),
         )
-        .with_state(AgentsService::new().with_agent_catalog(Default::default()))
+        .with_state(engine)
 }
 
 /// Get connection schema for an agent (STUB)
@@ -174,13 +182,7 @@ pub async fn get_agent_connection_schema_handler(
     (StatusCode::NOT_IMPLEMENTED, Json(response)).into_response()
 }
 
-/// Snapshot of the embedded component dispatcher.
-#[derive(serde::Serialize, utoipa::ToSchema)]
-pub struct ComponentsStatusResponse {
-    pub loaded: bool,
-    pub agent_ids: Vec<String>,
-    pub capability_count: usize,
-}
+pub use crate::api::services::operators::ComponentsStatus as ComponentsStatusResponse;
 
 /// Get a snapshot of the embedded component dispatcher's loaded agents and
 /// total declared-capability count. Used by ops and the components A/B
@@ -194,14 +196,14 @@ pub struct ComponentsStatusResponse {
     )
 )]
 pub async fn components_status_handler(
-    State(service): State<AgentsService>,
-) -> Json<ComponentsStatusResponse> {
-    let (loaded, agent_ids, capability_count) = service.components_status();
-    Json(ComponentsStatusResponse {
-        loaded,
-        agent_ids,
-        capability_count,
-    })
+    OrgId(tenant_id): OrgId,
+    State(engine): State<std::sync::Arc<dyn Engine>>,
+) -> Result<Json<ComponentsStatusResponse>, Response> {
+    engine
+        .components_status(&tenant_id)
+        .await
+        .map(Json)
+        .map_err(away)
 }
 
 #[cfg(test)]

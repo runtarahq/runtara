@@ -225,9 +225,11 @@ Not built:
   anonymous traffic for them. A chat platform is to reach a workflow as an
   integration on the native conversation, whose webhook is an ordinary
   trigger's, which intake receives.
-- **Preparation 4: agents.** Listing agents and running one on request are
-  still a part the engine serves. It was a tidying of the engine's surface
-  and not needed for intake.
+- **Preparation 4: agents.** Done since: what agents there are and what
+  each can do are operations of the engine (`ListAgents`, `AgentNamed`,
+  `ComponentsStatusOf`), as running one on request already was, and the
+  agent routes are the API's own. Which agents a tenant's plan includes is
+  decided by the API, which reads the plan; the engine says what it loaded.
 - **OAuth redirects** stay with the engine, as the plan had them: finishing
   a flow seals tokens.
 - **Routing at the proxy.** The API hands intake what it receives; a

@@ -245,8 +245,9 @@ process, with no change in behaviour. Implemented on
 - **Parts of the API the engine serves itself** (`Engine::serve`). What is
   answered with a connection's credentials, or by what the engine loaded,
   is the engine's: connections, the OAuth redirect, a tenant's object
-  model, chat channels' webhooks, triggers, a trigger's HTTP events, and
-  agents. Each is a router the engine holds; the API authenticates the
+  model, triggers and a trigger's HTTP events. (Chat channels' webhooks
+  were among them and are removed; agents were, and are operations of the
+  engine now, with their routes the API's own.) Each is a router the engine holds; the API authenticates the
   caller and hands the request over as it arrived. The engine answers it in
   the scope of the tenant it is for, which it enters itself, and decides
   there what the caller's role may do, where the route is known. The chat
@@ -361,7 +362,9 @@ be the engine's, and are now asked of it:
   `runtara_agent_*.meta.json` files of the release the engine runs, from
   `RUNTARA_AGENT_COMPONENTS_DIR`, and loads no component. It uses them to
   check what a workflow names. The routes that list agents and run one on
-  request stay the engine's.
+  request stayed the engine's then; they are the API's since, and ask the
+  engine what it loaded (`ListAgents`, `AgentNamed`, `ComponentsStatusOf`,
+  `TestAgent`).
 
 Left as it was, on purpose:
 
