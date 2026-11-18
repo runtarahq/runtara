@@ -7,8 +7,9 @@
 # test starts the server alone and then, against real `runtara-executor`
 # processes:
 #
-#   0. compiling       with no executor a workflow is not compiled; with one,
-#                      it is compiled there, by a compiler placed as a guest
+#   0. saving          with no executor a workflow is not validated, so not
+#                      saved, nor compiled; with one, both are done there, by
+#                      guests placed as a run is
 #   1. no executor     a run is not failed; it waits to be offered again
 #   2. one joins       the waiting run completes
 #   3. a second joins  runs go to both, and each fetched the workflow itself
@@ -249,24 +250,27 @@ RESP=$(api_post /workflows/create '{"name":"scalable executors e2e","description
 WORKFLOW=$(echo "${RESP}" | jq -r '.data.id // empty')
 [ -n "${WORKFLOW}" ] || { print_error "create failed: ${RESP}"; exit 1; }
 GRAPH=$(cat "${PROJECT_ROOT}/examples/workflows/01-conditional.json")
-RESP=$(api_post "/workflows/${WORKFLOW}/update" "{\"executionGraph\": ${GRAPH}}")
-[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "update failed: ${RESP}"; exit 1; }
-VERSION=$(curl -sS "${API}/workflows/${WORKFLOW}/versions" \
-    | jq -r '[.data[]?.version // .data[]?.versionNumber // empty] | max // 1')
 
 # --- 0 ------------------------------------------------------------------
 # A workflow is compiled where workflows run: on an executor, by a compiler
 # placed there as a guest (docs/compiler-on-an-executor.md). The server does
 # not compile it itself instead.
-print_step "0. With no executor, a workflow is not compiled, in the server or anywhere..."
+print_step "0. With no executor, a workflow is not validated or compiled, in the server or anywhere..."
 grep -q "Workflows are compiled on an executor" "${SERVER_LOG}" \
-    || { print_error "the server does not say it compiles on an executor"; exit 1; }
-RESP=$(api_post "/workflows/${WORKFLOW}/versions/${VERSION}/compile" '{}' 900)
+    && grep -q "Workflows are validated on an executor" "${SERVER_LOG}" \
+    || { print_error "the server does not say it validates and compiles on an executor"; exit 1; }
+# Saving validates, and validating is placed too: with no executor the save
+# is refused, after a short wait for one to say it is here.
+RESP=$(api_post "/workflows/${WORKFLOW}/update" "{\"executionGraph\": ${GRAPH}}")
 [ "$(echo "${RESP}" | jq -r '.success // false')" = "false" ] \
-    && echo "${RESP}" | grep -q "no executor is here" \
-    || { print_error "with no executor a workflow was compiled, or failed otherwise: ${RESP}"; exit 1; }
+    && echo "${RESP}" | grep -q "could not be validated" \
+    || { print_error "with no executor a workflow was saved, or refused otherwise: ${RESP}"; exit 1; }
 start_executor 0
 wait_for_log "${SERVER_LOG}" "an executor registered" 20
+RESP=$(api_post "/workflows/${WORKFLOW}/update" "{\"executionGraph\": ${GRAPH}}")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "update failed: ${RESP}"; exit 1; }
+VERSION=$(curl -sS "${API}/workflows/${WORKFLOW}/versions" \
+    | jq -r '[.data[]?.version // .data[]?.versionNumber // empty] | max // 1')
 RESP=$(api_post "/workflows/${WORKFLOW}/versions/${VERSION}/compile" '{}' 900)
 [ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "compile failed: ${RESP}"; exit 1; }
 api_post "/workflows/${WORKFLOW}/versions/${VERSION}/set-current" '{}' >/dev/null
@@ -276,7 +280,7 @@ ls "${WORK_DIR}/executor-state-0/compiled/runtara-compiler/"*.cwasm >/dev/null 2
 kill "${EXECUTOR_PIDS[0]}"; wait "${EXECUTOR_PIDS[0]}" 2>/dev/null || true
 EXECUTOR_PIDS[0]=""
 wait_for_log "${SERVER_LOG}" "an executor left" 15
-print_success "the workflow was compiled on an executor, and not at all without one"
+print_success "the workflow was validated and compiled on an executor, and not at all without one"
 
 # --- 1 and 2 ------------------------------------------------------------
 print_step "1. With no executor, a run is not failed..."
