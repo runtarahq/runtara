@@ -501,7 +501,7 @@ pub fn plain_fields(integration_id: &str, params: &Value) -> BTreeMap<String, St
 /// Whether this build's seal lets a SigV4 request name its operation in
 /// `X-Amz-Target`, which SQS, DynamoDB and other JSON services need.
 pub fn seal_takes_amz_target() -> bool {
-    seal_format::policy::amz_header_allowed("x-amz-target", &[])
+    !seal_format::policy::amz_header_controls_signing("x-amz-target")
 }
 
 /// Whether this build's seal lets a rule for a whole endpoint allow copies
@@ -630,7 +630,11 @@ fn aws_secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
         });
         token_targets.push(Target {
             base_url: base_url.clone(),
-            inject: Inject::Companion {},
+            // A session token is part of a presigned URL, where its key's
+            // rule presigns: only storage does.
+            inject: Inject::Companion {
+                allow_presign: storage,
+            },
             methods: None,
             plain: Vec::new(),
         });

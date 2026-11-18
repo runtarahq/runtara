@@ -13,6 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **seal as a process of its own.** seal, which holds connection secrets
+  and sends their requests, ran in the server's process, which could
+  therefore open every credential. `RUNTARA_SEAL_MODE=unix` or `mtls` has
+  the server use a seal that runs beside it, on a Unix socket, or on another
+  host over mutual TLS (`RUNTARA_SEAL_SOCKET`, or `RUNTARA_SEAL_ADDRESS` and
+  `RUNTARA_SEAL_TLS_DIR`). That seal alone holds tenants' keys and the key
+  that wraps them: a broken server can ask it to use a credential, toward
+  the destination sealed into it and with each use in seal's audit log, and
+  cannot read one. `in_process` stays the default. A server told of a seal
+  of its own is refused a wrapping key (`RUNTARA_SEAL_WRAPPING_KEY`), and
+  does not start if seal does not answer or lacks the keys the server's
+  database still holds. `runtara-server seal-keys export` hands those keys,
+  and the key that wraps them, over to seal, and `seal-keys forget` deletes
+  the database's copy once seal answers for each. `docker-compose.seal.yml`
+  adds seal to the evaluation stack. See `docs/seal.md`.
+
 - **Workflows on an executor, each in a sandboxed process of its own.** With
   `RUNTARA_RUNNER=executor` the server runs no workflow itself: it places each
   run with a `runtara-executor`, a service on a host of its own that holds no
@@ -1043,6 +1059,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the eager-pass behavior described above.
 
 ### Changed
+
+- **seal is at its current revision, which leaves what a credential may do
+  to the credential.** seal no longer holds a request to a method, a SigV4
+  request to a list of `X-Amz-*` headers, or a copy to a source: where a
+  secret may go is still sealed with it, and what it may do there is for its
+  own permissions at the provider. Values sealed with those options still
+  open. Likewise a Postgres password is sealed for a server and no longer
+  for one database on it: which databases a role may use is for its own
+  privileges, so give a tenant's role only the database it is to reach.
+  A session token is part of a presigned URL only where its own rule
+  says so, which a storage connection's now does; one sealed before this
+  presigns without its token until its secrets are entered again.
+  Tenants' seal keys are wrapped again, after an encryption key rotation,
+  by seal's own re-wrapping.
 
 - **Row-level security refuses a connection that names no scope.** A
   connection that named no tenant was the system path and saw every tenant's

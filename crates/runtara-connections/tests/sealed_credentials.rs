@@ -856,20 +856,20 @@ async fn sealed_secrets_survive_a_rotation_of_the_key_their_keys_are_wrapped_wit
     let wrap = |key: &[u8]| key_wrap(wrapping_key_from_encryption_key(key).as_ref()).unwrap();
     // A key that is not the one the seal keys are wrapped under moves nothing.
     assert_eq!(
-        rewrap_retired(&fixture.pool, wrap(&new_key).as_ref(), &[wrap(&[9_u8; 32])])
+        rewrap_retired(&fixture.pool, wrap(&new_key), &[wrap(&[9_u8; 32])])
             .await
             .unwrap(),
         0
     );
     assert_eq!(
-        rewrap_retired(&fixture.pool, wrap(&new_key).as_ref(), &[wrap(&old_key)])
+        rewrap_retired(&fixture.pool, wrap(&new_key), &[wrap(&old_key)])
             .await
             .unwrap(),
         1
     );
     // Done once: nothing is left under the retired key.
     assert_eq!(
-        rewrap_retired(&fixture.pool, wrap(&new_key).as_ref(), &[wrap(&old_key)])
+        rewrap_retired(&fixture.pool, wrap(&new_key), &[wrap(&old_key)])
             .await
             .unwrap(),
         0

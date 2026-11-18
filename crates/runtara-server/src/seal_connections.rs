@@ -96,7 +96,8 @@ pub async fn run(
                 .map_err(|error| format!("the server's configuration is not valid: {error}"))?,
         );
     }
-    let sealed = runtara_connections::sealed::from_env(pool.clone(), crate::seal_allowances())?;
+    let sealed =
+        runtara_connections::sealed::ready_from_env(pool.clone(), crate::seal_allowances()).await?;
 
     let scope = args.tenant_id.as_deref().unwrap_or("all tenants");
     let action = if args.dry_run {

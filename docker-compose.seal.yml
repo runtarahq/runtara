@@ -1,0 +1,182 @@
+# Runtara evaluation stack, with seal as a process of its own.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.seal.yml up
+#
+# An overlay on docker-compose.yml: it adds a `seal` service and has the
+# server use it (RUNTARA_SEAL_MODE=unix) instead of running seal in its own
+# process. seal alone then holds the keys that open connection secrets: the
+# server can ask it to use a secret, toward the destination sealed into it,
+# and cannot read one. See docs/seal.md. It combines with
+# docker-compose.executor.yml.
+#
+# The two containers share a volume with seal's socket and nothing else. seal
+# knows the server by the uid on the other end of the socket.
+#
+# A stack that has already run without this overlay keeps its tenants' seal
+# keys in its database, and its server will not start on a seal that lacks
+# them. Hand them over first, with the stack's server stopped:
+#   docker compose -f docker-compose.yml -f docker-compose.seal.yml \
+#     --profile handover run --rm seal-export
+# then start the stack with this overlay, and once it is up delete the
+# database's copy:
+#   docker compose -f docker-compose.yml -f docker-compose.seal.yml \
+#     --profile handover run --rm seal-forget
+
+services:
+  # One-shot: seal's directories, and the key that wraps tenants' keys unless
+  # one is already there (made here, or handed over by `seal-export`). Runs as
+  # root to write to the fresh volumes, then gives them to seal's user.
+  seal-init:
+    image: busybox:1.36
+    restart: "no"
+    user: "0:0"
+    entrypoint:
+      - sh
+      - -ec
+      - |
+        mkdir -p /var/lib/seal/keys
+        if [ ! -s /var/lib/seal/kek ]; then
+          (umask 077 && head -c 32 /dev/urandom > /var/lib/seal/kek)
+          echo "Made the key that wraps tenants' seal keys."
+        fi
+        chown -R 65532:65532 /var/lib/seal /run/seal
+        chmod 700 /var/lib/seal /var/lib/seal/keys
+        chmod 600 /var/lib/seal/kek
+        # seal's user alone writes here; its group, which the server is in,
+        # reaches the socket.
+        chmod 750 /run/seal
+    volumes:
+      - seal_data:/var/lib/seal
+      - seal_run:/run/seal
+
+  seal:
+    image: ghcr.io/runtarahq/seal:${RUNTARA_SEAL_TAG:-main}
+    pull_policy: always
+    depends_on:
+      seal-init:
+        condition: service_completed_successfully
+    configs:
+      - source: seal-config
+        target: /etc/seal/seal.toml
+    volumes:
+      - seal_data:/var/lib/seal
+      - seal_run:/run/seal
+
+  runtara:
+    depends_on:
+      seal:
+        condition: service_started
+    environment:
+      RUNTARA_SEAL_MODE: unix
+      RUNTARA_SEAL_SOCKET: /run/seal/seal.sock
+    # seal's group, for its socket.
+    group_add:
+      - "65532"
+    volumes:
+      - seal_run:/run/seal
+
+  # One-shot, on request: writes the seal keys the server's database holds,
+  # and the key that wraps them, to seal's volume. For a stack that ran
+  # without this overlay; run it before the stack is started with it.
+  seal-export:
+    profiles: ["handover"]
+    image: ghcr.io/runtarahq/runtara:${RUNTARA_IMAGE_TAG:-latest}
+    restart: "no"
+    user: "0:0"
+    depends_on:
+      db-setup:
+        condition: service_completed_successfully
+    healthcheck:
+      disable: true
+    environment:
+      RUNTARA_SERVER_DATABASE_URL: postgres://runtara_server:runtara_server@postgres/runtara_server
+      RUNTARA_CONNECTIONS_ENCRYPTION_KEY: "${RUNTARA_CONNECTIONS_ENCRYPTION_KEY:-}"
+      SKIP_MIGRATIONS: "true"
+    entrypoint:
+      - sh
+      - -ec
+      - |
+        if [ -z "$${RUNTARA_CONNECTIONS_ENCRYPTION_KEY}" ]; then
+          RUNTARA_CONNECTIONS_ENCRYPTION_KEY="$$(cat /data/credential-encryption.key)"
+          export RUNTARA_CONNECTIONS_ENCRYPTION_KEY
+        fi
+        if [ -s /var/lib/seal/kek ]; then
+          echo "seal's volume already has a wrapping key, which is not the one these keys are" >&2
+          echo "wrapped with unless this export wrote it: keys exported beside another would" >&2
+          echo "not open. Remove the volume (<project>_seal_data) and run this again." >&2
+          exit 1
+        fi
+        exec runtara-server seal-keys export --out /var/lib/seal/keys \
+          --wrapping-key-out /var/lib/seal/kek
+    volumes:
+      - runtara_data:/data
+      - seal_data:/var/lib/seal
+
+  # One-shot, on request: deletes the database's copy of the seal keys, once
+  # seal answers for every one of them. Run it with the stack up.
+  seal-forget:
+    profiles: ["handover"]
+    image: ghcr.io/runtarahq/runtara:${RUNTARA_IMAGE_TAG:-latest}
+    restart: "no"
+    depends_on:
+      seal:
+        condition: service_started
+    healthcheck:
+      disable: true
+    environment:
+      RUNTARA_SERVER_DATABASE_URL: postgres://runtara_server:runtara_server@postgres/runtara_server
+      RUNTARA_CONNECTIONS_ENCRYPTION_KEY: "${RUNTARA_CONNECTIONS_ENCRYPTION_KEY:-}"
+      SKIP_MIGRATIONS: "true"
+      RUNTARA_SEAL_MODE: unix
+      RUNTARA_SEAL_SOCKET: /run/seal/seal.sock
+    group_add:
+      - "65532"
+    entrypoint:
+      - sh
+      - -ec
+      - |
+        if [ -z "$${RUNTARA_CONNECTIONS_ENCRYPTION_KEY}" ]; then
+          RUNTARA_CONNECTIONS_ENCRYPTION_KEY="$$(cat /data/credential-encryption.key)"
+          export RUNTARA_CONNECTIONS_ENCRYPTION_KEY
+        fi
+        exec runtara-server seal-keys forget --confirm
+    volumes:
+      - runtara_data:/data
+      - seal_run:/run/seal
+
+configs:
+  seal-config:
+    content: |
+      [listen]
+      unix = "/run/seal/seal.sock"
+
+      # The server (the runtara image's uid): every tenant's keyset, which it
+      # makes, reads the public keys of, and destroys when a tenant leaves.
+      [[callers]]
+      name = "runtara-server"
+      unix_uid = 10001
+      keysets = ["*"]
+      admin = true
+      destroy_keysets = true
+
+      [keys]
+      source = { dir = "/var/lib/seal/keys" }
+      wrap = { file = "/var/lib/seal/kek" }
+
+      # The evaluation tenant's object model database is this stack's own
+      # Postgres, on its private network and with no TLS. The server seals
+      # its password for that (RUNTARA_DATABASE_CONNECTION_GUARD,
+      # RUNTARA_PROXY_ALLOW_HTTP_HOSTS in docker-compose.yml); seal has to be
+      # told it may go there too.
+      [network]
+      honour_private_rules = true
+      honour_plaintext_postgres_rules = true
+
+      # One line per use of a secret: who asked, for which keyset and item,
+      # and where it went. Never a value.
+      [audit]
+      sink = "stdout"
+
+volumes:
+  seal_data:
+  seal_run:

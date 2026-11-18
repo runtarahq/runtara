@@ -415,14 +415,20 @@ exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/certs/server.crt 
                 .is_err()
         );
 
-        // Another database than the one the password was sealed for is seal's
-        // to refuse, with the right password or not.
+        // The password is sealed for a server, not for one of its databases:
+        // which of them a role may connect to is the server's own privileges
+        // to say, and seal does not stand in for them. This role may use
+        // `postgres` too, so seal logs it in there. What a tenant's role must
+        // not reach is kept from it in the database, with its grants.
         let elsewhere = url.replace("/orders?", "/postgres?");
-        assert!(
-            sqlx::postgres::PgConnection::connect(&elsewhere)
-                .await
-                .is_err()
-        );
+        let mut other = sqlx::postgres::PgConnection::connect(&elsewhere)
+            .await
+            .expect("the role's own privileges let it use this database");
+        let name: String = sqlx::query_scalar("SELECT current_database()")
+            .fetch_one(&mut other)
+            .await
+            .unwrap();
+        assert_eq!(name, "postgres");
     }
 
     /// A URL that does not ask for a verified server is sealed for what it

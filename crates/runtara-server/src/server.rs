@@ -1404,14 +1404,47 @@ async fn start_as_platform(
             std::process::exit(1);
         }
     }
+    // A seal of its own is asked before anything depends on it.
     let sealed_credentials =
-        match runtara_connections::sealed::from_env(pool.clone(), crate::seal_allowances()) {
+        match runtara_connections::sealed::ready_from_env(pool.clone(), crate::seal_allowances())
+            .await
+        {
             Ok(sealed) => sealed,
             Err(msg) => {
                 eprintln!("❌ Configuration error: {msg}");
                 std::process::exit(1);
             }
         };
+    // A deployment that ran seal in this server has its tenants' keys in
+    // this database. A seal of its own that was not given them would make new
+    // ones, and everything sealed so far would stop opening: refuse to start
+    // until they are handed over.
+    if sealed_credentials.mode() != "in_process" {
+        use runtara_connections::sealed::KeysHandedOver;
+        match runtara_connections::sealed::keys_handed_over(&pool, &sealed_credentials).await {
+            Ok(KeysHandedOver::NoneKept) => {}
+            Ok(KeysHandedOver::All(count)) => tracing::warn!(
+                count,
+                "This database still holds seal keys that seal holds too: delete its copy \
+                 with `runtara-server seal-keys forget --confirm`"
+            ),
+            Ok(KeysHandedOver::Missing { keyset, kid }) => {
+                eprintln!(
+                    "❌ This database holds seal key `{kid}` of keyset `{keyset}`, and seal \
+                     ({}) does not: what was sealed to it would no longer open. Hand the keys \
+                     over first (`runtara-server seal-keys export`, see docs/seal.md).",
+                    sealed_credentials.mode()
+                );
+                std::process::exit(1);
+            }
+            Err(error) => {
+                eprintln!(
+                    "❌ Could not tell whether seal holds this database's seal keys: {error}"
+                );
+                std::process::exit(1);
+            }
+        }
+    }
     tracing::info!(
         mode = sealed_credentials.mode(),
         "Connection secrets are held by seal"

@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
 use seal_format::{KeyId, KeysetId};
-use seal_keys::{FileKeyWrap, KeyError, KeySource, KeyWrap, WrappedKey};
+use seal_keys::{
+    DirKeySource, FileKeyWrap, KeyError, KeySource, KeyWrap, KeyWraps, RewrapOptions, WrappedKey,
+};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use zeroize::Zeroizing;
@@ -132,6 +134,47 @@ impl KeySource for PgKeySource {
             })?;
         Ok(())
     }
+
+    async fn keysets(&self) -> Result<Vec<KeysetId>, KeyError> {
+        let names: Vec<String> =
+            sqlx::query_scalar("SELECT DISTINCT keyset FROM seal_wrapped_key ORDER BY keyset")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|error| {
+                    tracing::error!(%error, "could not list seal keysets");
+                    KeyError::Unavailable
+                })?;
+        names
+            .into_iter()
+            .map(|name| KeysetId::new(name).map_err(|_| KeyError::Invalid("stored keyset")))
+            .collect()
+    }
+
+    /// Replaces a key with itself wrapped another way, and only if it is still
+    /// the one that was read.
+    async fn replace(&self, old: &WrappedKey, new: &WrappedKey) -> Result<(), KeyError> {
+        let replaced = sqlx::query(
+            "UPDATE seal_wrapped_key SET wrap_id = $3, wrapped = $4 \
+             WHERE keyset = $1 AND kid = $2 AND wrap_id = $5 AND wrapped = $6",
+        )
+        .bind(old.keyset.as_str())
+        .bind(old.kid.as_str())
+        .bind(&new.wrap_id)
+        .bind(&new.wrapped)
+        .bind(&old.wrap_id)
+        .bind(&old.wrapped)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "could not store a seal key wrapped again");
+            KeyError::Unavailable
+        })?;
+        if replaced.rows_affected() == 0 {
+            // Another instance wrapped it again first, or it is gone.
+            return Err(KeyError::Unavailable);
+        }
+        Ok(())
+    }
 }
 
 fn unavailable(error: sqlx::Error) -> KeyError {
@@ -227,71 +270,152 @@ async fn store_key(
     Ok(())
 }
 
+/// A key source that shows only the keys a set of wrapping keys can open.
+/// seal's re-wrapping refuses to start while any key is under a wrapping key
+/// it was not given; a key left under one that is long gone opens nothing
+/// either way, and is not a reason to stop the rest.
+struct Openable<'a> {
+    keys: &'a PgKeySource,
+    wraps: &'a KeyWraps,
+    left: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl KeySource for Openable<'_> {
+    async fn wrapped_keys(&self, keyset: &KeysetId) -> Result<Vec<WrappedKey>, KeyError> {
+        let all = self.keys.wrapped_keys(keyset).await?;
+        let count = all.len();
+        let openable: Vec<WrappedKey> = all
+            .into_iter()
+            .filter(|key| self.wraps.by_id(&key.wrap_id).is_some())
+            .collect();
+        self.left
+            .fetch_add(count - openable.len(), std::sync::atomic::Ordering::Relaxed);
+        Ok(openable)
+    }
+
+    async fn keysets(&self) -> Result<Vec<KeysetId>, KeyError> {
+        self.keys.keysets().await
+    }
+
+    async fn replace(&self, old: &WrappedKey, new: &WrappedKey) -> Result<(), KeyError> {
+        self.keys.replace(old, new).await
+    }
+}
+
 /// Wraps again, under `current`, every seal key in the table that is still
 /// wrapped under one of `retired`. Returns how many were.
 ///
 /// This is how the key that wraps tenants' seal keys follows a rotation of
 /// the key it is derived from: without it, every sealed secret would be lost
-/// with the retired key. Each key is unwrapped and compared with its public
-/// key before it is written, and only the row that was read is replaced.
+/// with the retired key. The re-wrapping is seal's own: each key is unwrapped
+/// and compared with its public key, wrapped, and opened again from its new
+/// form before that replaces the old, and only the row that was read is
+/// replaced.
 pub async fn rewrap_retired(
     pool: &PgPool,
-    current: &dyn KeyWrap,
+    current: Arc<dyn KeyWrap>,
     retired: &[Arc<dyn KeyWrap>],
 ) -> Result<usize, String> {
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
-        "SELECT keyset, kid, public_key, wrap_id, wrapped FROM seal_wrapped_key \
-         WHERE wrap_id <> $1 ORDER BY keyset, kid",
-    )
-    .bind(current.id())
-    .fetch_all(pool)
-    .await
-    .map_err(|error| format!("could not read seal keys: {error}"))?;
-    let mut rewrapped = 0;
-    for (keyset, kid, public, wrap_id, wrapped) in rows {
-        let Some(old) = retired.iter().find(|wrap| wrap.id() == wrap_id) else {
-            continue;
-        };
-        let invalid = |what: &str| format!("seal key {keyset}/{kid}: {what}");
-        let keyset_id = KeysetId::new(keyset.clone()).map_err(|_| invalid("its keyset"))?;
-        let key_id = KeyId::new(kid.clone()).map_err(|_| invalid("its id"))?;
-        let bytes = URL_SAFE_NO_PAD
-            .decode(&wrapped)
-            .map_err(|_| invalid("it is not base64url"))?;
-        let private = old
-            .unwrap(&keyset_id, &key_id, &bytes)
-            .await
-            .map_err(|_| invalid("it does not open with the retired key"))?;
-        let matches = private
-            .public_key()
-            .ok()
-            .zip(seal_format::PublicKey::from_base64url(&public).ok())
-            .is_some_and(|(of_private, stored)| of_private == stored);
-        if !matches {
-            return Err(invalid("it does not match its public key"));
+    let mut older: Vec<Arc<dyn KeyWrap>> = Vec::new();
+    for wrap in retired {
+        let repeated = wrap.id() == current.id() || older.iter().any(|w| w.id() == wrap.id());
+        if !repeated {
+            older.push(Arc::clone(wrap));
         }
-        let again = current
-            .wrap(&keyset_id, &key_id, &private)
-            .await
-            .map_err(|_| invalid("it could not be wrapped again"))?;
-        drop(private);
-        let updated = sqlx::query(
-            "UPDATE seal_wrapped_key SET wrap_id = $3, wrapped = $4 \
-             WHERE keyset = $1 AND kid = $2 AND wrap_id = $5",
-        )
-        .bind(&keyset)
-        .bind(&kid)
-        .bind(current.id())
-        .bind(URL_SAFE_NO_PAD.encode(again))
-        .bind(&wrap_id)
-        .execute(pool)
-        .await
-        .map_err(|error| format!("could not store a seal key: {error}"))?;
-        rewrapped += usize::try_from(updated.rows_affected()).unwrap_or(0);
     }
-    Ok(rewrapped)
+    let wraps = KeyWraps::new(current, older).map_err(|error| error.to_string())?;
+    let keys = PgKeySource::new(pool.clone());
+    let openable = Openable {
+        keys: &keys,
+        wraps: &wraps,
+        left: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let done = seal_keys::rewrap(&openable, &wraps, RewrapOptions::default())
+        .await
+        .map_err(|error| format!("seal keys could not be wrapped again: {error}"))?;
+    let left = openable.left.load(std::sync::atomic::Ordering::Relaxed);
+    if left > 0 {
+        tracing::warn!(
+            left,
+            "seal keys are wrapped under a key that is neither the current nor a retired one, \
+             and were left: nothing sealed to them opens"
+        );
+    }
+    Ok(done.rewrapped)
+}
+
+/// Writes every seal key in the table into `dir`, as the key directory of a
+/// seal that runs as a process of its own holds them
+/// (`<dir>/<keyset>/<kid>.json`), still wrapped. Returns how many were
+/// written and how many were already there.
+///
+/// The directory is seal's own (`DirKeySource`), so the layout is seal's and
+/// not a copy of it. A key is never replaced: one already in the directory
+/// under the same name is left, so the command can be run again.
+pub async fn export_keys(pool: &PgPool, dir: &std::path::Path) -> Result<(usize, usize), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        if !dir.exists() {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)
+                .map_err(|error| format!("{} could not be made: {error}", dir.display()))?;
+        }
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)
+        .map_err(|error| format!("{} could not be made: {error}", dir.display()))?;
+    let source = PgKeySource::new(pool.clone());
+    let target = DirKeySource::new(dir, usize::MAX);
+    let (mut written, mut present) = (0, 0);
+    for keyset in source
+        .keysets()
+        .await
+        .map_err(|error| format!("the keysets could not be listed: {error}"))?
+    {
+        for key in source
+            .wrapped_keys(&keyset)
+            .await
+            .map_err(|error| format!("the keys of a keyset could not be read: {error}"))?
+        {
+            match target.store(&key).await {
+                Ok(()) => written += 1,
+                Err(KeyError::AlreadyExists) => present += 1,
+                Err(error) => {
+                    return Err(format!(
+                        "key {}/{} could not be written: {error}",
+                        key.keyset.as_str(),
+                        key.kid.as_str()
+                    ));
+                }
+            }
+        }
+    }
+    Ok((written, present))
+}
+
+/// Writes the key that wraps tenants' seal keys to `path`, as seal reads a
+/// wrapping key file: its 32 bytes, in a new file only its owner can read.
+/// For moving the key to the host of a seal that runs as a process of its
+/// own; nothing else should hold a copy afterwards.
+pub fn export_wrapping_key(path: &std::path::Path, key: &[u8; 32]) -> Result<(), String> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("{} could not be made: {error}", path.display()))?;
+    file.write_all(key)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("{} could not be written: {error}", path.display()))
 }
 
 #[cfg(test)]

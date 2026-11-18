@@ -193,7 +193,8 @@ pub async fn run(pool: PgPool, args: AppsArgs) -> Result<(), String> {
             oauth_apps::check_app(&app)?;
             let secret = read_secret()?;
             let sealed =
-                runtara_connections::sealed::from_env(pool.clone(), crate::seal_allowances())?;
+                runtara_connections::sealed::ready_from_env(pool.clone(), crate::seal_allowances())
+                    .await?;
             oauth_apps::put(&pool, &sealed, &app, &secret).await?;
             println!("Stored '{}', with its client secret sealed.", app.id);
             Ok(())

@@ -35,6 +35,7 @@ pub mod reencrypt;
 pub mod runtime_client;
 pub mod runtime_types;
 pub mod seal_connections;
+pub mod seal_keys;
 pub mod server;
 pub mod shutdown;
 pub mod step_events;
