@@ -244,8 +244,11 @@ process, with no change in behaviour. Implemented on
 
 - **Parts of the API the engine serves itself** (`Engine::serve`). What is
   answered with a connection's credentials, or by what the engine loaded,
-  is the engine's: connections, the OAuth redirect, a tenant's object
-  model, triggers and a trigger's HTTP events. (Chat channels' webhooks
+  is the engine's: connections, a tenant's object model and triggers,
+  each for a caller. What has no caller, a trigger's HTTP events and a
+  provider's OAuth redirect, is served by whichever process receives what
+  anyone may send: intake, or a single process, and never an engine of its
+  own (`docs/roles.md`). (Chat channels' webhooks
   were among them and are removed; agents were, and are operations of the
   engine now, with their routes the API's own.) Each is a router the engine holds; the API authenticates the
   caller and hands the request over as it arrived. The engine answers it in

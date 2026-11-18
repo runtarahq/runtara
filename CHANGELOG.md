@@ -1155,6 +1155,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **An engine of its own receives nothing anyone may send.** A provider's
+  OAuth redirect is received by intake, as a trigger's webhooks are: intake
+  hands the engine the path and query asked and the browser's cookie, and
+  the engine finishes the flow. The engine's listener refuses a webhook or
+  a redirect handed to it as it arrived (`403 NOT_FOR_THE_ENGINE`). **A
+  deployment with `RUNTARA_ROLE=api` and `RUNTARA_ROLE=engine` now needs
+  intake** (`RUNTARA_ROLE=intake`, `RUNTARA_INTAKE_URL`) for webhooks, the
+  synchronous trigger and OAuth redirects: without it the API answers them
+  `503 NO_INTAKE`. `docker-compose.roles.yml` runs one. A single process is
+  unchanged.
 - **The agent routes are the API's own.** Listing agents, reading one and
   its capabilities, and the component status ask the engine what it loaded
   through operations of its interface, as running an agent on request

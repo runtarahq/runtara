@@ -198,7 +198,8 @@ Built, and described in [roles.md](roles.md):
   synchronous trigger. It refuses the runtime database, the at-rest key, an
   executor's certificate and the engine's own settings, and starts only
   with a seal of its own. The API hands it those routes where
-  `RUNTARA_INTAKE_URL` names it, and the engine otherwise.
+  `RUNTARA_INTAKE_URL` names it. An engine of its own takes neither from
+  the API; an API with no intake answers them `503`.
 - **Preparation 1**: a caller's synchronous run (MCP) is an operation the
   API asks as that caller, and the part that served it is gone. What anyone
   may send is answered by intake asking the engine one operation, to run a
@@ -230,8 +231,17 @@ Not built:
   `ComponentsStatusOf`), as running one on request already was, and the
   agent routes are the API's own. Which agents a tenant's plan includes is
   decided by the API, which reads the plan; the engine says what it loaded.
-- **OAuth redirects** stay with the engine, as the plan had them: finishing
-  a flow seals tokens.
+Done since:
+
+- **OAuth redirects** are received by intake too. Finishing a flow seals
+  tokens, so the engine finishes it: intake asks it one more operation,
+  `OAuthRedirectForAnyone`, with the path and query asked and the browser's
+  cookie, and hands back what the engine answers. With that, the engine's
+  listener refuses every part that has no caller, and nothing anyone may
+  send reaches an engine that is a process of its own.
+
+Still not built:
+
 - **Routing at the proxy.** The API hands intake what it receives; a
   deployment that wants anonymous traffic never to reach the API either
   routes those two paths to a listener of intake's own, which does not
