@@ -34,12 +34,17 @@ def component_names(workspace: Path) -> list[str]:
     ]
 
 
+# What ships beside the components and is not one: the compiler as a WASI
+# command, which an engine compiles workflows in (RUNTARA_COMPILER_WASM).
+TOOLS = ["runtara-compile-sandboxed.wasm"]
+
+
 def stage(workspace: Path, source: Path, destination: Path) -> None:
     expected = {
         f"{name}.{extension}"
         for name in component_names(workspace)
         for extension in ("wasm", "meta.json")
-    }
+    } | set(TOOLS)
     missing = sorted(name for name in expected if not (source / name).is_file())
     if missing:
         raise ValueError(f"Missing component artifacts: {', '.join(missing)}")

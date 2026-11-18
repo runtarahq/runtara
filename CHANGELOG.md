@@ -36,6 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no working across tenants: `runtara_system` is the engine's) and a
   Valkey user that cannot write the trigger, compilation or control
   streams.
+- **Workflows compiled in a sandbox.** With `RUNTARA_COMPILER_WASM` naming
+  the compiler's WASI command (`runtara-compile-sandboxed.wasm`, which now
+  ships beside the components), a workflow is compiled in a Wasmtime store
+  of its own: no network, no environment, a bound on memory and time, and
+  only the component files to read. It is given no database, key or way to
+  seal, and what it hands back is checked. An engine in a process of its
+  own (`RUNTARA_ROLE=engine`) requires it and refuses to start without it;
+  a single process compiles as before unless given it. A compile in the
+  sandbox makes the same bytes.
 - **The split in the evaluation stack.** `docker-compose.roles.yml` is an
   overlay that runs seal, the engine and the API as three services, with
   the certificates, the API's database role and the Valkey users made for

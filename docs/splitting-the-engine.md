@@ -1,6 +1,6 @@
 # Splitting the engine: the compiler and intake
 
-A plan. Nothing here is built. It follows
+A plan, with Phase 6 built. It follows
 [separating-concerns.md](separating-concerns.md), whose phases 0 to 5 put
 the API in a process that holds nothing of the engine's and made the engine
 decide for itself who a call is for and what runs.
@@ -63,54 +63,57 @@ what holds state.
 So the split is not a "compiler role" with a database role of its own. It
 is the compile step as a guest that is given nothing.
 
-### The design
+### What was built
 
-A compile is a run. The engine places the compile guest the way it places a
-workflow: in its own sandboxed process (`runtara-run`, which holds a guest
-and nothing else), on an executor where there are executors. The guest gets
-the request and the components it names, over the workflow API its run is
-served, and nothing else: no database, no Valkey, no seal, no network but
-that API, no filesystem.
+The first thing to find out was whether the engine could host the guest as
+it is. It cannot, cheaply: the guest reaches its host over `wasi:http` 0.2,
+and the engine's interception of the workflow API is for runs on
+`wasi:http` 0.3. But the repository already runs one tenant-facing step in
+a sandbox of its own: save-time validation (`validation_sandbox.rs`, a
+Wasmtime store with no filesystem, network or environment, and bounds on
+fuel, memory and time). The compiler was built the same way.
 
-1. **An executor of compiles in the engine.** A `CompileExecutor` the engine
-   installs itself, which makes the request (`compile_request::request`),
-   places the guest as a run, serves it the request and the components by
-   digest, takes the result and applies it (`compile_request::apply`,
-   `apply_failure`, `apply_published_agent`). Publishing a workflow-agent
-   goes the same way (`compile_published_agent`).
-2. **Where it is placed.** With `RUNTARA_RUNNER=executor`, on an executor,
-   beside workflow runs and under the same sandbox. With the embedded
-   runner, in the engine's own wasmtime, where the guest is confined by
-   what its host gives it (no WASI filesystem, the workflow API only).
-   Whether the embedded runner can host this guest as it is, or needs a
-   launch kind of its own, is the first thing to find out.
-3. **How it is turned on.** `RUNTARA_COMPILER=guest`, with `in-process` the
-   default at first. Once it has run in the e2e suites, an engine that is a
-   process of its own (`RUNTARA_ROLE=engine`) requires it, as it requires a
-   seal of its own; a single process keeps the choice (decision 1).
-4. **The engine trusts nothing the compile says about itself.** Today the
-   build's `artifact-metadata.json` is read back as the engine's own. From a
-   guest it is input. For each field the engine either checks it or derives
-   it:
-   - the binary's digest: computed by the engine over the bytes it stores
-     (already so at registration);
-   - the agents a workflow uses, which the launch allowlist reads from the
-     image's metadata: derived by the engine from the graph it sent, or
-     from inspecting the artifact, not taken from the guest;
-   - the memory floor and limit: checked against the artifact;
-   - the trusted pins: compared with what the engine has installed (already
-     so).
-5. **One compile cannot reach the next.** A guest that takes one request
-   and ends cannot poison a later tenant's compile. The guest's warm mode
-   (one long-lived compiler taking compiles one after another) is kept per
-   tenant, as the guest already has it, and off by default.
-6. **Limits.** A compile has a deadline and a memory limit as a run has; one
-   that exceeds them is ended and recorded as a failure that says so.
+1. **The compiler as a WASI command for that sandbox**
+   (`runtara-compile-sandboxed`, in `crates/runtara-compile-guest`). It
+   takes one request on its input, reads the component files the request
+   names where its host shows them, writes its outcome and the composed
+   component, and ends. It is the compile the guest for a host elsewhere
+   runs (`compile_request::compile`), with files in place of fetches.
+2. **The sandbox** (`crates/runtara-server/src/compile_sandbox.rs`), with
+   `RUNTARA_COMPILER_WASM` naming the command. A Wasmtime store of its own
+   for each compile: no network, no environment, a bound on its memory
+   (3 GiB) and its time (five minutes), and of the filesystem only the
+   components directory and the tenant's published agents, read-only. It
+   is installed through the existing hook, so everything after the build
+   stays as it was, and a host that set an executor of its own keeps it.
+3. **An engine in a process of its own refuses to compile anywhere else**
+   (decision 1): it does not start without the compiler, or with one that
+   does not load. A single process keeps the choice.
+4. **The engine does not take the build on its word.** The component is
+   checked against the digest the outcome names before anything is written,
+   and again at registration. The agents a build says it composed, which a
+   launch checks against the tenant's allowlist, must include every agent
+   the engine finds in the graph and its children, or the build is refused.
+   The trusted pins are compared with what the engine has installed, and
+   the memory floor with the version's setting, as before.
+5. **One compile cannot reach the next**: each has a store of its own,
+   which is dropped when it ends.
+6. **It ships with the components**: `scripts/build-agent-components.sh`
+   builds it and the bundle carries it. `docker-compose.roles.yml` gives it
+   to the engine.
 
 What stays in the engine: the compile queue and its worker, loading the
-source, every check and record after the build, the approval records. The
-host's hook (`set_compile_executor`) stays as it is, and a host that sets
-one still wins.
+source, every check and record after the build, the approval records.
+
+**Where it differs from the plan as it was written.** A compile is not
+placed as a run on an executor: the sandbox is in the engine's process,
+which is the same confinement the engine gives a workflow it runs itself
+(a Wasmtime store), and not a process of its own. So a flaw in Wasmtime
+itself is not contained, as it would be by an executor's sandbox. Placing
+compiles on executors is still open; it needs the guest and the engine's
+workflow API to speak the same `wasi:http`. The stages a compile reports
+from inside (for the progress shown while it runs) are not reported from
+the sandbox; the stages around it are.
 
 ### What a broken compile is worth
 
@@ -122,22 +125,17 @@ tenant's graph, change another version, or reach a database.
 
 ### Tests
 
-- Unit: the existing `compile_request` tests (a compile elsewhere makes what
-  one in process does; a publish too; the stdlib mode is the runner's), and
-  new ones for each field of the result the engine checks or derives.
-- E2E: `test_two_roles.sh` and `test_scalable_executors.sh` with
-  `RUNTARA_COMPILER=guest`: compiles are placed on executors; a guest's
-  environment holds nothing; a compile killed part-way is a recorded
-  failure and the next compiles; a compile over its limits is ended.
-  `test_workflow_agent_parity.sh` and `test_trusted_pin_upgrade.sh` under
-  the same setting, for publishing and pins.
-
-### Size
-
-Small. The guest, the request format, the hook and the host's side of
-serving a compile exist. The work is the executor that submits a compile
-and places the guest, the checks in step 4, and the setting. About the size
-of Phase 1, and less if the embedded runner hosts the guest as it is.
+- Unit: what a compile wrote is parsed and refused when it is not an
+  outcome; a component that is not the one named is refused; a build that
+  leaves out an agent the graph calls is found out.
+- With the compiler (`compiler-sandbox-tests`, as `validator-sandbox-tests`
+  is for the validator): the sandbox makes the bytes a compile in this
+  process does; a graph that does not compile fails with the same error; a
+  components directory that is not there is not shown.
+- E2E: `test_two_roles.sh`, `TWO_ROLES=true test_served_tenants.sh` and
+  `test_two_roles_oidc.sh` run with every compile in the sandbox, on
+  executors and on the embedded runner. `test_two_roles.sh` checks that an
+  engine with no compiler, or one that does not load, refuses to start.
 
 ## Phase 7: intake
 
@@ -304,8 +302,7 @@ since the wire, the certificates and the verification exist.
 
 ## Order
 
-1. **Phase 6**, alone. It is small, changes no topology and needs nothing
-   of Phase 7.
+1. **Phase 6**, alone: done.
 2. **Phase 7's preparations 1, 2, 4 and 6.** Each is worth having in one
    process: they put the last direct uses of the runtime behind `Engine`
    and fix a likely fault.

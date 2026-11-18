@@ -117,6 +117,12 @@ scoped README files, examples.
   `scripts/roles/api-database-role.sql`, and a new Valkey key in
   `scripts/roles/api-valkey-user.acl`; `docker-compose.roles.yml` carries a
   copy of both, which a test in `roles.rs` holds to them.
+- A workflow's graph is compiled in a sandbox where one is configured
+  (`compile_sandbox.rs`, `RUNTARA_COMPILER_WASM`), and always in an engine
+  that is a process of its own. What a compile hands back is input: do not
+  record or act on a field of a build's output that the engine has not
+  checked or derived itself (`api/services/compilation.rs`). Give the
+  compiler nothing but the request and the component files.
 - Never read, print, log, or commit credential values. Treat `.env*`, tokens,
   connection parameters, and database URLs as sensitive.
 - Do not hand-edit generated artifacts or ignored build outputs.

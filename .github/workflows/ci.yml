@@ -760,6 +760,15 @@ jobs:
             --config 'profile.dev.package.runtara-component-host.opt-level=3' \
             --lib agent_deadline_tests
 
+      # The compiler's sandbox against its WASI command, which the components
+      # build above made: it compiles what a compile in the server's own
+      # process does.
+      - name: Run the compiler sandbox tests
+        env:
+          RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
+          RUNTARA_COMPILER_WASM: ${{ github.workspace }}/target/wasm32-wasip2/release/runtara-compile-sandboxed.wasm
+        run: cargo test -p runtara-server --features compiler-sandbox-tests --lib compile_sandbox
+
   # The direct WASM smoke battery with the stdlib composed into each artifact
   # (RUNTARA_DIRECT_STDLIB=fused), the mode older artifacts still run in. Its
   # own job, so the second mode runs alongside components-build rather than

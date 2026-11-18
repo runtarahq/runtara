@@ -192,6 +192,11 @@ if [ "${RUNTARA_ONLY_WORKFLOW_COMPONENTS:-}" != "1" ]; then
     echo "==> emit-meta"
     cargo run --quiet -p runtara-agent-bundle-emit --bin emit-meta -- "$out_dir"
 
+    # The compiler as a WASI command, which an engine compiles workflows in
+    # (RUNTARA_COMPILER_WASM, docs/roles.md). It ships beside the components.
+    echo "==> runtara-compile-sandboxed"
+    cargo build --release --target wasm32-wasip2 -p runtara-compile-guest --bin runtara-compile-sandboxed
+
     # Stage the exact workspace component set. Old Cargo outputs are left intact
     # but can never reintroduce a removed agent into the runtime/release bundle.
     python3 "$workspace/scripts/stage-agent-components.py" "$out_dir" "$target_dir/agent-components"
