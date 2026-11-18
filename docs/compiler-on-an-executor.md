@@ -198,10 +198,10 @@ The three things that had been read around and not run.
    workflow, so the store holds it and nothing was added to
    `LaunchWorkflows`.
 
-Not found out here: the compiler under the *real* sandbox. The tests run
-`runtara-run` sandboxed on Linux, which CI is, and unsandboxed on a
-developer's macOS. If the compiler makes a system call a run does not, CI
-is where it shows.
+And under the real sandbox: on Linux 7.0 with Landlock in full (seccomp,
+every filesystem and network right refused), the compiler ran in
+`runtara-run` as a run does, with no system call it is refused, and made
+the same bytes.
 
 ## Phases
 
