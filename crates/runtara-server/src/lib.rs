@@ -48,6 +48,7 @@ pub mod tenant_status;
 #[cfg(test)]
 pub(crate) mod test_env;
 pub mod types;
+pub mod validation_placed;
 pub mod validation_sandbox;
 pub mod valkey;
 pub mod workers;

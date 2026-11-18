@@ -423,6 +423,19 @@ pub trait Engine: Send + Sync {
 
     /// The agents a tenant published from its workflows, which its other
     /// workflows may use beside the built-in ones.
+    /// Validates the closure of `root`, as saving it does, against the
+    /// agents this engine has and the tenant's published ones. Where the
+    /// engine validates is its own to say: on an executor, where executors
+    /// are its runner. `Err` says why there is no report: the closure was
+    /// not validated.
+    async fn validate_closure(
+        &self,
+        tenant_id: &str,
+        root_workflow_id: &str,
+        root: runtara_dsl::ExecutionGraph,
+        children: Vec<runtara_workflows::ClosureChildGraph>,
+    ) -> Result<runtara_workflows::ClosureValidationReport, String>;
+
     async fn workflow_agents(&self, tenant_id: &str) -> Vec<runtara_dsl::agent_meta::AgentInfo>;
 
     /// The agents the engine loaded, and the tenant's published ones.
@@ -1152,6 +1165,39 @@ impl Engine for LocalEngine {
         image_id: &str,
     ) -> Result<Option<ImageSummary>, RuntimeError> {
         self.runtime()?.get_image(image_id, tenant_id).await
+    }
+
+    async fn validate_closure(
+        &self,
+        tenant_id: &str,
+        root_workflow_id: &str,
+        root: runtara_dsl::ExecutionGraph,
+        children: Vec<runtara_workflows::ClosureChildGraph>,
+    ) -> Result<runtara_workflows::ClosureValidationReport, String> {
+        // Published workflow-agents are visible to validation through the
+        // tenant's overlay: a parent may target `agentId: <slug>`.
+        let base = self.agent_catalog.clone().unwrap_or_default();
+        let catalog = crate::workflow_agents::catalog_with_workflow_agents(&base, tenant_id);
+        if crate::validation_placed::installed() {
+            let request = runtara_workflows::ClosureValidationRequest {
+                root_workflow_id: root_workflow_id.to_owned(),
+                root,
+                catalog: (*catalog).clone(),
+                children,
+            };
+            return crate::validation_placed::validate(tenant_id, &request).await;
+        }
+        let root_workflow_id = root_workflow_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            crate::validation_sandbox::validate_workflow_closure(
+                &root_workflow_id,
+                &root,
+                &catalog,
+                &children,
+            )
+        })
+        .await
+        .map_err(|error| format!("validating: {error}"))
     }
 
     async fn workflow_agents(&self, tenant_id: &str) -> Vec<runtara_dsl::agent_meta::AgentInfo> {

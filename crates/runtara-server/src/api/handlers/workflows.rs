@@ -2694,10 +2694,12 @@ pub(crate) fn graph_validate_routes(
             move |org: crate::middleware::tenant_auth::OrgId,
                   query: Query<ValidateGraphQuery>,
                   body: Json<Value>| {
-                // The handler asks the engine which connections the tenant has.
+                // The handler asks the engine which connections the tenant
+                // has, and to validate, against the agents it has.
                 let engine: Arc<dyn Engine> = Arc::new(
                     crate::engine::LocalEngine::without_runtime(pool.clone())
-                        .with_connections(connections.clone()),
+                        .with_connections(connections.clone())
+                        .with_agent_catalog(catalog.clone()),
                 );
                 let (pool, catalog) = (pool.clone(), catalog.clone());
                 async move {
@@ -2814,16 +2816,18 @@ pub async fn validate_graph_handler(
                     .clone()
                     .unwrap_or_else(|| "root".to_string())
             });
-            // Published workflow-agents are visible to validation via the tenant
-            // catalog overlay, as on save (a parent may target `agentId: <slug>`).
-            let catalog =
-                crate::workflow_agents::catalog_with_workflow_agents(&catalog, &tenant_id);
-            let report = crate::validation_sandbox::validate_workflow_closure(
-                &root_id,
-                &workflow.execution_graph,
-                &catalog,
-                &closure_children,
-            );
+            // The engine validates, where it validates: against its agents
+            // and the tenant's published ones, as on save. A closure it
+            // could not validate is refused, not validated here instead.
+            let report = engine
+                .validate_closure(
+                    &tenant_id,
+                    &root_id,
+                    workflow.execution_graph.clone(),
+                    closure_children.clone(),
+                )
+                .await
+                .unwrap_or_else(crate::validation_sandbox::refused);
 
             let attribute = |origin: Option<(&str, i32)>, text: String| match origin {
                 Some((child_id, _)) => format!("in child workflow '{}': {}", child_id, text),
