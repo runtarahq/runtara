@@ -405,11 +405,139 @@ agent:
     - hubspot_access_token
 ```
 
+## GraphQL APIs
+
+A GraphQL API (Shopify's Admin API, Braintree, Wave) publishes a schema, not
+operations: it has types and top-level fields, and what a request asks for is
+up to the caller. So each capability is an operation we write, one file per
+operation in `operations/`, named as the operation. For Shopify's Admin API:
+
+```yaml
+agent:
+  id: shopify
+  name: Shopify
+  description: Shopify Admin GraphQL API — products.
+  integration_id: [shopify_access_token, shopify_client_credentials]
+  error_prefix: SHOPIFY
+graphql:
+  schema:
+    introspect: https://shopify.dev/admin-graphql-direct-proxy/2026-10
+    sha256: 81ea7bbb…
+  path: /admin/api/2026-10/graphql.json  # the endpoint, relative to the connection
+  user_errors: userErrors                # optional, see below
+  scalars:                               # the vendor's own scalars
+    DateTime: {type: string, format: date-time}
+    Money: string
+operations:
+  - getProduct      # operations/getProduct.graphql
+  - listProducts
+  - createProduct
+```
+
+```graphql
+mutation createProduct($title: String!, $vendor: String, $status: ProductStatus) {
+  productCreate(product: {title: $title, vendor: $vendor, status: $status}) {
+    product { id title status }
+    userErrors { field message }
+  }
+}
+```
+
+`fetch` loads the schema and turns each operation into an OpenAPI operation,
+which is then sliced, labelled and rendered like any other:
+
+- **The schema** comes from `introspect:` (an endpoint it sends the
+  introspection query to), `url:` (an SDL file or introspection result to
+  download) or `path:` (one in the crate). An introspection result's order is
+  the server's, so the pin is the sha256 of the schema printed as sorted SDL;
+  a change fails `fetch` like a changed spec. Introspection asks for
+  deprecated arguments and input fields too, which a server otherwise leaves
+  out, so the schema (and its pin) is the same whichever way it is read. The
+  schema is taken as valid: a vendor's can break rules newer than it
+  (Shopify's deprecates fields of types whose interface does not), and only
+  the operations are checked against it.
+- **An operation** must be valid against the schema, be the file's only
+  operation (fragments may sit beside it), carry the file's name, and select
+  exactly one of the API's top-level fields (not `__type` or `__schema`).
+  Subscriptions are refused. `fetch` notes each deprecated field, argument and
+  input field an operation uses.
+- **The step's inputs are its variables**, labelled after the variable and
+  described by the argument or input field it is passed to. A variable
+  without `!`, or with a default, is optional; the default is the input's.
+  Putting variables inside an input object (`product: {title: $title}`) gives
+  the step one input per field, where a variable of the input object's type
+  would be one object input. An unset input is not sent, so the operation's
+  default applies (or, for an input object's field, the vendor leaves the
+  value as it is). An input whose type is not non-null (no `!`), an input
+  object's field of such a type and a list's item may also be set to `null`,
+  which is sent as `null`: it overrides the default, or clears the value.
+  These are `Option<Option<T>>` (`kit::nullable`), as a nullable body field
+  of an OpenAPI operation is.
+- **The output** is what the top-level field returns, built from the fields
+  the operation selects; aliases, inline fragments and fragment spreads are
+  merged, each fragment's fields read from its own type (an `owner` that is a
+  `User` in one fragment and a `Customer` in another is one object with the
+  fields of both). The returned object is `<Operation>Result`, and the objects
+  inside it are named after the operation and their response keys
+  (`ListProductsPageInfo`, `GetProductVariantsNodes`). A list whose items the
+  schema does not declare non-null (`[Node]`, as Shopify's `nodes(ids:)`
+  returns, with `null` for an unknown id) is a `Vec<Option<T>>`.
+- **Types:** `ID` and `String` are strings, `Int` an `i64`, `Float` an `f64`,
+  `Boolean` a `bool`, and an enum a string listing its values. Every other
+  scalar is the vendor's and needs a type in `graphql.scalars` (`string`, or a
+  schema); `fetch` names the ones missing.
+- **Queries are reads; mutations have side effects.**
+- **`user_errors`** names the field in which the vendor's mutations report
+  input they refused (Shopify's `userErrors`). A mutation whose result has
+  that field must select it so that it is always in the answer: directly or
+  through a fragment, not aliased, and with no `@skip` or `@include` on it or
+  on a fragment around it. Otherwise a refused write could read as done.
+- Descriptions are Markdown: links read as their text, and the lines of a
+  paragraph are joined. Code, fenced or indented, is kept as written.
+
+The generated request is a POST to `graphql.path` of `{"query": …,
+"variables": …}`, which the crate's `kit.rs` builds:
+
+```rust
+kit::Request::new("POST", path).graphql(
+    DOCUMENT,        // the operation as printed
+    "productCreate", // the top-level field's response key
+    false,           // a query (true) or a mutation (false)
+    variables,       // a kit::Body of the set inputs
+    "SHOPIFY",       // the error prefix
+)
+```
+
+So a GraphQL agent's kit has `Request::graphql` and `nullable`, and its
+`send` reads the answer, which a GraphQL API sends with HTTP 200 whether it
+worked or not: `errors` (a rate limit among them, as Shopify's `THROTTLED`)
+and the mutation's `user_errors` field. How each maps to an error is the
+vendor's to define. A query can be sent again when it gets no answer; a
+mutation, like any other write, is retried only if sending it twice changes
+nothing.
+
+**A `null` top-level field is an error, not a result.** `product(id:)` answers
+`null` for an id it does not know, and a nullable mutation payload can be
+`null` too. The kit reports that as an error: nothing found
+(`<PREFIX>_NOT_FOUND`) for a query, and an unknown outcome for a mutation,
+which may or may not have been carried out. So the capability returns the
+field's non-null type (`GetProductResult`, not `Option<GetProductResult>`),
+and a workflow branches on the error rather than checking every step's output
+for `null`. Items of a list are different: a `null` item is part of the
+answer (`nodes(ids:)` keeps a place for each id), so they are
+`Option<T>`.
+
+`check` also fails when an operation file no longer matches the operation in
+`spec.slice.json`, or `graphql.path` (where an API version usually is) no
+longer matches its endpoint: edited without `fetch`. Layout and comments do
+not count.
+
 ## A generated agent crate
 
 ```
 crates/agents/runtara-agent-<id>/
   connector.yaml      # spec source and operation allowlist (hand-written)
+  operations/         # a GraphQL API's operations, one .graphql file each (hand-written)
   spec.slice.json     # the spec trimmed to the listed operations (fetched)
   tests/fixtures/     # the spec's 2xx response examples (fetched)
   tests/*.rs          # hand-written tests
@@ -531,8 +659,12 @@ crates/agents/runtara-agent-<id>/
 
 ## Limits
 
-- OpenAPI 3.0 and Swagger 2.0 only (3.1 features such as `type: "null"` are
-  rewritten where listed above).
+- OpenAPI 3.0 and Swagger 2.0 (3.1 features such as `type: "null"` are
+  rewritten where listed above), and GraphQL schemas with operations of ours.
+- A GraphQL operation selects one top-level field and is no subscription. The
+  objects it returns are typed from what it selects, with every field
+  optional. A top-level field that answers `null` is an error the kit reports,
+  never a `null` result.
 - `fetch` refuses, naming the operation, what the templates cannot send yet:
   request bodies that are not JSON (form-encoded, multipart), object query
   parameters without declared scalar fields (unless free-form: a `deepObject`
