@@ -460,6 +460,38 @@ pub struct CompileElsewhere {
     pub timeout: Duration,
 }
 
+/// One call of an agent's capability, to be run as a guest with no run
+/// behind it ([`Runner::test_elsewhere`]).
+pub struct TestElsewhere {
+    /// Who is testing.
+    pub tenant_id: String,
+    /// The guest, in the artifact store: a workflow of one step, the call.
+    pub artifact: runtara_artifact_store::Digest,
+    /// Its input, as a run's.
+    pub input: Vec<u8>,
+    /// Whether the call may read the tenant's runs, as a test of the control
+    /// agent does.
+    pub acts_for_tenant: bool,
+    /// The guest's memory.
+    pub memory_bytes: u64,
+    /// How long it may take, from when it is placed.
+    pub timeout: Duration,
+}
+
+/// What a test placed as a guest ended with.
+#[derive(Debug)]
+pub enum TestedElsewhere {
+    /// It returned: its output.
+    Completed(Vec<u8>),
+    /// It failed.
+    Failed {
+        /// The error's code.
+        code: String,
+        /// What it says.
+        message: String,
+    },
+}
+
 /// What a compiler placed as a guest answered. Input to whoever asked: it is
 /// what a guest said.
 #[derive(Debug)]
@@ -659,6 +691,16 @@ pub trait Runner: Send + Sync {
     /// composed in, which every runner runs.
     fn links_workflow_stdlib(&self) -> bool {
         false
+    }
+
+    /// Runs one call of an agent's capability where this runner runs
+    /// workflows, with no run behind it: a test of the capability. `None`
+    /// from a runner that runs its guests in this process.
+    async fn test_elsewhere(
+        &self,
+        _test: TestElsewhere,
+    ) -> Option<std::result::Result<TestedElsewhere, String>> {
+        None
     }
 
     /// Compiles a workflow where this runner runs them: the compiler is

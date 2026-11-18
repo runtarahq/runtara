@@ -770,3 +770,82 @@ async fn a_validation_placed_on_an_executor_reports_what_one_in_process_does() {
         );
     }
 }
+
+// ---- A test of an agent's capability, placed on an executor ----
+
+/// A workflow of one step: a call of `agent`'s `capability`, given the run's
+/// input and answering the call's output.
+fn a_call_of(agent: &str, capability: &str, inputs: &[&str]) -> Value {
+    let mapping: serde_json::Map<String, Value> = inputs
+        .iter()
+        .map(|name| {
+            (
+                (*name).to_owned(),
+                json!({"valueType": "reference", "value": format!("data.{name}")}),
+            )
+        })
+        .collect();
+    json!({
+        "name": "A test call",
+        "entryPoint": "call",
+        "steps": {
+            "call": {"id": "call", "stepType": "Agent", "agentId": agent,
+                     "capabilityId": capability, "maxRetries": 0, "inputMapping": mapping},
+            "finish": {"id": "finish", "stepType": "Finish",
+                       "inputMapping": {"output": {"valueType": "reference", "value": "steps.call.outputs"}}}
+        },
+        "executionPlan": [{"fromStep": "call", "toStep": "finish"}],
+        "variables": {}, "inputSchema": {}, "outputSchema": {}
+    })
+}
+
+/// One call of a capability runs as a guest on an executor with no run
+/// behind it: no instance, no lease, nothing recorded. It is given its input
+/// and answers the call's output.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_capability_is_called_on_an_executor_with_no_run_behind_it() {
+    use runtara_environment::runner::{TestElsewhere, TestedElsewhere};
+
+    let deployment = deployment().await;
+    let temp = tempfile::tempdir().unwrap();
+    let built = runtara_workflows::compile_workflow_direct(
+        compile_input(a_call_of("utils", "return-input", &["value"])),
+        compile_options(temp.path().join("call"), temp.path().join("staged")),
+    )
+    .expect("the call compiles");
+    let artifact = deployment
+        .artifacts
+        .put(&std::fs::read(&built.binary_path).unwrap())
+        .await
+        .unwrap();
+    let test = |input: Value| TestElsewhere {
+        tenant_id: "tenant-x".into(),
+        artifact: artifact.clone(),
+        input: serde_json::to_vec(&input).unwrap(),
+        acts_for_tenant: false,
+        memory_bytes: 256 * 1024 * 1024,
+        timeout: Duration::from_secs(60),
+    };
+    let tested = deployment
+        .runner
+        .test_elsewhere(test(
+            json!({"data": {"value": {"seven": 7}}, "variables": {}}),
+        ))
+        .await
+        .expect("a runner over executors places tests")
+        .expect("the test was run");
+    let TestedElsewhere::Completed(output) = tested else {
+        panic!("the call failed: {tested:?}");
+    };
+    let output: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(output["output"], json!({"seven": 7}), "{output}");
+    // Nothing of it is a run: no instance was registered for it.
+    assert!(
+        deployment
+            .persistence
+            .list_instances(Some("tenant-x"), None, 10, 0)
+            .await
+            .map(|instances| instances.is_empty())
+            .unwrap_or(true)
+    );
+}

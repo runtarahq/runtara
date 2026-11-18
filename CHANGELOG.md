@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **With executors, a test of an agent's capability runs on one.** The
+  call is compiled into a workflow of one step and run on an executor as a
+  guest with no run behind it: no instance, nothing recorded. The server no
+  longer runs it in its own process, and the answer's `engine` is
+  `executor`. With no executor a test fails. Without executors nothing
+  changes.
 - **With executors, workflows are validated on one.** Saving a workflow
   validates it, and a server whose runner is executors places the
   validator as a guest there, as it places the compiler. The API asks the

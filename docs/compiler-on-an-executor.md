@@ -241,6 +241,38 @@ another process; an engine with executors does not start without the
 validator) and `e2e/test_scalable_executors.sh` (with no executor a save
 is refused; with one it is saved).
 
+### A test of a capability, the same way
+
+`POST /agents/{name}/capabilities/{id}/test` runs an agent's component with
+input its caller wrote. It ran in the engine's embedded dispatcher. With
+executors it is placed.
+
+- **The call is made into a workflow of one step** (`agent_test_placed.rs`):
+  an Agent step whose fields are taken from the run's input, and a Finish
+  that answers its output. It is compiled where workflows are compiled, on
+  an executor, and what comes back is checked as any compile's is.
+- **It runs as a guest with no run behind it** (`Runner::test_elsewhere`):
+  no instance, no lease, nothing recorded. The launch is given its input,
+  the trusted execution and control a test call always had, and a runtime
+  of its own that keeps nothing (`CallWithNoRun`: its checkpoints live as
+  long as the call, no signal reaches it, it does not sleep).
+- **Two guests for one test**: a compile and then the call, each taking a
+  run's slot for its moment. The workflow depends only on the agent, the
+  capability and the names of the fields, so it could be compiled once and
+  kept; it is compiled each time for now.
+- **No executor, no test.** It is not run in the server instead.
+
+What did not change: which agents may be tested. The route refuses an agent
+outside the tenant's plan, and a tenant's published workflow-agents are not
+let off there as they are when listed, so a test does not run a tenant's
+own code. It runs the platform's, with the tenant's input.
+
+Tested: a real executor runs a call of a capability with no run behind it,
+and no instance is registered (`runtara-runner-executor`);
+`agent_test_placed`'s unit tests; `e2e/test_two_roles.sh` (a capability is
+tested through an API in another process, says it ran on an executor, and
+leaves no run behind).
+
 ### What it costs
 
 - **A slot.** A compile takes one of an executor's run slots for as long

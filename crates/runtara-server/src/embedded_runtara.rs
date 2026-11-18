@@ -178,6 +178,7 @@ impl EmbeddedRuntara {
             .await
             .map_err(|e| anyhow::anyhow!("place compiles with the runner: {e}"))?;
         }
+        crate::agent_test_placed::runner_is_up(runner.clone(), config.artifacts.clone());
         if crate::validation_placed::installed() {
             let path = crate::validation_placed::configured()
                 .ok_or_else(|| anyhow::anyhow!("the validator to place is not configured"))?;

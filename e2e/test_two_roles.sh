@@ -655,6 +655,17 @@ all_complete 120 "${CALLER}"
 RESP=$(curl -sS "${API}/workflows/instances/${CALLER}")
 echo "${RESP}" | jq -e '[.. | objects | select(.childEcho? == "hello-live" and .childMarker? == "from-child")] | length > 0' >/dev/null \
     || { print_error "a workflow did not run the agent published through an executor: ${RESP}"; exit 1; }
+# A test of one capability runs an agent's code with input its caller wrote.
+# With executors it is run on one, as a guest with no run behind it.
+RESP=$(curl -sS --max-time 180 -X POST -H 'Content-Type: application/json' \
+    -d '{"input": {"value": {"seven": 7}}}' "${API}/agents/utils/capabilities/return-input/test")
+echo "${RESP}" | jq -e '.success == true and .output == {"seven": 7} and .engine == "executor"' >/dev/null \
+    || { print_error "a capability was not tested on an executor: ${RESP}"; exit 1; }
+RUNS_BEFORE=$(runs_known)
+RESP=$(curl -sS --max-time 180 -X POST -H 'Content-Type: application/json' \
+    -d '{"input": {"value": 1}}' "${API}/agents/utils/capabilities/return-input/test")
+[ "$(runs_known)" = "${RUNS_BEFORE}" ] \
+    || { print_error "a test of a capability left a run behind it"; exit 1; }
 # The agents the API describes are the ones the engine runs.
 [ "$(curl -sS "${API}/agents" | jq -r '(.agents // .data // .) | length')" -gt 0 ] \
     || { print_error "the engine's agents are not listed through the API"; exit 1; }
