@@ -203,6 +203,44 @@ never loads the compiler; `e2e/test_executor_runner.sh` runs the agent
 parity, child run fan-out and child run deadline suites against a server
 with executors, which compile there.
 
+### Validation, the same way
+
+Saving a workflow validates its closure, which is the other place a
+tenant's graph was worked on in the server: natively, or in a sandbox in
+the server's process where `RUNTARA_VALIDATOR_WASM` named one. With
+executors it is placed like the compiler.
+
+- **The validator as a guest** (`runtara-validate-placed.wasm`, built and
+  shipped beside the compiler): it takes the closure and the agent catalog
+  as its run's input and posts its report as its outcome. It fetches no
+  file and hands back no component.
+- **The API asks the engine to validate** (`Engine::validate_closure`, the
+  `ValidateClosure` operation). Validation was called from the handlers,
+  so in a split deployment it ran in the API; it is the engine's now, as
+  compiling is, and the engine validates against the agents *it* has and
+  the tenant's published ones. The API still parses the request's JSON
+  into a graph, and checks the tenant's plan.
+- **The engine places it** (`validation_placed.rs`) where executors are its
+  runner, four at once at most, and validates in its own process otherwise
+  (in the validator's sandbox where one is named). A server with executors
+  does not start without the validator to place
+  (`RUNTARA_VALIDATE_GUEST_WASM`, or beside the components).
+- **No executor, no save.** A closure that could not be validated is
+  refused as one that does not validate (E138), and is not validated in the
+  server instead. So that a server that has just started does not refuse
+  saves for the moments before its first executor says it is here, a guest
+  that is not a run waits up to ten seconds for somewhere to be placed
+  before it fails. A compile waits the same.
+
+Tested: a real executor runs the validator and reports what validating in
+process does, for a graph that is valid and one that is not
+(`runtara-runner-executor`); `validation_placed`'s unit tests against a
+runner that is stood in for; `e2e/test_two_roles.sh` (a save and the
+validate route are refused for what the validator found, through an API in
+another process; an engine with executors does not start without the
+validator) and `e2e/test_scalable_executors.sh` (with no executor a save
+is refused; with one it is saved).
+
 ### What it costs
 
 - **A slot.** A compile takes one of an executor's run slots for as long
