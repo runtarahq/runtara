@@ -1,6 +1,9 @@
 # The compiler on an executor
 
-A plan. Nothing here is built.
+Phase 1 is built: the compiler runs as a guest of `runtara-run` on an
+executor and makes the bytes a compile in process makes
+([what phase 1 found](#what-phase-1-found)). The engine does not place its
+compiles there yet: that is phases 2 and 3.
 
 ## What is wanted
 
@@ -42,11 +45,11 @@ almost all of this exists, for another host, and what is missing is small.
   sandboxed process, starts `runtara-run`, relays the guest's `/v1/` calls
   to the engine's run channel with the launch's credential, ends the run at
   its lifetime and reports what became of the process.
-- **`runtara-run` links both `wasi:http`**: 0.2 and 0.3
-  (`runtara-run/src/guest.rs`). Phase 6 did not use the existing guest
-  because the engine's *embedded* runner serves the workflow API to 0.3
-  only. A run on an executor has no such limit, so the reason Phase 6 gave
-  for not placing compiles on executors does not hold there.
+- **`runtara-run` links both `wasi:http`**, 0.2 and 0.3
+  (`runtara-run/src/guest.rs`). This was read as "a run on an executor is
+  given both", which it was not: 0.2 was linked so as to be denied, and the
+  entry a guest runs by had to be WASI 0.3's. Phase 1 changed both, for a
+  WASI 0.2 command only (below).
 
 **Missing**
 
@@ -118,16 +121,16 @@ would leave such a deployment compiling natively.
   stdlib, as the sandboxed one is), and the bundle carries it.
   `RUNTARA_COMPILER_WASM` names the sandboxed one; the HTTP one sits beside
   it under a fixed name.
-- **`runtara-runner-executor`** — an entry for placing a launch that is not
-  an instance: the placement, its status and its stop, without the
-  instance's row and lease. And `LaunchWorkflows` answers a compile
-  launch's artifact with the compiler's bytes, which the engine holds in
-  memory from boot, rather than from the artifact store.
+- **`runtara-environment`, `runtara-runner-executor`** — placing a launch
+  that is not an instance (`Runner::compile_elsewhere`, and the executor
+  provider's spec for a guest that is not a run). Done, phase 1. The
+  compiler is put in the artifact store and fetched from it by digest.
 - **`runtara-server`** — a `CompileExecutor` that does steps 1, 2, 5 and 6,
   installed when the runner is executors. `compile_sandbox.rs`'s checks
   move to where both use them.
-- **`runtara-executor`, `runtara-run`** — nothing, if the two things under
-  "To find out first" hold.
+- **`runtara-run`** — runs a WASI 0.2 command as well as a 0.3 one, and
+  gives it `wasi:http` 0.2 to the workflow API origin (done, phase 1).
+- **`runtara-executor`** — nothing.
 - **`runtara-component-host`** — nothing.
 
 ### What it costs
@@ -164,27 +167,45 @@ it when it is saved (in the validation sandbox, which is in the engine's
 process) and to find the agents it calls. Moving validation is not part of
 this plan.
 
-## To find out first
+## What phase 1 found
 
-Three things I have read around but not run. Each is an afternoon, and each
-could change the plan, so they are phase 1.
+The three things that had been read around and not run.
 
-1. **Whether an executor accepts the compiler as something to run.**
-   `runtara-run compile` refuses a component that imports what a run is not
-   given. The compiler imports WASI and `wasi:http` 0.2, which a run is
-   given, but I have not run it through.
-2. **Whether the relay's limits fit.** The guest fetches in slices of up to
-   8 MiB and hands back in parts sized for the VM it was built for (4 MiB).
-   `runtara-run` and the executor each cap a relayed body; I have not
-   compared the numbers.
-3. **Whether a launch can be placed without an instance.** The provider
-   builds the placement from an instance's launch. If the launch's protocol
-   fields assume a lease and an instance row, the entry in
-   `runtara-runner-executor` is more than a thin one.
+1. **An executor did not accept the compiler as something to run.**
+   `runtara-run` ran only a guest that exports `wasi:cli/run@0.3.0`, and
+   gave a guest `wasi:http` 0.3 to the workflow API while denying it 0.2.
+   The compiler is a WASI 0.2 command (what a Rust program built for
+   `wasm32-wasip2` is) and speaks `wasi:http` 0.2. So `runtara-run` now
+   also runs a guest whose entry is `wasi:cli/run@0.2.N`, which has the
+   same signature, and gives *that* guest `wasi:http` 0.2 to the workflow
+   API origin, over the same socket. A workflow, which runs by 0.3, is
+   denied 0.2 as before. No guest is given two ways out, and neither is
+   given any origin but the one.
+
+   The other way was to port the compiler to WASI 0.3. That is a change to
+   the compiler's own I/O and to how it is built, for a guest another host
+   also runs; the change to `runtara-run` is twenty lines and takes nothing
+   away from what a run is refused.
+2. **The relay's limits fit.** A compile of a workflow with one agent
+   fetched eight files (6.5 MB) and handed back 6.6 MB through
+   `runtara-run` and the executor, in 0.3 s in all.
+3. **A launch can be placed without an instance.** `begin_compile`, the
+   run channel's credential, the launch's artifact and the provider's
+   placement do not need one. `Runner::compile_elsewhere` is that
+   (`runtara-environment`, `runner/provider.rs`): the engine's runner places
+   the compiler, waits for what it posts, and takes what it handed back.
+   The compiler is fetched from the artifact store by its digest, like a
+   workflow, so the store holds it and nothing was added to
+   `LaunchWorkflows`.
+
+Not found out here: the compiler under the *real* sandbox. The tests run
+`runtara-run` sandboxed on Linux, which CI is, and unsandboxed on a
+developer's macOS. If the compiler makes a system call a run does not, CI
+is where it shows.
 
 ## Phases
 
-1. **The compiler under `runtara-run`, with no engine.** Build and ship the
+1. **The compiler under `runtara-run`, with no engine.** Done. Build and ship the
    HTTP guest. A test in `runtara-executor` (with the other
    component-integration tests) that runs it sandboxed against
    `ApiLaunches::begin_compile` and gets the bytes a compile in process
@@ -220,6 +241,5 @@ Made.
 
 ## Size
 
-Three to five days if the three unknowns hold: most of the machinery
-exists. If a launch cannot be placed without an instance (the third), add
-two days for the placement entry.
+Phase 1 took a day. Phases 2 and 3 are two to three more: the placement
+entry, which was the uncertain part, is built.

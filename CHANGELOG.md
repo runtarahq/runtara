@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The workflow compiler runs on an executor** (not used by the engine
+  yet: `docs/compiler-on-an-executor.md`, phase 1). `runtara-run` runs a
+  WASI 0.2 command as well as a workflow, and gives it `wasi:http` 0.2 to
+  the workflow API origin and nothing else; a workflow is given what it
+  was. A runner over executors can place the compiler as a guest that is
+  served its request and the components it names, and take back what it
+  composed (`Runner::compile_elsewhere`). The bundle carries that compiler
+  (`runtara-compile-guest.wasm`) beside the sandboxed one.
 - **A conversation with a workflow.** A conversation is a workflow, a key
   its client chose, and what has been said: found by `(tenant, workflow,
   key)`, kept until it is deleted, and carried by one run after another. A

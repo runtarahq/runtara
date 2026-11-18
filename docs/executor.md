@@ -29,7 +29,10 @@ configured with none of them.
 - **`runtara-run`** is one run. It sandboxes itself before it reads anything,
   loads the compiled workflow from a descriptor it was handed, and gives the
   guest one way out: `wasi:http` to the workflow API origin, over a socket
-  pair to its executor.
+  pair to its executor. (A workflow runs by WASI 0.3 and is given
+  `wasi:http` 0.3. A WASI 0.2 command, which the workflow compiler is, is
+  given `wasi:http` 0.2 to the same origin and no other:
+  [compiler-on-an-executor.md](compiler-on-an-executor.md).)
 
 All three are in the release bundle's `bin/` and in the `runtara` image.
 
