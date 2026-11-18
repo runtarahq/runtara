@@ -34,6 +34,12 @@ fn run_internal_precompile_component() -> Result<(), Box<dyn std::error::Error>>
 
 /// Run the process `std::env::args_os()` asks for, composed with `options`.
 pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error>> {
+    // A maintenance command, like starting the server, is the platform's own
+    // work on every tenant's rows.
+    runtara_store_postgres::tenant_scope::system(run_as_platform(options)).await
+}
+
+async fn run_as_platform(options: ServerOptions) -> Result<(), Box<dyn std::error::Error>> {
     if internal_precompile_component_requested(std::env::args_os()) {
         return run_internal_precompile_component();
     }

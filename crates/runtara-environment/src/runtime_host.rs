@@ -1181,7 +1181,7 @@ mod tests {
         assert!(!crate::in_process_waits::is_waiting(&id));
         let sleeping = {
             let host = host.clone();
-            tokio::spawn(async move {
+            runtara_store_postgres::tenant_scope::spawn(async move {
                 host.durable_sleep_checkpoint("nap".into(), b"s".to_vec(), 400)
                     .await
             })

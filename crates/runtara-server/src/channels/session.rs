@@ -253,12 +253,12 @@ impl ChannelRouter {
     /// inbound webhook is unauthenticated, and only its connection names whose
     /// it is.
     pub async fn served_connection_tenant(&self, connection_id: &str) -> anyhow::Result<String> {
-        let conn = self
-            .connections
-            .get_channel_connection(connection_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("DB error: {}", e))?
-            .ok_or_else(|| anyhow::anyhow!("Connection not found"))?;
+        let conn = runtara_store_postgres::tenant_scope::locating(
+            self.connections.get_channel_connection(connection_id),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("DB error: {}", e))?
+        .ok_or_else(|| anyhow::anyhow!("Connection not found"))?;
         match conn.tenant_id {
             Some(tenant) if crate::config::is_served_tenant(&tenant) => Ok(tenant),
             _ => anyhow::bail!("Connection not found"),
@@ -268,14 +268,14 @@ impl ChannelRouter {
     /// Look up the connection and its newest live Channel trigger, the same
     /// one webhook registration and Telegram's secret check use.
     async fn resolve_route(&self, connection_id: &str) -> Result<Route, RouteError> {
-        let conn = self
-            .connections
-            .get_channel_connection(connection_id)
-            .await
-            .map_err(|e| RouteError::Unavailable(anyhow::anyhow!("DB error: {}", e)))?
-            .ok_or_else(|| {
-                RouteError::Unroutable(anyhow::anyhow!("Connection not found: {}", connection_id))
-            })?;
+        let conn = runtara_store_postgres::tenant_scope::locating(
+            self.connections.get_channel_connection(connection_id),
+        )
+        .await
+        .map_err(|e| RouteError::Unavailable(anyhow::anyhow!("DB error: {}", e)))?
+        .ok_or_else(|| {
+            RouteError::Unroutable(anyhow::anyhow!("Connection not found: {}", connection_id))
+        })?;
 
         let tenant_id = conn.tenant_id.ok_or_else(|| {
             RouteError::Unroutable(anyhow::anyhow!("Connection has no tenant_id"))

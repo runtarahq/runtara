@@ -195,6 +195,7 @@ async fn control_event_revokes_user_keys_round_trip() {
         pool.clone(),
         config.clone(),
         tenant.clone(),
+        control_events::ReconcileSweep::Revoke,
         shutdown.clone(),
     ));
 
@@ -253,6 +254,7 @@ async fn startup_reconcile_revokes_former_member_keys() {
         pool.clone(),
         config.clone(),
         tenant.clone(),
+        control_events::ReconcileSweep::Revoke,
         shutdown.clone(),
     ));
 
@@ -281,4 +283,56 @@ async fn startup_reconcile_revokes_former_member_keys() {
         &[stream, gone_denylist, present_member_key],
     )
     .await;
+}
+
+/// A server whose auth mode keeps no membership records (`local`,
+/// `trust_proxy`, or membership not enforced) has no record for anyone. Its
+/// sweep must not read that as "no longer a member": it revoked every API key
+/// each time the server started.
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_reconcile_leaves_keys_where_membership_is_not_enforced() {
+    let pool = test_pool().await;
+    let config = valkey_config();
+    let mut conn = valkey_manager(&config).await;
+
+    for sweep in [
+        control_events::ReconcileSweep::Skip,
+        control_events::ReconcileSweep::Observe,
+    ] {
+        let tenant = unique_tenant();
+        // An active key whose user has no membership record.
+        let jti = seed_active_key(&pool, &tenant, "local").await;
+        let stream = control_stream_key(&tenant);
+
+        let shutdown = ShutdownSignal::new();
+        let consumer = tokio::spawn(control_events::run(
+            pool.clone(),
+            config.clone(),
+            tenant.clone(),
+            sweep,
+            shutdown.clone(),
+        ));
+        // The sweep runs before the consumer listens: once a published event
+        // has been acknowledged, the sweep is over.
+        sleep(Duration::from_millis(300)).await;
+        publish_member_removed(
+            &mut conn,
+            &tenant,
+            "someone-else",
+            Utc::now().timestamp_millis(),
+        )
+        .await;
+        assert!(
+            wait_until_acked(&mut conn, &stream, Duration::from_secs(10)).await,
+            "the consumer is past its sweep"
+        );
+        assert!(
+            !is_revoked(&pool, &tenant, &jti).await,
+            "{sweep:?}: a key is not revoked for want of a membership record"
+        );
+
+        shutdown.trigger();
+        let _ = timeout(Duration::from_secs(5), consumer).await;
+        cleanup(&pool, &mut conn, &tenant, &[stream]).await;
+    }
 }

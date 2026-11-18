@@ -17,6 +17,7 @@ path = "src/lib.rs"
 component-integration-tests = []
 
 [dependencies]
+runtara-tenant-scope = { path = "../runtara-tenant-scope" }
 runtara-environment = { path = "../runtara-environment" }
 runtara-component-host = { path = "../runtara-component-host" }
 runtara-workflow-api = { path = "../runtara-workflow-api" }

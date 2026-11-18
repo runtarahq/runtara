@@ -155,7 +155,7 @@ async fn authenticate_with(
 /// databases, where row level security then confines it to that tenant's rows
 /// (C11, M7.11), holding one of the tenant's request slots in this process
 /// (M7.16) whichever way it authenticated. A request that answers across
-/// tenants (`scoped` false) runs as the system path.
+/// tenants (`scoped` false) is the platform's own work, and runs as such.
 async fn as_tenant(
     scoped: bool,
     tenant: &str,
@@ -170,7 +170,7 @@ async fn as_tenant(
         };
         runtara_store_postgres::tenant_scope::scoped(tenant, rest).await
     } else {
-        rest.await
+        runtara_store_postgres::tenant_scope::system(rest).await
     }
 }
 
@@ -215,12 +215,16 @@ async fn validate_api_key(token: &str, auth_state: &AuthState) -> Result<ApiKey,
     // slow KDF adds nothing and would break the indexed hash lookup.
     let key_hash = hex::encode(sha2::Sha256::digest(token.as_bytes()));
 
-    crate::api::handlers::api_keys::validate_api_key_by_hash(&auth_state.pool, &key_hash)
-        .await
-        .map_err(|e| {
-            tracing::warn!(error = %e, "API key validation failed");
-            unauthorized("Invalid or expired API key")
-        })
+    // The key is all the caller presented: its row says whose it is. Within
+    // a tenant named in the path only that tenant's keys are found.
+    runtara_store_postgres::tenant_scope::locating(
+        crate::api::handlers::api_keys::validate_api_key_by_hash(&auth_state.pool, &key_hash),
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!(error = %e, "API key validation failed");
+        unauthorized("Invalid or expired API key")
+    })
 }
 
 /// Build the `AuthContext` for an API-key request. The key acts as its issuing user — role

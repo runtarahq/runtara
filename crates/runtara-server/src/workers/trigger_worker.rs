@@ -278,7 +278,7 @@ pub async fn run(
                     let event_sink = event_sink.clone();
                     let handoff_owner = worker_id.clone();
                     let max_retries = worker_config.max_retries;
-                    tasks.spawn(async move {
+                    tasks.spawn(runtara_store_postgres::tenant_scope::inherit(async move {
                         let _permit = permits
                             .acquire_owned()
                             .await
@@ -298,7 +298,7 @@ pub async fn run(
                             &event_sink,
                         )
                         .await;
-                    });
+                    }));
                 }
                 while let Some(joined) = tasks.join_next().await {
                     if let Err(e) = joined {
@@ -353,7 +353,7 @@ pub async fn run(
                     let event_sink = event_sink.clone();
                     let handoff_owner = worker_id.clone();
                     let max_retries = worker_config.max_retries;
-                    tasks.spawn(async move {
+                    tasks.spawn(runtara_store_postgres::tenant_scope::inherit(async move {
                         // Semaphore is never closed, so acquire cannot fail.
                         let _permit = permits
                             .acquire_owned()
@@ -374,7 +374,7 @@ pub async fn run(
                             &event_sink,
                         )
                         .await;
-                    });
+                    }));
                 }
                 while let Some(joined) = tasks.join_next().await {
                     if let Err(e) = joined {

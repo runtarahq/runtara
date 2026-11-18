@@ -1044,6 +1044,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Row-level security refuses a connection that names no scope.** A
+  connection that named no tenant was the system path and saw every tenant's
+  rows, so work that forgot its scope read and wrote across tenants without a
+  sign. Reaching every tenant is now asked for by name: the server's own
+  work runs in a scope of its own and sets `runtara.all_tenants` on its
+  connections, a request works as its tenant, and a connection that names
+  neither is refused with `runtara: no tenant scope`. Once a role named
+  `runtara_system` exists, only its members may ask for every tenant.
+  **Upgrading:** a forward migration in each database rewrites the policies,
+  and an older release still running on them as a plain role has its own
+  cross-tenant work (its workers) refused until it is stopped. A `psql`
+  session of a plain role sets `runtara.all_tenants = on` or a tenant before
+  it reads a policed table. `RUNTARA_ROW_SECURITY_UNSCOPED=system` gives work
+  in no scope every tenant's rows with a warning that says where it ran, to
+  find such a path before refusing it. A superuser or `BYPASSRLS` role is
+  bound by none of this, as before. See `docs/install.md`.
+
+- **The evaluation stack's server is not its database's administrator.**
+  `docker-compose.yml` connected the server as the Postgres image's own
+  user, a superuser that row-level security does not bind. A `db-setup`
+  step now makes a plain role, `runtara_server`, gives it the server's two
+  databases and what is in them, and makes the extensions the migrations
+  ask for; the server connects as that role with
+  `RUNTARA_REQUIRE_ROW_SECURITY=true`. The step runs on every `up` and
+  repeats nothing, so an existing volume is brought over by the next `up`.
+
 - **BREAKING: connection credentials are always encrypted at rest.**
   `runtara-server` (and `reencrypt-connections`) refuse to start unless
   `RUNTARA_CONNECTIONS_ENCRYPTION_KEY` holds a valid base64 32-byte key; a
@@ -1549,6 +1575,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is off or any row fails.
 
 ### Fixed
+
+- **A restart no longer revokes every API key where membership is not
+  enforced.** At start the server revokes the keys of users who are no
+  longer members of their tenant, and took a missing membership record for
+  that. Nothing writes those records in `local` and `trust_proxy` auth, and
+  under `oidc` the request gate ignores them unless
+  `RUNTARA_AUTH_MEMBERSHIP_POLICY=required`, so every key a user had made was
+  revoked each time the server started. The sweep now follows the gate: it
+  revokes under `oidc` with `required`, reports what it would revoke under
+  `logging`, and otherwise does nothing.
 
 - **A client-credentials connection is active again once its credentials
   work.** A token endpoint that refuses the stored credentials (a wrong

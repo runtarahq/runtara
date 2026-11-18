@@ -1046,7 +1046,7 @@ impl CompilationService {
         let (progress_callback, drain_handle, outer_tx) = match progress_reporter.clone() {
             Some(reporter) => {
                 let (tx, mut rx) = mpsc::unbounded_channel::<(String, String)>();
-                let drain = tokio::spawn(async move {
+                let drain = runtara_store_postgres::tenant_scope::spawn(async move {
                     while let Some((stage_str, msg)) = rx.recv().await {
                         if let Some(stage) = CompilationStage::parse(&stage_str) {
                             reporter.report(stage, &msg).await;

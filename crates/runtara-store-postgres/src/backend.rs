@@ -43,15 +43,18 @@ impl PostgresPersistence {
     }
 
     /// Persistence for one tenant: every connection names the tenant
-    /// (`runtara.tenant_id`), so row-level security confines its reads and
-    /// writes to that tenant's rows, and a read of another tenant's fails
-    /// closed. An unscoped [`PostgresPersistence::new`] is the system path.
+    /// (`runtara.tenant_id`) and not every tenant, whatever the role's own
+    /// default, so row-level security confines its reads and writes to that
+    /// tenant's rows, and a read of another tenant's fails closed.
     pub async fn for_tenant(
         options: sqlx::postgres::PgConnectOptions,
         tenant: &str,
         max_connections: u32,
     ) -> Result<Self, sqlx::Error> {
-        let options = options.options([("runtara.tenant_id", tenant)]);
+        let options = options.options([
+            ("runtara.tenant_id", tenant),
+            ("runtara.all_tenants", "off"),
+        ]);
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(max_connections)
             .connect_with(options)

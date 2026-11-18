@@ -193,7 +193,7 @@ impl WasiHttpHooks for WorkflowApiHooks {
         // the guest runs CPU-bound code: the Store's event loop polls the
         // returned future only when the guest yields to it, and a cleanup
         // alarm must be armed before that. Dropping the call aborts it.
-        let served = AbortOnDrop(tokio::spawn(async move {
+        let served = AbortOnDrop(runtara_tenant_scope::spawn(async move {
             let (parts, body) = request.into_parts();
             let body = Limited::new(body, limit)
                 .collect()

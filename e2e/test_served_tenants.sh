@@ -106,7 +106,11 @@ cleanup() {
     psql_quiet -d postgres -c "DROP DATABASE IF EXISTS ${TEST_DB_SERVER}" >/dev/null 2>&1 || true
     psql_quiet -d postgres -c "DROP DATABASE IF EXISTS ${TEST_DB_RUNTIME}" >/dev/null 2>&1 || true
     psql_quiet -d postgres -c "DROP ROLE IF EXISTS ${RUNTIME_ROLE}" >/dev/null 2>&1 || true
-    rm -rf "${TEST_DATA_DIR}" 2>/dev/null || true
+    if [ -n "${SERVED_TENANTS_KEEP:-}" ]; then
+        echo "kept ${TEST_DATA_DIR}" >&2
+    else
+        rm -rf "${TEST_DATA_DIR}" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
 
@@ -204,6 +208,8 @@ start_server() {
     RUST_LOG="warn,runtara_server=info" \
     AUTH_PROVIDER=local \
     RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS=127.0.0.1 \
+    RUNTARA_PROXY_ALLOW_HTTP_HOSTS=127.0.0.1 \
+    RUNTARA_OAUTH_TENANTLESS_CALLBACK=false \
     VALKEY_HOST=127.0.0.1 \
     VALKEY_PORT="${TEST_VALKEY_PORT}" \
     OTEL_SDK_DISABLED=true \
@@ -399,21 +405,22 @@ CALLBACK="http://127.0.0.1:${TEST_PORT_PUBLIC}/api/oauth"
 curl -sS -D - "${CALLBACK}/${TENANT}/callback?state=${STATE}&code=c1" \
     | grep -qiE "Invalid or expired authorization|^location: .*[?&]error=invalid_state" \
     || { print_error "the primary tenant's callback accepted the second tenant's state"; exit 1; }
-# Row-level security (M7.11) keeps the primary tenant's callback away from the
-# second tenant's state altogether: refused there, it is neither seen nor
-# spent, so another tenant cannot burn a flow it does not own.
-[ "$(server_sql "SELECT count(*) FROM oauth_state WHERE state = '${STATE}' AND tenant_id = '${SECOND_TENANT}'")" = "1" ] \
-    || { print_error "the primary tenant's callback reached the second tenant's state"; exit 1; }
-echo "  the primary tenant's callback refuses the second tenant's state and leaves it alone ✓"
-# A failed callback names no tenant it could prove: its event is not filed
-# under the tenant in its path.
-curl -sS -o /dev/null "${CALLBACK}/not-a-served-tenant/callback?error=access_denied"
 # Inside the suite's Valkey container: on its published port's own 6379, or,
 # where docker runs it on the host network, on the suite's port.
 valkey_cli() {
     docker exec "${VALKEY_CONTAINER}" valkey-cli -p "${TEST_VALKEY_PORT}" --raw "$@" 2>/dev/null \
         || docker exec "${VALKEY_CONTAINER}" valkey-cli --raw "$@"
 }
+# A flow is kept under its tenant, by its state's hash: refused at the primary
+# tenant's callback, the second tenant's is neither seen nor spent, so another
+# tenant cannot burn a flow it does not own.
+STATE_HASH=$(python3 -c 'import sys,hashlib; print(hashlib.sha256(sys.argv[1].encode()).hexdigest())' "${STATE}")
+[ "$(valkey_cli EXISTS "${SECOND_TENANT}:oauth_state:${STATE_HASH}")" = "1" ] \
+    || { print_error "the primary tenant's callback reached the second tenant's state"; exit 1; }
+echo "  the primary tenant's callback refuses the second tenant's state and leaves it alone ✓"
+# A failed callback names no tenant it could prove: its event is not filed
+# under the tenant in its path.
+curl -sS -o /dev/null "${CALLBACK}/not-a-served-tenant/callback?error=access_denied"
 EVENT_TENANT=""
 for _ in {1..10}; do
     EVENT_TENANT=$(valkey_cli XRANGE runtara:product_events:stream - + \
@@ -459,7 +466,9 @@ mcp_status '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
     || { print_error "the session is kept under the primary tenant"; exit 1; }
 
 # A restart drops the in-memory session, so the next request must restore it
-# from Valkey, under the requesting tenant.
+# from Valkey, under the requesting tenant. The API keys made above survive
+# the restart: in this suite's auth mode nothing records who is a member, and
+# the server does not take that for their user having left.
 kill "${SERVER_PID}"; wait "${SERVER_PID}" 2>/dev/null || true
 start_server
 LIST='{"jsonrpc":"2.0","id":1,"method":"tools/list"}'

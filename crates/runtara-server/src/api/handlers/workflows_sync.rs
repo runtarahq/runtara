@@ -71,14 +71,16 @@ pub async fn capture_http_event_sync(
 ) -> (StatusCode, Json<Value>) {
     // An unauthenticated webhook: the workflow's tenant, among those this
     // process serves. A workflow id two served tenants share names neither.
-    let tenants: Vec<String> = match sqlx::query_scalar(
-        "SELECT tenant_id FROM workflows WHERE workflow_id = $1 AND tenant_id = ANY($2) LIMIT 2",
+    let found: Result<Vec<String>, sqlx::Error> = runtara_store_postgres::tenant_scope::locating(
+        sqlx::query_scalar(
+            "SELECT tenant_id FROM workflows WHERE workflow_id = $1 AND tenant_id = ANY($2) LIMIT 2",
+        )
+        .bind(&workflow_id)
+        .bind(crate::config::served_tenants())
+        .fetch_all(&pool),
     )
-    .bind(&workflow_id)
-    .bind(crate::config::served_tenants())
-    .fetch_all(&pool)
-    .await
-    {
+    .await;
+    let tenants = match found {
         Ok(tenants) => tenants,
         Err(error) => {
             return (
@@ -101,15 +103,18 @@ pub async fn capture_http_event_sync(
     let inputs = build_inputs_from_http_request(&method, &uri, &headers, &body);
 
     // Execute synchronously via the shared engine
-    match engine
-        .run_sync(SyncRequest {
+    // The run is the workflow's tenant's.
+    match runtara_store_postgres::tenant_scope::scoped(
+        tenant_id.clone(),
+        engine.run_sync(SyncRequest {
             run_label: metadata.run_label,
             tenant_id: &tenant_id,
             workflow_id: &workflow_id,
             version: None,
             inputs,
-        })
-        .await
+        }),
+    )
+    .await
     {
         Ok(result) => {
             // Return the result directly (success or failure both use 200 OK)

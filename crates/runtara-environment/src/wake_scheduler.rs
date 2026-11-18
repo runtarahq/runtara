@@ -279,7 +279,7 @@ impl WakeScheduler {
                 && cascade.as_ref().is_none_or(|task| task.is_finished())
             {
                 let scheduler = Arc::clone(&this);
-                cascade = Some(tokio::spawn(async move {
+                cascade = Some(runtara_store_postgres::tenant_scope::spawn(async move {
                     if let Err(error) = scheduler.run_parent_close_pass().await {
                         warn!(%error, "Parent-close cascade pass failed");
                     }
@@ -404,7 +404,7 @@ impl WakeScheduler {
         for instance in sleeping_instances {
             let scheduler = Arc::clone(&self);
             let permits = Arc::clone(&permits);
-            tasks.spawn(async move {
+            tasks.spawn(runtara_store_postgres::tenant_scope::inherit(async move {
                 // Semaphore is never closed, so acquire cannot fail.
                 let _permit = permits
                     .acquire_owned()
@@ -488,7 +488,7 @@ impl WakeScheduler {
                     );
                     // One failure must not abandon the rest of the batch.
                 }
-            });
+            }));
         }
 
         while let Some(joined) = tasks.join_next().await {
@@ -548,7 +548,7 @@ impl WakeScheduler {
         for (child, parent, parent_status) in children {
             let state = Arc::clone(&state);
             let permits = Arc::clone(&permits);
-            tasks.spawn(async move {
+            tasks.spawn(runtara_store_postgres::tenant_scope::inherit(async move {
                 let _permit = permits.acquire_owned().await.expect("cascade semaphore");
                 let reason = parent_close_reason(&parent, parent_status.as_deref());
                 info!(
@@ -588,7 +588,7 @@ impl WakeScheduler {
                         false
                     }
                 }
-            });
+            }));
         }
         while let Some(joined) = tasks.join_next().await {
             match joined {

@@ -38,6 +38,41 @@ const BATCH_SIZE: usize = 50;
 /// Min idle before an undelivered/unacked entry is reclaimed via `XAUTOCLAIM`.
 const PENDING_RETRY_DELAY_MS: u64 = 60_000;
 
+/// What the startup sweep does with the keys of a user who has no membership
+/// record. It follows the gate every request passes: a missing record means
+/// "no longer a member" only where the gate reads it so, and elsewhere it
+/// means only that nothing writes membership records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileSweep {
+    /// Nothing: the gate does not consult membership, so no record says nothing.
+    Skip,
+    /// Says which users' keys it would revoke, and leaves them.
+    Observe,
+    /// Revokes them: the gate already refuses their keys.
+    Revoke,
+}
+
+impl ReconcileSweep {
+    /// The sweep for a server whose requests authenticate with `provider`
+    /// under `policy`. Only a provider that has a control plane writing
+    /// membership (`oidc`) can lose a member, and only a policy that enforces
+    /// membership refuses the key of one who is gone.
+    pub fn for_auth(
+        provider: crate::auth::provider::AuthProviderKind,
+        policy: crate::auth::MembershipPolicy,
+    ) -> Self {
+        use crate::auth::MembershipPolicy;
+        if provider != crate::auth::provider::AuthProviderKind::Oidc {
+            return Self::Skip;
+        }
+        match policy {
+            MembershipPolicy::Disabled => Self::Skip,
+            MembershipPolicy::Logging => Self::Observe,
+            MembershipPolicy::Required => Self::Revoke,
+        }
+    }
+}
+
 /// Run the control-event consumer for one tenant until shutdown. Spawn one per served tenant,
 /// inside `scoped(tenant, …)` so the revoke `UPDATE public.api_keys` runs under the tenant's
 /// row-level-security scope.
@@ -45,6 +80,7 @@ pub async fn run(
     pool: PgPool,
     valkey_config: ValkeyConfig,
     tenant_id: String,
+    sweep: ReconcileSweep,
     shutdown: ShutdownSignal,
 ) {
     let consumer_name = format!("control-{}", Uuid::new_v4());
@@ -64,7 +100,7 @@ pub async fn run(
     // Backstop for control events that were trimmed from the capped stream (MAXLEN ~) before this
     // consumer ever read them — e.g. runtara was down long enough for the stream to roll over.
     // Runs once, before we begin consuming new events.
-    reconcile_revocations(&pool, &revoke_conn, &tenant_id).await;
+    reconcile_revocations(&pool, &revoke_conn, &tenant_id, sweep).await;
 
     let mut consumer = StreamConsumer::new(
         client.get_connection(),
@@ -195,7 +231,9 @@ async fn process_event(
 }
 
 /// Startup reconcile sweep: revoke the keys of any user who still holds an active key but is no
-/// longer a member of the tenant. This is the backstop for `member_removed` events lost to stream
+/// longer a member of the tenant, where a missing membership record means that ([`ReconcileSweep`]).
+/// Without that, a server whose auth mode keeps no membership records revoked every API key each
+/// time it started. This is the backstop for `member_removed` events lost to stream
 /// trimming (§9): the per-request membership gate already *denies* such keys (their
 /// `{tenant}:member:{sub}` key is gone), and this makes the durable `is_revoked` flag catch up so
 /// they also read as revoked everywhere.
@@ -211,7 +249,11 @@ async fn reconcile_revocations(
     pool: &PgPool,
     valkey: &redis::aio::ConnectionManager,
     tenant_id: &str,
+    sweep: ReconcileSweep,
 ) {
+    if sweep == ReconcileSweep::Skip {
+        return;
+    }
     let users = match sqlx::query_scalar::<_, String>(
         r#"
         SELECT DISTINCT issuing_user_id
@@ -240,6 +282,9 @@ async fn reconcile_revocations(
         match exists {
             // Still a member — leave the keys alone.
             Ok(true) => {}
+            Ok(false) if sweep == ReconcileSweep::Observe => {
+                tracing::warn!(tenant_id = %tenant_id, sub = %user, "reconcile sweep: would revoke the keys of a former member (membership policy is logging)");
+            }
             // Confirmed non-member with active keys → a control event was missed; revoke them now.
             Ok(false) => {
                 match crate::api::handlers::api_keys::revoke_user_keys_before(
@@ -271,5 +316,42 @@ async fn reconcile_revocations(
 async fn ack(acker: &StreamAcker, entry_id: &str) {
     if let Err(e) = acker.acknowledge_event(entry_id).await {
         tracing::warn!(error = %e, entry_id = %entry_id, "control consumer: XACK failed (entry will be reclaimed)");
+    }
+}
+
+#[cfg(test)]
+mod sweep_tests {
+    use super::ReconcileSweep;
+    use crate::auth::MembershipPolicy;
+    use crate::auth::provider::AuthProviderKind;
+
+    #[test]
+    fn the_sweep_revokes_only_where_the_gate_refuses_a_missing_member() {
+        assert_eq!(
+            ReconcileSweep::for_auth(AuthProviderKind::Oidc, MembershipPolicy::Required),
+            ReconcileSweep::Revoke
+        );
+        assert_eq!(
+            ReconcileSweep::for_auth(AuthProviderKind::Oidc, MembershipPolicy::Logging),
+            ReconcileSweep::Observe
+        );
+        assert_eq!(
+            ReconcileSweep::for_auth(AuthProviderKind::Oidc, MembershipPolicy::Disabled),
+            ReconcileSweep::Skip
+        );
+        // No control plane writes membership in these modes, whatever the
+        // policy says: a key acts as the tenant's operator.
+        for provider in [AuthProviderKind::Local, AuthProviderKind::TrustProxy] {
+            for policy in [
+                MembershipPolicy::Disabled,
+                MembershipPolicy::Logging,
+                MembershipPolicy::Required,
+            ] {
+                assert_eq!(
+                    ReconcileSweep::for_auth(provider, policy),
+                    ReconcileSweep::Skip
+                );
+            }
+        }
     }
 }

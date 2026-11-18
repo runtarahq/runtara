@@ -42,6 +42,36 @@ services:
       # covers the active subdir. See docker-library/postgres#1259.
       - postgres_data:/var/lib/postgresql
 
+  # Makes the role the server connects as, and gives it the two databases.
+  # The server is not the database's administrator: `runtara_server` is a
+  # plain role, neither a superuser nor BYPASSRLS, so row-level security
+  # binds it, and RUNTARA_REQUIRE_ROW_SECURITY below has the server refuse to
+  # start as anything else. Runs on every `up` and changes nothing it has
+  # already done, so a volume made before this role existed is brought over.
+  db-setup:
+    image: pgvector/pgvector:pg18
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: runtara
+      PGPASSWORD: runtara
+    configs:
+      - source: db-setup-role
+        target: /db-setup-role.sql
+      - source: db-setup-database
+        target: /db-setup-database.sql
+    entrypoint:
+      - sh
+      - -ec
+      - |
+        psql -v ON_ERROR_STOP=1 -q -d postgres -f /db-setup-role.sql
+        for database in runtara_server runtara; do
+          psql -v ON_ERROR_STOP=1 -q -d "$$database" -f /db-setup-database.sql
+        done
+    restart: "no"
+
   valkey:
     image: valkey/valkey:8-alpine
     healthcheck:
@@ -62,6 +92,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-setup:
+        condition: service_completed_successfully
       valkey:
         condition: service_healthy
     environment:
@@ -83,8 +115,11 @@ services:
       RUNTARA_UI_PUBLIC_URL: "http://localhost:${RUNTARA_PORT:-3000}/"
       # No OTLP collector in this stack — silence the exporter.
       OTEL_SDK_DISABLED: "true"
-      RUNTARA_SERVER_DATABASE_URL: postgres://runtara:runtara@postgres/runtara_server
-      RUNTARA_DATABASE_URL: postgres://runtara:runtara@postgres/runtara
+      # As `runtara_server`, the plain role `db-setup` makes: not `runtara`,
+      # this Postgres's administrator, which row-level security does not bind.
+      RUNTARA_SERVER_DATABASE_URL: postgres://runtara_server:runtara_server@postgres/runtara_server
+      RUNTARA_DATABASE_URL: postgres://runtara_server:runtara_server@postgres/runtara
+      RUNTARA_REQUIRE_ROW_SECURITY: "true"
       # The evaluation tenant's object model database is the `runtara_objects`
       # database of this stack's own Postgres. The entrypoint below enters it
       # once (`runtara-server object-model set`), and it is stored sealed. It
@@ -237,6 +272,71 @@ configs:
       CREATE EXTENSION IF NOT EXISTS "fuzzystrmatch";
       ALTER SCHEMA public OWNER TO runtara_objects;
       REVOKE ALL ON SCHEMA public FROM PUBLIC;
+
+  db-setup-role:
+    content: |
+      DO $$$$
+      BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'runtara_server') THEN
+              CREATE ROLE runtara_server LOGIN PASSWORD 'runtara_server'
+                  NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          END IF;
+      END
+      $$$$;
+      ALTER DATABASE runtara_server OWNER TO runtara_server;
+      ALTER DATABASE runtara OWNER TO runtara_server;
+
+  # Run in each of the server's two databases. A plain role cannot make an
+  # extension, so the ones the migrations ask for are made here. What an
+  # earlier start made as the administrator becomes the server's: tables,
+  # views and sequences, then the functions and types that are not an
+  # extension's.
+  db-setup-database:
+    content: |
+      CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+      CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+      CREATE EXTENSION IF NOT EXISTS "vector";
+      CREATE EXTENSION IF NOT EXISTS "fuzzystrmatch";
+
+      DO $$$$
+      DECLARE
+          statement TEXT;
+      BEGIN
+          FOR statement IN
+              SELECT format('ALTER TABLE %s OWNER TO runtara_server', c.oid::regclass)
+                FROM pg_class c
+               WHERE c.relnamespace = 'public'::regnamespace
+                 AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+                 AND c.relowner <> 'runtara_server'::regrole
+          LOOP
+              EXECUTE statement;
+          END LOOP;
+          FOR statement IN
+              SELECT format('ALTER SEQUENCE %s OWNER TO runtara_server', c.oid::regclass)
+                FROM pg_class c
+               WHERE c.relnamespace = 'public'::regnamespace
+                 AND c.relkind = 'S'
+                 AND c.relowner <> 'runtara_server'::regrole
+              UNION ALL
+              SELECT format('ALTER ROUTINE %s OWNER TO runtara_server', p.oid::regprocedure)
+                FROM pg_proc p
+               WHERE p.pronamespace = 'public'::regnamespace
+                 AND p.proowner <> 'runtara_server'::regrole
+                 AND NOT EXISTS (SELECT 1 FROM pg_depend d
+                                  WHERE d.objid = p.oid AND d.deptype = 'e')
+              UNION ALL
+              SELECT format('ALTER TYPE %s OWNER TO runtara_server', t.oid::regtype)
+                FROM pg_type t
+               WHERE t.typnamespace = 'public'::regnamespace
+                 AND t.typowner <> 'runtara_server'::regrole
+                 AND t.typtype IN ('e', 'd', 'r')
+                 AND NOT EXISTS (SELECT 1 FROM pg_depend d
+                                  WHERE d.objid = t.oid AND d.deptype = 'e')
+          LOOP
+              EXECUTE statement;
+          END LOOP;
+      END
+      $$$$;
 
 volumes:
   postgres_data:

@@ -14,6 +14,7 @@ categories = ["asynchronous", "database"]
 db-integration-tests = ["runtara-core/test-support"]
 
 [dependencies]
+runtara-tenant-scope = { path = "../runtara-tenant-scope" }
 runtara-core = { path = "../runtara-core" }
 runtara-dsl = { path = "../runtara-dsl" }
 

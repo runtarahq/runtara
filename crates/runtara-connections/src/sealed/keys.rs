@@ -101,12 +101,10 @@ impl PgKeySource {
 impl KeySource for PgKeySource {
     async fn wrapped_keys(&self, keyset: &KeysetId) -> Result<Vec<WrappedKey>, KeyError> {
         if *keyset == platform_keyset() {
-            // The platform's keys are no tenant's rows, so a tenant's scope
-            // hides them. A task of its own leaves the scope.
-            let (pool, keyset) = (self.pool.clone(), keyset.clone());
-            return tokio::spawn(async move { read_keys(&pool, &keyset).await })
-                .await
-                .map_err(|_| KeyError::Unavailable)?;
+            let mut rows = platform_rows(&self.pool).await?;
+            let keys = read_keys(&mut *rows, keyset).await?;
+            rows.commit().await.map_err(unavailable)?;
+            return Ok(keys);
         }
         read_keys(&self.pool, keyset).await
     }
@@ -116,10 +114,9 @@ impl KeySource for PgKeySource {
             .tenant_of(&key.keyset)
             .ok_or(KeyError::Invalid("a key for a keyset with no known tenant"))?;
         if key.keyset == platform_keyset() {
-            let (pool, key) = (self.pool.clone(), key.clone());
-            return tokio::spawn(async move { store_key(&pool, &key, &tenant).await })
-                .await
-                .map_err(|_| KeyError::Unavailable)?;
+            let mut rows = platform_rows(&self.pool).await?;
+            store_key(&mut *rows, key, &tenant).await?;
+            return rows.commit().await.map_err(unavailable);
         }
         store_key(&self.pool, key, &tenant).await
     }
@@ -137,7 +134,35 @@ impl KeySource for PgKeySource {
     }
 }
 
-async fn read_keys(pool: &PgPool, keyset: &KeysetId) -> Result<Vec<WrappedKey>, KeyError> {
+fn unavailable(error: sqlx::Error) -> KeyError {
+    tracing::error!(%error, "could not reach the platform's seal keys");
+    KeyError::Unavailable
+}
+
+/// A transaction that reaches the platform's own rows and no tenant's. The
+/// platform's keys are no tenant's rows, so a tenant's scope hides them, and
+/// a request for a tenant's connection on a platform OAuth app needs them
+/// from inside one. The transaction names the platform as its tenant, for as
+/// long as it lasts.
+async fn platform_rows(
+    pool: &PgPool,
+) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, KeyError> {
+    let mut rows = pool.begin().await.map_err(unavailable)?;
+    sqlx::query(
+        "SELECT set_config('runtara.tenant_id', $1, true), \
+                set_config('runtara.all_tenants', 'off', true)",
+    )
+    .bind(PLATFORM_TENANT)
+    .execute(&mut *rows)
+    .await
+    .map_err(unavailable)?;
+    Ok(rows)
+}
+
+async fn read_keys(
+    pool: impl sqlx::PgExecutor<'_>,
+    keyset: &KeysetId,
+) -> Result<Vec<WrappedKey>, KeyError> {
     let rows = sqlx::query_as::<_, (String, String, i64, String, String)>(
         r#"
         SELECT kid, public_key, created, wrap_id, wrapped
@@ -169,7 +194,11 @@ async fn read_keys(pool: &PgPool, keyset: &KeysetId) -> Result<Vec<WrappedKey>, 
 }
 
 /// Never replaces a key: a second key with the same id is refused.
-async fn store_key(pool: &PgPool, key: &WrappedKey, tenant: &str) -> Result<(), KeyError> {
+async fn store_key(
+    pool: impl sqlx::PgExecutor<'_>,
+    key: &WrappedKey,
+    tenant: &str,
+) -> Result<(), KeyError> {
     let created = i64::try_from(key.created).map_err(|_| KeyError::Invalid("creation time"))?;
     let stored = sqlx::query(
         r#"

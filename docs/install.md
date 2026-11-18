@@ -183,9 +183,56 @@ in those modes on a non-loopback address**, because authentication is happening
 somewhere other than in-process. See
 [deployment/auth-modes.md](deployment/auth-modes.md).
 
-### Enum indexes under row level security
+### Row level security
 
 The server and runtime databases keep tenants apart with row level security.
+Every table that holds a tenant's rows is policed, for its owner too, and a
+connection reaches rows in one of two ways:
+
+- it names a tenant (`runtara.tenant_id`), and reaches that tenant's rows;
+- it asks for every tenant (`runtara.all_tenants = on`), and reaches them all.
+
+The server sets one or the other on each connection as it takes it from its
+pool: a request works as its caller's tenant, and the server's own work
+across tenants (starting, its workers, finding which tenant a webhook is for)
+asks for every tenant. A connection that names neither is refused with
+`runtara: no tenant scope`, for reads and writes alike, so a path that forgot
+whose rows it is for fails where it runs instead of reading across tenants.
+
+Row level security binds neither a superuser nor a `BYPASSRLS` role. Where
+one server serves several tenants, connect as a plain role that owns the
+databases, and set `RUNTARA_REQUIRE_ROW_SECURITY=true` to have the server
+refuse to start otherwise.
+
+| | |
+|---|---|
+| `RUNTARA_REQUIRE_ROW_SECURITY` | `true` refuses to start as a superuser or `BYPASSRLS` role |
+| `RUNTARA_ROW_SECURITY_UNSCOPED` | `refuse` (default), or `system`: work in no scope is given every tenant's rows, with a warning that says where it ran. For finding such a path in a deployment before refusing it; not for keeping |
+
+**Who may ask for every tenant.** Any role, until a role named
+`runtara_system` exists in the cluster. From then on only its members:
+another role that asks is refused with `may not work across tenants`, and
+still reaches a tenant it names. Create the role and grant it to the server's
+role to hold every other role that can reach these databases to one tenant at
+a time.
+
+**From `psql`.** A session of a plain role says what it is for before it
+reads a policed table:
+
+```sql
+SET runtara.all_tenants = on;          -- every tenant's rows
+SET runtara.tenant_id = 'acme';        -- or one tenant's
+```
+
+**Upgrading.** The migration that brings this is not compatible with an
+older release still running on the same databases as a plain role: the older
+release names no scope for its own work, which is now refused. Its requests
+keep working, each in its tenant; its workers (waking runs, dispatching
+launches, clean-up) fail until it is stopped. Stop the older release's
+workers before the new one migrates, or keep the overlap short.
+
+### Enum indexes under row level security
+
 Under a policy, Postgres uses an index for a condition only when its operator
 is leakproof, and enum equality is not by default: every condition on an enum
 column (an instance's status, for one) then scans its whole table, and gets

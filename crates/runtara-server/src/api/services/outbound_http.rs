@@ -1064,7 +1064,7 @@ fn record_credential_request_async(
     let connection_id = connection_id.to_string();
     let tenant_id = tenant_id.to_string();
 
-    tokio::spawn(async move {
+    runtara_store_postgres::tenant_scope::spawn(async move {
         if let Err(e) = facade
             .record_credential_request(&connection_id, &tenant_id, &event_type, metadata)
             .await
