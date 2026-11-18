@@ -270,6 +270,16 @@ sleep 2
 [ "$(events "${ECHO}" c1 | jq -r '[.[] | select(.kind == "run_started")] | length')" = "2" ] || { print_error "A message sent twice started a run"; exit 1; }
 print_success "The same message id again is the same message ✓"
 
+# A first message that says nothing starts a run all the same: how a client
+# lets the workflow speak first.
+read -r STATUS BODY <<< "$(api_status POST "$(conversation "${ECHO}" opened)/messages" '{"id": "opening", "payload": {}}')"
+[ "${STATUS}" = "200" ] && [ "$(echo "${BODY}" | jq -r '.data.state')" = "started" ] \
+    || { print_error "A message with an empty payload did not start a run: ${STATUS} ${BODY}"; exit 1; }
+wait_events "${ECHO}" opened "$(ended 1)"
+[ "$(events "${ECHO}" opened | jq -r '[.[] | select(.kind == "run_ended")][0].body.status')" = "completed" ] \
+    || { print_error "The run a silent message started did not complete"; exit 1; }
+print_success "A first message with nothing to say starts the run ✓"
+
 # ---------------------------------------------------------------------------
 print_step "2. A run replies from its middle, waits, and is answered by the next message..."
 read -r STATUS BODY <<< "$(api_status PUT "$(conversation "${TALKER}" "chat:42")" "$(jq -nc --arg r "${ROUTE}" '{replyWorkflowId: $r}')")"

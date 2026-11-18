@@ -791,17 +791,23 @@ impl Conversations {
         // after a failure here starts the same run.
         let instance = Uuid::new_v5(&at.row.id, format!("message:{message_id}").as_bytes());
         let said = json!({"text": message.text, "sender": message.sender});
-        let inputs = json!({
-            "data": {
-                "message": message.text,
-                "payload": message.payload,
-                "messageId": message_id,
-                "sender": message.sender,
-                "attachments": message.attachments,
-                "conversation": at.describe(),
-            },
-            "variables": {},
-        });
+        // What a message does not carry is left out, not sent as null: a
+        // workflow's input schema that says `message` is a string would
+        // refuse a null one.
+        let mut data = serde_json::Map::new();
+        data.insert("messageId".into(), json!(message_id));
+        data.insert("conversation".into(), at.describe());
+        data.insert("attachments".into(), json!(message.attachments));
+        for (name, value) in [
+            ("message", json!(message.text)),
+            ("payload", json!(message.payload)),
+            ("sender", json!(message.sender)),
+        ] {
+            if !value.is_null() {
+                data.insert(name.into(), value);
+            }
+        }
+        let inputs = json!({"data": data, "variables": {}});
         match self
             .runs
             .start(&at.row.tenant_id, &at.row.workflow_id, instance, inputs)
