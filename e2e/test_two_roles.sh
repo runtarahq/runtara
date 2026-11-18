@@ -434,10 +434,16 @@ echo "${SAID}" | grep -q "was given RUNTARA_ENGINE_HEALTH_LISTEN" \
 SAID=$(refused_start engine_env env -u RUNTARA_SEAL_MODE -u RUNTARA_SEAL_SOCKET "${RUNTARA_SERVER_BIN}")
 echo "${SAID}" | grep -q "RUNTARA_ROLE=engine needs a seal of its own" \
     || { print_error "an engine with seal in itself did not refuse to start: ${SAID}"; exit 1; }
-SAID=$(refused_start engine_env env -u RUNTARA_COMPILER_WASM "${RUNTARA_SERVER_BIN}")
+# With executors, workflows are compiled on one, and nowhere else instead: an
+# engine that has not the compiler to place there does not start.
+SAID=$(refused_start engine_env RUNTARA_COMPILE_GUEST_WASM="${WORK_DIR}/not-a-compiler.wasm" "${RUNTARA_SERVER_BIN}")
+echo "${SAID}" | grep -q "RUNTARA_RUNNER=executor needs the compiler that is placed on an executor" \
+    || { print_error "an engine with executors and no compiler to place did not refuse to start: ${SAID}"; exit 1; }
+# Without executors it compiles in a sandbox of the compiler's own, or not at all.
+SAID=$(refused_start engine_env env -u RUNTARA_RUNNER -u RUNTARA_COMPILER_WASM "${RUNTARA_SERVER_BIN}")
 echo "${SAID}" | grep -q "RUNTARA_ROLE=engine needs RUNTARA_COMPILER_WASM" \
     || { print_error "an engine with no sandbox to compile in did not refuse to start: ${SAID}"; exit 1; }
-SAID=$(refused_start engine_env RUNTARA_COMPILER_WASM="${WORK_DIR}/not-a-compiler.wasm" "${RUNTARA_SERVER_BIN}")
+SAID=$(refused_start engine_env env -u RUNTARA_RUNNER RUNTARA_COMPILER_WASM="${WORK_DIR}/not-a-compiler.wasm" "${RUNTARA_SERVER_BIN}")
 echo "${SAID}" | grep -q "names a compiler that could not be loaded" \
     || { print_error "an engine whose compiler is not there did not refuse to start: ${SAID}"; exit 1; }
 SAID=$(refused_start engine_env env -u RUNTARA_ENGINE_LISTEN "${RUNTARA_SERVER_BIN}")
@@ -458,8 +464,13 @@ for name in "${API_ENV[@]}"; do
             print_error "the API is given ${name%%=*}"; exit 1 ;;
     esac
 done
-grep -q "Workflows are compiled in a sandbox" "${ENGINE_LOG}" \
-    || { print_error "the engine does not say it compiles in a sandbox"; exit 1; }
+# The engine places its compiles on an executor, and does not load the
+# compiler itself, though it is given one to compile in.
+grep -q "Workflows are compiled on an executor" "${ENGINE_LOG}" \
+    || { print_error "the engine does not say it compiles on an executor"; exit 1; }
+if grep -q "Workflows are compiled in a sandbox" "${ENGINE_LOG}"; then
+    print_error "an engine with executors loaded the compiler into its own process"; exit 1
+fi
 grep -q "Engine at https://127.0.0.1:${ENGINE_PORT} answers" "${API_LOG}" \
     || { print_error "the API does not say the engine answers"; exit 1; }
 if grep -Eq "Embedded runtara|Component dispatcher loaded|Connection secrets are held by seal|Execution engine initialized" "${API_LOG}"; then

@@ -7,6 +7,8 @@
 # test starts the server alone and then, against real `runtara-executor`
 # processes:
 #
+#   0. compiling       with no executor a workflow is not compiled; with one,
+#                      it is compiled there, by a compiler placed as a guest
 #   1. no executor     a run is not failed; it waits to be offered again
 #   2. one joins       the waiting run completes
 #   3. a second joins  runs go to both, and each fetched the workflow itself
@@ -251,9 +253,30 @@ RESP=$(api_post "/workflows/${WORKFLOW}/update" "{\"executionGraph\": ${GRAPH}}"
 [ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "update failed: ${RESP}"; exit 1; }
 VERSION=$(curl -sS "${API}/workflows/${WORKFLOW}/versions" \
     | jq -r '[.data[]?.version // .data[]?.versionNumber // empty] | max // 1')
+
+# --- 0 ------------------------------------------------------------------
+# A workflow is compiled where workflows run: on an executor, by a compiler
+# placed there as a guest (docs/compiler-on-an-executor.md). The server does
+# not compile it itself instead.
+print_step "0. With no executor, a workflow is not compiled, in the server or anywhere..."
+grep -q "Workflows are compiled on an executor" "${SERVER_LOG}" \
+    || { print_error "the server does not say it compiles on an executor"; exit 1; }
+RESP=$(api_post "/workflows/${WORKFLOW}/versions/${VERSION}/compile" '{}' 900)
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "false" ] \
+    && echo "${RESP}" | grep -q "no executor is here" \
+    || { print_error "with no executor a workflow was compiled, or failed otherwise: ${RESP}"; exit 1; }
+start_executor 0
+wait_for_log "${SERVER_LOG}" "an executor registered" 20
 RESP=$(api_post "/workflows/${WORKFLOW}/versions/${VERSION}/compile" '{}' 900)
 [ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "compile failed: ${RESP}"; exit 1; }
 api_post "/workflows/${WORKFLOW}/versions/${VERSION}/set-current" '{}' >/dev/null
+# The compiler is kept by the executor under the platform's name, once.
+ls "${WORK_DIR}/executor-state-0/compiled/runtara-compiler/"*.cwasm >/dev/null 2>&1 \
+    || { print_error "the executor does not hold the compiler it ran"; exit 1; }
+kill "${EXECUTOR_PIDS[0]}"; wait "${EXECUTOR_PIDS[0]}" 2>/dev/null || true
+EXECUTOR_PIDS[0]=""
+wait_for_log "${SERVER_LOG}" "an executor left" 15
+print_success "the workflow was compiled on an executor, and not at all without one"
 
 # --- 1 and 2 ------------------------------------------------------------
 print_step "1. With no executor, a run is not failed..."
@@ -266,14 +289,14 @@ echo "  the run is ${STATUS}"
 
 print_step "2. An executor joins, and the waiting run completes..."
 start_executor 0
-wait_for_log "${SERVER_LOG}" "an executor registered" 20
+wait_for_log "${SERVER_LOG}" "an executor registered" 20 2
 all_complete 180 "${EARLY}"
 print_success "the run waited for an executor and completed on it"
 
 # --- 3 ------------------------------------------------------------------
 print_step "3. A second executor joins, and runs go to both..."
 start_executor 1
-wait_for_log "${SERVER_LOG}" "an executor registered" 20 2
+wait_for_log "${SERVER_LOG}" "an executor registered" 20 3
 run_many 12
 for index in 0 1; do
     [ "$(placed_by "${index}")" -gt 0 ] \
@@ -314,7 +337,7 @@ print_success "the restarted server placed runs with an executor it was never to
 print_step "7. An executor that stops says so..."
 kill "${EXECUTOR_PIDS[0]}"; wait "${EXECUTOR_PIDS[0]}" 2>/dev/null || true
 EXECUTOR_PIDS[0]=""
-wait_for_log "${SERVER_LOG}" "an executor left" 15
+wait_for_log "${SERVER_LOG}" "an executor left" 15 2
 print_success "the server forgot the executor as it stopped"
 
 echo
