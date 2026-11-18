@@ -387,6 +387,27 @@ mod tests {
             format!("user runtara-api on >runtara_api {rules}"),
             "docker-compose.roles.yml and scripts/roles/api-valkey-user.acl differ"
         );
+
+        // Intake's, the same way.
+        assert_eq!(
+            content_of("intake-database-role").trim_end(),
+            read("scripts/roles/intake-database-role.sql").trim_end(),
+            "docker-compose.roles.yml and scripts/roles/intake-database-role.sql differ"
+        );
+        let rules = read("scripts/roles/intake-valkey-user.acl")
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let intake = users
+            .lines()
+            .find(|line| line.starts_with("user runtara-intake "))
+            .expect("intake's Valkey user");
+        assert_eq!(
+            intake,
+            format!("user runtara-intake on >runtara_intake {rules}"),
+            "docker-compose.roles.yml and scripts/roles/intake-valkey-user.acl differ"
+        );
     }
     use super::*;
     use std::sync::Arc;

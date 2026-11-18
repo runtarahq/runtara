@@ -8,7 +8,11 @@
 # takes the requests (RUNTARA_ROLE=api). The API holds nothing of the
 # engine's: no runtime database, no key, no way to seal. It asks the engine
 # over mutual TLS, and the engine verifies for itself who each call is for
-# and runs only what it approved. See docs/roles.md.
+# and runs only what it approved. An `intake` service (RUNTARA_ROLE=intake)
+# receives what anyone may send, a trigger's webhooks and a provider's OAuth
+# redirects, which the engine does not: it holds no run state, no connection
+# and no key, and asks the engine the two things it needs of it. See
+# docs/roles.md.
 #
 # The engine starts only with a seal of its own, so this overlay needs
 # docker-compose.seal.yml before it. It combines with
@@ -16,18 +20,25 @@
 #   docker compose -f docker-compose.yml -f docker-compose.seal.yml \
 #     -f docker-compose.executor.yml -f docker-compose.roles.yml up
 #
-# What each of the two is given:
+# What each of the three is given:
 #   - a certificate each, from the CA `executor-pki` makes (the one the
 #     executors use). The CA's key is kept nowhere; to make new certificates,
-#     remove the three volumes (<project>_executor_pki_server,
-#     <project>_executor_pki_executor, <project>_roles_pki_api) and start
-#     again.
+#     remove the four volumes (<project>_executor_pki_server,
+#     <project>_executor_pki_executor, <project>_roles_pki_api,
+#     <project>_roles_pki_intake) and start again.
 #   - a database role each. The engine's (`runtara_server`) owns the
 #     databases. The API's (`runtara_api`) is granted its own records in the
 #     server database and nothing else (`api-role`, from
 #     scripts/roles/api-database-role.sql), and cannot work across tenants.
+#     Intake's (`runtara_intake`) is granted the triggers to read and the
+#     tables a queued run is written to (`intake-role`, from
+#     scripts/roles/intake-database-role.sql).
 #   - a Valkey user each. The API's cannot write what starts work
-#     (scripts/roles/api-valkey-user.acl).
+#     (scripts/roles/api-valkey-user.acl); intake's counts admissions and
+#     writes product events (scripts/roles/intake-valkey-user.acl).
+#   - intake, a seal of its own (`seal-intake`) over the same keys, which
+#     knows it as a caller that administers nothing. It checks a webhook's
+#     signature with it.
 #
 # The passwords here are this trial stack's, like the database's in
 # docker-compose.yml. A stack that has already run without this overlay is
@@ -50,18 +61,20 @@ services:
       - sh
       - -c
       - |
-        if [ ! -s /pki/server/tls.key ] || [ ! -s /pki/executor/tls.key ] || [ ! -s /pki/api/tls.key ]; then
+        if [ ! -s /pki/server/tls.key ] || [ ! -s /pki/executor/tls.key ] || [ ! -s /pki/api/tls.key ] \
+           || [ ! -s /pki/intake/tls.key ]; then
           runtara-executor init-pki --server-dir /pki/server --executor-dir /pki/executor \
-            --api-dir /pki/api --replace || exit 1
+            --api-dir /pki/api --intake-dir /pki/intake --replace || exit 1
         fi
-        chown -R 10001:0 /pki/server /pki/executor /pki/api
+        chown -R 10001:0 /pki/server /pki/executor /pki/api /pki/intake
     volumes:
       - executor_pki_server:/pki/server
       - executor_pki_executor:/pki/executor
       - roles_pki_api:/pki/api
+      - roles_pki_intake:/pki/intake
 
-  # Valkey with two users: the engine's, which keeps every key, and the
-  # API's.
+  # Valkey with three users: the engine's, which keeps every key, the
+  # API's and intake's.
   valkey:
     command: ["valkey-server", "--aclfile", "/etc/valkey/users.acl"]
     configs:
@@ -134,6 +147,117 @@ services:
           -f /api-database-role.sql
     restart: "no"
 
+  # One-shot: intake's database role, and what it is granted, as `api-role`
+  # does the API's.
+  intake-role:
+    image: pgvector/pgvector:pg18
+    depends_on:
+      api-role:
+        condition: service_completed_successfully
+    environment:
+      PGHOST: postgres
+      PGUSER: runtara
+      PGPASSWORD: runtara
+    configs:
+      - source: intake-database-role
+        target: /intake-database-role.sql
+    entrypoint:
+      - sh
+      - -ec
+      - |
+        psql -v ON_ERROR_STOP=1 -q -d postgres <<'SQL'
+        DO $$$$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'runtara_intake') THEN
+                CREATE ROLE runtara_intake LOGIN PASSWORD 'runtara_intake'
+                    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+            END IF;
+        END
+        $$$$;
+        GRANT CONNECT ON DATABASE runtara_server TO runtara_intake;
+        SQL
+        psql -q -d runtara_server -v intake_role=runtara_intake -f /intake-database-role.sql
+    restart: "no"
+
+  # One-shot: the directory of intake's seal socket, given to seal's user.
+  seal-intake-init:
+    image: busybox:1.36
+    restart: "no"
+    user: "0:0"
+    entrypoint:
+      - sh
+      - -ec
+      - |
+        chown 65532:65532 /run/seal
+        chmod 750 /run/seal
+    volumes:
+      - seal_intake_run:/run/seal
+
+  # Intake's seal: the keys `seal` holds, for a caller that administers
+  # nothing. Intake starts only with a seal of its own.
+  seal-intake:
+    image: ghcr.io/runtarahq/seal:${RUNTARA_SEAL_TAG:-main}
+    pull_policy: always
+    depends_on:
+      seal-init:
+        condition: service_completed_successfully
+      seal-intake-init:
+        condition: service_completed_successfully
+    configs:
+      - source: seal-intake-config
+        target: /etc/seal/seal.toml
+    volumes:
+      - seal_data:/var/lib/seal
+      - seal_intake_run:/run/seal
+
+  # Intake: what receives what anyone may send, a trigger's webhooks and a
+  # provider's OAuth redirects, handed to it by the API. It refuses to start
+  # with the runtime database or a key. It queues a webhook's run for the
+  # engine, and asks the engine to run and wait, or to finish an OAuth flow.
+  intake:
+    image: ghcr.io/runtarahq/runtara:${RUNTARA_IMAGE_TAG:-latest}
+    pull_policy: always
+    depends_on:
+      runtara:
+        condition: service_healthy
+      intake-role:
+        condition: service_completed_successfully
+      seal-intake:
+        condition: service_started
+      valkey:
+        condition: service_healthy
+    environment:
+      RUNTARA_ROLE: intake
+      RUNTARA_INTAKE_LISTEN: "0.0.0.0:7447"
+      RUNTARA_INTAKE_HEALTH_LISTEN: "127.0.0.1:7448"
+      RUNTARA_INTAKE_TLS_DIR: /pki
+      RUNTARA_ENGINE_URL: "https://runtara:7445"
+      RUNTARA_SERVER_DATABASE_URL: postgres://runtara_intake:runtara_intake@postgres/runtara_server
+      RUNTARA_REQUIRE_ROW_SECURITY: "true"
+      SKIP_MIGRATIONS: "true"
+      RUNTARA_SEAL_MODE: unix
+      RUNTARA_SEAL_SOCKET: /run/seal/seal.sock
+      # The same sign-in, tenant and Valkey as the engine: they must agree.
+      AUTH_PROVIDER: local
+      TENANT_ID: evaluation
+      VALKEY_HOST: valkey
+      VALKEY_PORT: "6379"
+      VALKEY_USER: runtara-intake
+      VALKEY_PASSWORD: runtara_intake
+      OTEL_SDK_DISABLED: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:7448/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 40s
+      retries: 5
+    # seal's group, for its socket.
+    group_add:
+      - "65532"
+    volumes:
+      - roles_pki_intake:/pki:ro
+      - seal_intake_run:/run/seal
+
   # The API: what takes requests from outside. Its environment is all it is
   # given; it refuses to start with the runtime database, a key or the way
   # to seal.
@@ -145,11 +269,15 @@ services:
         condition: service_healthy
       api-role:
         condition: service_completed_successfully
+      intake:
+        condition: service_healthy
       valkey:
         condition: service_healthy
     environment:
       RUNTARA_ROLE: api
       RUNTARA_ENGINE_URL: "https://runtara:7445"
+      # What anyone may send goes to intake. The engine receives none of it.
+      RUNTARA_INTAKE_URL: "https://intake:7447"
       RUNTARA_ENGINE_TLS_DIR: /pki
       # As `runtara_api`, which owns nothing: the engine runs the migrations.
       RUNTARA_SERVER_DATABASE_URL: postgres://runtara_api:runtara_api@postgres/runtara_server
@@ -190,11 +318,13 @@ services:
 
 configs:
   # The engine's user (`default`) keeps every key. The API's rules are
-  # scripts/roles/api-valkey-user.acl, on one line.
+  # scripts/roles/api-valkey-user.acl, on one line, and intake's
+  # scripts/roles/intake-valkey-user.acl.
   valkey-users:
     content: |
       user default on >runtara_engine ~* &* +@all
       user runtara-api on >runtara_api resetkeys resetchannels -@all %R~*:member:* %R~member:* ~*:token:revoked:* ~token:revoked:* %R~runtara:tenant_status:* ~*:quota:api ~*:quota:compile ~runtara:mcp:sessions:* ~runtara:product_events:* +@all -@admin -@dangerous +info (%RW~*:control resetchannels -@all +xgroup +xreadgroup +xack +xautoclaim +xpending +xinfo +xlen +ping)
+      user runtara-intake on >runtara_intake resetkeys resetchannels -@all ~*:admission:reserved %R~runtara:tenant_status:* ~runtara:product_events:* +@all -@admin -@dangerous +info
 
   # scripts/roles/api-database-role.sql, as it is.
   api-database-role:
@@ -261,7 +391,88 @@ configs:
       -- conversation_events. Nothing is granted in the runtime database,
       -- which the API is given no address of.
 
+  # scripts/roles/intake-database-role.sql, as it is.
+  intake-database-role:
+    content: |
+      -- What the intake role's database role may do in the server database, for a
+      -- server whose intake is a process of its own (RUNTARA_ROLE=intake,
+      -- docs/roles.md, docs/splitting-the-engine.md).
+      --
+      -- Intake receives what anyone may send: it looks up the trigger a webhook
+      -- names, and queues the run it asks for. It is given the triggers to read,
+      -- the tables a queued run is written to, and nothing else: no connection,
+      -- no workflow's definition, no key, and it may not work across tenants.
+      --
+      -- Run as an administrator, on the server database, once the engine has run
+      -- the migrations, and again after an upgrade that adds a table:
+      --
+      --   psql -d <server database> -v intake_role=<role> \
+      --        -f scripts/roles/intake-database-role.sql
+      --
+      -- The role exists already, as a plain login role (NOSUPERUSER NOBYPASSRLS).
+      -- Intake starts with SKIP_MIGRATIONS=true. `runtara_system` is made by
+      -- api-database-role.sql; intake is not a member of it.
+
+      \set ON_ERROR_STOP on
+
+      DO $$$$
+      BEGIN
+          IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'runtara_system') THEN
+              CREATE ROLE runtara_system NOLOGIN;
+          END IF;
+      END
+      $$$$;
+      REVOKE runtara_system FROM :"intake_role";
+
+      REVOKE ALL ON ALL TABLES IN SCHEMA public FROM :"intake_role";
+      REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM :"intake_role";
+      GRANT USAGE ON SCHEMA public TO :"intake_role";
+
+      -- The trigger a webhook names, with what checks it.
+      GRANT SELECT ON invocation_trigger TO :"intake_role";
+
+      -- Whose a workflow is, for the synchronous trigger, which names one.
+      GRANT SELECT (tenant_id, workflow_id) ON workflows TO :"intake_role";
+
+      -- A queued run: the request, its place in the outbox, and its admission.
+      GRANT SELECT, INSERT ON execution_requests TO :"intake_role";
+      GRANT SELECT, INSERT ON execution_outbox TO :"intake_role";
+      GRANT SELECT, INSERT ON execution_admission_reservations TO :"intake_role";
+      -- The admission count, where it is kept here and not in Valkey.
+      GRANT SELECT, INSERT, UPDATE ON execution_admission_tenants TO :"intake_role";
+
+      GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO :"intake_role";
+
+      -- Nothing is granted on: workflow_definitions, workflow_compilations,
+      -- connection_data_entity, connection_defaults, oauth_state,
+      -- platform_oauth_app, seal_wrapped_key, api_keys, audit_events,
+      -- conversations and what was said in them, or anything in the runtime
+      -- database.
+
+  # Intake's seal: `seal`'s keys, and one caller, which may make or destroy
+  # no keyset.
+  seal-intake-config:
+    content: |
+      [listen]
+      unix = "/run/seal/seal.sock"
+
+      [[callers]]
+      name = "runtara-intake"
+      unix_uid = 10001
+      keysets = ["*"]
+      admin = false
+      destroy_keysets = false
+
+      [keys]
+      source = { dir = "/var/lib/seal/keys" }
+      wrap = { file = "/var/lib/seal/kek" }
+
+      [audit]
+      sink = "stdout"
+
 volumes:
   executor_pki_server:
   executor_pki_executor:
   roles_pki_api:
+  roles_pki_intake:
+  seal_intake_run:
