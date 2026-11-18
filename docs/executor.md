@@ -253,6 +253,10 @@ Saving a workflow validates it, and the validator is placed the same way
 (`runtara-validate-placed.wasm`): it is given the closure and the agent
 catalog, and answers its report.
 
+A test of one agent's capability goes there too: the call is compiled into
+a workflow of one step and run as a guest with no run behind it, which
+leaves no instance.
+
 What follows from it:
 
 - **No executor, no save.** A workflow that could not be validated is not

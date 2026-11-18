@@ -2497,6 +2497,12 @@ async fn start_as_platform(
             }
         }
     }
+    // And where a test of one agent's capability is run, which runs an
+    // agent's code with input its caller wrote: with executors, on one, as a
+    // guest with no run behind it.
+    if runs_on_executors {
+        crate::agent_test_placed::install();
+    }
     // Without executors: in a sandbox of the compiler's own in this process,
     // when one is named. An engine that is a process of its own compiles
     // nowhere else: a tenant's graph is not parsed where both databases and
@@ -3673,6 +3679,7 @@ async fn start_as_platform(
             Some(
                 AgentTestingService::new(true)
                     .with_connections(connections_facade.clone())
+                    .with_agent_catalog(agent_catalog.clone())
                     .with_component_dispatcher(dispatcher.clone()),
             )
         } else {

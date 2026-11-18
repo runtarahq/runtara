@@ -102,6 +102,9 @@ pub struct TestResult {
 #[serde(rename_all = "lowercase")]
 pub enum ActiveEngine {
     Components,
+    /// On an executor, as a guest with no run behind it: where a test runs
+    /// when executors are the runner.
+    Executor,
 }
 
 /// Agent testing service. Routes every call through the embedded wasmtime
@@ -112,6 +115,9 @@ pub struct AgentTestingService {
     rate_limiter: RateLimiter,
     component_dispatcher: Option<Arc<ComponentDispatcherService>>,
     connections: Option<Arc<runtara_connections::ConnectionsFacade>>,
+    /// The agents there are, for a test that is placed on an executor: what
+    /// its call is compiled against.
+    agent_catalog: Option<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
 }
 
 impl AgentTestingService {
@@ -122,7 +128,17 @@ impl AgentTestingService {
             rate_limiter: RateLimiter::new(),
             component_dispatcher: None,
             connections: None,
+            agent_catalog: None,
         }
+    }
+
+    /// With the agents there are.
+    pub fn with_agent_catalog(
+        mut self,
+        catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
+    ) -> Self {
+        self.agent_catalog = Some(catalog);
+        self
     }
 
     pub fn with_connections(mut self, facade: Arc<runtara_connections::ConnectionsFacade>) -> Self {
@@ -153,6 +169,12 @@ impl AgentTestingService {
         _requested: TestEngine,
         agent_name: &str,
     ) -> Result<ActiveEngine, ServiceError> {
+        // With executors a test is not run in this process, whatever it has
+        // loaded: it is placed, and an agent that is not there fails when
+        // its call is compiled.
+        if crate::agent_test_placed::installed() {
+            return Ok(ActiveEngine::Executor);
+        }
         let has_component = self
             .component_dispatcher
             .as_deref()
@@ -210,6 +232,10 @@ impl AgentTestingService {
                 self.run_via_components(tenant_id, agent_name, capability_id, input, connection_id)
                     .await
             }
+            ActiveEngine::Executor => {
+                self.run_on_an_executor(tenant_id, agent_name, capability_id, input, connection_id)
+                    .await
+            }
         };
 
         // Telemetry: count + duration histogram, labeled by
@@ -217,6 +243,7 @@ impl AgentTestingService {
         if let Some(m) = metrics() {
             let engine_label = match active {
                 ActiveEngine::Components => "components",
+                ActiveEngine::Executor => "executor",
             };
             let attrs = [
                 KeyValue::new("engine", engine_label),
@@ -240,6 +267,49 @@ impl AgentTestingService {
         }
 
         result
+    }
+
+    /// The call on an executor, as a guest with no run behind it
+    /// ([`crate::agent_test_placed`]).
+    async fn run_on_an_executor(
+        &self,
+        tenant_id: &str,
+        agent_name: &str,
+        capability_id: &str,
+        input: Value,
+        connection_id: Option<String>,
+    ) -> Result<TestResult, ServiceError> {
+        // The tenant's published workflow-agents are agents it may test.
+        let base = self.agent_catalog.clone().unwrap_or_default();
+        let catalog = crate::workflow_agents::catalog_with_workflow_agents(&base, tenant_id);
+        if catalog.capability(agent_name, capability_id).is_none() {
+            return Err(ServiceError::AgentNotFound(format!(
+                "agent `{agent_name}` has no capability `{capability_id}`"
+            )));
+        }
+        let started = Instant::now();
+        let tested = crate::agent_test_placed::test(
+            tenant_id,
+            agent_name,
+            capability_id,
+            input,
+            connection_id,
+            catalog,
+        )
+        .await
+        .map_err(|error| ServiceError::ExecutionError(format!("Executor: {error}")))?;
+        let (success, output, error) = match tested {
+            crate::agent_test_placed::Tested::Returned(output) => (true, Some(output), None),
+            crate::agent_test_placed::Tested::Failed(error) => (false, None, Some(error)),
+        };
+        Ok(TestResult {
+            success,
+            output,
+            error,
+            execution_time_ms: started.elapsed().as_secs_f64() * 1000.0,
+            max_memory_mb: None,
+            engine: ActiveEngine::Executor,
+        })
     }
 
     async fn run_via_components(

@@ -331,6 +331,35 @@ impl ApiLaunches {
         Ok(())
     }
 
+    /// Start serving `binding` as a call of one agent's capability with no
+    /// run behind it (a test of it): a standalone launch whose input is
+    /// `input`, with the trusted execution and control a test call is given,
+    /// and `runtime` for what a run would ask of its own
+    /// ([`crate::runtime_host::CallWithNoRun`]). What it posts as its outcome
+    /// [`Self::finish`] answers.
+    pub fn begin_test(
+        &self,
+        binding: Binding,
+        input: Vec<u8>,
+        control: StandaloneControl,
+        runtime: Weak<dyn RuntimeHost>,
+    ) -> Result<(), String> {
+        let launch_id = binding.launch_id.clone();
+        self.begin_standalone(binding, StandaloneTrust::Unpinned, control)?;
+        let mut slots = self.slots.lock().expect("workflow API launches poisoned");
+        let slot = slots
+            .get_mut(&launch_id)
+            .and_then(Arc::get_mut)
+            .ok_or_else(|| format!("launch {launch_id} is already in use"))?;
+        slot.input = input;
+        slot.info.launch_kind = "test".into();
+        // A guest that is a workflow of one step asks what a run asks (its
+        // checkpoints, whether it was told to stop): a call has a runtime of
+        // its own for that, which keeps nothing.
+        slot.runtime = runtime;
+        Ok(())
+    }
+
     /// Start serving `binding` as its tenant's warm compiler (SYN-930): a
     /// compile launch whose input is `settings` and which takes its tenant's
     /// compiles from [`Self::submit_compile`], one after another, over
