@@ -22,9 +22,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use runtara_workflows::compile_request::{self, CompileRequest, GuestOutcome};
-use runtara_workflows::direct_wasm::DirectStdlibMode;
-use runtara_workflows::{CompilationInput, DirectWorkflowCompileOptions, NativeCompilationResult};
+use runtara_workflows::compile_request::{CompileRequest, GuestOutcome};
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
@@ -204,91 +202,26 @@ fn parse(written: &[u8]) -> std::io::Result<(GuestOutcome, Vec<u8>)> {
     Ok((outcome, made.to_vec()))
 }
 
-/// The component a compile handed back, if it is the one its outcome names.
-fn made_as_named(named: &str, made: Vec<u8>) -> std::io::Result<Vec<u8>> {
-    use sha2::Digest;
-    let digest: String = sha2::Sha256::digest(&made)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    if digest != named {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "the compiler's sandbox handed back another component than its outcome names",
-        ));
-    }
-    Ok(made)
-}
-
-impl CompileExecutor for CompileSandbox {
+impl crate::compile_executor::Compiler for Arc<CompileSandbox> {
     fn compile(
         &self,
-        input: CompilationInput,
-        options: DirectWorkflowCompileOptions,
-    ) -> std::io::Result<NativeCompilationResult> {
-        let (request, _) = compile_request::request(&input, &options)?;
-        let (outcome, made) = CompileSandbox::compile(
+        _tenant: &str,
+        request: &CompileRequest,
+        shown: &crate::compile_executor::Shown<'_>,
+    ) -> std::io::Result<(GuestOutcome, Vec<u8>)> {
+        CompileSandbox::compile(
             self,
-            &request,
-            &options.components_dir,
-            &options.extra_component_dirs,
-        )?;
-        match outcome {
-            GuestOutcome::Compiled {
-                outcome,
-                workflow_wasm,
-            } => compile_request::apply(
-                *outcome,
-                &made_as_named(&workflow_wasm, made)?,
-                &input.workflow_id,
-                input.version,
-                &options,
-            ),
-            GuestOutcome::Failed(failure) => Err(compile_request::apply_failure(failure, &options)),
-        }
+            request,
+            shown.components_dir,
+            shown.extra_component_dirs,
+        )
     }
+}
 
-    fn compile_published_agent(
-        &self,
-        tenant: &str,
-        input: runtara_workflows::direct_wasm::DirectCompilationInput,
-        components_dir: &Path,
-        extra_component_dirs: &[PathBuf],
-        stdlib: DirectStdlibMode,
-    ) -> std::io::Result<compile_request::PublishedAgent> {
-        let (request, _) = compile_request::request_published_agent(
-            tenant,
-            &input,
-            components_dir,
-            extra_component_dirs,
-            stdlib,
-        )?;
-        let (outcome, made) =
-            CompileSandbox::compile(self, &request, components_dir, extra_component_dirs)?;
-        match outcome {
-            GuestOutcome::Compiled {
-                outcome,
-                workflow_wasm,
-            } => compile_request::apply_published_agent(
-                *outcome,
-                &made_as_named(&workflow_wasm, made)?,
-                &input.workflow_id,
-                input.version,
-                &input.output_dir,
-            ),
-            GuestOutcome::Failed(failure) => {
-                // The paths a failure names are the compiler's: name the
-                // host's, as a workflow's compile does.
-                let options = DirectWorkflowCompileOptions {
-                    output_dir: input.output_dir.clone(),
-                    components_dir: components_dir.to_path_buf(),
-                    extra_component_dirs: extra_component_dirs.to_vec(),
-                    source_checksum: input.source_checksum.clone(),
-                    stdlib: Some(stdlib),
-                };
-                Err(compile_request::apply_failure(failure, &options))
-            }
-        }
+impl CompileSandbox {
+    /// The sandbox as where this process compiles.
+    pub fn executor(self: Arc<Self>) -> Arc<dyn CompileExecutor> {
+        Arc::new(crate::compile_executor::Untrusted(self))
     }
 }
 
@@ -329,14 +262,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_component_that_is_not_the_one_named_is_refused() {
-        let named = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-        assert_eq!(made_as_named(named, b"abc".to_vec()).unwrap(), b"abc");
-        let error = made_as_named(named, b"abd".to_vec()).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-    }
-
     /// Requires `RUNTARA_COMPILER_WASM`'s command, built with
     /// `cargo build -p runtara-compile-guest --bin runtara-compile-sandboxed
     /// --release --target wasm32-wasip2`, and the workflow components in
@@ -344,6 +269,7 @@ mod tests {
     #[cfg(feature = "compiler-sandbox-tests")]
     mod with_the_compiler {
         use super::*;
+        use runtara_workflows::{CompilationInput, DirectWorkflowCompileOptions};
 
         fn input(steps: serde_json::Value, entry: &str) -> CompilationInput {
             CompilationInput {
@@ -374,9 +300,11 @@ mod tests {
             }
         }
 
-        fn sandbox() -> Arc<CompileSandbox> {
+        fn sandbox() -> Arc<dyn CompileExecutor> {
             let path = configured().expect("compiler-sandbox-tests requires RUNTARA_COMPILER_WASM");
-            CompileSandbox::load(&path).expect("the compiler loads")
+            CompileSandbox::load(&path)
+                .expect("the compiler loads")
+                .executor()
         }
 
         fn finish() -> serde_json::Value {
@@ -396,12 +324,9 @@ mod tests {
                 options(native_dir.path()),
             )
             .expect("compiles natively");
-            let sandboxed = CompileExecutor::compile(
-                sandbox.as_ref(),
-                input(finish(), "finish"),
-                options(sandboxed_dir.path()),
-            )
-            .expect("compiles in the sandbox");
+            let sandboxed = sandbox
+                .compile(input(finish(), "finish"), options(sandboxed_dir.path()))
+                .expect("compiles in the sandbox");
             assert_eq!(sandboxed.binary_checksum, native.binary_checksum);
             assert_eq!(sandboxed.binary_size, native.binary_size);
             assert_eq!(sandboxed.trusted_pins, native.trusted_pins);
@@ -420,9 +345,9 @@ mod tests {
             let native =
                 runtara_workflows::compile_workflow_direct(broken(), options(output.path()))
                     .unwrap_err();
-            let sandboxed =
-                CompileExecutor::compile(sandbox.as_ref(), broken(), options(output.path()))
-                    .unwrap_err();
+            let sandboxed = sandbox
+                .compile(broken(), options(output.path()))
+                .unwrap_err();
             assert_eq!(sandboxed.kind(), native.kind());
             assert_eq!(sandboxed.to_string(), native.to_string());
         }
@@ -436,9 +361,9 @@ mod tests {
             let output = tempfile::tempdir().unwrap();
             let mut nowhere = options(output.path());
             nowhere.components_dir = output.path().join("no-components");
-            let error =
-                CompileExecutor::compile(sandbox.as_ref(), input(finish(), "finish"), nowhere)
-                    .unwrap_err();
+            let error = sandbox
+                .compile(input(finish(), "finish"), nowhere)
+                .unwrap_err();
             assert!(!error.to_string().contains("sandbox"), "{error}");
         }
     }

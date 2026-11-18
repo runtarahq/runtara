@@ -2435,14 +2435,50 @@ async fn start_as_platform(
         );
         std::process::exit(1);
     }
-    // Where workflows are compiled: in a sandbox of the compiler's own, when
-    // one is named. An engine that is a process of its own compiles nowhere
-    // else: a tenant's graph is not parsed where both databases and the way
-    // to seal are. A host that set an executor of its own keeps it.
+    // `RUNTARA_RUNNER=executor`: workflows run on an executor, none in this
+    // process, unless the host supplied a runner of its own. A setting that
+    // cannot be honoured stops the server here: it never falls back to
+    // running workflows in process.
+    let runs_on_executors = options.runner_factory.is_none() && {
+        options.runner_factory = runtara_runner_executor::from_env().await?;
+        options.runner_factory.is_some()
+    };
+    // Where workflows are compiled. With executors, on one: the compiler is
+    // placed as a guest there, and this process does not load it
+    // (docs/compiler-on-an-executor.md). There is no compiling anywhere else
+    // instead, so the compiler to place has to be here. A host that set an
+    // executor of its own keeps it.
+    if runs_on_executors && crate::compile_executor::executor().is_none() {
+        match crate::compile_placed::configured().filter(|path| path.is_file()) {
+            Some(path) => {
+                crate::compile_executor::set_compile_executor(crate::compile_placed::install());
+                println!(
+                    "✓ Workflows are compiled on an executor ({})",
+                    path.display()
+                );
+            }
+            None => {
+                eprintln!(
+                    "❌ RUNTARA_RUNNER=executor needs the compiler that is placed on an \
+                     executor: {} beside the components (RUNTARA_AGENT_COMPONENTS_DIR), or \
+                     where {} names it. Workflows are compiled where they run, and nowhere \
+                     else instead (docs/compiler-on-an-executor.md)",
+                    crate::compile_placed::COMPILE_GUEST,
+                    crate::compile_placed::COMPILE_GUEST_ENV
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+    // Without executors: in a sandbox of the compiler's own in this process,
+    // when one is named. An engine that is a process of its own compiles
+    // nowhere else: a tenant's graph is not parsed where both databases and
+    // the way to seal are.
     match crate::compile_sandbox::configured() {
+        Some(_) if crate::compile_placed::installed() => {}
         Some(path) => match crate::compile_sandbox::CompileSandbox::load(&path) {
             Ok(sandbox) => {
-                crate::compile_executor::set_compile_executor(sandbox);
+                crate::compile_executor::set_compile_executor(sandbox.executor());
                 println!("✓ Workflows are compiled in a sandbox ({})", path.display());
             }
             Err(error) => {
@@ -2483,14 +2519,6 @@ async fn start_as_platform(
     };
     if let Some(source) = options.entitlements.clone() {
         config::install_entitlement_source(source);
-    }
-
-    // `RUNTARA_RUNNER=executor`: workflows run on an executor, none in this
-    // process, unless the host supplied a runner of its own. A setting that
-    // cannot be honoured stops the server here: it never falls back to
-    // running workflows in process.
-    if options.runner_factory.is_none() {
-        options.runner_factory = runtara_runner_executor::from_env().await?;
     }
 
     // Every artifact lives in one store, shared with Environment and its
