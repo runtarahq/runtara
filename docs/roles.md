@@ -232,7 +232,7 @@ does not read whom the API says it authenticated.
   nothing the API refuses. The one exception is the list of agents a
   tenant published, which the API shows to every caller.
 - A part of the API the engine serves for callers (connections, the object
-  model, agents, triggers) is served to the caller the engine found, and
+  model, triggers) is served to the caller the engine found, and
   to nobody without one. A webhook or an OAuth redirect has no caller, and
   is checked by the engine as it is when anyone sends one.
 - Whose an API key is, the engine finds. The API's database role cannot

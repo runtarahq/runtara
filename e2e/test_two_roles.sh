@@ -560,6 +560,20 @@ echo "${RESP}" | jq -e '[.data[] | select(.kind == "run_ended")][0].body.status 
 # The agents the API describes are the ones the engine runs.
 [ "$(curl -sS "${API}/agents" | jq -r '(.agents // .data // .) | length')" -gt 0 ] \
     || { print_error "the engine's agents are not listed through the API"; exit 1; }
+# One agent, one of its capabilities and what the engine loaded are asked of
+# the engine too: the API loads no component.
+AGENT=$(curl -sS "${API}/agents/utils")
+CAPABILITY=$(echo "${AGENT}" | jq -r '.capabilities[0].id // empty')
+[ "$(echo "${AGENT}" | jq -r '.id')" = "utils" ] && [ -n "${CAPABILITY}" ] \
+    || { print_error "an agent is not read through the API: ${AGENT}"; exit 1; }
+[ "$(curl -sS "${API}/agents/utils/capabilities/${CAPABILITY}" | jq -r '.id')" = "${CAPABILITY}" ] \
+    || { print_error "a capability is not read through the API"; exit 1; }
+# One the engine does not have is in no tenant's plan, which is asked first.
+case "$(http_status "${API}/agents/no-such-agent")" in 403|404) ;; *)
+    print_error "an agent the engine does not have was answered"; exit 1 ;;
+esac
+[ "$(curl -sS "${API}/_internal/components/status" | jq -r '.loaded')" = "true" ] \
+    || { print_error "what the engine loaded is not read through the API"; exit 1; }
 print_success "runs went to both executors ($(placed_by 0) and $(placed_by 1)), and one was run and waited for"
 
 # --- 4 ------------------------------------------------------------------

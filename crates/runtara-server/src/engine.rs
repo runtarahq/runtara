@@ -47,6 +47,7 @@ use crate::api::services::conversations::{
     ConversationEvent, ConversationResult, ConversationState, Conversations, EngineRuns, Message,
     OpenConversation, Sent,
 };
+use crate::api::services::operators::{AgentListing, AgentsService, ComponentsStatus};
 use crate::api::services::pending_inputs::PendingInputPage;
 use crate::api::services::workflow_runtime::{
     WorkflowActionReceipt, WorkflowRuntimeAction, WorkflowRuntimeActionPage, WorkflowRuntimeError,
@@ -80,8 +81,6 @@ pub enum Served {
     OAuthCallbacks,
     /// A tenant's object model: schemas, instances, SQL and CSV.
     ObjectModel,
-    /// Agents: what there are, what each can do, and running one on request.
-    Agents,
     /// Triggers: registering one may register a webhook at its provider.
     Triggers,
     /// A trigger's HTTP events, each checked against its connection, from
@@ -95,7 +94,6 @@ impl Served {
         Served::Connections,
         Served::OAuthCallbacks,
         Served::ObjectModel,
-        Served::Agents,
         Served::Triggers,
         Served::Events,
     ];
@@ -106,7 +104,6 @@ impl Served {
             Served::Connections => "connections",
             Served::OAuthCallbacks => "o-auth-callbacks",
             Served::ObjectModel => "object-model",
-            Served::Agents => "agents",
             Served::Triggers => "triggers",
             Served::Events => "events",
         }
@@ -117,7 +114,7 @@ impl Served {
     /// provider's redirect, a webhook.
     pub(crate) fn has_a_caller(self) -> bool {
         match self {
-            Served::Connections | Served::ObjectModel | Served::Agents | Served::Triggers => true,
+            Served::Connections | Served::ObjectModel | Served::Triggers => true,
             Served::OAuthCallbacks | Served::Events => false,
         }
     }
@@ -428,6 +425,21 @@ pub trait Engine: Send + Sync {
     /// workflows may use beside the built-in ones.
     async fn workflow_agents(&self, tenant_id: &str) -> Vec<runtara_dsl::agent_meta::AgentInfo>;
 
+    /// The agents the engine loaded, and the tenant's published ones.
+    async fn list_agents(&self, tenant_id: &str) -> Result<AgentListing, String>;
+
+    /// One agent with its capabilities: one the engine loaded, or, asked for
+    /// a `published` one, one of the tenant's own.
+    async fn agent(
+        &self,
+        tenant_id: &str,
+        name: &str,
+        published: bool,
+    ) -> Result<Option<runtara_dsl::agent_meta::AgentInfo>, String>;
+
+    /// Whether the engine loaded its components, and which.
+    async fn components_status(&self, tenant_id: &str) -> Result<ComponentsStatus, String>;
+
     /// Takes a published workflow-agent out of use, when its workflow is
     /// deleted.
     async fn unstage_workflow_agent(&self, tenant_id: &str, slug: &str) -> Result<(), String>;
@@ -552,6 +564,8 @@ pub struct LocalEngine {
     agent_catalog: Option<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     /// Runs an agent's capability on request, if this server allows it.
     agent_testing: Option<AgentTestingService>,
+    /// What agents this engine loaded, and what each can do.
+    agents: AgentsService,
     /// Connections and their sealed secrets.
     connections: Option<Arc<runtara_connections::ConnectionsFacade>>,
     /// The parts of the API this engine serves, each a router of its own.
@@ -580,6 +594,7 @@ impl LocalEngine {
             pool,
             agent_catalog: None,
             agent_testing: None,
+            agents: AgentsService::default(),
             connections: None,
             served: std::sync::RwLock::default(),
             runs_elsewhere: None,
@@ -623,6 +638,12 @@ impl LocalEngine {
 
     /// With the service that runs an agent's capability on request.
     #[must_use]
+    /// With the agents this engine loaded.
+    pub fn with_agents(mut self, agents: AgentsService) -> Self {
+        self.agents = agents;
+        self
+    }
+
     pub fn with_agent_testing(mut self, agent_testing: Option<AgentTestingService>) -> Self {
         self.agent_testing = agent_testing;
         self
@@ -1137,6 +1158,35 @@ impl Engine for LocalEngine {
         crate::workflow_agents::staged_tenant_agents(tenant_id)
     }
 
+    async fn list_agents(&self, tenant_id: &str) -> Result<AgentListing, String> {
+        Ok(AgentListing {
+            built_in: self.agents.list_agents(),
+            published: self.agents.published_agent_summaries(tenant_id),
+        })
+    }
+
+    async fn agent(
+        &self,
+        tenant_id: &str,
+        name: &str,
+        published: bool,
+    ) -> Result<Option<runtara_dsl::agent_meta::AgentInfo>, String> {
+        Ok(if published {
+            self.agents.published_agent(tenant_id, name)
+        } else {
+            self.agents.get_agent(name).ok()
+        })
+    }
+
+    async fn components_status(&self, _tenant_id: &str) -> Result<ComponentsStatus, String> {
+        let (loaded, agent_ids, capability_count) = self.agents.components_status();
+        Ok(ComponentsStatus {
+            loaded,
+            agent_ids,
+            capability_count,
+        })
+    }
+
     async fn unstage_workflow_agent(&self, tenant_id: &str, slug: &str) -> Result<(), String> {
         crate::workflow_agents::unstage(tenant_id, slug)
             .await
@@ -1512,8 +1562,6 @@ mod boundary {
         "api/handlers/triggers.rs",
         "api/handlers/object_model.rs",
         "api/handlers/csv_import_export.rs",
-        "api/handlers/operators.rs",
-        "api/handlers/agent_testing.rs",
     ];
 
     fn sources(dir: &Path, found: &mut Vec<PathBuf>) {

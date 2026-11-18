@@ -51,9 +51,7 @@ fn handed_over_limit(part: Served) -> usize {
         }
         // A redirect from a provider carries its answer in the query.
         Served::OAuthCallbacks => 64 * 1024,
-        Served::Connections | Served::ObjectModel | Served::Agents | Served::Triggers => {
-            HANDED_OVER_LIMIT
-        }
+        Served::Connections | Served::ObjectModel | Served::Triggers => HANDED_OVER_LIMIT,
     }
 }
 
@@ -1085,6 +1083,34 @@ impl Engine for RemoteEngine {
         .await
     }
 
+    async fn list_agents(&self, tenant_id: &str) -> Result<AgentListing, String> {
+        self.ask(wire::ListAgents {
+            tenant_id: tenant_id.to_owned(),
+        })
+        .await
+    }
+
+    async fn agent(
+        &self,
+        tenant_id: &str,
+        name: &str,
+        published: bool,
+    ) -> Result<Option<runtara_dsl::agent_meta::AgentInfo>, String> {
+        self.ask(wire::AgentNamed {
+            tenant_id: tenant_id.to_owned(),
+            name: name.to_owned(),
+            published,
+        })
+        .await
+    }
+
+    async fn components_status(&self, tenant_id: &str) -> Result<ComponentsStatus, String> {
+        self.ask(wire::ComponentsStatusOf {
+            tenant_id: tenant_id.to_owned(),
+        })
+        .await
+    }
+
     async fn workflow_agents(&self, tenant_id: &str) -> Vec<runtara_dsl::agent_meta::AgentInfo> {
         self.ask(wire::WorkflowAgents {
             tenant_id: tenant_id.to_owned(),
@@ -1699,13 +1725,16 @@ mod tests {
             .map(|(name, _)| *name)
             .collect();
         // What the engine says of itself and whose a key is are no tenant's;
-        // a tenant's published agents are listed to every caller.
+        // agents are listed to every caller.
         assert_eq!(
             open,
             [
                 "Facts",
                 "RunSyncForAnyone",
                 "WorkflowAgents",
+                "ListAgents",
+                "AgentNamed",
+                "ComponentsStatusOf",
                 "ApiKeyByHash"
             ]
         );

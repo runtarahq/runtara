@@ -28,6 +28,24 @@ impl std::fmt::Display for ServiceError {
     }
 }
 
+/// The agents a tenant may be shown: the ones the engine loaded, and the
+/// workflows the tenant published as agents. Which of the first a tenant's
+/// plan includes is for whoever asks to decide.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct AgentListing {
+    pub built_in: Vec<AgentSummary>,
+    pub published: Vec<AgentSummary>,
+}
+
+/// What the engine loaded: whether it loaded components at all, the agents
+/// it has, and how many capabilities they declare between them.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+pub struct ComponentsStatus {
+    pub loaded: bool,
+    pub agent_ids: Vec<String>,
+    pub capability_count: usize,
+}
+
 #[derive(Clone, Default)]
 pub struct AgentsService {
     component_dispatcher: Option<Arc<ComponentDispatcherService>>,
