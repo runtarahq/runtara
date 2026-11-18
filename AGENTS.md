@@ -143,7 +143,10 @@ scoped README files, examples.
 - An engine that is a process of its own receives nothing anyone may send:
   its listener refuses a part that has no caller (`Served::has_a_caller`).
   A new route anyone may send to is intake's to receive; do not forward one
-  to the engine as it arrived.
+  to the engine as it arrived. Intake's own listener
+  (`RUNTARA_INTAKE_PUBLIC_LISTEN`, `listener::router_for_anyone`) serves
+  those routes and nothing else: do not add a route that has a caller to
+  it, or have it take what a request says of its caller or tenant.
 - Never read, print, log, or commit credential values. Treat `.env*`, tokens,
   connection parameters, and database URLs as sensitive.
 - Do not hand-edit generated artifacts or ignored build outputs.

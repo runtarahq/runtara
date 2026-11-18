@@ -240,18 +240,21 @@ Done since:
   listener refuses every part that has no caller, and nothing anyone may
   send reaches an engine that is a process of its own.
 
+- **A listener of intake's own** (`RUNTARA_INTAKE_PUBLIC_LISTEN`): a
+  deployment routes the event and OAuth redirect paths to it at its edge,
+  and what anyone may send passes through neither the engine nor the API.
+  It serves those paths and nothing else.
+
 Still not built:
 
-- **Routing at the proxy.** The API hands intake what it receives; a
-  deployment that wants anonymous traffic never to reach the API either
-  routes those two paths to a listener of intake's own, which does not
-  exist: intake listens for the API only.
 - **A seal permission to verify alone.** seal's callers are held to
   keysets and to administering or not. Intake's caller administers nothing
   and its keyset rule gives it `send` and `connect` as well as `verify`;
   what stops it using a connection is that it cannot read one: its
   database role has no connection table and it has no at-rest key. A
-  permission for `verify` alone is seal's to add.
+  permission for `verify` alone is in seal since 0.2.0 (a caller's
+  `operations`); the revision pinned here is older, and taking the newer
+  one changes how private destinations and single endpoints are named.
 
 ### The design
 
