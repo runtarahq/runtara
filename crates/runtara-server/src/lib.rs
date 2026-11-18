@@ -10,6 +10,7 @@ pub mod bind;
 pub mod boot;
 pub mod channels;
 pub mod compile_executor;
+pub mod compile_sandbox;
 pub mod compiler;
 pub mod config;
 pub mod conn_limit;
