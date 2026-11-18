@@ -3790,11 +3790,18 @@ async fn start_as_platform(
     // Where the engine listens for an API role in another process. A request
     // that arrives there is answered in the scope of the tenant it is for, and
     // not in this start-up's: the listener's tasks are started in no scope.
+    // Who it is for the engine verifies itself, as the API's middleware does.
     if let Some(listen) = listen {
         match crate::engine::remote::serve_api_role(
             listen.address,
             &listen.tls_dir,
-            crate::engine::listener::router(engine_api.clone()),
+            crate::engine::listener::router(
+                engine_api.clone(),
+                Arc::new(crate::engine::listener::Verification {
+                    api: auth_state.clone(),
+                    mcp: mcp_auth_state.clone(),
+                }),
+            ),
         )
         .await
         {

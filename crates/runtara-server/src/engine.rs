@@ -119,6 +119,20 @@ impl Served {
         }
     }
 
+    /// Whether the part is served to a caller the API authenticated. The
+    /// others are sent by anyone, and say whose they are themselves: a
+    /// provider's redirect, a webhook.
+    pub(crate) fn has_a_caller(self) -> bool {
+        match self {
+            Served::Connections
+            | Served::ObjectModel
+            | Served::Agents
+            | Served::Triggers
+            | Served::EventsForCallers => true,
+            Served::OAuthCallbacks | Served::Channels | Served::Events => false,
+        }
+    }
+
     /// The part of that name.
     pub(crate) fn named(name: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|part| part.name() == name)

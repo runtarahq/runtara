@@ -329,13 +329,16 @@ impl RemoteEngine {
             sent: false,
             reason: error.to_string(),
         })?;
-        let request = http::Request::post(format!("{}{}", wire::OPERATIONS, O::NAME))
+        let mut request = http::Request::post(format!("{}{}", wire::OPERATIONS, O::NAME))
             .header(header::CONTENT_TYPE, "application/json")
             .body(Bytes::from(body))
             .map_err(|error| Away {
                 sent: false,
                 reason: error.to_string(),
             })?;
+        if let Some(presented) = presented_header() {
+            request.headers_mut().insert(wire::PRESENTED, presented);
+        }
         let response = self.transport.send(request, within).await?;
         let status = response.status();
         let answer = tokio::time::timeout(
@@ -383,9 +386,21 @@ impl RemoteEngine {
     }
 }
 
+/// What the caller of the current work presented, as it is sent with a call
+/// made for them.
+fn presented_header() -> Option<HeaderValue> {
+    let presented = crate::auth::presented::presented()?;
+    let json = serde_json::to_vec(&presented).ok()?;
+    let mut value =
+        HeaderValue::from_str(&base64::engine::general_purpose::STANDARD.encode(json)).ok()?;
+    value.set_sensitive(true);
+    Some(value)
+}
+
 /// The request the API hands the engine for a part it serves: the request as
-/// it arrived, with what the API established about it in headers of its own.
-/// Headers of those names that came from outside are dropped first.
+/// it arrived, with what its caller presented and what the API says of how
+/// it arrived in headers of its own. Headers of those names that came from
+/// outside are dropped first.
 async fn handed_over(
     part: Served,
     request: axum::extract::Request,
@@ -402,7 +417,7 @@ async fn handed_over(
         .unwrap_or("/");
     let path = format!("{}{}{own}", wire::SERVED, part.name());
 
-    for name in [wire::CALLER, wire::REQUESTED_TENANT, wire::EVENT_SOURCE] {
+    for name in [wire::PRESENTED, wire::REQUESTED_TENANT, wire::EVENT_SOURCE] {
         parts.headers.remove(name);
     }
     // What belongs to the connection the request came on, and not to it.
@@ -418,13 +433,8 @@ async fn handed_over(
         parts.headers.remove(name);
     }
     let bad = || StatusCode::BAD_REQUEST.into_response();
-    if let Some(caller) = parts.extensions.get::<crate::auth::AuthContext>() {
-        let json = serde_json::to_vec(caller).map_err(|_| bad())?;
-        let value = base64::engine::general_purpose::STANDARD.encode(json);
-        parts.headers.insert(
-            wire::CALLER,
-            HeaderValue::from_str(&value).map_err(|_| bad())?,
-        );
+    if let Some(presented) = presented_header() {
+        parts.headers.insert(wire::PRESENTED, presented);
     }
     if let Some(tenant) = parts
         .extensions
@@ -1169,7 +1179,7 @@ mod tests {
                             .extensions()
                             .get::<crate::product_events::EventSource>()
                             .copied();
-                        let forged = request.headers().contains_key(wire::CALLER);
+                        let forged = request.headers().contains_key(wire::PRESENTED);
                         let kept = request
                             .headers()
                             .get("x-signature")
@@ -1193,10 +1203,47 @@ mod tests {
         engine
     }
 
+    /// The engine's verification, for tests: a bearer token `user@tenant` is
+    /// that user acting for that tenant, unless the request names another;
+    /// anything else is nobody.
+    struct ByToken;
+
+    #[async_trait]
+    impl super::super::listener::Callers for ByToken {
+        async fn verify(
+            &self,
+            presented: &crate::auth::presented::Presented,
+        ) -> Result<crate::auth::AuthContext, Response> {
+            let headers = presented.headers();
+            let found = headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .and_then(|token| token.split_once('@'));
+            let Some((user, tenant)) = found else {
+                return Err(StatusCode::UNAUTHORIZED.into_response());
+            };
+            if presented
+                .requested_tenant
+                .as_deref()
+                .is_some_and(|named| named != tenant)
+            {
+                return Err(StatusCode::FORBIDDEN.into_response());
+            }
+            let mut caller = caller(tenant, user);
+            caller.role = Some(crate::authz::Role::Member);
+            Ok(caller)
+        }
+    }
+
+    fn listening(engine: Arc<LocalEngine>) -> axum::Router {
+        super::super::listener::router(engine, Arc::new(ByToken))
+    }
+
     /// The API's side, with the engine in another "process": everything it
     /// asks goes through the wire's two halves.
     fn api_side(engine: Arc<LocalEngine>) -> Arc<RemoteEngine> {
-        RemoteEngine::over(Arc::new(InProcess(super::super::listener::router(engine))))
+        RemoteEngine::over(Arc::new(InProcess(listening(engine))))
     }
 
     fn api(engine: Arc<dyn Engine>) -> axum::Router {
@@ -1211,6 +1258,27 @@ mod tests {
         )
     }
 
+    /// What a caller with the bearer token `token` presented to the API.
+    fn presented(token: &str, named: Option<&str>) -> crate::auth::presented::Presented {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        crate::auth::presented::Presented::of(
+            crate::auth::presented::Door::Api,
+            &headers,
+            &[],
+            named.map(str::to_owned),
+            true,
+        )
+    }
+
+    /// `work`, as the API does it for a caller with the bearer token `token`.
+    async fn asked_by<F: Future>(token: &str, work: F) -> F::Output {
+        crate::auth::presented::presenting(presented(token, None), work).await
+    }
+
     #[tokio::test]
     async fn a_request_the_engine_serves_crosses_as_it_arrived() {
         let api = api(api_side(engine_side()));
@@ -1218,7 +1286,8 @@ mod tests {
             .header("x-signature", "sha256=abc")
             .body(Body::from("the body"))
             .unwrap();
-        request.extensions_mut().insert(caller("acme", "ann"));
+        // What the API's own middleware found is not what crosses.
+        request.extensions_mut().insert(caller("other", "eve"));
         request
             .extensions_mut()
             .insert(crate::middleware::tenant_path::RequestedTenant(
@@ -1227,7 +1296,11 @@ mod tests {
         request
             .extensions_mut()
             .insert(crate::product_events::EventSource::Mcp);
-        let (status, seen) = text(api.oneshot(request).await.unwrap()).await;
+        let (status, seen) =
+            crate::auth::presented::presenting(presented("ann@acme", Some("acme")), async {
+                text(api.oneshot(request).await.unwrap()).await
+            })
+            .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             seen,
@@ -1237,17 +1310,17 @@ mod tests {
         );
     }
 
-    /// What says who the caller is comes from the API and from nowhere else:
-    /// a header of that name sent from outside is dropped, whether or not the
-    /// API authenticated anyone.
+    /// Who the caller is, the engine finds from what the caller presented:
+    /// not from a header of the wire's name sent from outside, and not from
+    /// whom the API says it authenticated.
     #[tokio::test]
-    async fn a_caller_named_from_outside_is_not_the_caller() {
+    async fn the_caller_is_whom_the_engine_finds_and_not_whom_the_api_names() {
         let api = api(api_side(engine_side()));
         let forged = base64::engine::general_purpose::STANDARD
-            .encode(serde_json::to_vec(&caller("victim", "mallory")).unwrap());
+            .encode(serde_json::to_vec(&presented("mallory@victim", None)).unwrap());
         let ask = |authenticated: Option<crate::auth::AuthContext>| {
             let mut request = http::Request::post("/api/runtime/triggers/t-1")
-                .header(wire::CALLER, &forged)
+                .header(wire::PRESENTED, &forged)
                 .header(wire::REQUESTED_TENANT, "victim")
                 .body(Body::empty())
                 .unwrap();
@@ -1255,17 +1328,118 @@ mod tests {
                 request.extensions_mut().insert(caller);
             }
             let api = api.clone();
-            async move { text(api.oneshot(request).await.unwrap()).await.1 }
+            async move { text(api.oneshot(request).await.unwrap()).await }
         };
-        let seen = ask(None).await;
-        assert!(seen.contains("caller=None named=None"), "{seen}");
-        assert!(seen.contains("scope=None"), "{seen}");
-        let seen = ask(Some(caller("acme", "ann"))).await;
+        // Nothing presented to the API: the part is served to nobody, whatever
+        // the request's headers and the API say.
+        let (status, _) = ask(None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = ask(Some(caller("victim", "mallory"))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // Presented by ann of acme: served to her, whomever the API names.
+        let (status, seen) = asked_by("ann@acme", ask(Some(caller("victim", "mallory")))).await;
+        assert_eq!(status, StatusCode::OK);
         assert!(
             seen.contains("caller=Some(\"ann of acme\") named=None"),
             "{seen}"
         );
         assert!(seen.contains("scope=Some(\"acme\")"), "{seen}");
+        // What nobody's verification accepts is answered as the API's own
+        // middleware answers it.
+        let (status, _) = asked_by("not a token", ask(None)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// A part anyone may send to is served without a caller, and what was
+    /// presented with it is not looked at.
+    #[tokio::test]
+    async fn a_part_with_no_caller_is_served_to_whoever_sends() {
+        let local = local_without_runtime();
+        local.serves(
+            Served::Events,
+            axum::Router::new().fallback(|request: axum::extract::Request| async move {
+                format!(
+                    "caller={} header={}",
+                    request
+                        .extensions()
+                        .get::<crate::auth::AuthContext>()
+                        .is_some(),
+                    request.headers().contains_key(wire::PRESENTED),
+                )
+            }),
+        );
+        let remote = api_side(local);
+        let ask = || async {
+            let request = http::Request::post("/api/runtime/events/webhook/t-1")
+                .body(Body::empty())
+                .unwrap();
+            text(remote.serve(Served::Events, request).await).await
+        };
+        assert_eq!(
+            ask().await,
+            (StatusCode::OK, "caller=false header=false".to_owned())
+        );
+        assert_eq!(
+            asked_by("not a token", ask()).await,
+            (StatusCode::OK, "caller=false header=false".to_owned())
+        );
+    }
+
+    /// An operation is answered for the tenant its caller acts for, and for
+    /// no other: the tenant an operation names is not the API's to choose.
+    #[tokio::test]
+    async fn an_operation_is_answered_only_for_the_callers_tenant() {
+        let remote = api_side(engine_side());
+        let refused = |answer: Result<StopOutcome, ExecutionError>, with: &str| match answer {
+            Err(ExecutionError::NotConnected(why)) => assert!(why.contains(with), "{why}"),
+            other => panic!("{other:?}"),
+        };
+        // No caller.
+        refused(remote.stop("acme", "run-1").await, "401");
+        // A caller of another tenant.
+        refused(
+            asked_by("mallory@other", remote.stop("acme", "run-1")).await,
+            "403",
+        );
+        // A credential the engine does not accept.
+        refused(
+            asked_by("not a token", remote.stop("acme", "run-1")).await,
+            "401",
+        );
+        // The tenant's own caller is answered as the engine in this process
+        // answers.
+        assert_eq!(
+            format!(
+                "{:?}",
+                asked_by("ann@acme", remote.stop("acme", "run-1")).await
+            ),
+            format!("{:?}", engine_side().stop("acme", "run-1").await),
+        );
+        // What the engine says of itself is no tenant's, and needs no caller.
+        assert!(remote.learn().await);
+    }
+
+    /// An operation that names its caller is answered for the caller the
+    /// engine found, not the one the API wrote.
+    #[tokio::test]
+    async fn an_operation_names_the_caller_the_engine_found() {
+        let mut operation = wire::SubmitWorkflowAction {
+            auth: {
+                let mut forged = caller("acme", "mallory");
+                forged.role = Some(crate::authz::Role::Owner);
+                forged
+            },
+            workflow_id: "w".to_owned(),
+            instance_id: "i".to_owned(),
+            request_id: "r".to_owned(),
+            operation_id: "o".to_owned(),
+            payload: serde_json::Value::Null,
+        };
+        let mut found = caller("acme", "ann");
+        found.role = Some(crate::authz::Role::Viewer);
+        wire::Operation::of_caller(&mut operation, &found);
+        assert_eq!(operation.auth.user_id, "ann");
+        assert_eq!(operation.auth.role, Some(crate::authz::Role::Viewer));
     }
 
     /// What anyone may send is not read past what the engine takes of it.
@@ -1282,7 +1456,7 @@ mod tests {
         let request = http::Request::post("/api/runtime/triggers/t-1")
             .body(Body::from(oversized))
             .unwrap();
-        let answer = engine.serve(Served::Triggers, request).await;
+        let answer = asked_by("ann@acme", engine.serve(Served::Triggers, request)).await;
         assert_eq!(answer.status(), StatusCode::OK);
         assert!(handed_over_limit(Served::Events) <= HANDED_OVER_LIMIT);
     }
@@ -1293,15 +1467,24 @@ mod tests {
         let remote = api_side(local.clone());
         // An error with its fields, and a plain answer.
         assert_eq!(
-            format!("{:?}", remote.stop("acme", "run-1").await),
+            format!(
+                "{:?}",
+                asked_by("ann@acme", remote.stop("acme", "run-1")).await
+            ),
             format!("{:?}", local.stop("acme", "run-1").await),
         );
         assert_eq!(
-            format!("{:?}", remote.tenant_connections("acme").await),
+            format!(
+                "{:?}",
+                asked_by("ann@acme", remote.tenant_connections("acme")).await
+            ),
             format!("{:?}", local.tenant_connections("acme").await),
         );
         assert_eq!(
-            format!("{:?}", remote.get_instance_info("acme", "run-1").await),
+            format!(
+                "{:?}",
+                asked_by("ann@acme", remote.get_instance_info("acme", "run-1")).await
+            ),
             format!("{:?}", local.get_instance_info("acme", "run-1").await),
         );
         // What the engine says of itself is learnt, and until then assumed.
@@ -1323,11 +1506,13 @@ mod tests {
             "two operations share a name"
         );
 
-        let engine = super::super::listener::router(engine_side());
+        let engine = listening(engine_side());
+        let by_ann = presented_header_of(&presented("ann@acme", None));
         let ask = |method: http::Method, path: &str, body: &'static str| {
             let request = http::Request::builder()
                 .method(method)
                 .uri(path)
+                .header(wire::PRESENTED, &by_ann)
                 .body(Body::from(body))
                 .unwrap();
             let engine = engine.clone();
@@ -1364,6 +1549,10 @@ mod tests {
             ask(post, "/api/runtime/workflows", "").await,
             StatusCode::NOT_FOUND
         );
+    }
+
+    fn presented_header_of(presented: &crate::auth::presented::Presented) -> String {
+        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(presented).unwrap())
     }
 
     /// A transport to an engine that is not there.
@@ -1444,7 +1633,7 @@ mod tests {
         let (address, serving) = serve_api_role(
             "127.0.0.1:0".parse().unwrap(),
             &certificates.engine,
-            super::super::listener::router(engine_side()),
+            listening(engine_side()),
         )
         .await
         .unwrap();
@@ -1457,14 +1646,22 @@ mod tests {
             "the API role's certificate is accepted"
         );
         assert_eq!(
-            format!("{:?}", api_role.tenant_connections("acme").await),
+            format!(
+                "{:?}",
+                asked_by("ann@acme", api_role.tenant_connections("acme")).await
+            ),
             "Err(\"this engine holds no connections\")"
         );
-        let mut request = http::Request::post("/api/runtime/triggers/t-1?x=1")
+        // The certificate lets the API ask; it does not let it say for whom.
+        let unasked = format!("{:?}", api_role.tenant_connections("acme").await);
+        assert!(unasked.contains("401"), "{unasked}");
+        let request = http::Request::post("/api/runtime/triggers/t-1?x=1")
             .body(Body::from("over the wire"))
             .unwrap();
-        request.extensions_mut().insert(caller("acme", "ann"));
-        let (status, seen) = text(api(api_role).oneshot(request).await.unwrap()).await;
+        let (status, seen) = asked_by("ann@acme", async {
+            text(api(api_role).oneshot(request).await.unwrap()).await
+        })
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert!(seen.contains("caller=Some(\"ann of acme\")"), "{seen}");
         assert!(seen.ends_with("body=over the wire"), "{seen}");

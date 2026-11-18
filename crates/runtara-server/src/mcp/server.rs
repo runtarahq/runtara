@@ -1136,7 +1136,22 @@ impl ServerHandler for SmoMcpServer {
             ));
         }
 
+        // What the caller presented goes with the call too, for what a tool
+        // asks of an engine in another process.
+        let presented = context
+            .extensions
+            .get::<axum::http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<crate::auth::presented::Presented>())
+            .cloned();
+
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        let call = async {
+            let call = self.tool_router.call(tcc);
+            match presented {
+                Some(presented) => crate::auth::presented::presenting(presented, call).await,
+                None => call.await,
+            }
+        };
         match caller {
             // rmcp runs the call on a task of its own, outside the request's
             // tenant scope, so it is scoped again here: the tool's own
@@ -1145,7 +1160,7 @@ impl ServerHandler for SmoMcpServer {
                 let tenant = auth.org_id.clone();
                 runtara_store_postgres::tenant_scope::scoped(
                     tenant,
-                    tools::internal_api::with_caller_auth(auth, self.tool_router.call(tcc)),
+                    tools::internal_api::with_caller_auth(auth, call),
                 )
                 .await
             }
@@ -1160,7 +1175,7 @@ impl ServerHandler for SmoMcpServer {
                     None,
                 ))
             }
-            None => self.tool_router.call(tcc).await,
+            None => call.await,
         }
     }
 

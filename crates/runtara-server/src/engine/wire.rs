@@ -23,8 +23,9 @@ pub(crate) const OPERATIONS: &str = "/engine/v1/operations/";
 /// part's name, then the request's own path.
 pub(crate) const SERVED: &str = "/engine/v1/served/";
 
-/// The caller as the API authenticated it, on a request it hands over.
-pub(crate) const CALLER: &str = "x-runtara-caller";
+/// What the caller presented to the API ([`crate::auth::presented`]), on
+/// every call made for one. The engine verifies it itself.
+pub(crate) const PRESENTED: &str = "x-runtara-presented";
 /// The tenant a request's path named, on a request it hands over.
 pub(crate) const REQUESTED_TENANT: &str = "x-runtara-requested-tenant";
 /// What a request came through (the API, MCP), on a request it hands over.
@@ -38,7 +39,22 @@ pub(crate) trait Operation: Serialize + DeserializeOwned + Send + 'static {
     /// The tenant it is for, whose scope the engine answers it in.
     fn tenant(&self) -> Option<&str>;
 
+    /// Makes the caller the operation names the one the engine found. Only an
+    /// operation that names its caller does anything.
+    fn of_caller(&mut self, caller: &AuthContext);
+
     fn ask(self, engine: &dyn Engine) -> impl Future<Output = Self::Answer> + Send;
+}
+
+/// Why an operation was not answered.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Refused {
+    /// Its body is not the operation, or the answer could not be written.
+    Unreadable(String),
+    /// It is for a tenant and came with nothing presented.
+    NoCaller,
+    /// It is for a tenant its caller does not act for.
+    NotTheCallers,
 }
 
 /// What the engine says of itself, which does not change while it runs.
@@ -58,7 +74,7 @@ pub(crate) struct EngineFacts {
 macro_rules! operations {
     ($(
         $name:ident { $($field:ident : $ty:ty),* $(,)? } -> $answer:ty,
-        |$engine:ident, $op:ident| for $tenant:expr => $call:expr;
+        |$engine:ident, $op:ident| for $tenant:expr $(, as $caller:ident)? => $call:expr;
     )*) => {
         $(
             #[derive(Serialize, Deserialize)]
@@ -73,6 +89,10 @@ macro_rules! operations {
                     $tenant
                 }
 
+                fn of_caller(&mut self, _caller: &AuthContext) {
+                    $(self.$caller = _caller.clone();)?
+                }
+
                 async fn ask(self, $engine: &dyn Engine) -> $answer {
                     let $op = self;
                     $call
@@ -84,23 +104,37 @@ macro_rules! operations {
         #[cfg(test)]
         pub(crate) const NAMES: &[&str] = &[$(stringify!($name)),*];
 
-        /// Has `engine` answer the operation `name` sent as `body`. `None` if
-        /// there is no such operation; `Err` if the body is not one, or the
-        /// answer cannot be written.
+        /// Has `engine` answer the operation `name` sent as `body` for
+        /// `caller`, whom the engine verified. `None` if there is no such
+        /// operation.
+        ///
+        /// An operation for a tenant is answered only for a caller who acts
+        /// for that tenant, in that tenant's scope.
         pub(crate) async fn answer(
             engine: &dyn Engine,
             name: &str,
             body: &[u8],
-        ) -> Option<Result<Vec<u8>, String>> {
+            caller: Option<&AuthContext>,
+        ) -> Option<Result<Vec<u8>, Refused>> {
             match name {
                 $(stringify!($name) => Some(match serde_json::from_slice::<$name>(body) {
-                    Err(error) => Err(error.to_string()),
-                    Ok(operation) => {
+                    Err(error) => Err(Refused::Unreadable(error.to_string())),
+                    Ok(mut operation) => {
                         let answer = match operation.tenant().map(str::to_owned) {
-                            Some(tenant) => scoped(tenant, operation.ask(engine)).await,
+                            Some(tenant) => {
+                                match caller {
+                                    None => return Some(Err(Refused::NoCaller)),
+                                    Some(caller) if caller.org_id != tenant => {
+                                        return Some(Err(Refused::NotTheCallers));
+                                    }
+                                    Some(caller) => operation.of_caller(caller),
+                                }
+                                scoped(tenant, operation.ask(engine)).await
+                            }
                             None => operation.ask(engine).await,
                         };
-                        serde_json::to_vec(&answer).map_err(|error| error.to_string())
+                        serde_json::to_vec(&answer)
+                            .map_err(|error| Refused::Unreadable(error.to_string()))
                     }
                 }),)*
                 _ => None,
@@ -310,7 +344,7 @@ operations! {
         operation: String,
         payload: Value,
     } -> InputResult<InputReceipt>,
-    |engine, op| for Some(&op.auth.org_id) => engine
+    |engine, op| for Some(&op.auth.org_id), as auth => engine
         .submit_authenticated_input_response(
             &op.auth,
             &op.instance_id,
@@ -349,7 +383,7 @@ operations! {
         operation_id: String,
         payload: Value,
     } -> Result<WorkflowActionReceipt, WorkflowRuntimeError>,
-    |engine, op| for Some(&op.auth.org_id) => engine
+    |engine, op| for Some(&op.auth.org_id), as auth => engine
         .submit_workflow_action(
             &op.auth,
             &op.workflow_id,
@@ -367,7 +401,7 @@ operations! {
         operation_id: String,
         payload: Value,
     } -> Result<WorkflowActionReceipt, WorkflowRuntimeError>,
-    |engine, op| for Some(&op.auth.org_id) => engine
+    |engine, op| for Some(&op.auth.org_id), as auth => engine
         .submit_authenticated_input(
             &op.auth,
             &op.instance_id,
