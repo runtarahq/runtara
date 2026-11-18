@@ -38,6 +38,16 @@
 #      trigger, connection and API key ids, asked as the primary tenant:
 #      none answers 2xx with the second tenant's object.
 #
+#  11. THE ENGINE DECIDES (TWO_ROLES only; docs/separating-concerns.md,
+#      Phase 4) — the API is a database role with its own records and no
+#      more, and a Valkey user that cannot write what starts work
+#      (scripts/roles). With all the API holds — its certificate, its
+#      database role, its Valkey user — the engine is asked for another
+#      tenant and refuses; the outbox, the keys and the runtime database are
+#      closed; a definition changed in the server database does not run
+#      until a caller who may compiles it; the version that runs is the one
+#      chosen through the engine.
+#
 # With SERVED_TENANTS_KEY_ID_PER_TENANT, a host that seals each tenant's
 # credentials under its own keys (key id `{tenant}-k1`) is checked to.
 #
@@ -85,6 +95,12 @@ ENGINE_PID=""
 SEAL_PID=""
 SEAL_DIR=""
 TEST_ENGINE_PORT="${TEST_ENGINE_PORT:-17885}"
+# The API's own database role and Valkey user (TWO_ROLES): scripts/roles.
+API_ROLE="${TEST_DB_SERVER}_api"
+API_PASSWORD=""
+API_VALKEY_USER="runtara-api"
+API_VALKEY_PASSWORD=""
+MADE_RUNTARA_SYSTEM=""
 VALKEY_CONTAINER=""
 TENANT="served_tenants_e2e"
 SECOND_TENANT="served_tenants_e2e_b"
@@ -122,6 +138,10 @@ cleanup() {
     psql_quiet -d postgres -c "DROP DATABASE IF EXISTS ${TEST_DB_SERVER}" >/dev/null 2>&1 || true
     psql_quiet -d postgres -c "DROP DATABASE IF EXISTS ${TEST_DB_RUNTIME}" >/dev/null 2>&1 || true
     psql_quiet -d postgres -c "DROP ROLE IF EXISTS ${RUNTIME_ROLE}" >/dev/null 2>&1 || true
+    psql_quiet -d postgres -c "DROP ROLE IF EXISTS ${API_ROLE}" >/dev/null 2>&1 || true
+    # `runtara_system` is the cluster's: it is dropped only if this run made it.
+    [ -z "${MADE_RUNTARA_SYSTEM}" ] \
+        || psql_quiet -d postgres -c "DROP ROLE IF EXISTS runtara_system" >/dev/null 2>&1 || true
     if [ -n "${SERVED_TENANTS_KEEP:-}" ]; then
         echo "kept ${TEST_DATA_DIR}" >&2
     else
@@ -199,6 +219,27 @@ for extension in uuid-ossp vector fuzzystrmatch pg_trgm; do
 done
 psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_RUNTIME} OWNER ${RUNTIME_ROLE}" >/dev/null
 SERVER_DB_URL="postgresql://${RUNTIME_ROLE}:${RUNTIME_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}"
+# The API in front of an engine is a role of its own, which owns nothing: it
+# is granted its own records once the engine has made the tables.
+API_DB_URL="${SERVER_DB_URL}"
+if [ "${TWO_ROLES}" = "true" ]; then
+    API_PASSWORD=$(openssl rand -hex 16)
+    API_VALKEY_PASSWORD=$(openssl rand -hex 16)
+    psql_quiet -d postgres -c "CREATE ROLE ${API_ROLE} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '${API_PASSWORD}'" >/dev/null
+    API_DB_URL="postgresql://${API_ROLE}:${API_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}"
+    [ "$(psql_quiet -d postgres -c "SELECT count(*) FROM pg_roles WHERE rolname = 'runtara_system'")" = "1" ] \
+        || MADE_RUNTARA_SYSTEM=yes
+fi
+
+# What the API role is given of the database and of Valkey, as a deployment
+# gives it: the two files under scripts/roles.
+grant_the_api_its_own() {
+    psql_quiet -d "${TEST_DB_SERVER}" -v api_role="${API_ROLE}" -v engine_role="${RUNTIME_ROLE}" \
+        < "${PROJECT_ROOT}/scripts/roles/api-database-role.sql" >/dev/null
+    # shellcheck disable=SC2046
+    docker exec "${VALKEY_CONTAINER}" valkey-cli ACL SETUSER "${API_VALKEY_USER}" on ">${API_VALKEY_PASSWORD}" \
+        $(grep -v '^#' "${PROJECT_ROOT}/scripts/roles/api-valkey-user.acl") >/dev/null
+}
 # No platform object-model database: tenants sharing a process take none
 # (M7.16).
 
@@ -259,7 +300,7 @@ start_api() {
     RUNTARA_ROLE=api \
     RUNTARA_ENGINE_URL="https://127.0.0.1:${TEST_ENGINE_PORT}" \
     RUNTARA_ENGINE_TLS_DIR="${TEST_DATA_DIR}/pki-api" \
-    RUNTARA_SERVER_DATABASE_URL="${SERVER_DB_URL}" \
+    RUNTARA_SERVER_DATABASE_URL="${API_DB_URL}" \
     TENANT_ID="${TENANT}" \
     RUNTARA_SERVED_TENANTS="${SECOND_TENANT}" \
     RUNTARA_REQUIRE_ROW_SECURITY=true \
@@ -273,6 +314,8 @@ start_api() {
     RUNTARA_OAUTH_TENANTLESS_CALLBACK=false \
     VALKEY_HOST=127.0.0.1 \
     VALKEY_PORT="${TEST_VALKEY_PORT}" \
+    VALKEY_USER="${API_VALKEY_USER}" \
+    VALKEY_PASSWORD="${API_VALKEY_PASSWORD}" \
     OTEL_SDK_DISABLED=true \
     SKIP_MIGRATIONS=true \
     "${RUNTARA_SERVER_BIN}") >>"${TEST_LOG}" 2>&1 &
@@ -302,6 +345,7 @@ start_server() {
                 sleep 1
                 kill -0 "${ENGINE_PID}" 2>/dev/null || { print_error "Engine exited during boot."; tail -30 "${TEST_LOG}"; exit 1; }
             done
+            grant_the_api_its_own
         fi
         start_api
     else
@@ -739,5 +783,147 @@ if asked < 20:
     sys.exit(f"only {asked} routes were asked; the OpenAPI document lists too few")
 print(f"  {asked} GET routes asked as the primary for the second tenant's objects: none answered with one ✓")
 PY
+
+#-------------------------------------------------------------------------
+if [ "${TWO_ROLES}" = "true" ]; then
+print_step "11. The engine decides, with all the API holds turned against it..."
+AUTH=()
+
+# a. The API's certificate lets it ask the engine; it does not let it say
+# for whom. What a caller presented is what the engine goes by.
+presented() {  # presented [bearer token]: the wire's header for that caller
+    python3 - "$@" <<'PY'
+import base64, json, sys
+headers = [["authorization", f"Bearer {sys.argv[1]}"]] if len(sys.argv) > 1 else []
+print(base64.b64encode(json.dumps(
+    {"door": "api", "headers": headers, "requested_tenant": None, "as_a_member": True}).encode()).decode())
+PY
+}
+ask_engine() {  # ask_engine OPERATION BODY [presented]: the status the engine answers
+    curl -sS -o "${TEST_DATA_DIR}/engine_body" -w '%{http_code}' --max-time 30 \
+        --cacert "${TEST_DATA_DIR}/pki-api/ca.pem" \
+        --cert "${TEST_DATA_DIR}/pki-api/tls.pem" --key "${TEST_DATA_DIR}/pki-api/tls.key" \
+        --resolve "runtara-server:${TEST_ENGINE_PORT}:127.0.0.1" \
+        -X POST -H 'Content-Type: application/json' ${3:+-H "x-runtara-presented: $3"} -d "$2" \
+        "https://runtara-server:${TEST_ENGINE_PORT}/engine/v1/operations/$1"
+}
+B_LIST="{\"tenant_id\": \"${SECOND_TENANT}\", \"workflow_id\": \"${B_WF}\", \"page\": 0, \"size\": 5}"
+B_QUEUE="{\"run_label\": null, \"tenant_id\": \"${SECOND_TENANT}\", \"workflow_id\": \"${B_WF}\", \"version\": null, \"inputs\": {\"data\": {}}, \"debug\": false, \"correlation_id\": null, \"idempotency_key\": null, \"trigger_source\": \"HttpApi\", \"instance_id\": null}"
+B_RUNS_BEFORE=$(runtime_sql "SELECT count(*) FROM instances WHERE tenant_id = '${SECOND_TENANT}'")
+# Nothing presented: in this suite's auth mode that is the primary tenant's
+# operator, who is not the second tenant's.
+for operation in "ListExecutions ${B_LIST}" "Queue ${B_QUEUE}"; do
+    CODE=$(ask_engine "${operation%% *}" "${operation#* }" "$(presented)")
+    [ "${CODE}" = "403" ] || { print_error "the engine answered ${operation%% *} for the second tenant to the primary's operator with ${CODE}: $(head -c 300 "${TEST_DATA_DIR}/engine_body")"; exit 1; }
+    CODE=$(ask_engine "${operation%% *}" "${operation#* }")
+    [ "${CODE}" = "401" ] || { print_error "the engine answered ${operation%% *} with no caller with ${CODE}"; exit 1; }
+    CODE=$(ask_engine "${operation%% *}" "${operation#* }" "$(presented "${KEY}")")
+    [ "${CODE}" = "403" ] || { print_error "the engine answered ${operation%% *} for the second tenant to the primary's key with ${CODE}"; exit 1; }
+    CODE=$(ask_engine "${operation%% *}" "${operation#* }" "$(presented "rt_not_a_key_$(openssl rand -hex 12)")")
+    [ "${CODE}" = "401" ] || { print_error "the engine answered ${operation%% *} to a key that is nobody's with ${CODE}"; exit 1; }
+done
+[ "$(runtime_sql "SELECT count(*) FROM instances WHERE tenant_id = '${SECOND_TENANT}'")" = "${B_RUNS_BEFORE}" ] \
+    || { print_error "a refused operation started a run for the second tenant"; exit 1; }
+# The second tenant's own key is answered.
+CODE=$(ask_engine ListExecutions "${B_LIST}" "$(presented "${SECOND_KEY}")")
+[ "${CODE}" = "200" ] || { print_error "the engine refused the second tenant's own key (${CODE}): $(head -c 300 "${TEST_DATA_DIR}/engine_body")"; exit 1; }
+# A part of the API that has a caller is served to nobody without one.
+CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
+    --cacert "${TEST_DATA_DIR}/pki-api/ca.pem" --cert "${TEST_DATA_DIR}/pki-api/tls.pem" --key "${TEST_DATA_DIR}/pki-api/tls.key" \
+    --resolve "runtara-server:${TEST_ENGINE_PORT}:127.0.0.1" \
+    -H "x-runtara-caller: $(printf '{"org_id":"%s","user_id":"mallory","auth_method":"Jwt","role":"owner","jti":null,"email":null,"name":null,"tenant_slug":null}' "${SECOND_TENANT}" | base64 | tr -d '\n')" \
+    "https://runtara-server:${TEST_ENGINE_PORT}/engine/v1/served/connections/api/runtime/connections")
+[ "${CODE}" = "401" ] || { print_error "the engine served connections to a caller the API named (${CODE})"; exit 1; }
+echo "  with the API's certificate: no caller 401, another tenant's caller 403, a key that is nobody's 401, no run started; the tenant's own key is answered ✓"
+
+# b. The API's database role holds its own records and no more.
+as_api_role() {  # as_api_role SQL [database]: its output, or the error
+    PGPASSWORD="${API_PASSWORD}" psql -qtA -U "${API_ROLE}" -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" \
+        -d "${2:-${TEST_DB_SERVER}}" -c "$1" 2>&1 || true
+}
+SCOPED="SELECT set_config('runtara.tenant_id', '${TENANT}', false);"
+[ "$(as_api_role "${SCOPED} SELECT count(*) > 0 FROM workflows" | tail -1)" = "t" ] \
+    || { print_error "the API's role cannot read its own workflows"; exit 1; }
+for table in execution_outbox execution_requests execution_admission_reservations \
+             connection_data_entity seal_wrapped_key platform_oauth_app oauth_state; do
+    OUT=$(as_api_role "${SCOPED} SELECT count(*) FROM ${table}")
+    echo "${OUT}" | grep -q "permission denied" \
+        || { print_error "the API's role read ${table}: ${OUT}"; exit 1; }
+done
+OUT=$(as_api_role "${SCOPED} DELETE FROM workflow_compilations")
+echo "${OUT}" | grep -q "permission denied" || { print_error "the API's role wrote workflow_compilations: ${OUT}"; exit 1; }
+OUT=$(as_api_role "SELECT set_config('runtara.all_tenants', 'on', false); SELECT count(*) FROM workflows")
+echo "${OUT}" | grep -q "may not work across tenants" \
+    || { print_error "the API's role worked across tenants: ${OUT}"; exit 1; }
+OUT=$(as_api_role "SELECT count(*) FROM instances" "${TEST_DB_RUNTIME}")
+echo "${OUT}" | grep -q "permission denied" || { print_error "the API's role read the runtime database: ${OUT}"; exit 1; }
+OUT=$(as_api_role "SELECT count(*) FROM workflow_approvals" "${TEST_DB_RUNTIME}")
+echo "${OUT}" | grep -q "permission denied" || { print_error "the API's role read what the engine approved: ${OUT}"; exit 1; }
+echo "  the API's database role reads its workflows; the outbox, admission, connections, keys, compilations (to write), every tenant at once and the runtime database are closed to it ✓"
+
+# c. Its Valkey user cannot write what starts work.
+as_api_valkey() {
+    docker exec "${VALKEY_CONTAINER}" valkey-cli --user "${API_VALKEY_USER}" --pass "${API_VALKEY_PASSWORD}" --no-auth-warning "$@" 2>&1 || true
+}
+for command in "XADD runtara:triggers:${SECOND_TENANT} * event x" \
+               "RPUSH ${SECOND_TENANT}:compilation:queue x" "RPUSH runtara:compilation:queue x" \
+               "XADD ${SECOND_TENANT}:control * type x" "INCR ${SECOND_TENANT}:admission:reserved" \
+               "SET ${SECOND_TENANT}:member:mallory owner"; do
+    # shellcheck disable=SC2086
+    OUT=$(as_api_valkey ${command})
+    echo "${OUT}" | grep -q "NOPERM" || { print_error "the API's Valkey user ran '${command}': ${OUT}"; exit 1; }
+done
+[ "$(as_api_valkey SET "${TENANT}:token:revoked:e2e-probe" 1 EX 5)" = "OK" ] \
+    || { print_error "the API's Valkey user cannot record a revoked token"; exit 1; }
+echo "  the API's Valkey user cannot write a trigger stream, a compilation queue, the control stream, an admission count or a membership ✓"
+
+# d. A definition changed in the server database, which the API's role may
+# write, does not run: nobody who may run it asked for it as it now is.
+sync_answer() { curl -sS --max-time 120 -X POST -H 'Content-Type: application/json' -d '{}' "${API}/${TENANT}/events/http-sync/${WF_ID}"; }
+RESP=$(sync_answer)
+echo "${RESP}" | jq -e '.outputs.answer == 42' >/dev/null || { print_error "the workflow did not run before it was changed: ${RESP}"; exit 1; }
+WF_VERSION=$(server_sql "SELECT COALESCE(current_version, latest_version) FROM workflows WHERE workflow_id = '${WF_ID}'")
+OUT=$(as_api_role "${SCOPED} UPDATE workflow_definitions SET definition = jsonb_set(definition, '{steps,finish,inputMapping,answer,value}', '666') WHERE workflow_id = '${WF_ID}' AND version = ${WF_VERSION} RETURNING 1")
+[ "${OUT##*$'\n'}" = "1" ] || { print_error "the definition was not changed as the API's role: ${OUT}"; exit 1; }
+RESP=$(sync_answer)
+if echo "${RESP}" | jq -e '.outputs.answer == 666' >/dev/null 2>&1; then
+    print_error "a definition changed behind the engine's back ran: ${RESP}"; exit 1
+fi
+echo "${RESP}" | grep -q "approved to run" \
+    || { print_error "the changed definition was not refused as unapproved: $(echo "${RESP}" | head -c 400)"; exit 1; }
+CODE=$(http_status -X POST -H 'Content-Type: application/json' -d '{"n": 1}' "${API}/${TENANT}/events/http/${TRIGGER}/run")
+sleep 5
+[ "$(runtime_sql "SELECT count(*) FROM instances WHERE tenant_id = '${TENANT}' AND convert_from(output, 'UTF8') LIKE '%666%'")" = "0" ] \
+    || { print_error "a webhook ran the changed definition"; exit 1; }
+# A caller who may compile it approves it as it now is, and it runs.
+RESP=$(api_post "/workflows/${WF_ID}/versions/${WF_VERSION}/compile" '{}' 900)
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "compiling the changed definition failed: ${RESP}"; exit 1; }
+RESP=$(sync_answer)
+echo "${RESP}" | jq -e '.outputs.answer == 666' >/dev/null \
+    || { print_error "the definition a caller compiled did not run: $(echo "${RESP}" | head -c 400)"; exit 1; }
+echo "  a definition changed in the server database was refused (webhook and sync) until a caller compiled it, and then ran ✓"
+
+# e. The version that runs is the one chosen through the engine.
+RESP=$(api_post "/workflows/${WF_ID}/update" "{\"executionGraph\": ${GRAPH/\"value\": 42/\"value\": 43}}")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "a new version was not saved: ${RESP}"; exit 1; }
+NEW_VERSION=$(server_sql "SELECT latest_version FROM workflows WHERE workflow_id = '${WF_ID}'")
+[ "${NEW_VERSION}" -gt "${WF_VERSION}" ] || { print_error "no new version (${NEW_VERSION})"; exit 1; }
+RESP=$(api_post "/workflows/${WF_ID}/versions/${NEW_VERSION}/compile" '{}' 900)
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "compiling the new version failed: ${RESP}"; exit 1; }
+RESP=$(api_post "/workflows/${WF_ID}/versions/${WF_VERSION}/set-current" '{}')
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "set-current failed: ${RESP}"; exit 1; }
+[ "$(runtime_sql "SELECT version FROM workflow_current_versions WHERE workflow_id = '${WF_ID}'")" = "${WF_VERSION}" ] \
+    || { print_error "the engine did not record the chosen version"; exit 1; }
+echo "$(sync_answer)" | jq -e '.outputs.answer == 666' >/dev/null || { print_error "the chosen version did not run"; exit 1; }
+OUT=$(as_api_role "${SCOPED} UPDATE workflows SET current_version = ${NEW_VERSION} WHERE workflow_id = '${WF_ID}' RETURNING 1")
+[ "${OUT##*$'\n'}" = "1" ] || { print_error "the current version was not changed as the API's role: ${OUT}"; exit 1; }
+RESP=$(sync_answer)
+echo "${RESP}" | jq -e '.outputs.answer == 666' >/dev/null \
+    || { print_error "a current version written to the server database chose what ran: $(echo "${RESP}" | head -c 300)"; exit 1; }
+RESP=$(api_post "/workflows/${WF_ID}/versions/${NEW_VERSION}/set-current" '{}')
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "set-current failed: ${RESP}"; exit 1; }
+echo "$(sync_answer)" | jq -e '.outputs.answer == 43' >/dev/null || { print_error "the version chosen through the engine did not run"; exit 1; }
+echo "  the version chosen through the engine ran; one written to the server database behind it did not ✓"
+fi
 
 print_success "served tenants: webhooks, API keys, triggers, cron, OAuth callbacks and connection events reach exactly the tenants this server serves, each its own, under its own limits"

@@ -999,6 +999,8 @@ impl ExecutionEngine {
         crate::engine::approvals::approve_as_asked(req.tenant_id, req.workflow_id, version)
             .await
             .map_err(ExecutionError::DatabaseError)?;
+        self.require_approved(req.tenant_id, req.workflow_id, version)
+            .await?;
 
         // 1.5 A compilation that failed for this unchanged definition fails
         // every launch the same way, so refuse now rather than report a
@@ -1183,6 +1185,8 @@ impl ExecutionEngine {
         crate::engine::approvals::approve_as_asked(req.tenant_id, req.workflow_id, version)
             .await
             .map_err(ExecutionError::DatabaseError)?;
+        self.require_approved(req.tenant_id, req.workflow_id, version)
+            .await?;
         let workflow = self
             .workflow_repo
             .get_by_id(req.tenant_id, req.workflow_id, Some(version))
@@ -2554,6 +2558,41 @@ impl ExecutionEngine {
             self.workflow_repo
                 .get_current_or_latest_version(tenant_id, workflow_id)
                 .await
+        }
+    }
+
+    /// Refuses a version whose definition is not the one approved to run,
+    /// before anything is compiled or queued for it. Every launch is held to
+    /// the same in `ensure_compiled`; this says so to whoever asked.
+    async fn require_approved(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+    ) -> Result<(), ExecutionError> {
+        let Some(approvals) = crate::engine::approvals::installed() else {
+            return Ok(());
+        };
+        // A version that is not there is said to be so by what looks for it.
+        if approvals
+            .source(tenant_id, workflow_id, version)
+            .await
+            .map_err(ExecutionError::DatabaseError)?
+            .is_none()
+        {
+            return Ok(());
+        }
+        match approvals
+            .verdict(tenant_id, workflow_id, version, None)
+            .await
+            .map_err(ExecutionError::DatabaseError)?
+        {
+            crate::engine::approvals::Verdict::Refuse => Err(ExecutionError::WorkflowNotRunnable {
+                workflow_id: workflow_id.to_string(),
+                version,
+                error: crate::engine::approvals::NOT_APPROVED.to_string(),
+            }),
+            _ => Ok(()),
         }
     }
 
