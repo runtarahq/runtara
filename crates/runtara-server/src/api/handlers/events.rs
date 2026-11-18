@@ -130,9 +130,10 @@ pub async fn capture_http_event(
     let trigger_repo = TriggerRepository::new(pool.clone());
     // A webhook is unauthenticated: its tenant is its trigger's, and only a
     // tenant this process serves.
-    let found =
-        runtara_store_postgres::tenant_scope::locating(trigger_repo.get_by_id(&trigger_id, None))
-            .await;
+    let found = crate::middleware::tenant_path::finding_the_tenant(
+        trigger_repo.get_by_id(&trigger_id, None),
+    )
+    .await;
     let trigger = match found {
         Ok(Some(t))
             if crate::config::is_served_tenant(
