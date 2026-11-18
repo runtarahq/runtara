@@ -72,6 +72,9 @@ RUNTARA_SERVER_BIN="${RUNTARA_SERVER_BIN:-${TARGET_DIR}/debug/runtara-server}"
 EXECUTOR_BIN="${TARGET_DIR}/debug/runtara-executor"
 COMPONENTS_DIR="${RUNTARA_AGENT_COMPONENTS_DIR:-${PROJECT_ROOT}/target/wasm32-wasip2/release}"
 SQLX_OFFLINE="${SQLX_OFFLINE:-true}"
+# The compiler's WASI command, which an engine that is a process of its own
+# compiles in: RUNTARA_COMPILER_WASM, or built beside the components.
+COMPILER_WASM="${RUNTARA_COMPILER_WASM:-${COMPONENTS_DIR}/runtara-compile-sandboxed.wasm}"
 
 WORK_DIR="$(mktemp -d -t runtara_two_roles_e2e_XXXXXX)"
 # A socket's path is short.
@@ -141,6 +144,7 @@ engine_env() {
     RUNTARA_ROLE=engine \
     RUNTARA_ENGINE_LISTEN="127.0.0.1:${ENGINE_PORT}" \
     RUNTARA_ENGINE_HEALTH_LISTEN="127.0.0.1:${ENGINE_HEALTH_PORT}" \
+    RUNTARA_COMPILER_WASM="${COMPILER_WASM}" \
     RUNTARA_RUNNER=executor \
     RUNTARA_EXECUTOR_TLS_DIR="${WORK_DIR}/pki-engine" \
     RUNTARA_RUN_CHANNEL_LISTEN="127.0.0.1:${RUN_CHANNEL_PORT}" \
@@ -405,6 +409,10 @@ VALKEY_CONTAINER=$(docker run -d --rm -p "${TEST_VALKEY_PORT}:6379" valkey/valke
 for _ in {1..20}; do (echo > "/dev/tcp/127.0.0.1/${TEST_VALKEY_PORT}") 2>/dev/null && break; sleep 0.5; done
 psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_SERVER}" >/dev/null
 psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_RUNTIME}" >/dev/null
+if [ ! -f "${COMPILER_WASM}" ]; then
+    print_step "Building the compiler's WASI command..."
+    cargo build -p runtara-compile-guest --bin runtara-compile-sandboxed --release --target wasm32-wasip2 >&2
+fi
 start_seal
 
 # --- 1 ------------------------------------------------------------------
@@ -425,10 +433,16 @@ echo "${SAID}" | grep -q "was given RUNTARA_ENGINE_HEALTH_LISTEN" \
 SAID=$(refused_start engine_env env -u RUNTARA_SEAL_MODE -u RUNTARA_SEAL_SOCKET "${RUNTARA_SERVER_BIN}")
 echo "${SAID}" | grep -q "RUNTARA_ROLE=engine needs a seal of its own" \
     || { print_error "an engine with seal in itself did not refuse to start: ${SAID}"; exit 1; }
+SAID=$(refused_start engine_env env -u RUNTARA_COMPILER_WASM "${RUNTARA_SERVER_BIN}")
+echo "${SAID}" | grep -q "RUNTARA_ROLE=engine needs RUNTARA_COMPILER_WASM" \
+    || { print_error "an engine with no sandbox to compile in did not refuse to start: ${SAID}"; exit 1; }
+SAID=$(refused_start engine_env RUNTARA_COMPILER_WASM="${WORK_DIR}/not-a-compiler.wasm" "${RUNTARA_SERVER_BIN}")
+echo "${SAID}" | grep -q "names a compiler that could not be loaded" \
+    || { print_error "an engine whose compiler is not there did not refuse to start: ${SAID}"; exit 1; }
 SAID=$(refused_start engine_env env -u RUNTARA_ENGINE_LISTEN "${RUNTARA_SERVER_BIN}")
 echo "${SAID}" | grep -q "RUNTARA_ROLE=engine needs RUNTARA_ENGINE_LISTEN" \
     || { print_error "an engine with nowhere to listen did not refuse to start: ${SAID}"; exit 1; }
-print_success "an API refuses the engine's holdings; an engine refuses to be unreachable, or to hold seal's keys"
+print_success "an API refuses the engine's holdings; an engine refuses to be unreachable, to hold seal's keys, or to compile in its own process"
 
 # --- 2 ------------------------------------------------------------------
 print_step "2. Starting the engine, two executors and the API..."
@@ -443,6 +457,8 @@ for name in "${API_ENV[@]}"; do
             print_error "the API is given ${name%%=*}"; exit 1 ;;
     esac
 done
+grep -q "Workflows are compiled in a sandbox" "${ENGINE_LOG}" \
+    || { print_error "the engine does not say it compiles in a sandbox"; exit 1; }
 grep -q "Engine at https://127.0.0.1:${ENGINE_PORT} answers" "${API_LOG}" \
     || { print_error "the API does not say the engine answers"; exit 1; }
 if grep -Eq "Embedded runtara|Component dispatcher loaded|Connection secrets are held by seal|Execution engine initialized" "${API_LOG}"; then

@@ -2167,6 +2167,37 @@ async fn start_as_platform(
         );
         std::process::exit(1);
     }
+    // Where workflows are compiled: in a sandbox of the compiler's own, when
+    // one is named. An engine that is a process of its own compiles nowhere
+    // else: a tenant's graph is not parsed where both databases and the way
+    // to seal are. A host that set an executor of its own keeps it.
+    match crate::compile_sandbox::configured() {
+        Some(path) => match crate::compile_sandbox::CompileSandbox::load(&path) {
+            Ok(sandbox) => {
+                crate::compile_executor::set_compile_executor(sandbox);
+                println!("✓ Workflows are compiled in a sandbox ({})", path.display());
+            }
+            Err(error) => {
+                eprintln!(
+                    "❌ {} names a compiler that could not be loaded: {error}",
+                    crate::compile_sandbox::COMPILER_WASM_ENV
+                );
+                std::process::exit(1);
+            }
+        },
+        None if !roles.runs(crate::roles::Role::Api)
+            && crate::compile_executor::executor().is_none() =>
+        {
+            eprintln!(
+                "❌ RUNTARA_ROLE=engine needs {}: the compiler's WASI command \
+                 (runtara-compile-sandboxed.wasm), so that workflows are compiled in a \
+                 sandbox and not in the engine's own process (docs/roles.md)",
+                crate::compile_sandbox::COMPILER_WASM_ENV
+            );
+            std::process::exit(1);
+        }
+        None => {}
+    }
     let listen = match crate::roles::engine_listen() {
         Ok(Some(listen)) => Some(listen),
         Ok(None) if roles.runs(crate::roles::Role::Api) => None,

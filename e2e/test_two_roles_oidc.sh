@@ -71,6 +71,9 @@ RUNTARA_SERVER_BIN="${RUNTARA_SERVER_BIN:-${TARGET_DIR}/debug/runtara-server}"
 EXECUTOR_BIN="${TARGET_DIR}/debug/runtara-executor"
 COMPONENTS_DIR="${RUNTARA_AGENT_COMPONENTS_DIR:-${PROJECT_ROOT}/target/wasm32-wasip2/release}"
 SQLX_OFFLINE="${SQLX_OFFLINE:-true}"
+# The compiler's WASI command, which an engine that is a process of its own
+# compiles in: RUNTARA_COMPILER_WASM, or built beside the components.
+COMPILER_WASM="${RUNTARA_COMPILER_WASM:-${COMPONENTS_DIR}/runtara-compile-sandboxed.wasm}"
 
 WORK_DIR="$(mktemp -d -t runtara_two_roles_oidc_e2e_XXXXXX)"
 # A socket's path is short.
@@ -185,6 +188,10 @@ fi
 [ -f "${COMPONENTS_DIR}/runtara_workflow_stdlib.wasm" ] \
     || { print_error "Missing ${COMPONENTS_DIR}/runtara_workflow_stdlib.wasm — run scripts/build-agent-components.sh"; exit 1; }
 
+if [ ! -f "${COMPILER_WASM}" ]; then
+    print_step "Building the compiler's WASI command..."
+    cargo build -p runtara-compile-guest --bin runtara-compile-sandboxed --release --target wasm32-wasip2 >&2
+fi
 print_step "Starting an isolated Valkey, a mock JWKS, the databases and seal..."
 docker info >/dev/null 2>&1 || { print_error "docker is required"; exit 1; }
 VALKEY_CONTAINER=$(docker run -d --rm -p "${TEST_VALKEY_PORT}:6379" valkey/valkey:8-alpine)
@@ -279,6 +286,7 @@ print_step "Starting the engine and the API..."
     RUNTARA_ROLE=engine \
     RUNTARA_ENGINE_LISTEN="127.0.0.1:${ENGINE_PORT}" \
     RUNTARA_ENGINE_TLS_DIR="${WORK_DIR}/pki-engine" \
+    RUNTARA_COMPILER_WASM="${COMPILER_WASM}" \
     RUNTARA_SERVER_DATABASE_URL="${SERVER_DB_URL}" \
     RUNTARA_DATABASE_URL="${RUNTIME_DB_URL}" \
     RUNTARA_CONNECTIONS_ENCRYPTION_KEY="${ENGINE_KEY}" \

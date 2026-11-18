@@ -110,6 +110,9 @@ SECOND_TENANT="served_tenants_e2e_b"
 RUNTARA_SERVER_BIN="${RUNTARA_SERVER_BIN:-${PROJECT_ROOT}/target/debug/runtara-server}"
 COMPONENTS_DIR="${RUNTARA_AGENT_COMPONENTS_DIR:-${PROJECT_ROOT}/target/wasm32-wasip2/release}"
 SQLX_OFFLINE="${SQLX_OFFLINE:-true}"
+# The compiler's WASI command, which an engine that is a process of its own
+# compiles in: RUNTARA_COMPILER_WASM, or built beside the components.
+COMPILER_WASM="${RUNTARA_COMPILER_WASM:-${COMPONENTS_DIR}/runtara-compile-sandboxed.wasm}"
 
 print_step()    { echo -e "${GREEN}[STEP]${NC} $1"; }
 # stderr so failures inside $(command substitution) helpers stay visible.
@@ -334,8 +337,12 @@ start_server() {
                 --api-dir "${TEST_DATA_DIR}/pki-api" >/dev/null
             mkdir "${TEST_DATA_DIR}/agent-descriptions"
             cp "${COMPONENTS_DIR}"/runtara_agent_*.meta.json "${TEST_DATA_DIR}/agent-descriptions/"
+            if [ ! -f "${COMPILER_WASM}" ]; then
+                cargo build -p runtara-compile-guest --bin runtara-compile-sandboxed --release --target wasm32-wasip2 >&2
+            fi
             start_seal
             RUNTARA_ROLE=engine \
+            RUNTARA_COMPILER_WASM="${COMPILER_WASM}" \
             RUNTARA_ENGINE_LISTEN="127.0.0.1:${TEST_ENGINE_PORT}" \
             RUNTARA_ENGINE_TLS_DIR="${TEST_DATA_DIR}/pki-engine" \
             RUNTARA_SEAL_MODE=unix \
