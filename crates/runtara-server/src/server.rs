@@ -1343,10 +1343,34 @@ fn api_app(parts: ApiParts) -> Router {
     // process, though, `execute_workflow_sync` reaches it as a real identity, so the internal
     // copy gets the same gate every other MCP-reachable route has. Without it that single tool
     // would run a workflow for a caller whose role or credential scope forbids executing one.
-    let internal_event_routes = Router::new().nest(
-        "/api/runtime/events",
-        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::EventsForCallers),
-    );
+    // For such a caller the synchronous run is an operation the API asks of
+    // the engine like any other (`Engine::run_sync`), as that caller: the
+    // engine verifies who it is and holds it to what it may run. Only what
+    // anyone may send goes to the engine as it arrived.
+    let sync = api::handlers::workflows_sync::capture_http_event_sync;
+    let internal_event_routes = Router::new()
+        .route(
+            "/api/runtime/events/http-sync/{workflow_id}",
+            post(sync).get(sync).put(sync).delete(sync).patch(sync),
+        )
+        .with_state(AppState {
+            pool: pool.clone(),
+            valkey_conn: valkey_conn.clone(),
+            engine: engine_api.clone(),
+            agent_catalog: agent_catalog.clone(),
+            events: product_event_sink.clone(),
+        })
+        .route_layer(from_fn(crate::middleware::entitlement::api_key_auth_guard))
+        .route_layer(from_fn(crate::middleware::authorization::authorize(
+            membership_policy,
+        )))
+        .route_layer(from_fn_with_state(
+            auth_state.clone(),
+            crate::middleware::auth::authenticate,
+        ))
+        .layer(DefaultBodyLimit::max(
+            api::handlers::events::webhook_max_body_bytes(),
+        ));
 
     let internal_router = Router::new()
         .merge(tenant_routes.clone())
@@ -3782,18 +3806,9 @@ async fn start_as_platform(
 
     // A trigger's HTTP events are the engine's: each is checked against its
     // connection's sealed secret before a run is accepted. Whoever sends one
-    // is not authenticated, so the API hands it over as it arrived. The same
-    // routes asked from inside (an MCP tool, for a caller the API already
-    // authenticated) hold the caller's role to what it may run.
-    local_engine.serves(
-        crate::engine::Served::EventsForCallers,
-        events_served
-            .clone()
-            .route_layer(from_fn(crate::middleware::authorization::authorize(
-                membership_policy,
-            ))),
-    );
-
+    // is not authenticated, so the API hands it over as it arrived. A caller
+    // the API authenticated asks for a synchronous run as an operation
+    // (`Engine::run_sync`), not through these routes.
     local_engine.serves(crate::engine::Served::Events, events_served);
 
     // Chat channels (conversational triggers). The engine serves a channel's

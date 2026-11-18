@@ -88,9 +88,6 @@ pub enum Served {
     /// A trigger's HTTP events, each checked against its connection, from
     /// whoever sends them.
     Events,
-    /// The same, asked by a caller the API authenticated, whose role is held
-    /// to what it may run.
-    EventsForCallers,
 }
 
 impl Served {
@@ -103,7 +100,6 @@ impl Served {
         Served::Agents,
         Served::Triggers,
         Served::Events,
-        Served::EventsForCallers,
     ];
 
     /// The part's name, as it is written between two processes.
@@ -116,7 +112,6 @@ impl Served {
             Served::Agents => "agents",
             Served::Triggers => "triggers",
             Served::Events => "events",
-            Served::EventsForCallers => "events-for-callers",
         }
     }
 
@@ -125,11 +120,7 @@ impl Served {
     /// provider's redirect, a webhook.
     pub(crate) fn has_a_caller(self) -> bool {
         match self {
-            Served::Connections
-            | Served::ObjectModel
-            | Served::Agents
-            | Served::Triggers
-            | Served::EventsForCallers => true,
+            Served::Connections | Served::ObjectModel | Served::Agents | Served::Triggers => true,
             Served::OAuthCallbacks | Served::Channels | Served::Events => false,
         }
     }

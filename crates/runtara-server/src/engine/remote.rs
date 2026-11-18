@@ -46,7 +46,7 @@ const HANDED_OVER_LIMIT: usize = 96 * 1024 * 1024;
 /// more than the engine would have taken.
 fn handed_over_limit(part: Served) -> usize {
     match part {
-        Served::Events | Served::EventsForCallers | Served::Channels => {
+        Served::Events | Served::Channels => {
             crate::api::handlers::events::webhook_max_body_bytes().min(HANDED_OVER_LIMIT)
         }
         // A redirect from a provider carries its answer in the query.
