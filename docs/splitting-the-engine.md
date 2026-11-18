@@ -215,14 +215,12 @@ Built, and described in [roles.md](roles.md):
 
 Not built:
 
-- **Preparation 2: chat channels.** Their webhooks still go to the engine,
-  which receives them and runs their conversations. They are not to be
-  moved to intake: the platform-specific channels are to be removed from
-  the core, and chat platforms built as integrations on a native
-  conversation, whose webhooks are then ordinary triggers'
-  ([native-chat.md](native-chat.md)). Until that is done a deployment that
-  has chat channel triggers still has the engine receive anonymous
-  requests for them.
+- **Preparation 2: chat channels.** Not moved to intake: removed. The
+  platform-specific channels and the Channel trigger are gone from the
+  core ([native-chat.md](native-chat.md)), so the engine receives no
+  anonymous traffic for them. A chat platform is to reach a workflow as an
+  integration on the native conversation, whose webhook is an ordinary
+  trigger's, which intake receives.
 - **Preparation 4: agents.** Listing agents and running one on request are
   still a part the engine serves. It was a tidying of the engine's surface
   and not needed for intake.

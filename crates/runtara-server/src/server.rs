@@ -16,7 +16,6 @@ use utoipa::OpenApi;
 use crate::agent_release;
 use crate::api;
 use crate::auth;
-use crate::channels;
 use crate::config;
 use crate::embedded_runtara;
 use crate::mcp;
@@ -1336,13 +1335,6 @@ fn api_app(parts: ApiParts) -> Router {
         ),
     );
 
-    // A chat channel's webhook is the engine's, which answers that there is
-    // none if it serves no channels.
-    let channel_routes = Router::new().nest(
-        "/api/runtime/events/webhook",
-        crate::engine::forwarded(engine_api.clone(), crate::engine::Served::Channels),
-    );
-
     // Build internal router for MCP in-process calls (no network hop).
     // MCP tools pre-inject AuthContext into extensions, so auth middleware
     // detects it and skips JWT validation.
@@ -1499,7 +1491,6 @@ fn api_app(parts: ApiParts) -> Router {
         .merge(my_tenants_routes)
         .merge(public_routes)
         .merge(event_routes)
-        .merge(channel_routes)
         .merge(oidc_routes)
         .nest("/mcp", mcp_router);
 
@@ -3073,32 +3064,6 @@ async fn start_as_platform(
         },
     );
 
-    // Webhook secrets earlier releases stored readable in Channel triggers
-    // are sealed: nothing checks a call against a readable one any more.
-    {
-        let webhooks =
-            crate::api::services::webhook_manager::WebhookManager::new(connections_facade.clone());
-        for tenant_id in config::served_tenants() {
-            match crate::api::services::webhook_manager::seal_stored_webhook_secrets(
-                &pool, &webhooks, tenant_id,
-            )
-            .await
-            {
-                Ok(0) => {}
-                Ok(sealed) => tracing::info!(
-                    tenant_id = %tenant_id,
-                    sealed,
-                    "Sealed Channel triggers' webhook secrets stored readable"
-                ),
-                Err(error) => tracing::error!(
-                    tenant_id = %tenant_id,
-                    %error,
-                    "Could not seal Channel triggers' webhook secrets"
-                ),
-            }
-        }
-    }
-
     // NOTE: State sync with runtara happens after RuntimeClient is initialized (below)
 
     // NOTE: Compilation records are now preserved across restarts.
@@ -4117,39 +4082,6 @@ async fn start_as_platform(
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 }
             },
-        );
-    }
-
-    // Chat channels (conversational triggers). The engine serves a channel's
-    // webhook: the call is checked against its connection's sealed secret, and
-    // the conversation it belongs to runs there. The API hands it over as it
-    // arrived.
-    if let (Some(rc), Some(_ts), Some(vc)) = (&runtime_client, &trigger_stream, &valkey_conn) {
-        let channel_router = Arc::new(channels::session::ChannelRouter::new(
-            rc.clone(),
-            pool.clone(),
-            connections_facade.clone(),
-            execution_engine.clone(),
-            vc.clone(),
-        ));
-        // Dispatches messages a previous process acknowledged but did not
-        // finish, retries pending ones, and purges handled ones.
-        workers.detached(
-            crate::roles::Role::Engine,
-            "channel intake",
-            channel_router.clone().run_intake_worker(),
-        );
-        println!("✓ Channel router initialized");
-        local_engine.serves(
-            crate::engine::Served::Channels,
-            channels::routes(channel_router)
-                // Defense in depth: these public, unauthenticated channel-ingest
-                // routes buffer the whole body (Bytes extractor) before auth, so
-                // cap it. Bot Framework / chat activities are a few KB; the
-                // shared webhook cap is generous enough for mailgun payloads.
-                .layer(DefaultBodyLimit::max(
-                    api::handlers::events::webhook_max_body_bytes(),
-                )),
         );
     }
 

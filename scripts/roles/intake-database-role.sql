@@ -50,4 +50,4 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO :"intake_role";
 -- Nothing is granted on: workflow_definitions, workflow_compilations,
 -- connection_data_entity, connection_defaults, oauth_state,
 -- platform_oauth_app, seal_wrapped_key, api_keys, audit_events,
--- channel_intake, or anything in the runtime database.
+-- or anything in the runtime database.

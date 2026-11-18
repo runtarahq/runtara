@@ -1,6 +1,7 @@
 # A native chat, and channels built on it
 
-A plan. Nothing here is built.
+A plan. Phase 1 is built: the platform channels and the Channel trigger
+are removed. The rest is not.
 
 ## What is wanted
 
@@ -168,6 +169,12 @@ agent's to do: registering its webhook (Telegram), and making the target a
 reply is sent to (Teams).
 
 ### What is removed
+
+Done, as phase 1. One thing differs from the list below: sealing and
+checking a webhook's secret token stays in `runtara-connections`. It is
+seal's own primitive, exercised by the tests of seal as a service, and the
+declared webhook checks of phase 4 need it for a platform that sends a
+shared secret.
 
 - `crates/runtara-server/src/channels/`, whole.
 - `api/services/webhook_manager.rs`, whole.

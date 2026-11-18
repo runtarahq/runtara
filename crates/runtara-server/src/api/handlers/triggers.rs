@@ -15,16 +15,9 @@ use crate::api::dto::common::ApiResponse;
 use crate::api::dto::triggers::*;
 use crate::api::repositories::triggers::TriggerRepository;
 use crate::api::services::triggers::{ServiceError, TriggerService};
-use crate::api::services::webhook_manager::{
-    WebhookManager, activate_channel_webhook, reconcile_channel_webhooks, update_channel_webhooks,
-};
 use crate::auth::AuthContext;
 use crate::middleware::tenant_auth::Source;
 use crate::product_events::{EventType, ProductEvent, ProductEventSink};
-
-fn is_active_channel_trigger(trigger: &InvocationTrigger) -> bool {
-    trigger.trigger_type == TriggerType::Channel && trigger.active
-}
 
 /// Create a new invocation trigger
 #[utoipa::path(
@@ -64,25 +57,9 @@ pub async fn create_invocation_trigger(
                     .properties(json!({"trigger_type": &trigger.trigger_type}))
                     .source(source),
             );
-            if is_active_channel_trigger(&trigger) {
-                activate_channel_webhook(
-                    &pool,
-                    &WebhookManager::new(connections.clone()),
-                    &trigger,
-                    &tenant_id,
-                )
-                .await;
-            }
             keep_webhook_checks_current(&pool, &connections, &tenant_id).await;
 
-            // Re-read the trigger to get the config registration updated (platform).
-            let trigger = service
-                .get_trigger(&trigger.id, Some(&tenant_id))
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or(trigger);
-            let trigger_response = InvocationTriggerResponse::from_trigger(trigger, &tenant_id);
+            let trigger_response = trigger;
 
             let response =
                 ApiResponse::success_with_message("Trigger created successfully", trigger_response);
@@ -131,10 +108,6 @@ pub async fn list_invocation_triggers(
 
     match service.list_triggers(Some(&tenant_id)).await {
         Ok(triggers) => {
-            let triggers: Vec<_> = triggers
-                .into_iter()
-                .map(|t| InvocationTriggerResponse::from_trigger(t, &tenant_id))
-                .collect();
             let response = ApiResponse::success(triggers);
             Ok((
                 StatusCode::OK,
@@ -178,7 +151,7 @@ pub async fn get_invocation_trigger(
 
     match service.get_trigger(&id, Some(&tenant_id)).await {
         Ok(Some(trigger)) => {
-            let trigger_response = InvocationTriggerResponse::from_trigger(trigger, &tenant_id);
+            let trigger_response = trigger;
             let response = ApiResponse::success(trigger_response);
             Ok((
                 StatusCode::OK,
@@ -247,40 +220,10 @@ pub async fn update_invocation_trigger(
 
     let service = TriggerService::new(repository);
 
-    // Load previous state for webhook lifecycle.
-    let old_trigger = service
-        .get_trigger(&id, Some(&tenant_id))
-        .await
-        .ok()
-        .flatten();
-
     match service.update_trigger(&id, request, Some(&tenant_id)).await {
         Ok(Some(trigger)) => {
             keep_webhook_checks_current(&pool, &connections, &tenant_id).await;
-            // Handle webhook lifecycle on state transitions. A bot's webhook
-            // is shared by every Channel trigger on its connection, so these
-            // take the connection's other triggers into account.
-            if old_trigger.as_ref().is_some_and(is_active_channel_trigger)
-                || is_active_channel_trigger(&trigger)
-            {
-                update_channel_webhooks(
-                    &pool,
-                    &WebhookManager::new(connections.clone()),
-                    old_trigger.as_ref(),
-                    &trigger,
-                    &tenant_id,
-                )
-                .await;
-            }
-
-            // Re-read to get updated config.
-            let trigger = service
-                .get_trigger(&trigger.id, Some(&tenant_id))
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or(trigger);
-            let trigger_response = InvocationTriggerResponse::from_trigger(trigger, &tenant_id);
+            let trigger_response = trigger;
 
             let response =
                 ApiResponse::success_with_message("Trigger updated successfully", trigger_response);
@@ -336,7 +279,6 @@ pub async fn delete_invocation_trigger(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
     State(pool): State<PgPool>,
-    State(connections): State<Arc<runtara_connections::ConnectionsFacade>>,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
     let repository = Arc::new(TriggerRepository::new(pool.clone()));
@@ -356,27 +298,8 @@ pub async fn delete_invocation_trigger(
 
     let service = TriggerService::new(repository);
 
-    // Load trigger before deleting for webhook cleanup.
-    let old_trigger = service
-        .get_trigger(&id, Some(&tenant_id))
-        .await
-        .ok()
-        .flatten();
-
     match service.delete_trigger(&id, Some(&tenant_id)).await {
         Ok(true) => {
-            if let Some(ref old) = old_trigger
-                && is_active_channel_trigger(old)
-            {
-                reconcile_channel_webhooks(
-                    &pool,
-                    &WebhookManager::new(connections.clone()),
-                    std::slice::from_ref(old),
-                    &tenant_id,
-                )
-                .await;
-            }
-
             let response = json!({
                 "success": true,
                 "message": "Trigger deleted successfully",

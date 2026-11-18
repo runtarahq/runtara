@@ -31,15 +31,13 @@ pub struct GetTriggerParams {
 pub struct CreateTriggerParams {
     #[schemars(description = "Workflow ID to invoke when the trigger fires")]
     pub workflow_id: String,
-    #[schemars(
-        description = "Trigger type (uppercase): CRON, HTTP, EMAIL, APPLICATION, or CHANNEL"
-    )]
+    #[schemars(description = "Trigger type (uppercase): CRON, HTTP, EMAIL or APPLICATION")]
     pub trigger_type: String,
     #[schemars(description = "Whether the trigger is active on creation (default: true)")]
     pub active: Option<bool>,
     #[schemars(description = "Trigger-specific JSON configuration. CRON: \
                        {expression: \"0 0 * * *\", timezone?: \"UTC\", inputs?: {...}, debug?: false}. \
-                       CHANNEL: {connection_id: \"...\"}. Field `inputs` carries the workflow input \
+                       Field `inputs` carries the workflow input \
                        payload for CRON triggers.")]
     #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_object_schema")]
     pub configuration: Option<serde_json::Value>,
@@ -56,9 +54,7 @@ pub struct UpdateTriggerParams {
     pub trigger_id: String,
     #[schemars(description = "Workflow ID to invoke when the trigger fires")]
     pub workflow_id: String,
-    #[schemars(
-        description = "Trigger type (uppercase): CRON, HTTP, EMAIL, APPLICATION, or CHANNEL"
-    )]
+    #[schemars(description = "Trigger type (uppercase): CRON, HTTP, EMAIL or APPLICATION")]
     pub trigger_type: String,
     #[schemars(description = "Whether the trigger is active")]
     pub active: bool,

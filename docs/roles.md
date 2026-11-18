@@ -154,8 +154,7 @@ accepted and queued, and runs when the engine is back; the synchronous
 trigger answers `503`. With intake away, webhooks answer `503` and
 everything else the API does goes on.
 
-**What it does not receive yet.** Chat channel webhooks and OAuth redirects
-still go to the engine. See
+**What it does not receive.** OAuth redirects still go to the engine. See
 [splitting-the-engine.md](splitting-the-engine.md).
 
 `e2e/test_intake.sh` runs seal, an engine, intake and an API as separate

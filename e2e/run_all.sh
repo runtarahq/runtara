@@ -67,8 +67,6 @@ run_test "Wake scheduler drains a backlog in batches (regression)" "${SCRIPT_DIR
 # on dedicated high ports and mock the Bot Framework, so they are self-contained
 # and do not depend on ./start.sh. They need docker + python3 + openssl.
 run_test "Teams outbound send-message (mock Bot Connector)" "${SCRIPT_DIR}/test_teams_send_message.sh"
-run_test "Teams inbound webhook JWT + dedup (mock authority)" "${SCRIPT_DIR}/test_teams_inbound_webhook.sh"
-run_test "Channel session re-flush provenance guard" "${SCRIPT_DIR}/test_channel_reflush_provenance.sh"
 
 # Trusted built-in upgrade. Self-contained (own server + Valkey); needs docker,
 # jq and prebuilt components (scripts/build-agent-components.sh). Checks the

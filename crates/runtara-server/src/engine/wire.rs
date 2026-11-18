@@ -567,11 +567,6 @@ operations! {
     needs [WorkflowRead, WorkflowCreate, WorkflowUpdate],
     |engine, op| for Some(&op.tenant_id) => engine.tenant_connections(&op.tenant_id).await;
 
-    ReconcileChannelWebhooks { tenant_id: String, removed: Vec<InvocationTrigger> } -> (),
-    needs [WorkflowDelete],
-    |engine, op| for Some(&op.tenant_id) =>
-        engine.reconcile_channel_webhooks(&op.tenant_id, &op.removed).await;
-
     // What agents a tenant published: the API lists agents to every caller
     // (its agent routes are ungated), so any member may ask.
     WorkflowAgents { tenant_id: String } -> Vec<runtara_dsl::agent_meta::AgentInfo>,

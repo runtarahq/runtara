@@ -476,7 +476,7 @@ as_intake_role() {  # as_intake_role SQL [database]: its output, or the error
 SCOPED="SELECT set_config('runtara.tenant_id', '${TENANT}', false);"
 [ "$(as_intake_role "${SCOPED} SELECT count(*) > 0 FROM invocation_trigger" | tail -1)" = "t" ] \
     || { print_error "intake's role cannot read triggers"; exit 1; }
-for table in connection_data_entity workflow_definitions workflow_compilations api_keys seal_wrapped_key channel_intake; do
+for table in connection_data_entity workflow_definitions workflow_compilations api_keys seal_wrapped_key; do
     OUT=$(as_intake_role "${SCOPED} SELECT count(*) FROM ${table}")
     echo "${OUT}" | grep -q "permission denied" || { print_error "intake's role read ${table}: ${OUT}"; exit 1; }
 done

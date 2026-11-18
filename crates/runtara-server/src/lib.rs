@@ -8,7 +8,6 @@ pub mod auth;
 pub mod authz;
 pub mod bind;
 pub mod boot;
-pub mod channels;
 pub mod compile_executor;
 pub mod compile_sandbox;
 pub mod compiler;
