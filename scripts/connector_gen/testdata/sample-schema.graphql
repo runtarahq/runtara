@@ -1,0 +1,119 @@
+"""
+A thing in the shop. See [the docs](https://example.com/docs/items)
+for how items are
+priced.
+"""
+type Item implements Node {
+  id: ID!
+  "The item's name."
+  name: String!
+  "The item's price, as a decimal string."
+  price: Money
+  status: ItemStatus!
+  tags: [String!]!
+  "Labels, some of which may be unset."
+  labels: [String]
+  createdAt: DateTime!
+  oldName: String @deprecated(reason: "Use `name`.")
+  owner: User
+  "The item's parts."
+  parts("How many parts to return." first: Int = 10, after: String): PartConnection!
+}
+
+interface Node {
+  id: ID!
+}
+
+type User implements Node {
+  id: ID!
+  email: String
+}
+
+type Customer {
+  name: String
+}
+
+type Order implements Node {
+  id: ID!
+  owner: Customer
+}
+
+type Part {
+  id: ID!
+  label: String
+}
+
+type PartConnection {
+  nodes: [Part!]!
+  pageInfo: PageInfo!
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  endCursor: String
+}
+
+"Whether an item is on sale."
+enum ItemStatus {
+  ACTIVE
+  DRAFT
+}
+
+scalar Money
+
+scalar DateTime
+
+union SearchResult = Item | User
+
+input ItemInput {
+  "The name to give the item."
+  name: String!
+  "The price to sell it at."
+  price: Money
+  status: ItemStatus = DRAFT
+  tags: [String!]
+  oldName: String @deprecated(reason: "Use `name`.")
+}
+
+type UserError {
+  field: [String!]
+  message: String!
+}
+
+type ItemCreatePayload {
+  item: Item
+  userErrors: [UserError!]!
+}
+
+type Query {
+  "Returns an item by its ID."
+  item("The ID of the item." id: ID!): Item
+  "Lists items."
+  items(
+    "How many items to return."
+    first: Int
+    after: String
+    query: String
+    "Labels the items carry; a null one matches an item without a label."
+    labels: [String]
+  ): [Item!]!
+  node(id: ID!): Node
+  "Looks objects up by their IDs; an unknown ID is null."
+  nodes("The IDs of the objects." ids: [ID!]!): [Node]!
+  search(text: String!): [SearchResult!]!
+  version: String!
+}
+
+type Mutation {
+  "Creates an item."
+  itemCreate(
+    "The item to create."
+    input: ItemInput!
+    "The item, in the old form."
+    legacy: ItemInput @deprecated(reason: "Use `input`.")
+  ): ItemCreatePayload
+}
+
+type Subscription {
+  itemChanged: Item
+}

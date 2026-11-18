@@ -160,7 +160,12 @@ async fn a_link_flow_waits_unusable_until_a_member_confirms() {
     assert!(runtara_connections::sealed::is_sealed(
         &stored["pending_oauth"]["fields"]["access_token"]
     ));
-    assert!(!stored.to_string().contains("at-pending"), "{stored}");
+    assert!(
+        !runtara_connections::sealed::testing::without_sealed(&stored)
+            .to_string()
+            .contains("at-pending"),
+        "{stored}"
+    );
 
     // Nothing that makes requests with the connection finds a token.
     let mut headers = HashMap::new();

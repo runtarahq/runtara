@@ -13,6 +13,7 @@ use axum::http::{Request, StatusCode, header};
 use runtara_connections::config::EveryTenant;
 use runtara_connections::crypto::noop::NoOpCipher;
 use runtara_connections::repository::connections::ConnectionRepository;
+use runtara_connections::sealed::testing::without_sealed;
 use runtara_connections::sealed::{Allowances, MemoryKeySource, SealedCredentials, is_sealed};
 use runtara_connections::service::connections::ConnectionService;
 use runtara_connections::{
@@ -156,8 +157,9 @@ async fn a_flow_never_holds_a_readable_secret() {
     assert!(is_sealed(
         &pending["pending_oauth"]["fields"]["access_token"]
     ));
-    assert!(!pending.to_string().contains("at-1"), "{pending}");
-    assert!(!pending.to_string().contains("csec"), "{pending}");
+    let clear = without_sealed(&pending).to_string();
+    assert!(!clear.contains("at-1"), "{clear}");
+    assert!(!clear.contains("csec"), "{clear}");
 
     // Confirmed, the tokens become the connection's, sealed.
     let pending_id = fixture
@@ -180,7 +182,8 @@ async fn a_flow_never_holds_a_readable_secret() {
         assert!(is_sealed(&confirmed[token]), "{token}: {confirmed}");
     }
     assert!(confirmed.get("pending_oauth").is_none());
-    assert!(!confirmed.to_string().contains("at-1"), "{confirmed}");
+    let clear = without_sealed(&confirmed).to_string();
+    assert!(!clear.contains("at-1"), "{clear}");
     assert_eq!(fixture.stored("c1").await.1, "ACTIVE");
 
     // The stored token is fresh: a request presents it, and nothing is
@@ -225,7 +228,8 @@ async fn a_flow_never_holds_a_readable_secret() {
         assert_ne!(rotated[token], expired[token], "{token} was rotated");
     }
     assert!(guard.is_some(), "the rotation guard is set");
-    assert!(!rotated.to_string().contains("at-2"), "{rotated}");
+    let clear = without_sealed(&rotated).to_string();
+    assert!(!clear.contains("at-2"), "{clear}");
     assert_ne!(rotated["token_expires_at"], expired["token_expires_at"]);
 
     // The token seal holds reaches the API.

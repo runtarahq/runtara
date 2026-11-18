@@ -1513,11 +1513,16 @@ pub fn capability_to_api_with_types(
         output_type = "object".to_string();
     } else if output_type == "array" {
         // Vec<T> capability output: resolve the item struct when registered.
+        // Items that may be null (Vec<Option<T>>) resolve to T.
         let inner = cap
             .output_type
             .strip_prefix("Vec<")
             .and_then(|s| s.strip_suffix('>'))
             .unwrap_or("");
+        let inner = inner
+            .strip_prefix("Option<")
+            .and_then(|s| s.strip_suffix('>'))
+            .unwrap_or(inner);
         if let Some(meta) = output_types.get(inner) {
             output_items = Some(Box::new(FieldTypeInfo {
                 type_name: "object".to_string(),
@@ -1801,12 +1806,16 @@ pub fn validate_agent_metadata() -> Vec<AgentValidationError> {
         if output_types.contains_key(type_name) {
             return true;
         }
-        // Check Vec<T> where T is a registered output type
+        // Check Vec<T> (or Vec<Option<T>>) where T is a registered output type
         if let Some(inner) = type_name
             .strip_prefix("Vec<")
             .and_then(|s| s.strip_suffix('>'))
         {
-            return is_primitive_output_type(inner) || output_types.contains_key(inner);
+            let item = inner
+                .strip_prefix("Option<")
+                .and_then(|s| s.strip_suffix('>'))
+                .unwrap_or(inner);
+            return is_primitive_output_type(inner) || output_types.contains_key(item);
         }
         // Check Option<T> where T is a registered output type
         if let Some(inner) = type_name
@@ -2611,6 +2620,18 @@ mod output_schema_tests {
     #[test]
     fn vec_of_registered_struct_output_resolves_items() {
         let cap = capability("Vec<Order>");
+        let info = capability_to_api_with_types(&cap, None, None, &registry());
+        assert_eq!(info.output.type_name, "array");
+        let items = info.output.items.expect("items resolved");
+        assert_eq!(items.type_name, "object");
+        assert!(items.fields.is_some());
+    }
+
+    #[test]
+    fn vec_of_nullable_registered_struct_output_resolves_items() {
+        // A list whose items may be null (GraphQL's `[Order]`) is still a
+        // list of orders.
+        let cap = capability("Vec<Option<Order>>");
         let info = capability_to_api_with_types(&cap, None, None, &registry());
         assert_eq!(info.output.type_name, "array");
         let items = info.output.items.expect("items resolved");
