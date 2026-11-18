@@ -1728,6 +1728,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`connector_gen` takes a spec that writes `const`, and `check` finds the
+  fixture `fetch` saved.** JSON Schema's `const` is not OpenAPI 3.0's, and
+  openapi-generator refused a 3.0 spec that has it; `fetch` now writes
+  `const: X` as the enum `[X]` (a boolean's `const` is dropped). Where a
+  response has several named examples, `fetch` saved the first as the vendor
+  wrote them and `check` looked for the first in `spec.slice.json`, which is
+  saved with sorted keys, so `check` failed right after `fetch`. Both now
+  take the first by name. The generated agents are unchanged.
+
 - **A restart no longer revokes every API key where membership is not
   enforced.** At start the server revokes the keys of users who are no
   longer members of their tenant, and took a missing membership record for
