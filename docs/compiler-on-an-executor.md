@@ -166,7 +166,11 @@ compiled and handed nothing back; a compile before the runner is up; one
 asked for from inside the runtime), `e2e/test_two_roles.sh` (an engine
 with executors says it compiles on one, never loads the compiler, compiles
 and runs workflows, and refuses to start without the compiler to place)
-and `e2e/test_scalable_executors.sh`.
+and `e2e/test_scalable_executors.sh` (with no executor a workflow is not
+compiled; with one it is, and the executor keeps the compiler under the
+platform's name), which was also run on Linux with the sandbox in full:
+the server placed the compiler on an executor under seccomp and Landlock,
+and ran what it made.
 
 ### What it costs
 
