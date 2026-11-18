@@ -122,6 +122,12 @@ pub trait Provider: Send + Sync {
     fn guest_spec(&self, _memory_bytes: u64, _lifetime: Duration) -> Option<Value> {
         None
     }
+    /// Whether nothing is here to place a guest with, for now: a provider
+    /// whose capacity comes and goes (executors that say they are here) has
+    /// none just after it starts.
+    fn none_here(&self) -> bool {
+        false
+    }
     /// Stages a workflow component for `tenant`; what a placement names it by.
     async fn stage(&self, tenant: &str, bytes: &[u8]) -> std::result::Result<String, String>;
     /// Places a run of `artifact` with `spec`; the provider's run id.
@@ -653,6 +659,11 @@ pub const COMPILER_TENANT: &str = "runtara-compiler";
 
 /// How long past its lifetime a compiler is waited for before it is given up.
 const COMPILE_GRACE: Duration = Duration::from_secs(30);
+/// How long a guest that is not a run waits for somewhere to be placed
+/// before it fails: a server that just started has no executor until the
+/// first one says it is here, moments later. It is placed nowhere else
+/// meanwhile.
+const PLACE_PATIENCE: Duration = Duration::from_secs(10);
 
 /// Places one compile with `provider` and waits for what its compiler
 /// answers. The launch is served the compile's request, the components it
@@ -684,6 +695,10 @@ async fn place_compile(
             tenant_id: COMPILER_TENANT.to_owned(),
             ..binding.clone()
         };
+        let patient_until = tokio::time::Instant::now() + PLACE_PATIENCE;
+        while provider.none_here() && tokio::time::Instant::now() < patient_until {
+            tokio::time::sleep(WAIT).await;
+        }
         let run = provider
             .place(spec, compile.compiler.as_str(), &kept_as)
             .await

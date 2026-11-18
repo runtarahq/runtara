@@ -178,6 +178,20 @@ impl EmbeddedRuntara {
             .await
             .map_err(|e| anyhow::anyhow!("place compiles with the runner: {e}"))?;
         }
+        if crate::validation_placed::installed() {
+            let path = crate::validation_placed::configured()
+                .ok_or_else(|| anyhow::anyhow!("the validator to place is not configured"))?;
+            let validator = tokio::fs::read(&path)
+                .await
+                .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
+            crate::validation_placed::runner_is_up(
+                runner.clone(),
+                config.artifacts.as_ref(),
+                &validator,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("place validations with the runner: {e}"))?;
+        }
 
         // Start Environment. It owns the image registry, the instance
         // lifecycle and the durable launch queue; guests reach core through the

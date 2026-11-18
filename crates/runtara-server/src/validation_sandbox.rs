@@ -224,10 +224,10 @@ impl Drop for Turn {
     }
 }
 
-/// A closure the sandbox could not validate: refused, as a graph the
-/// compiler does not support.
-fn refused(reason: String) -> ClosureValidationReport {
-    tracing::warn!(reason = %reason, "A workflow could not be validated in the sandbox");
+/// A closure that could not be validated where it is to be (a sandbox, an
+/// executor): refused, as a graph the compiler does not support.
+pub fn refused(reason: String) -> ClosureValidationReport {
+    tracing::warn!(reason = %reason, "A workflow could not be validated");
     let mut root = ValidationResult::default();
     root.errors.push(ValidationError::UnsupportedGraphShape {
         step_id: None,

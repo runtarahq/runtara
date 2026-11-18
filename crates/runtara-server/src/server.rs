@@ -2473,6 +2473,30 @@ async fn start_as_platform(
             }
         }
     }
+    // And where a workflow's closure is validated when it is saved: with
+    // executors, on one too, for the same reason and by the same rule.
+    if runs_on_executors {
+        match crate::validation_placed::configured().filter(|path| path.is_file()) {
+            Some(path) => {
+                crate::validation_placed::install();
+                println!(
+                    "✓ Workflows are validated on an executor ({})",
+                    path.display()
+                );
+            }
+            None => {
+                eprintln!(
+                    "❌ RUNTARA_RUNNER=executor needs the validator that is placed on an \
+                     executor: {} beside the components (RUNTARA_AGENT_COMPONENTS_DIR), or \
+                     where {} names it. Workflows are validated where they run, and nowhere \
+                     else instead (docs/compiler-on-an-executor.md)",
+                    crate::validation_placed::VALIDATE_GUEST,
+                    crate::validation_placed::VALIDATE_GUEST_ENV
+                );
+                std::process::exit(1);
+            }
+        }
+    }
     // Without executors: in a sandbox of the compiler's own in this process,
     // when one is named. An engine that is a process of its own compiles
     // nowhere else: a tenant's graph is not parsed where both databases and

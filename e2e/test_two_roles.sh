@@ -441,6 +441,9 @@ echo "${SAID}" | grep -q "RUNTARA_ROLE=engine needs a seal of its own" \
 SAID=$(refused_start engine_env RUNTARA_COMPILE_GUEST_WASM="${WORK_DIR}/not-a-compiler.wasm" "${RUNTARA_SERVER_BIN}")
 echo "${SAID}" | grep -q "RUNTARA_RUNNER=executor needs the compiler that is placed on an executor" \
     || { print_error "an engine with executors and no compiler to place did not refuse to start: ${SAID}"; exit 1; }
+SAID=$(refused_start engine_env RUNTARA_VALIDATE_GUEST_WASM="${WORK_DIR}/not-a-validator.wasm" "${RUNTARA_SERVER_BIN}")
+echo "${SAID}" | grep -q "RUNTARA_RUNNER=executor needs the validator that is placed on an executor" \
+    || { print_error "an engine with executors and no validator to place did not refuse to start: ${SAID}"; exit 1; }
 # Without executors it compiles in a sandbox of the compiler's own, or not at all.
 SAID=$(refused_start engine_env env -u RUNTARA_RUNNER -u RUNTARA_COMPILER_WASM "${RUNTARA_SERVER_BIN}")
 echo "${SAID}" | grep -q "RUNTARA_ROLE=engine needs RUNTARA_COMPILER_WASM" \
@@ -470,6 +473,8 @@ done
 # compiler itself, though it is given one to compile in.
 grep -q "Workflows are compiled on an executor" "${ENGINE_LOG}" \
     || { print_error "the engine does not say it compiles on an executor"; exit 1; }
+grep -q "Workflows are validated on an executor" "${ENGINE_LOG}" \
+    || { print_error "the engine does not say it validates on an executor"; exit 1; }
 if grep -q "Workflows are compiled in a sandbox" "${ENGINE_LOG}"; then
     print_error "an engine with executors loaded the compiler into its own process"; exit 1
 fi
@@ -570,6 +575,21 @@ echo "${RESP}" | jq -e '[.data[] | select(.kind == "run_ended")][0].body.status 
     || { print_error "a conversation's run was not carried to its end: ${RESP}"; exit 1; }
 [ "$(curl -sS "${CONVERSATION}" | jq -r '.data.key')" = "two-roles" ] \
     || { print_error "a conversation is not read through the API"; exit 1; }
+# Saving a workflow validates it, on an executor too: the API asks the
+# engine, which places the validator. What the validator finds is what the
+# save is refused for.
+BROKEN_GRAPH=$(echo "${ANSWER_GRAPH}" | jq '.steps.call = {"stepType": "Agent", "id": "call",
+    "agentId": "an-agent-that-is-not-there", "capabilityId": "run", "inputMapping": {}}
+    | .entryPoint = "call" | .executionPlan = [{"fromStep": "call", "toStep": "finish"}]')
+RESP=$(api_post "/workflows/${ANSWER}/update" "{\"executionGraph\": ${BROKEN_GRAPH}}")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "false" ] \
+    && echo "${RESP}" | grep -q "an-agent-that-is-not-there" \
+    || { print_error "a workflow that does not validate was saved, or refused for something else: ${RESP}"; exit 1; }
+RESP=$(curl -sS --max-time 60 -X POST -H 'Content-Type: application/json' -d "${BROKEN_GRAPH}" \
+    "${API}/workflows/graph/validate")
+echo "${RESP}" | grep -q "an-agent-that-is-not-there" \
+    || { print_error "the validate route did not say what the validator found: ${RESP}"; exit 1; }
+
 # A workflow published as an agent is compiled on an executor too, and a
 # workflow that calls it is compiled with it: the compiler asks the engine
 # for the tenant's published agent as it asks for any component.
