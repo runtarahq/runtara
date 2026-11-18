@@ -10,9 +10,7 @@
 //! scheduler every poll) switches off triggers whose workflow is already gone.
 //! Both apply one orphan rule: workflow ids are only unique per tenant, so a
 //! tenant's trigger needs a live workflow in its own tenant, while a global
-//! trigger needs one in any tenant. `newest_live_channel_trigger`, which picks
-//! the Channel trigger a shared webhook must stay registered for, follows the
-//! same rule.
+//! trigger needs one in any tenant.
 //!
 //! Requires the explicit `db-integration-tests` feature and a live Postgres.
 
@@ -95,55 +93,12 @@ async fn seed_trigger(pool: &PgPool, tenant: Option<&str>, workflow_id: &str) ->
 
 /// Seed an active Channel trigger on `connection_id`, created `minutes_ago`
 /// so tests control which trigger is newest.
-async fn seed_channel_trigger(
-    pool: &PgPool,
-    tenant: &str,
-    workflow_id: &str,
-    connection_id: &str,
-    minutes_ago: i32,
-) -> String {
-    let request = CreateInvocationTriggerRequest {
-        workflow_id: workflow_id.to_string(),
-        trigger_type: TriggerType::Channel,
-        active: true,
-        configuration: Some(json!({ "connection_id": connection_id })),
-        remote_tenant_id: None,
-        single_instance: false,
-    };
-    let id = TriggerRepository::new(pool.clone())
-        .create(&request, Some(tenant), None)
-        .await
-        .expect("seed channel trigger row")
-        .id;
-    sqlx::query(
-        "UPDATE invocation_trigger SET created_at = NOW() - make_interval(mins => $2) WHERE id = $1",
-    )
-    .bind(&id)
-    .bind(minutes_ago)
-    .execute(pool)
-    .await
-    .expect("backdate channel trigger");
-    id
-}
-
 async fn is_active(pool: &PgPool, trigger_id: &str) -> bool {
     sqlx::query_scalar("SELECT active FROM invocation_trigger WHERE id = $1")
         .bind(trigger_id)
         .fetch_one(pool)
         .await
         .expect("trigger row must exist")
-}
-
-async fn newest_live_channel_trigger_id(
-    triggers: &TriggerRepository,
-    connection_id: &str,
-    tenant: &str,
-) -> Option<String> {
-    triggers
-        .newest_live_channel_trigger(connection_id, tenant, None)
-        .await
-        .expect("newest live channel trigger lookup")
-        .map(|t| t.id)
 }
 
 async fn cleanup(pool: &PgPool, tenant: &str, workflow_ids: &[&str]) {
@@ -338,111 +293,6 @@ async fn deactivate_orphaned_requires_a_live_workflow_in_the_triggers_own_tenant
 
     cleanup(&pool, &tenant_a, &[&shared_wf]).await;
     cleanup(&pool, &tenant_b, &[&shared_wf]).await;
-}
-
-#[tokio::test]
-async fn newest_live_channel_trigger_skips_inactive_and_dead_workflow_triggers() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-    let repo = WorkflowRepository::new(pool.clone());
-    let triggers = TriggerRepository::new(pool.clone());
-    let tenant = format!("t-{}", Uuid::new_v4());
-    let connection = format!("conn-{}", Uuid::new_v4());
-
-    let older_wf = seed_workflow(&repo, &tenant).await;
-    let newer_wf = seed_workflow(&repo, &tenant).await;
-    let dead_wf = seed_workflow(&repo, &tenant).await;
-    soft_delete_behind_repository(&pool, &tenant, &dead_wf).await;
-    let older = seed_channel_trigger(&pool, &tenant, &older_wf, &connection, 30).await;
-    let newer = seed_channel_trigger(&pool, &tenant, &newer_wf, &connection, 20).await;
-    // Newest of all, but its workflow is gone: it is about to be swept and
-    // must not decide which secret the webhook keeps.
-    let _dead = seed_channel_trigger(&pool, &tenant, &dead_wf, &connection, 10).await;
-
-    assert_eq!(
-        newest_live_channel_trigger_id(&triggers, &connection, &tenant).await,
-        Some(newer.clone())
-    );
-    assert_eq!(
-        triggers
-            .newest_live_channel_trigger(&connection, &tenant, Some(&newer))
-            .await
-            .expect("newest live channel trigger lookup")
-            .map(|t| t.id),
-        Some(older.clone()),
-        "an excepted trigger is skipped"
-    );
-
-    sqlx::query("UPDATE invocation_trigger SET active = false WHERE id = $1")
-        .bind(&newer)
-        .execute(&pool)
-        .await
-        .expect("deactivate newer trigger");
-    assert_eq!(
-        newest_live_channel_trigger_id(&triggers, &connection, &tenant).await,
-        Some(older.clone()),
-        "an inactive trigger is skipped"
-    );
-
-    soft_delete_behind_repository(&pool, &tenant, &older_wf).await;
-    assert_eq!(
-        newest_live_channel_trigger_id(&triggers, &connection, &tenant).await,
-        None,
-        "no live trigger is left on the connection"
-    );
-
-    cleanup(&pool, &tenant, &[&older_wf, &newer_wf, &dead_wf]).await;
-}
-
-#[tokio::test]
-async fn newest_live_channel_trigger_breaks_a_created_at_tie_by_id() {
-    skip_if_no_db!();
-    let pool = get_test_pool().await;
-    let repo = WorkflowRepository::new(pool.clone());
-    let triggers = TriggerRepository::new(pool.clone());
-    let tenant = format!("t-{}", Uuid::new_v4());
-    let connection = format!("conn-{}", Uuid::new_v4());
-
-    let workflow = seed_workflow(&repo, &tenant).await;
-    let tied = vec![
-        seed_channel_trigger(&pool, &tenant, &workflow, &connection, 0).await,
-        seed_channel_trigger(&pool, &tenant, &workflow, &connection, 0).await,
-    ];
-    // One statement, so both rows get the same NOW().
-    sqlx::query(
-        "UPDATE invocation_trigger SET created_at = NOW() - interval '5 minutes' WHERE id = ANY($1)",
-    )
-    .bind(&tied)
-    .execute(&pool)
-    .await
-    .expect("tie the triggers' created_at");
-    let greatest: String =
-        sqlx::query_scalar("SELECT max(id) FROM invocation_trigger WHERE id = ANY($1)")
-            .bind(&tied)
-            .fetch_one(&pool)
-            .await
-            .expect("greatest tied id");
-    let other = tied.iter().find(|id| **id != greatest).unwrap();
-
-    // Validation, routing and registration all ask this, so on a tie each
-    // call must pick the same trigger.
-    for _ in 0..3 {
-        assert_eq!(
-            newest_live_channel_trigger_id(&triggers, &connection, &tenant).await,
-            Some(greatest.clone())
-        );
-    }
-    assert_eq!(
-        triggers
-            .newest_live_channel_trigger(&connection, &tenant, Some(&greatest))
-            .await
-            .expect("newest live channel trigger lookup")
-            .map(|t| t.id),
-        Some(other.clone()),
-        "with the winner excepted, the other tied trigger is next"
-    );
-
-    cleanup(&pool, &tenant, &[&workflow]).await;
 }
 
 #[tokio::test]

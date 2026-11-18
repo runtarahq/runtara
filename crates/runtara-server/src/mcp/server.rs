@@ -1041,7 +1041,7 @@ impl SmoMcpServer {
     // ===== Invocation Trigger Tools =====
 
     #[tool(
-        description = "List all invocation triggers (CRON, HTTP, EMAIL, APPLICATION, CHANNEL) for the tenant."
+        description = "List all invocation triggers (CRON, HTTP, EMAIL, APPLICATION) for the tenant."
     )]
     async fn list_triggers(
         &self,

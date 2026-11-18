@@ -38,7 +38,6 @@ use crate::api::dto::agent_testing::TestEngine;
 use crate::api::dto::executions::{ExecutionFilters, ExecutionSummary};
 use crate::api::dto::operations::OperationQueue;
 use crate::api::dto::trigger_event::TriggerEvent;
-use crate::api::dto::triggers::InvocationTrigger;
 use crate::api::dto::workflows::{PageWorkflowInstanceHistoryDto, WorkflowInstanceDto};
 use crate::api::services::agent_testing::{
     AgentTestingService, ServiceError as AgentTestError, TestResult,
@@ -79,8 +78,6 @@ pub enum Served {
     OAuthCallbacks,
     /// A tenant's object model: schemas, instances, SQL and CSV.
     ObjectModel,
-    /// Webhooks of chat channels, each checked against its connection.
-    Channels,
     /// Agents: what there are, what each can do, and running one on request.
     Agents,
     /// Triggers: registering one may register a webhook at its provider.
@@ -96,7 +93,6 @@ impl Served {
         Served::Connections,
         Served::OAuthCallbacks,
         Served::ObjectModel,
-        Served::Channels,
         Served::Agents,
         Served::Triggers,
         Served::Events,
@@ -108,7 +104,6 @@ impl Served {
             Served::Connections => "connections",
             Served::OAuthCallbacks => "o-auth-callbacks",
             Served::ObjectModel => "object-model",
-            Served::Channels => "channels",
             Served::Agents => "agents",
             Served::Triggers => "triggers",
             Served::Events => "events",
@@ -121,7 +116,7 @@ impl Served {
     pub(crate) fn has_a_caller(self) -> bool {
         match self {
             Served::Connections | Served::ObjectModel | Served::Agents | Served::Triggers => true,
-            Served::OAuthCallbacks | Served::Channels | Served::Events => false,
+            Served::OAuthCallbacks | Served::Events => false,
         }
     }
 
@@ -437,10 +432,6 @@ pub trait Engine: Send + Sync {
     /// The connections a tenant has: what a workflow's steps may name. Their
     /// ids, kinds and titles, and nothing of what they hold.
     async fn tenant_connections(&self, tenant_id: &str) -> Result<Vec<ConnectionRef>, String>;
-
-    /// Takes down, at their providers, the webhooks of chat channel triggers
-    /// that were removed. Best effort: what fails is logged.
-    async fn reconcile_channel_webhooks(&self, tenant_id: &str, removed: &[InvocationTrigger]);
 
     // ---- Compilation, through the queue -------------------------------------
 
@@ -1156,19 +1147,6 @@ impl Engine for LocalEngine {
             .collect())
     }
 
-    async fn reconcile_channel_webhooks(&self, tenant_id: &str, removed: &[InvocationTrigger]) {
-        let Some(connections) = &self.connections else {
-            return;
-        };
-        crate::api::services::webhook_manager::reconcile_channel_webhooks(
-            &self.pool,
-            &crate::api::services::webhook_manager::WebhookManager::new(connections.clone()),
-            removed,
-            tenant_id,
-        )
-        .await;
-    }
-
     fn queues_compilations(&self) -> bool {
         self.compile_queue().is_some()
     }
@@ -1624,8 +1602,8 @@ mod serving {
         let engine: Arc<dyn Engine> = local_without_runtime();
         let response = engine
             .serve(
-                Served::Channels,
-                Request::post("/api/runtime/events/webhook/slack/c-1")
+                Served::Events,
+                Request::post("/api/runtime/events/http/t-1/run")
                     .body(Body::empty())
                     .unwrap(),
             )

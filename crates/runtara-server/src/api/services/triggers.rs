@@ -20,12 +20,10 @@ impl TriggerService {
     /// them.
     pub async fn create_trigger(
         &self,
-        mut request: CreateInvocationTriggerRequest,
+        request: CreateInvocationTriggerRequest,
         tenant_id: Option<&str>,
         created_by: &str,
     ) -> Result<InvocationTrigger, ServiceError> {
-        strip_server_managed_keys(&mut request.configuration);
-
         // Validation: workflow_id should not be empty
         if request.workflow_id.trim().is_empty() {
             return Err(ServiceError::ValidationError(
@@ -74,10 +72,9 @@ impl TriggerService {
     pub async fn update_trigger(
         &self,
         id: &str,
-        mut request: UpdateInvocationTriggerRequest,
+        request: UpdateInvocationTriggerRequest,
         tenant_id: Option<&str>,
     ) -> Result<Option<InvocationTrigger>, ServiceError> {
-        strip_server_managed_keys(&mut request.configuration);
         // Validation: workflow_id should not be empty
         if request.workflow_id.trim().is_empty() {
             return Err(ServiceError::ValidationError(
@@ -138,25 +135,6 @@ impl TriggerService {
             TriggerType::Application => {
                 // Application triggers require connection information
                 // Validation can be added here if needed
-            }
-            TriggerType::Channel => {
-                // Channel triggers require a connection_id in configuration.
-                if let Some(config) = configuration {
-                    if config
-                        .get("connection_id")
-                        .and_then(|v| v.as_str())
-                        .is_none()
-                        || config["connection_id"].as_str().unwrap_or("").is_empty()
-                    {
-                        return Err(
-                            "Channel trigger requires 'connection_id' in configuration".to_string()
-                        );
-                    }
-                } else {
-                    return Err(
-                        "Channel trigger requires configuration with 'connection_id'".to_string(),
-                    );
-                }
             }
         }
         Ok(())

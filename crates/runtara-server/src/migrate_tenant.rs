@@ -155,7 +155,6 @@ const SERVER_TABLES: &[Table] = &[
         "request_id IN (SELECT request_id FROM execution_requests WHERE tenant_id = $1)",
     ),
     by("execution_admission_reservations", "tenant_id = $1"),
-    by("channel_intake", "tenant_id = $1"),
     by("operations_views", "tenant_id = $1"),
 ];
 

@@ -6,8 +6,8 @@ The all-in-one HTTP API server binary for Runtara — one process, one port, the
 
 `runtara-server` is the native host binary that fronts a full Runtara deployment
 over HTTP. It wires together the workflow engine, agent integrations, the DSL
-compiler, the management SDK, the object-model repositories, and a
-Valkey/Redis-backed channel system behind a single `axum` router with an
+compiler, the management SDK, the object-model repositories, and
+Valkey/Redis-backed session queues behind a single `axum` router with an
 `utoipa`-generated OpenAPI document.
 
 The server also embeds an `rmcp`-based MCP endpoint, an OpenTelemetry exporter
@@ -87,8 +87,7 @@ The console's own settings (auth mode, OIDC client, API URL) are the
   and debugging transport, served on loopback only when
   `RUNTARA_CORE_INSTANCE_API` is enabled. Workflows reach Core in-process.
 - Links `runtara-agents` for host connection support and the static metadata
-  registry. Workflow capabilities execute in standalone WASM components,
-  including [Slack and Mailgun attachment downloads](../../docs/workflow-attachments.md).
+  registry. Workflow capabilities execute in standalone WASM components.
 - Pulls in `runtara-dsl`, `runtara-connections`,
   `runtara-object-store`, `runtara-text-parser`, and `runtara-workflow-stdlib`
   to expose their functionality over the HTTP API.

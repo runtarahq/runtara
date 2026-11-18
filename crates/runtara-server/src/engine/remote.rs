@@ -46,7 +46,7 @@ const HANDED_OVER_LIMIT: usize = 96 * 1024 * 1024;
 /// more than the engine would have taken.
 fn handed_over_limit(part: Served) -> usize {
     match part {
-        Served::Events | Served::Channels => {
+        Served::Events => {
             crate::api::handlers::events::webhook_max_body_bytes().min(HANDED_OVER_LIMIT)
         }
         // A redirect from a provider carries its answer in the query.
@@ -1087,14 +1087,6 @@ impl Engine for RemoteEngine {
     async fn tenant_connections(&self, tenant_id: &str) -> Result<Vec<ConnectionRef>, String> {
         self.ask(wire::TenantConnections {
             tenant_id: tenant_id.to_owned(),
-        })
-        .await
-    }
-
-    async fn reconcile_channel_webhooks(&self, tenant_id: &str, removed: &[InvocationTrigger]) {
-        self.ask(wire::ReconcileChannelWebhooks {
-            tenant_id: tenant_id.to_owned(),
-            removed: removed.to_vec(),
         })
         .await
     }

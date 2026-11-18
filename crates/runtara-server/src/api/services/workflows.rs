@@ -3,7 +3,6 @@
 //! Business logic for workflow management
 //! Handles validation, orchestration, and error mapping
 
-use crate::api::dto::triggers::TriggerType;
 use crate::api::dto::workflows::*;
 use crate::api::repositories::workflows::WorkflowRepository;
 use crate::api::utils::pagination::{normalize_page, normalize_page_size};
@@ -1134,17 +1133,6 @@ impl WorkflowService {
                 ?trigger_ids,
                 "Deactivated triggers of deleted workflow"
             );
-            // Best-effort: a webhook failure must not resurrect the workflow.
-            if deleted
-                .deactivated_triggers
-                .iter()
-                .any(|t| t.trigger_type == TriggerType::Channel)
-                && let Some(engine) = &self.engine
-            {
-                engine
-                    .reconcile_channel_webhooks(tenant_id, &deleted.deactivated_triggers)
-                    .await;
-            }
         }
 
         Ok(deleted.definitions_deleted)
