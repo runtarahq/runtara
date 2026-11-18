@@ -11,18 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- **A workflow runs only as the engine approved it.** The engine records,
-  in the runtime database, each version someone who may run it asked to
-  have compiled or run, the image it compiled from that, and the version
-  chosen to run. A run nobody asked for (a schedule, a webhook) is refused
-  with `this version's definition is not the one that was approved to run`
-  if the definition was changed in the database since, until a caller
-  compiles or runs it; editing through the API and compiling, as before,
-  approves it. What was compiled and chosen before is carried over at the
-  first start. Applies to a single process too.
-
 ### Added
 
 - **The API and the engine as two processes.** `RUNTARA_ROLE=api` runs what
@@ -1094,6 +1082,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the eager-pass behavior described above.
 
 ### Changed
+
+- **A workflow runs only as the engine approved it.** The engine records,
+  in the runtime database, each version someone who may run it asked to
+  have compiled or run, the image it compiled from that, and the version
+  chosen to run. A run nobody asked for (a schedule, a webhook) is refused
+  with `this version's definition is not the one that was approved to run`
+  if the definition was changed in the database since, until a caller
+  compiles or runs it; editing through the API and compiling, as before,
+  approves it. What was compiled and chosen before is carried over at the
+  first start. Applies to a single process too.
 
 - **seal is at its current revision, which leaves what a credential may do
   to the credential.** seal no longer holds a request to a method, a SigV4

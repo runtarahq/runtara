@@ -1106,6 +1106,8 @@ impl Engine for LocalEngine {
                 .set_current(tenant_id, workflow_id, version, &by)
                 .await?;
         }
+        // Whoever chooses the version that runs asks for it to run.
+        approvals::approve_as_asked(tenant_id, workflow_id, version).await?;
         match repository
             .set_current_version(tenant_id, workflow_id, version)
             .await
@@ -1125,7 +1127,11 @@ impl Engine for LocalEngine {
         crate::api::repositories::workflows::WorkflowRepository::new(self.pool.clone())
             .invalidate_compilation(tenant_id, workflow_id, version)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        // A caller who changed the definition, or asked for it to be built
+        // again, approves it as it now stands: it is compiled when it next
+        // runs, as it was before the engine kept a record.
+        approvals::approve_as_asked(tenant_id, workflow_id, version).await
     }
 
     async fn tenant_connections(&self, tenant_id: &str) -> Result<Vec<ConnectionRef>, String> {

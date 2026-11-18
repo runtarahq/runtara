@@ -46,7 +46,8 @@
 #      tenant and refuses; the outbox, the keys and the runtime database are
 #      closed; a definition changed in the server database does not run
 #      until a caller who may compiles it; the version that runs is the one
-#      chosen through the engine.
+#      chosen through the engine; a version a caller edits through the API
+#      still runs as edited.
 #
 # With SERVED_TENANTS_KEY_ID_PER_TENANT, a host that seals each tenant's
 # credentials under its own keys (key id `{tenant}-k1`) is checked to.
@@ -924,6 +925,17 @@ RESP=$(api_post "/workflows/${WF_ID}/versions/${NEW_VERSION}/set-current" '{}')
 [ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "set-current failed: ${RESP}"; exit 1; }
 echo "$(sync_answer)" | jq -e '.outputs.answer == 43' >/dev/null || { print_error "the version chosen through the engine did not run"; exit 1; }
 echo "  the version chosen through the engine ran; one written to the server database behind it did not ✓"
+
+# f. A caller who may edit a version in place approves it as they leave it:
+# it is compiled when it next runs, without anyone compiling it first.
+RESP=$(curl -sS --max-time 120 -X PUT -H 'Content-Type: application/json' \
+    -d "{\"executionGraph\": ${GRAPH/\"value\": 42/\"value\": 44}}" \
+    "${API}/workflows/${WF_ID}/versions/${NEW_VERSION}/graph")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "the version was not edited in place: ${RESP}"; exit 1; }
+RESP=$(sync_answer)
+echo "${RESP}" | jq -e '.outputs.answer == 44' >/dev/null \
+    || { print_error "a version a caller edited in place did not run: $(echo "${RESP}" | head -c 400)"; exit 1; }
+echo "  a version a caller edited in place through the API ran as edited, compiled as it ran ✓"
 fi
 
 print_success "served tenants: webhooks, API keys, triggers, cron, OAuth callbacks and connection events reach exactly the tenants this server serves, each its own, under its own limits"
