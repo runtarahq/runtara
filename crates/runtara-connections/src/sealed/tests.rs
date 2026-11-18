@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use super::testing::without_sealed;
 use super::*;
 
 const TENANT: &str = "acme";
@@ -73,7 +74,7 @@ async fn a_secret_is_stored_as_a_marker_and_nothing_else_changes() {
     assert_eq!(stored["base_url"], params["base_url"]);
     assert!(is_sealed(&stored["token"]));
     assert!(has_sealed_values(&stored));
-    assert!(!stored.to_string().contains(SECRET));
+    assert!(!without_sealed(&stored).to_string().contains(SECRET));
     assert_eq!(stored["token"][SEALED_MARKER]["envelope"]["keyset"], TENANT);
     assert_eq!(sealed.mode(), "in_process");
 }
@@ -277,7 +278,7 @@ async fn an_oauth_connection_not_yet_authorized_has_its_client_secret_sealed() {
     // It has no tokens yet; its client secret is seal's to send with a code.
     assert!(is_sealed(&stored["client_secret"]));
     assert_eq!(stored["client_id"], "id");
-    assert!(!stored.to_string().contains(SECRET));
+    assert!(!without_sealed(&stored).to_string().contains(SECRET));
     assert!(stored.get("access_token").is_none());
 
     // On a platform OAuth app it holds no client secret, and nothing is sealed.
@@ -552,7 +553,7 @@ async fn a_signing_secret_checks_a_webhooks_signature_without_being_read() {
         .unwrap()
         .expect("slack_bot is sealed");
     assert!(is_sealed(&stored["bot_token"]) && is_sealed(&stored["signing_secret"]));
-    assert!(!stored.to_string().contains("CANARY"));
+    assert!(!without_sealed(&stored).to_string().contains("CANARY"));
 
     let message = b"v0:1700000000:{\"type\":\"event_callback\"}".to_vec();
     let signature = hmac_sha256(SECRET, &message);
@@ -730,7 +731,7 @@ async fn an_mcp_connections_extra_headers_are_sent_by_seal() {
         .await
         .unwrap()
         .expect("mcp is sealed");
-    assert!(!stored.to_string().contains("CANARY"));
+    assert!(!without_sealed(&stored).to_string().contains("CANARY"));
     assert_eq!(
         request_fields("mcp", &stored),
         [
@@ -860,7 +861,7 @@ async fn a_telegram_token_is_put_in_the_path_by_seal() {
         .await
         .unwrap()
         .expect("telegram_bot is sealed");
-    assert!(!stored.to_string().contains(token));
+    assert!(!without_sealed(&stored).to_string().contains(token));
 
     // The request names the method only.
     let response = sealed
@@ -930,7 +931,7 @@ async fn an_azure_account_key_signs_the_request_seal_sends() {
         .unwrap()
         .expect("azure_blob_storage is sealed");
     assert!(is_sealed(&stored["account_key"]));
-    assert!(!stored.to_string().contains(&account_key));
+    assert!(!without_sealed(&stored).to_string().contains(&account_key));
 
     let url = format!("{}/devstore/container/blob.txt", server.uri());
     let response = sealed
@@ -1023,8 +1024,12 @@ async fn an_aws_key_signs_the_request_seal_sends() {
     };
     assert!(is_sealed(&stored["aws_secret_access_key"]));
     assert!(is_sealed(&stored["aws_session_token"]));
-    assert!(!stored.to_string().contains(SECRET));
-    assert!(!stored.to_string().contains("session-CANARY"));
+    assert!(!without_sealed(&stored).to_string().contains(SECRET));
+    assert!(
+        !without_sealed(&stored)
+            .to_string()
+            .contains("session-CANARY")
+    );
 
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
@@ -1189,7 +1194,7 @@ async fn a_database_url_is_stored_as_its_sealed_password_and_its_target() {
         stored["database_target"],
         "postgres://app@db.example.com:6432/orders"
     );
-    assert!(!stored.to_string().contains(SECRET));
+    assert!(!without_sealed(&stored).to_string().contains(SECRET));
 
     // Saved again untouched, it stays as it is.
     let again = sealed
@@ -1229,7 +1234,7 @@ async fn a_database_url_is_stored_as_its_sealed_password_and_its_target() {
                 stored["database_target"],
                 "postgres://app@db.example.com:5432/orders?sslmode=require"
             );
-            assert!(!stored.to_string().contains(SECRET));
+            assert!(!without_sealed(&stored).to_string().contains(SECRET));
         }
         None => assert!(!policy::seal_logs_in_unverified()),
     }

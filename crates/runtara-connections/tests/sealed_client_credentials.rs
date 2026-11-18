@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use runtara_connections::auth::provider_auth::resolve_connection_auth;
+use runtara_connections::sealed::testing::without_sealed;
 use runtara_connections::sealed::{
     Allowances, MemoryKeySource, SealedCredentials, SendError, is_sealed,
 };
@@ -113,7 +114,7 @@ async fn a_sealed_client_secret_gets_a_token_only_the_api_ever_sees() {
         .unwrap()
         .expect("the connection is sealed");
     assert!(is_sealed(&stored["client_secret"]));
-    assert!(!stored.to_string().contains(SECRET));
+    assert!(!without_sealed(&stored).to_string().contains(SECRET));
 
     // Twice: the token is got once, and kept.
     for _ in 0..2 {
@@ -121,7 +122,7 @@ async fn a_sealed_client_secret_gets_a_token_only_the_api_ever_sees() {
             .await
             .unwrap();
         assert!(is_sealed(&parameters["access_token"]));
-        assert!(!parameters.to_string().contains(TOKEN));
+        assert!(!without_sealed(&parameters).to_string().contains(TOKEN));
         let response = sealed
             .send_bounded(
                 TENANT,

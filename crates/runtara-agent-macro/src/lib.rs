@@ -1754,8 +1754,13 @@ fn analyze_type_for_nesting(type_str: &str) -> (bool, Option<String>, Option<Str
         .strip_prefix("Vec<")
         .and_then(|s| s.strip_suffix('>'))
     {
-        // The inner type is the items type
-        let items_type = inner.to_string();
+        // The inner type is the items type; items that may be null
+        // (`Vec<Option<T>>`) are items of T.
+        let items_type = inner
+            .strip_prefix("Option<")
+            .and_then(|s| s.strip_suffix('>'))
+            .unwrap_or(inner)
+            .to_string();
         return (is_nullable, Some(items_type), None);
     }
 
@@ -2281,6 +2286,15 @@ mod tests {
         let (nullable, items, nested) = analyze_type_for_nesting("Option<Vec<i32>>");
         assert!(nullable);
         assert_eq!(items, Some("i32".to_string()));
+        assert!(nested.is_none());
+    }
+
+    #[test]
+    fn test_analyze_type_for_nesting_vec_of_nullable_items() {
+        // A list whose items may be null is a list of the item type.
+        let (nullable, items, nested) = analyze_type_for_nesting("Option<Vec<Option<Order>>>");
+        assert!(nullable);
+        assert_eq!(items, Some("Order".to_string()));
         assert!(nested.is_none());
     }
 
