@@ -1230,9 +1230,12 @@ def check_input_names(sliced: dict) -> None:
                     sys.exit(f"{op['operationId']}: {INPUT_NAME} `{custom}` is not a plain name")
                 name = custom or field["name"]
                 if name in PLATFORM_INPUTS:
+                    # A GraphQL operation's inputs are its variables, which are ours to name.
+                    fix = ("rename the variable in the operation" if "x-runtara-graphql-document" in op
+                           else f"name it with {INPUT_NAME}")
                     sys.exit(
                         f"{op['operationId']}: the platform sets the input `{name}` on every call, "
-                        f"which would overwrite the value; name it with {INPUT_NAME}"
+                        f"which would overwrite the value; {fix}"
                     )
                 if name in seen:
                     sys.exit(f"{op['operationId']}: two inputs are named `{name}`")

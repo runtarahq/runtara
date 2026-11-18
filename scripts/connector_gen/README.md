@@ -450,13 +450,17 @@ which is then sliced, labelled and rendered like any other:
   introspection query to), `url:` (an SDL file or introspection result to
   download) or `path:` (one in the crate). An introspection result's order is
   the server's, so the pin is the sha256 of the schema printed as sorted SDL;
-  a change fails `fetch` like a changed spec. The schema is taken as valid: a
-  vendor's can break rules newer than it (Shopify's deprecates fields of types
-  whose interface does not), and only the operations are checked against it.
+  a change fails `fetch` like a changed spec. Introspection asks for
+  deprecated arguments and input fields too, which a server otherwise leaves
+  out, so the schema (and its pin) is the same whichever way it is read. The
+  schema is taken as valid: a vendor's can break rules newer than it
+  (Shopify's deprecates fields of types whose interface does not), and only
+  the operations are checked against it.
 - **An operation** must be valid against the schema, be the file's only
   operation (fragments may sit beside it), carry the file's name, and select
-  exactly one top-level field. Subscriptions are refused. `fetch` notes each
-  deprecated field an operation selects.
+  exactly one of the API's top-level fields (not `__type` or `__schema`).
+  Subscriptions are refused. `fetch` notes each deprecated field, argument and
+  input field an operation uses.
 - **The step's inputs are its variables**, labelled after the variable and
   described by the argument or input field it is passed to. A variable
   without `!`, or with a default, is optional; the default is the input's.
@@ -466,9 +470,13 @@ which is then sliced, labelled and rendered like any other:
   default applies.
 - **The output** is what the top-level field returns, built from the fields
   the operation selects; aliases, inline fragments and fragment spreads are
-  merged. The returned object is `<Operation>Result`, and the objects inside it
-  are named after the operation and their response keys
-  (`ListProductsPageInfo`, `GetProductVariantsNodes`).
+  merged, each fragment's fields read from its own type (an `owner` that is a
+  `User` in one fragment and a `Customer` in another is one object with the
+  fields of both). The returned object is `<Operation>Result`, and the objects
+  inside it are named after the operation and their response keys
+  (`ListProductsPageInfo`, `GetProductVariantsNodes`). A list whose items the
+  schema does not declare non-null (`[Node]`, as Shopify's `nodes(ids:)`
+  returns, with `null` for an unknown id) is a `Vec<Option<T>>`.
 - **Types:** `ID` and `String` are strings, `Int` an `i64`, `Float` an `f64`,
   `Boolean` a `bool`, and an enum a string listing its values. Every other
   scalar is the vendor's and needs a type in `graphql.scalars` (`string`, or a
@@ -476,9 +484,10 @@ which is then sliced, labelled and rendered like any other:
 - **Queries are reads; mutations have side effects.**
 - **`user_errors`** names the field in which the vendor's mutations report
   input they refused (Shopify's `userErrors`). A mutation whose result has
-  that field must select it, so a refused write cannot read as done.
+  that field must select it, directly or through a fragment and not aliased,
+  so a refused write cannot read as done.
 - Descriptions are Markdown: links read as their text, and the lines of a
-  paragraph are joined.
+  paragraph are joined. Code, fenced or indented, is kept as written.
 
 The generated request is a POST to `graphql.path` of `{"query": …,
 "variables": …}`, which the crate's `kit.rs` builds:
@@ -502,7 +511,9 @@ gets no answer; a mutation, like any other write, is retried only if sending
 it twice changes nothing.
 
 `check` also fails when an operation file no longer matches the operation in
-`spec.slice.json` (edited without `fetch`); layout and comments do not count.
+`spec.slice.json`, or `graphql.path` (where an API version usually is) no
+longer matches its endpoint: edited without `fetch`. Layout and comments do
+not count.
 
 ## A generated agent crate
 

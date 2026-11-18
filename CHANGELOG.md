@@ -80,10 +80,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each capability is an operation of ours in `operations/<name>.graphql`,
   checked against the schema. Its variables are the step's inputs, and its
   output is what its one top-level field returns, typed from the fields it
-  selects. Queries are reads and mutations side effects; the vendor's own
-  scalars are typed in `graphql.scalars`. `check` also fails when an
-  operation was edited without `fetch`. The OpenAPI path and the existing
-  generated agents are unchanged.
+  selects; a list whose items may be null is a `Vec<Option<T>>`, which the
+  step editor's metadata reads as a list of `T`. Queries are reads and
+  mutations side effects; the vendor's own scalars are typed in
+  `graphql.scalars`. `check` also fails when an operation or the endpoint
+  was edited without `fetch`. The OpenAPI path and the existing generated
+  agents are unchanged.
 
 - **BigCommerce agent, generated from BigCommerce's OpenAPI files.**
   Twenty-seven capabilities: list, read, create and update orders, read their

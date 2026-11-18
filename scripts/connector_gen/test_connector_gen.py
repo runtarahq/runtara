@@ -2168,6 +2168,7 @@ class InlineNameRenderTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 try:
+    import graphql
     import graphql_source as gs
 except ImportError:  # graphql-core is not installed
     gs = None
@@ -2306,6 +2307,15 @@ class GraphqlTest(unittest.TestCase):
             "Use it to:\n\n- list items and parts\n- count them\n\n| a | b |\n| - | - |\n\n```\nx\ny\n```",
         )
 
+    def test_markdown_code_is_kept_as_written(self):
+        text = ("Example:\n\n    mutation {\n      foo\n    }\n\nSee [the docs](https://x.example)\nfor more.\n\n"
+                "```\nquery { a } # [not](https://a.link)\n```\nOne\n    two")
+        self.assertEqual(
+            gs.markdown_text(text),
+            "Example:\n\n    mutation {\n      foo\n    }\n\nSee the docs for more.\n\n"
+            "```\nquery { a } # [not](https://a.link)\n```\nOne two",
+        )
+
     def test_a_mutation_has_side_effects(self):
         sliced, _ = fetched({"createItem": CREATE_ITEM}, user_errors="userErrors")
         op = operation(sliced, "createItem")
@@ -2338,7 +2348,65 @@ class GraphqlTest(unittest.TestCase):
         item_input = sliced["components"]["schemas"]["ItemInput"]
         # `status` has a default, so only `name` is required.
         self.assertEqual(item_input["required"], ["name"])
-        self.assertEqual(sorted(item_input["properties"]), ["name", "price", "status", "tags"])
+        self.assertEqual(sorted(item_input["properties"]), ["name", "oldName", "price", "status", "tags"])
+        self.assertTrue(item_input["properties"]["oldName"]["deprecated"])
+
+    def test_fragments_on_different_types_may_share_a_key(self):
+        sliced, _ = fetched({"findOwner": """
+            query findOwner($id: ID!) {
+              node(id: $id) {
+                ... on Item { owner { email } }
+                ... on Order { owner { name } }
+              }
+            }"""})
+        schemas = sliced["components"]["schemas"]
+        self.assertEqual(schemas["FindOwnerResult"]["properties"]["owner"]["allOf"],
+                         [{"$ref": "#/components/schemas/FindOwnerOwner"}])
+        owner = schemas["FindOwnerOwner"]
+        # Each fragment's fields, read from its own type (`User`, `Customer`).
+        self.assertEqual(sorted(owner["properties"]), ["email", "name"])
+        self.assertNotIn("description", owner)
+
+    def test_list_items_may_be_null(self):
+        sliced, _ = fetched({
+            "many": "query many($ids: [ID!]!) { nodes(ids: $ids) { id } }",
+            "itemLabels": "query itemLabels($id: ID!) { item(id: $id) { labels tags } }",
+        })
+        response = operation(sliced, "many")["responses"]["200"]["content"]["application/json"]["schema"]
+        self.assertEqual(response, {"type": "array", "items": {
+            "allOf": [{"$ref": "#/components/schemas/ManyResult"}], "nullable": True}})
+        labels = sliced["components"]["schemas"]["ItemLabelsResult"]["properties"]
+        self.assertEqual(labels["labels"]["items"], {"type": "string", "nullable": True})
+        self.assertEqual(labels["tags"]["items"], {"type": "string"})
+
+    def test_introspection_asks_for_deprecated_inputs(self):
+        schema_text = SAMPLE_SCHEMA.read_text()
+        schema = gs.schema_from_text(schema_text, "sdl")
+        answer = graphql.graphql_sync(schema, gs.introspection_query())
+        introspected = gs.schema_from_text(json.dumps({"data": answer.data}), "introspection")
+        # The same schema whichever way it is read, so it pins the same.
+        self.assertEqual(gs.canonical_sdl(introspected), gs.canonical_sdl(schema))
+        self.assertIn('legacy: ItemInput @deprecated(reason: "Use `input`.")', gs.canonical_sdl(introspected))
+
+    def test_deprecated_arguments_and_input_fields_are_noted(self):
+        _, printed = fetched({"legacyCreate": """
+            mutation legacyCreate($name: String!, $old: String) {
+              itemCreate(input: {name: $name, oldName: $old}, legacy: {name: $name}) { item { id } }
+            }"""})
+        self.assertIn("argument `itemCreate(legacy:)` is deprecated: Use `input`.", printed)
+        self.assertIn("input field `ItemInput.oldName` is deprecated: Use `name`.", printed)
+
+    def test_user_errors_may_be_selected_through_a_fragment(self):
+        sliced, _ = fetched({"createViaFragment": """
+            mutation createViaFragment { itemCreate(input: {name: "A"}) { ...Payload } }
+            fragment Payload on ItemCreatePayload { item { id } userErrors { message } }"""},
+                            user_errors="userErrors")
+        result = sliced["components"]["schemas"]["CreateViaFragmentResult"]
+        self.assertEqual(sorted(result["properties"]), ["item", "userErrors"])
+
+    def test_a_variable_the_platform_sets_is_refused(self):
+        message = refused({"clash": "query clash($connection_id: ID!) { item(id: $connection_id) { id } }"})
+        self.assertIn("rename the variable", message)
 
     def test_fragments_and_aliases_are_merged(self):
         sliced, _ = fetched({"findNode": """
@@ -2371,6 +2439,8 @@ class GraphqlTest(unittest.TestCase):
                 "created": "query created($id: ID!) { item(id: $id) { createdAt } }"},
             'contains `"##`': {"hashes": 'query hashes { search(text: "\\"##") { __typename } }'},
             "holds 2 operations": {"pair": "query pair { version }\nquery other { version }"},
+            "asks about the schema itself": {"typeInfo": 'query typeInfo { __type(name: "Item") { name } }'},
+            "Syntax Error": {"broken": "query broken { item(id: "},
         }
         for expected, documents in cases.items():
             with self.subTest(expected):
@@ -2403,6 +2473,11 @@ class GraphqlTest(unittest.TestCase):
             document.write_text(GET_ITEM.replace("    name\n", "    name\n    tags\n"))
             problems = cg.drift(crate)
             self.assertIn("operations/getItem.graphql does not match spec.slice.json", problems)
+            # An API version bump in the endpoint, without `fetch`.
+            config = yaml.safe_load((crate / "connector.yaml").read_text())
+            config["graphql"]["path"] = "/v2/graphql"
+            (crate / "connector.yaml").write_text(yaml.safe_dump(config))
+            self.assertIn("graphql.path `/v2/graphql` is not the endpoint in spec.slice.json", cg.drift(crate))
 
 
 @unittest.skipUnless(gs and generator_available(), "graphql-core or openapi-generator-cli is not installed")
@@ -2410,7 +2485,12 @@ class GraphqlRenderTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         with tempfile.TemporaryDirectory() as tmp:
-            graphql_crate(Path(tmp), {"getItem": GET_ITEM, "createItem": CREATE_ITEM}, user_errors="userErrors")
+            graphql_crate(Path(tmp), {
+                "getItem": GET_ITEM,
+                "createItem": CREATE_ITEM,
+                "many": "query many($ids: [ID!]!) { nodes(ids: $ids) { id } }",
+                "itemLabels": "query itemLabels($id: ID!) { item(id: $id) { labels } }",
+            }, user_errors="userErrors")
             with contextlib.redirect_stdout(io.StringIO()):
                 cg.fetch(Path(tmp))
             cls.text = cg.render(Path(tmp))
@@ -2433,6 +2513,10 @@ class GraphqlRenderTest(unittest.TestCase):
         self.assertIn("-> Result<GetItemResult, AgentError>", self.flat)
         self.assertIn("-> Result<CreateItemResult, AgentError>", self.flat)
         self.assertIn("pub user_errors: Option<Vec<CreateItemUserErrors>>,", self.text)
+
+    def test_list_items_that_may_be_null_are_options(self):
+        self.assertIn("-> Result<Vec<Option<ManyResult>>, AgentError>", self.flat)
+        self.assertIn("pub labels: Option<Vec<Option<String>>>,", self.text)
 
     def test_nothing_of_the_rest_api_template(self):
         self.assertNotIn("query_opt", self.text)

@@ -83,6 +83,10 @@ MARKDOWN_BLOCK = re.compile(r"\s*([-*+]\s|\d+[.)]\s|\||#|>|```)")
 LIST_ITEM = re.compile(r"\s*([-*+]\s|\d+[.)]\s)")
 
 
+def indented_code(line: str) -> bool:
+    return line.startswith(("    ", "\t"))
+
+
 def continues(previous: str, line: str) -> bool:
     """Whether Markdown reads `line` as the rest of `previous`'s paragraph, or
     of its list item when `line` is indented."""
@@ -96,14 +100,24 @@ def continues(previous: str, line: str) -> bool:
 def markdown_text(text: str) -> str:
     """A GraphQL description (Markdown) as the step editor shows it: links as
     their text, and the lines of a paragraph, which Markdown joins, joined.
-    Lists, tables, headings and code blocks keep their lines."""
-    lines, fenced = [], False
-    for line in MARKDOWN_LINK.sub(r"\1", text).strip().split("\n"):
+    Lists, tables, headings and code blocks keep their lines, and code (fenced,
+    or indented after a blank line) is kept as written, links included."""
+    lines, fenced, code = [], False, False
+    for line in text.strip().split("\n"):
         fence = line.lstrip().startswith("```")
-        if lines and not fenced and not fence and continues(lines[-1], line):
-            lines[-1] = lines[-1].rstrip() + " " + line.strip()
-        else:
+        previous = lines[-1] if lines else ""
+        # An indented line starts code only after a blank line; inside a
+        # paragraph it is the paragraph's next line.
+        if not fenced and not fence and indented_code(line) and (code or not previous.strip()):
+            code = True
+        elif line.strip() and not indented_code(line):
+            code = False
+        if fenced or fence or code:
             lines.append(line)
+        elif lines and continues(previous, line):
+            lines[-1] = previous.rstrip() + " " + MARKDOWN_LINK.sub(r"\1", line.strip())
+        else:
+            lines.append(MARKDOWN_LINK.sub(r"\1", line))
         if fence:
             fenced = not fenced
     return "\n".join(lines)
@@ -139,8 +153,16 @@ def schema_from_text(text: str, where: str):
         sys.exit(f"{where}: {e}")
 
 
+def introspection_query() -> str:
+    """The introspection query, asking for deprecated arguments and input fields
+    too: without `input_value_deprecation` a server leaves them out, so the
+    schema would differ from its SDL (and pin differently), and an operation
+    could not pass a deprecated argument the API still takes."""
+    return get_introspection_query(descriptions=True, input_value_deprecation=True)
+
+
 def introspect(url: str) -> str:
-    body = json.dumps({"query": get_introspection_query(descriptions=True)}).encode()
+    body = json.dumps({"query": introspection_query()}).encode()
     request = urllib.request.Request(url, data=body, headers={
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -193,16 +215,20 @@ def document_path(crate: Path, name: str) -> Path:
     return crate / OPERATIONS_DIR / f"{name}.graphql"
 
 
-def printed_document(crate: Path, name: str) -> str:
-    """The operation as the generated code sends it: graphql-core's printing,
-    without comments or layout of ours."""
+def document_text(crate: Path, name: str) -> str:
     path = document_path(crate, name)
     if not path.exists():
         sys.exit(f"{name}: {path} is missing; each listed operation is a file of that name")
+    return path.read_text()
+
+
+def printed_document(crate: Path, name: str) -> str:
+    """The operation as the generated code sends it: graphql-core's printing,
+    without comments or layout of ours."""
     try:
-        return print_ast(parse(path.read_text()))
+        return print_ast(parse(document_text(crate, name)))
     except GraphQLSyntaxError as e:
-        sys.exit(f"{path}: {e}")
+        sys.exit(f"{document_path(crate, name)}: {e}")
 
 
 class Operation:
@@ -219,7 +245,10 @@ class Operation:
         # the API's input types (named as the API names them).
         self.components = components
         self.inputs = inputs
-        self.document = parse(text)
+        try:
+            self.document = parse(text)
+        except GraphQLSyntaxError as e:
+            sys.exit(f"{name}: {e}")
         errors = validate(schema, self.document)
         if errors:
             sys.exit(f"{name}: not valid against the schema:\n" + "\n".join(f"  {e.message}" for e in errors))
@@ -244,6 +273,9 @@ class Operation:
             sys.exit(f"{name}: select exactly one top-level field; the capability returns what it returns")
         self.root = fields[0]
         self.root_key = (self.root.alias or self.root.name).value
+        if self.root.name.value.startswith("__"):
+            sys.exit(f"{name}: `{self.root.name.value}` asks about the schema itself; a capability "
+                     "selects one of the API's own top-level fields")
         self.root_field = self.root_type.fields[self.root.name.value]
         self.printed = print_ast(self.document)
         if '"##' in self.printed:
@@ -299,56 +331,73 @@ class Operation:
             }
         return {"$ref": f"#/components/schemas/{name}"}
 
-    def output_schema(self, gql_type, nodes: list, model: str, prefix: str = None) -> dict:
-        """The schema of what a field returns. An object is the model `model`;
-        the objects inside it are named `prefix` (by default `model`) and their
-        response keys."""
+    def output_schema(self, gql_type, sources: list, model: str, prefix: str = None) -> dict:
+        """The schema of what a field returns. `sources` are the (field
+        definition, node) pairs that select it: several when fragments on
+        different types select the same key, each typed by its own type. An
+        object is the model `model`; the objects inside it are named `prefix`
+        (by default `model`) and their response keys.
+
+        An item of a list may be `null` unless the schema says it is not
+        (Shopify's `nodes(ids:)` answers an unknown id with `null`), so it is
+        marked nullable and read as an `Option`."""
         if isinstance(gql_type, GraphQLNonNull):
-            return self.output_schema(gql_type.of_type, nodes, model, prefix)
+            return self.output_schema(gql_type.of_type, sources, model, prefix)
         if isinstance(gql_type, GraphQLList):
-            return {"type": "array", "items": self.output_schema(gql_type.of_type, nodes, model, prefix)}
+            items = self.output_schema(gql_type.of_type, sources, model, prefix)
+            if not isinstance(gql_type.of_type, GraphQLNonNull):
+                items = {"allOf": [items], "nullable": True} if "$ref" in items else {**items, "nullable": True}
+            return {"type": "array", "items": items}
         if is_leaf_type(gql_type):
             return self.leaf_schema(gql_type)
-        self.define_model(model, gql_type, nodes, prefix or model)
+        self.define_model(model, sources, prefix or model)
         return {"$ref": f"#/components/schemas/{model}"}
 
-    def define_model(self, name: str, parent, nodes: list, prefix: str) -> None:
+    def define_model(self, name: str, sources: list, prefix: str) -> None:
         if name in self.components:
             what = "an input type's name" if name in self.inputs else "defined twice"
             sys.exit(f"{self.name}: the model `{name}` would be {what}; "
                      "alias a field or rename the operation")
         self.components[name] = {}
         selected = {}
-        for node in nodes:
-            self.collect(parent, node.selection_set, selected)
+        types = []
+        for field, node in sources:
+            named = get_named_type(field.type)
+            types.append(named)
+            self.collect(named, node.selection_set, selected)
         properties = {}
         for key, entries in selected.items():
-            fields = [field for field, _ in entries if field is not None]
-            if not fields:
+            typed = [(field, node, parent) for field, node, parent in entries if field is not None]
+            if not typed:
                 properties[key] = {"type": "string", "description": "The object's GraphQL type name."}
                 continue
-            field = fields[0]
-            schema = self.output_schema(field.type, [node for _, node in entries], prefix + pascal(key))
+            field, node, parent = typed[0]
+            schema = self.output_schema(field.type, [(f, n) for f, n, _ in typed], prefix + pascal(key))
             properties[key] = {**schema, **described(field.description)}
             if field.deprecation_reason is not None:
                 properties[key]["deprecated"] = True
-                print(f"note: {self.name}: `{parent.name}.{entries[0][1].name.value}` is deprecated: "
+                print(f"note: {self.name}: `{parent.name}.{node.name.value}` is deprecated: "
                       f"{' '.join(field.deprecation_reason.split())}")
-        self.components[name] = {"type": "object", "properties": properties, **described(parent.description)}
+        # Fragments on different types (an `owner` that is a `User` here and a
+        # `Customer` there) share no one description.
+        description = described(types[0].description) if len({t.name for t in types}) == 1 else {}
+        self.components[name] = {"type": "object", "properties": properties, **description}
 
     def collect(self, parent, selection_set, out: dict) -> None:
-        """Response key -> [(field definition, node)] of the fields selected on
-        `parent`, through inline fragments and fragment spreads. The schema's
-        validation has made sure fields of one key can be merged."""
+        """Response key -> [(field definition, node, the type it is a field of)]
+        of the fields selected on `parent`, through inline fragments and
+        fragment spreads. The schema's validation has made sure fields of one
+        key can be merged; their definitions may still be of different types,
+        one per fragment."""
         if selection_set is None:
             return
         for selection in selection_set.selections:
             if isinstance(selection, FieldNode):
                 key = (selection.alias or selection.name).value
                 if selection.name.value == "__typename":
-                    out.setdefault(key, []).append((None, selection))
+                    out.setdefault(key, []).append((None, selection, parent))
                 else:
-                    out.setdefault(key, []).append((parent.fields[selection.name.value], selection))
+                    out.setdefault(key, []).append((parent.fields[selection.name.value], selection, parent))
             elif isinstance(selection, InlineFragmentNode):
                 condition = selection.type_condition
                 target = self.schema.get_type(condition.name.value) if condition else parent
@@ -365,6 +414,11 @@ class Operation:
         passed to: a variable has no description of its own."""
         found = {}
 
+        def note_deprecated(what: str, definition) -> None:
+            if definition.deprecation_reason is not None:
+                print(f"note: {self.name}: {what} is deprecated: "
+                      f"{' '.join(definition.deprecation_reason.split())}")
+
         def walk_value(node, gql_type, description):
             if isinstance(node, VariableNode):
                 found.setdefault(node.name.value, description)
@@ -377,6 +431,7 @@ class Operation:
                 named = get_named_type(gql_type)
                 for field in node.fields:
                     definition = named.fields[field.name.value]
+                    note_deprecated(f"input field `{named.name}.{field.name.value}`", definition)
                     walk_value(field.value, definition.type, definition.description)
 
         seen_fragments = set()
@@ -391,6 +446,7 @@ class Operation:
                     field = parent.fields[selection.name.value]
                     for argument in selection.arguments or ():
                         definition = field.args[argument.name.value]
+                        note_deprecated(f"argument `{selection.name.value}({argument.name.value}:)`", definition)
                         walk_value(argument.value, definition.type, definition.description)
                     if is_composite_type(get_named_type(field.type)):
                         walk(get_named_type(field.type), selection.selection_set)
@@ -407,10 +463,11 @@ class Operation:
         return found
 
     def request_body(self):
+        # Walked even without variables: it also notes deprecated arguments.
+        descriptions = self.variable_descriptions()
         variables = self.node.variable_definitions
         if not variables:
             return None
-        descriptions = self.variable_descriptions()
         properties, required = {}, []
         for variable in variables:
             name = variable.variable.name.value
@@ -436,9 +493,11 @@ class Operation:
         payload = get_named_type(self.root_field.type)
         if self.user_errors not in getattr(payload, "fields", {}):
             return
-        selections = self.root.selection_set.selections if self.root.selection_set else []
-        if not any(isinstance(s, FieldNode) and s.name.value == self.user_errors and s.alias is None
-                   for s in selections):
+        # Selected directly or through a fragment, under its own name: the
+        # kit reads the answer's field of that name.
+        selected = {}
+        self.collect(payload, self.root.selection_set, selected)
+        if not any(node.name.value == self.user_errors for _, node, _ in selected.get(self.user_errors, [])):
             sys.exit(f"{self.name}: select `{self.user_errors}` (not aliased) on `{self.root_key}`; "
                      "it is how the vendor says it refused the write")
 
@@ -446,8 +505,8 @@ class Operation:
         self.check_user_errors()
         # The result is `ListProductsResult`; the objects inside it are named
         # after the operation, not after `…Result`: `ListProductsPageInfo`.
-        response = self.output_schema(self.root_field.type, [self.root], pascal(self.name) + "Result",
-                                      prefix=pascal(self.name))
+        response = self.output_schema(self.root_field.type, [(self.root_field, self.root)],
+                                      pascal(self.name) + "Result", prefix=pascal(self.name))
         operation = {
             "operationId": self.name,
             "tags": ["graphql"],
@@ -469,15 +528,14 @@ class Operation:
         return operation
 
 
-def openapi_spec(config: dict, crate: Path, schema=None) -> tuple:
+def openapi_spec(config: dict, crate: Path) -> tuple:
     """The OpenAPI document of the listed operations, and the ones that only
-    read (the queries). `schema` is loaded from `graphql.schema` unless given."""
+    read (the queries)."""
     graphql = config.get("graphql") or {}
     path = graphql.get("path")
     if not isinstance(path, str) or not path.startswith("/"):
         sys.exit("graphql.path in connector.yaml is the endpoint's path, such as `/graphql`")
-    if schema is None:
-        schema = load_schema(graphql.get("schema") or {}, crate)
+    schema = load_schema(graphql.get("schema") or {}, crate)
     scalars = graphql.get("scalars") or {}
     unknown = sorted(name for name in scalars if not isinstance(schema.get_type(name), GraphQLScalarType)
                      or name in BUILTIN_SCALARS)
@@ -485,10 +543,7 @@ def openapi_spec(config: dict, crate: Path, schema=None) -> tuple:
         sys.exit(f"graphql.scalars {unknown} are no custom scalar of the schema")
     components, inputs, paths, queries = {}, set(), {}, []
     for name in config["operations"]:
-        if not document_path(crate, name).exists():
-            sys.exit(f"{name}: {document_path(crate, name)} is missing; each listed operation is a "
-                     "file of that name")
-        operation = Operation(schema, name, document_path(crate, name).read_text(), scalars,
+        operation = Operation(schema, name, document_text(crate, name), scalars,
                               graphql.get("user_errors"), components, inputs)
         # Every operation is a POST to the one endpoint; the path here only keeps
         # them apart in the document, and the template sends `x-runtara-graphql-path`.
@@ -505,16 +560,21 @@ def openapi_spec(config: dict, crate: Path, schema=None) -> tuple:
 
 
 def document_drift(config: dict, crate: Path, sliced: dict) -> list:
-    """Operations whose file no longer matches what `spec.slice.json` holds:
+    """What `connector.yaml` and the operation files say that `spec.slice.json`
+    no longer holds: an operation, or the endpoint (an API version bump),
     edited without running `fetch`."""
     held = {
-        op["operationId"]: op.get("x-runtara-graphql-document")
+        op["operationId"]: op
         for item in sliced["paths"].values()
         for op in item.values()
         if isinstance(op, dict) and "operationId" in op
     }
-    return [
+    problems = [
         f"{document_path(crate, name).relative_to(crate)} does not match spec.slice.json"
         for name in config["operations"]
-        if name in held and held[name] != printed_document(crate, name)
+        if name in held and held[name].get("x-runtara-graphql-document") != printed_document(crate, name)
     ]
+    path = (config.get("graphql") or {}).get("path")
+    if any(op.get("x-runtara-graphql-path") != path for op in held.values()):
+        problems.append(f"graphql.path `{path}` is not the endpoint in spec.slice.json")
+    return problems
