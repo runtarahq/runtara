@@ -8,6 +8,7 @@ repository's rustfmt; they are skipped when the generator is not installed.
 """
 
 import contextlib
+import hashlib
 import copy
 import io
 import json
@@ -2160,6 +2161,282 @@ class InlineNameRenderTest(unittest.TestCase):
         self.assertIn(f'"{returned}", &__OUTPUT_META_{returned} as &OutputTypeMeta', registry)
         self.assertIn('rename = "status_reason__s"', text)
         self.assertIn("pub status_reason_s: Option<String>,", text)
+
+
+# ---------------------------------------------------------------------------
+# GraphQL APIs (graphql_source.py)
+# ---------------------------------------------------------------------------
+
+try:
+    import graphql_source as gs
+except ImportError:  # graphql-core is not installed
+    gs = None
+
+SAMPLE_SCHEMA = TESTDATA / "sample-schema.graphql"
+
+GET_ITEM = """
+# Comments and layout are not sent.
+query getItem($id: ID!) {
+  item(id: $id) {
+    id
+    name
+    status
+    price
+    owner { email }
+    parts(first: 5) {
+      nodes { label }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+"""
+
+CREATE_ITEM = """
+mutation createItem($name: String!, $price: Money, $status: ItemStatus) {
+  itemCreate(input: {name: $name, price: $price, status: $status}) {
+    item { id name }
+    userErrors { field message }
+  }
+}
+"""
+
+
+def graphql_crate(crate: Path, documents: dict, sha256: str = None, **graphql) -> None:
+    """A crate generated from the sample schema, with `documents` as its
+    operations (name -> text)."""
+    schema_text = SAMPLE_SCHEMA.read_text()
+    (crate / "schema.graphql").write_text(schema_text)
+    pin = sha256 or hashlib.sha256(
+        gs.canonical_sdl(gs.schema_from_text(schema_text, "schema")).encode()).hexdigest()
+    (crate / "operations").mkdir(exist_ok=True)
+    for name, text in documents.items():
+        (crate / "operations" / f"{name}.graphql").write_text(text)
+    (crate / "connector.yaml").write_text(yaml.safe_dump({
+        "agent": {
+            "id": "sample",
+            "name": "Sample",
+            "description": "Sample GraphQL agent.",
+            "integration_id": "sample_token",
+            "error_prefix": "SAMPLE",
+        },
+        "graphql": {
+            "schema": {"path": "schema.graphql", "sha256": pin},
+            "path": "/graphql",
+            "scalars": {"Money": "string"},
+            **graphql,
+        },
+        "operations": list(documents),
+    }))
+
+
+def fetched(documents: dict, **graphql) -> tuple:
+    """`fetch` on a sample crate: the slice, and what `fetch` printed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        crate = Path(tmp)
+        graphql_crate(crate, documents, **graphql)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cg.fetch(crate)
+        return json.loads((crate / "spec.slice.json").read_text()), out.getvalue()
+
+
+def refused(documents: dict, **graphql) -> str:
+    """What `fetch` stops with."""
+    with tempfile.TemporaryDirectory() as tmp:
+        graphql_crate(Path(tmp), documents, **graphql)
+        with contextlib.redirect_stdout(io.StringIO()), unittest.TestCase().assertRaises(SystemExit) as stop:
+            cg.fetch(Path(tmp))
+        return str(stop.exception.code)
+
+
+def body_schema(op: dict) -> dict:
+    return op["requestBody"]["content"]["application/json"]["schema"]
+
+
+@unittest.skipUnless(gs, "graphql-core is not installed")
+class GraphqlTest(unittest.TestCase):
+    def test_a_query_is_a_read_whose_variables_are_inputs(self):
+        sliced, _ = fetched({"getItem": GET_ITEM})
+        op = operation(sliced, "getItem")
+        self.assertNotIn("x-runtara-side-effects", op)
+        self.assertEqual(op["x-runtara-graphql-field"], "item")
+        self.assertEqual(op["x-runtara-graphql-path"], "/graphql")
+        self.assertEqual(op["x-runtara-summary"], "Get Item")
+        self.assertEqual(op["description"], "Returns an item by its ID.")
+        body = body_schema(op)
+        self.assertEqual(body["required"], ["id"])
+        # A variable is described by the argument it is passed to.
+        self.assertEqual(body["properties"]["id"]["description"], "The ID of the item.")
+        self.assertEqual(body["properties"]["id"]["x-runtara-label"], "ID")
+
+    def test_the_operation_is_sent_as_graphql_prints_it(self):
+        sliced, _ = fetched({"getItem": GET_ITEM})
+        document = operation(sliced, "getItem")["x-runtara-graphql-document"]
+        self.assertTrue(document.startswith("query getItem($id: ID!) {\n  item(id: $id) {"), document)
+        self.assertNotIn("#", document)
+
+    def test_the_result_is_what_the_field_returns(self):
+        sliced, _ = fetched({"getItem": GET_ITEM})
+        schemas = sliced["components"]["schemas"]
+        response = operation(sliced, "getItem")["responses"]["200"]["content"]["application/json"]["schema"]
+        self.assertEqual(response, {"$ref": "#/components/schemas/GetItemResult"})
+        result = schemas["GetItemResult"]
+        self.assertEqual(sorted(result["properties"]), ["id", "name", "owner", "parts", "price", "status"])
+        self.assertEqual(result["properties"]["status"]["enum"], ["ACTIVE", "DRAFT"])
+        self.assertEqual(result["properties"]["price"]["type"], "string")
+        # Objects inside the result are named after the operation and their keys.
+        self.assertEqual(
+            sorted(schemas),
+            ["GetItemOwner", "GetItemParts", "GetItemPartsNodes", "GetItemPartsPageInfo", "GetItemResult"],
+        )
+        self.assertEqual(schemas["GetItemParts"]["properties"]["nodes"]["items"],
+                         {"$ref": "#/components/schemas/GetItemPartsNodes"})
+
+    def test_descriptions_read_as_text(self):
+        sliced, _ = fetched({"getItem": GET_ITEM})
+        self.assertEqual(
+            sliced["components"]["schemas"]["GetItemResult"]["description"],
+            "A thing in the shop. See the docs for how items are priced.",
+        )
+
+    def test_markdown_keeps_lists_tables_and_code(self):
+        text = "Use it to:\n\n- list items\n  and parts\n- count them\n\n| a | b |\n| - | - |\n\n```\nx\ny\n```"
+        self.assertEqual(
+            gs.markdown_text(text),
+            "Use it to:\n\n- list items and parts\n- count them\n\n| a | b |\n| - | - |\n\n```\nx\ny\n```",
+        )
+
+    def test_a_mutation_has_side_effects(self):
+        sliced, _ = fetched({"createItem": CREATE_ITEM}, user_errors="userErrors")
+        op = operation(sliced, "createItem")
+        self.assertTrue(op["x-runtara-side-effects"])
+        self.assertEqual(op["x-runtara-graphql-field"], "itemCreate")
+        body = body_schema(op)
+        self.assertEqual(body["required"], ["name"])
+        # Described by the input field the variable fills.
+        self.assertEqual(body["properties"]["price"]["description"], "The price to sell it at.")
+        self.assertEqual(body["properties"]["status"]["enum"], ["ACTIVE", "DRAFT"])
+        result = sliced["components"]["schemas"]["CreateItemResult"]
+        self.assertEqual(result["properties"]["userErrors"]["items"],
+                         {"$ref": "#/components/schemas/CreateItemUserErrors"})
+
+    def test_a_default_makes_an_input_optional(self):
+        sliced, _ = fetched({"listItems": "query listItems($first: Int = 25) { items(first: $first) { id } }"})
+        op = operation(sliced, "listItems")
+        first = body_schema(op)["properties"]["first"]
+        self.assertNotIn("required", body_schema(op))
+        self.assertEqual((first["default"], first["x-runtara-default"]), (25, "25"))
+        self.assertEqual(first["format"], "int64")
+        response = op["responses"]["200"]["content"]["application/json"]["schema"]
+        self.assertEqual(response, {"type": "array", "items": {"$ref": "#/components/schemas/ListItemsResult"}})
+
+    def test_an_input_object_variable_is_a_model(self):
+        sliced, _ = fetched({"createFromInput": """
+            mutation createFromInput($input: ItemInput!) {
+              itemCreate(input: $input) { item { id } userErrors { message } }
+            }"""})
+        item_input = sliced["components"]["schemas"]["ItemInput"]
+        # `status` has a default, so only `name` is required.
+        self.assertEqual(item_input["required"], ["name"])
+        self.assertEqual(sorted(item_input["properties"]), ["name", "price", "status", "tags"])
+
+    def test_fragments_and_aliases_are_merged(self):
+        sliced, _ = fetched({"findNode": """
+            query findNode($id: ID!) {
+              node(id: $id) {
+                __typename
+                id
+                ... on Item { title: name }
+                ...UserFields
+              }
+            }
+            fragment UserFields on User { email }"""})
+        result = sliced["components"]["schemas"]["FindNodeResult"]
+        self.assertEqual(sorted(result["properties"]), ["__typename", "email", "id", "title"])
+
+    def test_a_deprecated_field_is_noted(self):
+        _, printed = fetched({"oldItem": "query oldItem($id: ID!) { item(id: $id) { oldName } }"})
+        self.assertIn("`Item.oldName` is deprecated: Use `name`.", printed)
+
+    def test_refusals(self):
+        cases = {
+            "subscriptions are not supported": {
+                "watch": "subscription watch { itemChanged { id } }"},
+            "select exactly one top-level field": {
+                "two": "query two { version item(id: \"1\") { id } }"},
+            "name it `named`": {"named": "query other { version }"},
+            "not valid against the schema": {
+                "bad": "query bad($id: ID!) { item(id: $id) { colour } }"},
+            "['DateTime'] have no type": {
+                "created": "query created($id: ID!) { item(id: $id) { createdAt } }"},
+            'contains `"##`': {"hashes": 'query hashes { search(text: "\\"##") { __typename } }'},
+            "holds 2 operations": {"pair": "query pair { version }\nquery other { version }"},
+        }
+        for expected, documents in cases.items():
+            with self.subTest(expected):
+                self.assertIn(expected, refused(documents))
+
+    def test_a_mutation_must_select_its_user_errors(self):
+        message = refused({"createItem": "mutation createItem { itemCreate(input: {name: \"A\"}) { item { id } } }"},
+                          user_errors="userErrors")
+        self.assertIn("select `userErrors`", message)
+
+    def test_scalars_must_be_the_schemas(self):
+        self.assertIn("are no custom scalar", refused({"getItem": GET_ITEM}, scalars={"Item": "string"}))
+
+    def test_the_schema_is_pinned(self):
+        message = refused({"getItem": GET_ITEM}, sha256="0" * 64)
+        self.assertIn("changed: sha256 of its sorted SDL is", message)
+
+    def test_an_operation_edited_without_fetch_is_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            crate = Path(tmp)
+            graphql_crate(crate, {"getItem": GET_ITEM})
+            with contextlib.redirect_stdout(io.StringIO()):
+                cg.fetch(crate)
+            document = crate / "operations" / "getItem.graphql"
+            # Layout and comments are not the operation.
+            document.write_text("query getItem($id: ID!) { item(id: $id) { id name status price owner { email } "
+                                "parts(first: 5) { nodes { label } pageInfo { hasNextPage endCursor } } } }")
+            self.assertEqual(gs.document_drift(cg.load_config(crate), crate,
+                                               json.loads((crate / "spec.slice.json").read_text())), [])
+            document.write_text(GET_ITEM.replace("    name\n", "    name\n    tags\n"))
+            problems = cg.drift(crate)
+            self.assertIn("operations/getItem.graphql does not match spec.slice.json", problems)
+
+
+@unittest.skipUnless(gs and generator_available(), "graphql-core or openapi-generator-cli is not installed")
+class GraphqlRenderTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with tempfile.TemporaryDirectory() as tmp:
+            graphql_crate(Path(tmp), {"getItem": GET_ITEM, "createItem": CREATE_ITEM}, user_errors="userErrors")
+            with contextlib.redirect_stdout(io.StringIO()):
+                cg.fetch(Path(tmp))
+            cls.text = cg.render(Path(tmp))
+            cls.flat = re.sub(r"\s+", " ", cls.text)
+
+    def test_the_operation_is_sent_to_the_endpoint(self):
+        self.assertIn('const DOCUMENT: &str = r##"query getItem($id: ID!) {', self.text)
+        self.assertIn('kit::Request::new("POST", String::from("/graphql"))', self.flat)
+        self.assertIn('.graphql(DOCUMENT, "item", true, variables, "SAMPLE")', self.flat)
+        self.assertIn('.graphql( DOCUMENT, "itemCreate", false, variables, "SAMPLE", )', self.flat)
+
+    def test_variables_are_the_inputs(self):
+        self.assertIn('let variables = kit::Body::new().field("id", &self.id);', self.flat)
+        self.assertIn('.field("name", &self.name)', self.flat)
+        self.assertIn('.field_opt("price", &self.price)', self.flat)
+        self.assertIn("pub name: String,", self.text)
+        self.assertIn("pub price: Option<String>,", self.text)
+
+    def test_the_result_is_returned_typed(self):
+        self.assertIn("-> Result<GetItemResult, AgentError>", self.flat)
+        self.assertIn("-> Result<CreateItemResult, AgentError>", self.flat)
+        self.assertIn("pub user_errors: Option<Vec<CreateItemUserErrors>>,", self.text)
+
+    def test_nothing_of_the_rest_api_template(self):
+        self.assertNotIn("query_opt", self.text)
+        self.assertNotIn("json_body", self.text)
 
 
 if __name__ == "__main__":

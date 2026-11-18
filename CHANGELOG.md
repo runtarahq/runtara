@@ -74,6 +74,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `http_api_key` can fix the format, so its users enter the key alone
   (`docs/adding-an-agent.md`).
 
+- **`connector_gen` generates agents for GraphQL APIs.** A `connector.yaml`
+  with `graphql:` names the vendor's schema (an introspection endpoint, an
+  SDL file or one in the crate), pinned by the sha256 of its sorted SDL, and
+  each capability is an operation of ours in `operations/<name>.graphql`,
+  checked against the schema. Its variables are the step's inputs, and its
+  output is what its one top-level field returns, typed from the fields it
+  selects. Queries are reads and mutations side effects; the vendor's own
+  scalars are typed in `graphql.scalars`. `check` also fails when an
+  operation was edited without `fetch`. The OpenAPI path and the existing
+  generated agents are unchanged.
+
 - **BigCommerce agent, generated from BigCommerce's OpenAPI files.**
   Twenty-seven capabilities: list, read, create and update orders, read their
   products and shipping addresses, read the order statuses, create, list and
