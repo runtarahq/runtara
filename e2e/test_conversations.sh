@@ -204,7 +204,10 @@ say() {
         maxRetries: 0, inputMapping: { text: $text } }'
 }
 TALKER=$(workflow conv-talker "$(jq -n \
-    --argjson first "$(say first '{"valueType": "immediate", "value": "Working on it."}')" \
+    --argjson first "$(say first '{"valueType": "immediate", "value": "Working on it."}' | jq '.inputMapping += {
+        replyId: {valueType: "immediate", value: "working"},
+        format: {valueType: "immediate", value: "plain"},
+        data: {valueType: "immediate", value: {stage: 1}} }')" \
     --argjson second "$(say second '{"valueType": "reference", "value": "steps.wait.outputs.message"}')" '{
     name: "conv-talker", durable: true, entryPoint: "first",
     steps: { first: $first,
@@ -251,7 +254,7 @@ done
 [ "$(sent_state "${SENT}")" = "started" ] || { print_error "The first message did not start a run: ${SENT}"; exit 1; }
 wait_events "${ECHO}" c1 "$(ended 1)"
 [ "$(replies "${ECHO}" c1)" = '["hello"]' ] || { print_error "Unexpected replies: $(replies "${ECHO}" c1)"; exit 1; }
-[ "$(kinds "${ECHO}" c1)" = '["run_started","reply","run_ended"]' ] || { print_error "Unexpected events: $(kinds "${ECHO}" c1)"; exit 1; }
+[ "$(kinds "${ECHO}" c1)" = '["message","run_started","reply","run_ended"]' ] || { print_error "Unexpected events: $(kinds "${ECHO}" c1)"; exit 1; }
 
 SENT=$(send "${ECHO}" c1 m-2 again)
 [ "$(sent_state "${SENT}")" = "started" ] || { print_error "The second message did not start a run: ${SENT}"; exit 1; }
@@ -291,13 +294,28 @@ wait_events "${TALKER}" "chat:42" '[.[] | select(.kind == "waiting_for_input")] 
 [ "$(events "${TALKER}" "chat:42" | jq "$(ended 0)")" = "true" ] || { print_error "The run ended before it was answered"; exit 1; }
 read -r STATUS BODY <<< "$(api_status GET "$(conversation "${TALKER}" "chat:42")")"
 [ "$(echo "${BODY}" | jq -r '.data.waitingFor.message')" = "What next?" ] || { print_error "The conversation does not say what it waits for: ${BODY}"; exit 1; }
-print_success "A reply is said while the run still runs, and the conversation says what it waits for ✓"
+# The reply as the workflow shaped it, in the turn of the message that
+# started the run; and that message is in the log as it was said.
+FIRST=$(events "${TALKER}" "chat:42" | jq -c '[.[] | select(.kind == "reply")][0] | {turn, body: (.body | del(.instanceId))}')
+[ "${FIRST}" = '{"turn":"m-1","body":{"replyId":"working","text":"Working on it.","format":"plain","data":{"stage":1}}}' ] \
+    || { print_error "The reply is not as the workflow said it: ${FIRST}"; exit 1; }
+[ "$(events "${TALKER}" "chat:42" | jq -c '.[0] | [.kind, .turn, .body.id, .body.text]')" = '["message","m-1","m-1","start"]' ] \
+    || { print_error "The message is not in the log as it was said: $(events "${TALKER}" "chat:42" | jq -c '.[0]')"; exit 1; }
+REQUEST=$(events "${TALKER}" "chat:42" | jq -r '[.[] | select(.kind == "waiting_for_input")][0].body.requestId')
+# An answer written for another question is not given to this one.
+SENT=$(api_status POST "$(conversation "${TALKER}" "chat:42")/messages" '{"id":"m-stale","text":"for another","inReplyTo":"not-this-request"}')
+[ "$(sent_state "${SENT}")" = "failed" ] || { print_error "An answer for another request was not refused: ${SENT}"; exit 1; }
+[ "$(events "${TALKER}" "chat:42" | jq "$(ended 0)")" = "true" ] || { print_error "A stale answer ended the run"; exit 1; }
+print_success "A reply is said while the run still runs, as the workflow shaped it; the conversation says what it waits for, and takes no answer meant for another request ✓"
 
-SENT=$(send "${TALKER}" "chat:42" m-2 "the second thing")
+SENT=$(api_status POST "$(conversation "${TALKER}" "chat:42")/messages" "$(jq -nc --arg r "${REQUEST}" '{id: "m-2", text: "the second thing", inReplyTo: $r}')")
 [ "$(sent_state "${SENT}")" = "delivered" ] || { print_error "The message did not answer the run: ${SENT}"; exit 1; }
 wait_events "${TALKER}" "chat:42" "$(ended 1)"
 [ "$(replies "${TALKER}" "chat:42")" = '["Working on it.","the second thing"]' ] \
     || { print_error "Unexpected replies: $(replies "${TALKER}" "chat:42")"; exit 1; }
+# What follows the answer is of the answer's turn.
+[ "$(events "${TALKER}" "chat:42" | jq -c '[.[] | select(.kind == "reply") | .turn]')" = '["m-1","m-2"]' ] \
+    || { print_error "The replies are not of their messages' turns"; exit 1; }
 [ "$(events "${TALKER}" "chat:42" | jq -r '[.[] | select(.kind == "run_started")] | length')" = "1" ] || { print_error "The answer started a second run"; exit 1; }
 print_success "The next message answers the waiting run; a run that replied is not answered for from its output ✓"
 
