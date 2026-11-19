@@ -167,9 +167,12 @@ configs:
       # Postgres, on its private network and with no TLS. The server seals
       # its password for that (RUNTARA_DATABASE_CONNECTION_GUARD,
       # RUNTARA_PROXY_ALLOW_HTTP_HOSTS in docker-compose.yml); seal has to be
-      # told it may go there too.
+      # told it may go there too, by the ranges it may reach for a rule that
+      # allows a private destination. These are the ranges Docker gives its
+      # networks. Every caller of seal can reach what is in them, so a
+      # deployment names its database's subnet and no more.
       [network]
-      honour_private_rules = true
+      private_rule_cidrs = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
       honour_plaintext_postgres_rules = true
 
       # One line per use of a secret: who asked, for which keyset and item,

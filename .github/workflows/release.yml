@@ -197,6 +197,7 @@ jobs:
       # on loopback and reached with no TLS.
       RUNTARA_DATABASE_CONNECTION_GUARD: "off"
       RUNTARA_PROXY_ALLOW_HTTP_HOSTS: 127.0.0.1
+      RUNTARA_SEAL_PRIVATE_CIDRS: 127.0.0.0/8
       RUNTARA_DATABASE_URL: postgresql://smo_worker:GueUkDKea0CjKP4Rn5Bk0FDV@127.0.0.1:5432/runtara
       AUTH_PROVIDER: local
       TENANT_ID: Organity

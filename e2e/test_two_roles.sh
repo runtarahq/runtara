@@ -170,7 +170,7 @@ engine_env() {
     RUNTARA_DEV_MODE=false \
     RUST_LOG="warn,runtara_server=info,runtara_environment=info,runtara_runner_executor=info" \
     AUTH_PROVIDER=local \
-    RUNTARA_DATABASE_CONNECTION_GUARD=off \
+    RUNTARA_DATABASE_CONNECTION_GUARD=off RUNTARA_SEAL_PRIVATE_CIDRS="${RUNTARA_SEAL_PRIVATE_CIDRS:-127.0.0.0/8,::1/128}" \
     RUNTARA_PROXY_ALLOWED_HOSTS="${POSTGRES_HOST}" \
     RUNTARA_PROXY_ALLOW_HTTP_HOSTS="${POSTGRES_HOST}" \
     VALKEY_HOST=127.0.0.1 \
@@ -269,7 +269,7 @@ lock_memory = "off"
 
 [network]
 allow_private_cidrs = ["127.0.0.0/8", "::1/128"]
-honour_private_rules = true
+private_rule_cidrs = ["127.0.0.0/8", "::1/128"]
 honour_plaintext_postgres_rules = true
 
 [audit]

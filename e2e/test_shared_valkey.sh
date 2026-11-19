@@ -165,6 +165,7 @@ start_server() {
     print_step "Starting server ${name} (tenant ${tenant}) on :${port}..."
     RUNTARA_SERVER_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DB_PREFIX}_${db}_server" \
     RUNTARA_DATABASE_CONNECTION_GUARD="${served:+off}" \
+    RUNTARA_SEAL_PRIVATE_CIDRS="${RUNTARA_SEAL_PRIVATE_CIDRS:-127.0.0.0/8,::1/128}" \
     RUNTARA_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DB_PREFIX}_${db}_runtime" \
     TENANT_ID="${tenant}" \
     RUNTARA_SERVED_TENANTS="${served}" \

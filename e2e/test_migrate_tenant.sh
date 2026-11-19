@@ -89,6 +89,7 @@ http_status() { curl -sS -o /dev/null -w '%{http_code}' "$@"; }
 start() {
     RUNTARA_SERVER_DATABASE_URL="$(url "${DB_SIDE:-$1}_server")" \
     RUNTARA_DATABASE_CONNECTION_GUARD="${3:+off}" \
+    RUNTARA_SEAL_PRIVATE_CIDRS="${RUNTARA_SEAL_PRIVATE_CIDRS:-127.0.0.0/8,::1/128}" \
     RUNTARA_DATABASE_URL="$(url "${DB_SIDE:-$1}_runtime")" \
     TENANT_ID="$2" RUNTARA_SERVED_TENANTS="${3:-}" \
     SERVER_HOST=127.0.0.1 SERVER_PORT="${TEST_PORT_PUBLIC}" \
