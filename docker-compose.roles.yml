@@ -462,6 +462,9 @@ configs:
       keysets = ["*"]
       admin = false
       destroy_keysets = false
+      # Intake checks a webhook's signature and does nothing else with a
+      # secret: it may not send, connect or presign with one.
+      operations = ["verify"]
 
       [keys]
       source = { dir = "/var/lib/seal/keys" }

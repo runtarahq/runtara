@@ -1179,6 +1179,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **seal 0.2.0, and what a deployment names for it.** Three things change
+  with it.
+  - **Private destinations are named by range.** seal no longer honours a
+    rule that allows a private destination everywhere once any is allowed:
+    it reaches one only inside the internal ranges the deployment names. A
+    host in `RUNTARA_PROXY_ALLOWED_HOSTS` given by its address (or
+    `localhost`) is that address, as before. **A host given by name, and a
+    private database reached because `RUNTARA_DATABASE_CONNECTION_GUARD` is
+    off, now need their range in `RUNTARA_SEAL_PRIVATE_CIDRS`**
+    (comma-separated, like `10.20.0.0/16`); the evaluation stack sets it. A
+    seal that is a process of its own takes `private_rule_cidrs` in its
+    `[network]` settings, in place of `honour_private_rules`, **which it no
+    longer reads: such a seal does not start until its configuration is
+    changed.**
+  - **A secret for one endpoint goes to that path only.** A client secret, a
+    refresh token and a token to revoke are sealed for the token or
+    revocation endpoint's whole path, and a Telegram webhook's secret for
+    `setWebhook`, where they were sealed for the path and anything below it.
+    A connection sealed before keeps the rule it has until its secret is
+    entered again.
+  - **Intake's seal caller may only verify** (`operations = ["verify"]`, in
+    `docker-compose.roles.yml` and `docs/roles.md`).
 - **An engine of its own receives nothing anyone may send.** A provider's
   OAuth redirect is received by intake, as a trigger's webhooks are: intake
   hands the engine the path and query asked and the browser's cookie, and

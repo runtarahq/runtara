@@ -150,6 +150,9 @@ server_sql() { psql_quiet -d "${TEST_DB_SERVER}" -c "$1"; }
 # A seal: `seal CONFIG-NAME SOCKET CALLER-NAME ADMIN`. Both share the keys.
 start_a_seal() {
     local name="$1" socket="$2" caller="$3" admin="$4"
+    # A caller that administers nothing is intake's: it may only verify.
+    local operations=""
+    [ "${admin}" = "true" ] || operations='operations = ["verify"]'
     cat > "${SEAL_DIR}/${name}.toml" <<TOML
 [listen]
 unix = "${socket}"
@@ -160,6 +163,7 @@ unix_uid = $(id -u)
 keysets = ["*"]
 admin = ${admin}
 destroy_keysets = ${admin}
+${operations}
 
 [keys]
 source = { dir = "${SEAL_DIR}/keys" }
@@ -168,7 +172,7 @@ lock_memory = "off"
 
 [network]
 allow_private_cidrs = ["127.0.0.0/8", "::1/128"]
-honour_private_rules = true
+private_rule_cidrs = ["127.0.0.0/8", "::1/128"]
 
 [audit]
 sink = { file = "${SEAL_DIR}/${name}-audit.jsonl" }
@@ -207,7 +211,7 @@ start_engine() {
         RUNTARA_AGENT_COMPONENTS_DIR="${COMPONENTS_DIR}" \
         DATA_DIR="${WORK_DIR}/data" \
         RUNTARA_DEV_MODE=false \
-        RUNTARA_DATABASE_CONNECTION_GUARD=off \
+        RUNTARA_DATABASE_CONNECTION_GUARD=off RUNTARA_SEAL_PRIVATE_CIDRS="${RUNTARA_SEAL_PRIVATE_CIDRS:-127.0.0.0/8,::1/128}" \
         RUST_LOG="warn,runtara_server=info" \
         AUTH_PROVIDER=local \
         VALKEY_HOST=127.0.0.1 \
@@ -508,9 +512,17 @@ for command in "XADD runtara:triggers:${TENANT} * event x" "RPUSH ${TENANT}:comp
     OUT=$(as_intake_valkey ${command})
     echo "${OUT}" | grep -q "NOPERM" || { print_error "intake's Valkey user ran '${command}': ${OUT}"; exit 1; }
 done
-# Its seal knows it as a caller that administers nothing.
+# Its seal knows it as a caller that administers nothing and may only
+# verify: the signed webhook above was checked as that caller, and seal
+# refuses it a send, a connect or a presign (CALLER_DENIED).
 grep -q 'admin = false' "${SEAL_DIR}/seal-intake.toml" && grep -q 'destroy_keysets = false' "${SEAL_DIR}/seal-intake.toml" \
     || { print_error "intake's seal caller is an administrator"; exit 1; }
+grep -q '^operations = \["verify"\]$' "${SEAL_DIR}/seal-intake.toml" \
+    || { print_error "intake's seal caller may do more than verify"; exit 1; }
+grep -q '"caller":"runtara-intake"' "${SEAL_DIR}/seal-intake-audit.jsonl" \
+    || { print_error "seal has no record of intake verifying a webhook"; exit 1; }
+grep '"caller":"runtara-intake"' "${SEAL_DIR}/seal-intake-audit.jsonl" | grep -q "CALLER_DENIED" \
+    && { print_error "intake asked seal for something it may not do"; exit 1; }
 print_success "intake's environment, database role and Valkey user hold no run, connection, definition or key, and cannot work across tenants"
 
 #-------------------------------------------------------------------------

@@ -250,7 +250,7 @@ lock_memory = "off"
 
 [network]
 allow_private_cidrs = ["127.0.0.0/8", "::1/128"]
-honour_private_rules = true
+private_rule_cidrs = ["127.0.0.0/8", "::1/128"]
 
 [audit]
 sink = { file = "${SEAL_DIR}/audit.jsonl" }
@@ -300,7 +300,7 @@ print_step "Starting the engine and the API..."
     RUNTARA_ENV_HTTP_PORT="${TEST_ENV_HTTP_PORT}" \
     RUNTARA_AGENT_COMPONENTS_DIR="${COMPONENTS_DIR}" \
     DATA_DIR="${WORK_DIR}/data" \
-    RUNTARA_DATABASE_CONNECTION_GUARD=off \
+    RUNTARA_DATABASE_CONNECTION_GUARD=off RUNTARA_SEAL_PRIVATE_CIDRS="${RUNTARA_SEAL_PRIVATE_CIDRS:-127.0.0.0/8,::1/128}" \
     RUST_LOG="warn,runtara_server=info" \
     SQLX_OFFLINE="${SQLX_OFFLINE}" \
     "${RUNTARA_SERVER_BIN}") >>"${ENGINE_LOG}" 2>&1 &

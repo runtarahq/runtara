@@ -42,6 +42,13 @@ pub struct Allowances {
     /// Whether database connections may reach private addresses: where the
     /// deployment's own address guard for them is off.
     pub private_databases: bool,
+    /// The internal ranges seal in this process may reach for a rule that
+    /// allows a private destination (`RUNTARA_SEAL_PRIVATE_CIDRS`), each
+    /// written like `10.0.0.0/8`. A private host given as an address is
+    /// reached without being listed here; one given by name, and a private
+    /// database, are reached only inside these. A seal that is a process of
+    /// its own has its own (`private_rule_cidrs`).
+    pub private_ranges: Vec<String>,
 }
 
 impl Allowances {
@@ -49,6 +56,51 @@ impl Allowances {
         self.private_hosts.iter().any(|entry| {
             entry == host || port.is_some_and(|port| *entry == format!("{host}:{port}"))
         })
+    }
+
+    /// The internal ranges a rule that allows a private destination may
+    /// reach: those the deployment lists, and each private host it named by
+    /// its address, which is that address and no other. `localhost` is the
+    /// loopback addresses. Anyone can seal a rule for any host, so these are
+    /// what every caller of seal can reach.
+    pub fn private_rule_ranges(&self) -> Result<Vec<String>, String> {
+        let mut ranges = Vec::new();
+        for range in &self.private_ranges {
+            let (address, prefix) = range
+                .split_once('/')
+                .ok_or_else(|| format!("`{range}` is not a range like 10.0.0.0/8"))?;
+            let address: std::net::IpAddr = address
+                .parse()
+                .map_err(|_| format!("`{range}` is not a range like 10.0.0.0/8"))?;
+            let longest = if address.is_ipv4() { 32 } else { 128 };
+            if !prefix.parse::<u8>().is_ok_and(|prefix| prefix <= longest) {
+                return Err(format!("`{range}` is not a range like 10.0.0.0/8"));
+            }
+            ranges.push(range.clone());
+        }
+        let exactly = |address: std::net::IpAddr| match address {
+            std::net::IpAddr::V4(address) => format!("{address}/32"),
+            std::net::IpAddr::V6(address) => format!("{address}/128"),
+        };
+        for entry in &self.private_hosts {
+            // `host`, `host:port`, `[v6]` or `[v6]:port`.
+            let host = match entry.strip_prefix('[') {
+                Some(bracketed) => bracketed.split(']').next().unwrap_or(bracketed),
+                None if entry.parse::<std::net::IpAddr>().is_ok() => entry.as_str(),
+                None => entry
+                    .rsplit_once(':')
+                    .map_or(entry.as_str(), |(host, _)| host),
+            };
+            if host == "localhost" {
+                ranges.push("127.0.0.1/32".to_owned());
+                ranges.push("::1/128".to_owned());
+            } else if let Ok(address) = host.parse() {
+                ranges.push(exactly(address));
+            }
+        }
+        ranges.sort();
+        ranges.dedup();
+        Ok(ranges)
     }
 
     fn allows_plain_http(&self, host: &str) -> bool {
@@ -85,12 +137,11 @@ pub fn telegram_webhook_secret_policy(
                 .api_bases
                 .get("telegram_bot")
                 .map_or(TELEGRAM_API_BASE, String::as_str);
-            let mut rule = rule_for(
+            let mut rule = endpoint_rule_for(
                 &format!("{}/setWebhook", api_base.trim_end_matches('/')),
                 &Inject::FormField {
                     name: "secret_token".to_owned(),
                 },
-                false,
                 allowances,
             )?;
             rule.methods = Some(vec![Method::Post]);
@@ -979,7 +1030,7 @@ fn token_rules(tokens: &AuthorizedTokens, allowances: &Allowances) -> Option<Tok
             let inject = Inject::JsonField {
                 pointer: "/token".to_owned(),
             };
-            rules.push(rule_for(url, &inject, false, allowances)?);
+            rules.push(endpoint_rule_for(url, &inject, allowances)?);
         }
         Some(())
     };
@@ -1011,12 +1062,11 @@ fn token_rules(tokens: &AuthorizedTokens, allowances: &Allowances) -> Option<Tok
             },
         ],
     };
-    let mut refresh = rule_for(
+    let mut refresh = endpoint_rule_for(
         &tokens.token_url,
         &Inject::FormField {
             name: REFRESH_TOKEN_FIELD.to_owned(),
         },
-        false,
         allowances,
     )?;
     refresh.seal_response = Some(seal_response.clone());
@@ -1077,7 +1127,7 @@ fn authorized_client_policy(
     allowances: &Allowances,
 ) -> Option<Policy> {
     let rules = token_rules(tokens, allowances)?;
-    let mut to_token_endpoint = rule_for(&tokens.token_url, client, false, allowances)?;
+    let mut to_token_endpoint = endpoint_rule_for(&tokens.token_url, client, allowances)?;
     to_token_endpoint.seal_response = Some(rules.seal_response);
     // A platform's secret goes with any tenant's record, so only with the
     // grants a tenant's own authorization makes: never one that gets a token
@@ -1090,7 +1140,7 @@ fn authorized_client_policy(
     }
     let mut client_rules = vec![to_token_endpoint];
     if let (Some(url), Inject::Basic { .. }) = (&tokens.revocation_url, client) {
-        client_rules.push(rule_for(url, client, false, allowances)?);
+        client_rules.push(endpoint_rule_for(url, client, allowances)?);
     }
     Some(Policy {
         rules: client_rules,
@@ -1102,7 +1152,7 @@ fn authorized_client_policy(
 
 /// The policy of a client secret, and of the access tokens it gets.
 fn client_secret_policy(grant: &TokenGrant, allowances: &Allowances) -> Option<Policy> {
-    let mut to_token_endpoint = rule_for(&grant.token_url, &grant.client, false, allowances)?;
+    let mut to_token_endpoint = endpoint_rule_for(&grant.token_url, &grant.client, allowances)?;
     to_token_endpoint.seal_response = Some(SealResponse {
         format: ResponseFormat::Json,
         fields: vec![SealedField {
@@ -1640,6 +1690,27 @@ pub const SEALABLE_TYPES: &[&str] = &[
     "http_api_key",
 ];
 
+/// A rule that sends a secret to the one endpoint `url` names and nowhere
+/// below it: a token endpoint, a revocation endpoint, a webhook's
+/// registration. A prefix also matches what is under it, and a server may
+/// read a path under one endpoint as another's (`/revoke/..;/token`).
+///
+/// A URL with no path names its host, as it does for [`rule_for`].
+fn endpoint_rule_for(url: &str, inject: &Inject, allowances: &Allowances) -> Option<Rule> {
+    let mut rule = rule_for(url, inject, false, allowances)?;
+    // The path as the URL writes it, a closing `/` included: it is what the
+    // request made to this URL has, and the match is exact.
+    let whole = url::Url::parse(url).ok()?.path().to_owned();
+    if let Destination::Http {
+        path_prefix, path, ..
+    } = &mut rule.destination
+        && path_prefix.take().is_some()
+    {
+        *path = Some(whole);
+    }
+    Some(rule)
+}
+
 /// A rule that sends a secret to `base_url` and below (or anywhere on its
 /// host, with `any_path`), or `None` if seal cannot express the destination or
 /// this deployment does not allow it.
@@ -1671,6 +1742,7 @@ fn rule_for(
             host: Host::new(host.as_str()).ok()?,
             port: url.port(),
             path_prefix: (!any_path && !path.is_empty()).then(|| path.to_owned()),
+            path: None,
         },
         inject.clone(),
     );
@@ -2324,7 +2396,7 @@ mod tests {
             json!({
                 "rules": [{
                     "destination": {
-                        "scheme": "https", "host": "auth.example.com", "path_prefix": "/oauth/token",
+                        "scheme": "https", "host": "auth.example.com", "path": "/oauth/token",
                     },
                     "inject": {"form_field": {"name": "client_secret"}},
                     "seal_response": sealed_access_token(),
@@ -2363,7 +2435,7 @@ mod tests {
                 json!({
                     "rules": [{
                         "destination": {
-                            "scheme": "https", "host": host, "path_prefix": "/v1/oauth2/token",
+                            "scheme": "https", "host": host, "path": "/v1/oauth2/token",
                         },
                         "inject": {"basic": {"username": {"literal": "cid"}}},
                         "seal_response": sealed_access_token(),
@@ -2399,7 +2471,7 @@ mod tests {
             json!({"basic": {"username": {"literal": "cid"}}})
         );
         assert_eq!(
-            ups["rules"][0]["destination"]["path_prefix"],
+            ups["rules"][0]["destination"]["path"],
             "/security/v1/oauth/token"
         );
         let (_, generic) = client_secret(
@@ -2425,7 +2497,7 @@ mod tests {
             json!({
                 "destination": {
                     "scheme": "https", "host": "acme.myshopify.com",
-                    "path_prefix": "/admin/oauth/access_token",
+                    "path": "/admin/oauth/access_token",
                 },
                 "inject": {"json_field": {"pointer": "/client_secret"}},
                 "seal_response": sealed_access_token(),
@@ -2471,7 +2543,7 @@ mod tests {
             entra["rules"][0]["destination"],
             json!({
                 "scheme": "https", "host": "login.microsoftonline.com",
-                "path_prefix": "/tenant-1/oauth2/v2.0/token",
+                "path": "/tenant-1/oauth2/v2.0/token",
             })
         );
         assert_eq!(
@@ -2615,7 +2687,7 @@ mod tests {
         let revoke = json!({
             "destination": {
                 "scheme": "https", "host": "developer.api.intuit.com",
-                "path_prefix": "/v2/oauth2/tokens/revoke",
+                "path": "/v2/oauth2/tokens/revoke",
             },
             "inject": {"json_field": {"pointer": "/token"}},
         });
@@ -2638,7 +2710,7 @@ mod tests {
             {
                 "destination": {
                     "scheme": "https", "host": "oauth.platform.intuit.com",
-                    "path_prefix": "/oauth2/v1/tokens/bearer",
+                    "path": "/oauth2/v1/tokens/bearer",
                 },
                 "inject": {"form_field": {"name": "refresh_token"}},
                 "seal_response": {"format": "json", "fields": [
@@ -2970,7 +3042,7 @@ mod tests {
         );
         assert_eq!(field, "app_password");
         assert_eq!(
-            policy["rules"][0]["destination"]["path_prefix"],
+            policy["rules"][0]["destination"]["path"],
             "/tenant-1/oauth2/v2.0/token"
         );
         // A conversation names its own service URL, on one of the hosts the
@@ -3209,7 +3281,7 @@ mod tests {
                 "rules": [{
                     "destination": {
                         "scheme": "https", "host": "api.telegram.org",
-                        "path_prefix": "/setWebhook",
+                        "path": "/setWebhook",
                     },
                     "methods": ["POST"],
                     "inject": {"form_field": {"name": "secret_token"}},
@@ -3356,6 +3428,107 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// A rule for one endpoint names its whole path, as its URL writes it,
+    /// and so matches nothing below it; a rule for an API is a prefix.
+    #[test]
+    fn a_rule_for_one_endpoint_names_its_whole_path() {
+        let allowances = Allowances::default();
+        let inject = header("authorization", "Bearer {}");
+        let path_of = |rule: Rule| match rule.destination {
+            Destination::Http {
+                path, path_prefix, ..
+            } => (path, path_prefix),
+            other => panic!("{other:?}"),
+        };
+        let exact = |path: &str| (Some(path.to_owned()), None);
+        assert_eq!(
+            path_of(
+                endpoint_rule_for("https://auth.example.com/oauth/token", &inject, &allowances)
+                    .unwrap()
+            ),
+            exact("/oauth/token")
+        );
+        // A closing slash is part of the path a request to this URL has.
+        assert_eq!(
+            path_of(
+                endpoint_rule_for(
+                    "https://auth.example.com/oauth/token/",
+                    &inject,
+                    &allowances
+                )
+                .unwrap()
+            ),
+            exact("/oauth/token/")
+        );
+        // A URL with no path names its host, as it did.
+        assert_eq!(
+            path_of(endpoint_rule_for("https://auth.example.com", &inject, &allowances).unwrap()),
+            (None, None)
+        );
+        assert_eq!(
+            path_of(rule_for("https://api.example.com/v2/", &inject, false, &allowances).unwrap()),
+            (None, Some("/v2".to_owned()))
+        );
+        // It is still refused what any rule is.
+        assert!(
+            endpoint_rule_for(
+                "https://auth.example.com/token?tenant=1",
+                &inject,
+                &allowances
+            )
+            .is_none()
+        );
+        assert!(endpoint_rule_for("http://auth.example.com/token", &inject, &allowances).is_none());
+    }
+
+    /// The internal ranges a rule may reach are the ones the deployment
+    /// lists and the private hosts it named by address, each as that one
+    /// address. A host named by name, and a private database, open nothing
+    /// by themselves.
+    #[test]
+    fn a_private_destination_is_reached_only_in_the_ranges_the_deployment_names() {
+        let named = |hosts: &[&str], ranges: &[&str], databases: bool| {
+            Allowances {
+                private_hosts: hosts.iter().map(|host| (*host).to_owned()).collect(),
+                private_ranges: ranges.iter().map(|range| (*range).to_owned()).collect(),
+                private_databases: databases,
+                ..Allowances::default()
+            }
+            .private_rule_ranges()
+        };
+        assert_eq!(named(&[], &[], false), Ok(vec![]));
+        assert_eq!(
+            named(&["db.internal", "db.internal:5432"], &[], true),
+            Ok(vec![])
+        );
+        assert_eq!(
+            named(
+                &["127.0.0.1:8080", "10.1.2.3", "[fd00::1]:443", "localhost:9"],
+                &[],
+                false
+            ),
+            Ok(vec![
+                "10.1.2.3/32".to_owned(),
+                "127.0.0.1/32".to_owned(),
+                "::1/128".to_owned(),
+                "fd00::1/128".to_owned(),
+            ])
+        );
+        assert_eq!(
+            named(&["db.internal"], &["10.20.0.0/16", "fd00::/8"], true),
+            Ok(vec!["10.20.0.0/16".to_owned(), "fd00::/8".to_owned()])
+        );
+        for range in [
+            "10.0.0.0",
+            "10.0.0.0/33",
+            "db.internal/8",
+            "fd00::/129",
+            "/8",
+        ] {
+            assert!(named(&[], &[range], false).is_err(), "{range}");
+        }
     }
 
     #[test]

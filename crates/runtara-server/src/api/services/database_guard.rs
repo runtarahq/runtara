@@ -473,6 +473,7 @@ exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/certs/server.crt 
                 // and that lets this host be reached in the clear.
                 Allowances {
                     private_databases: true,
+                    private_ranges: vec!["127.0.0.0/8".to_owned()],
                     plain_http_hosts: vec!["127.0.0.1".into()],
                     ..Default::default()
                 },

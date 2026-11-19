@@ -55,10 +55,17 @@ repository (`docs/operations.md` there). What Runtara needs of it:
 - **What it may reach.** The server decides what a secret is sealed *for*
   (`RUNTARA_PROXY_ALLOW_HTTP_HOSTS`, `RUNTARA_DATABASE_CONNECTION_GUARD` and
   the like). seal decides, by its own `[network]` settings, whether it goes
-  there: a private address needs `honour_private_rules`, a database with no
-  TLS `honour_plaintext_postgres_rules`, and a provider with a private CA
-  `extra_ca_files`. In the server's process these followed the server's
-  settings; a separate seal is told itself.
+  there: a private address needs its range in `private_rule_cidrs`, a
+  database with no TLS `honour_plaintext_postgres_rules`, and a provider with a private CA
+  `extra_ca_files`. In the server's process these follow the server's
+  settings, with the ranges in `RUNTARA_SEAL_PRIVATE_CIDRS`; a separate
+  seal is told itself. A range is open to every caller of seal, with a
+  credential of yours or without: name the narrowest that holds what
+  credentials are sealed for.
+
+- **What a caller may do.** A caller may be held to some of `send`,
+  `connect`, `verify` and `presign` with `operations`. Intake's, which only
+  checks webhooks, has `operations = ["verify"]` (`docs/roles.md`).
 
 On the server:
 

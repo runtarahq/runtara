@@ -136,9 +136,19 @@ impl SealedCredentials {
             }
         }
         // A rule names a private destination only when this deployment's
-        // allowance listed its host as the secret was sealed.
-        config.network.honour_private_rules =
-            !allowances.private_hosts.is_empty() || allowances.private_databases;
+        // allowance listed its host as the secret was sealed, and seal
+        // reaches one only inside the ranges the deployment names: anyone
+        // can seal a rule for any host, so a range is open to every caller.
+        for range in allowances
+            .private_rule_ranges()
+            .map_err(|error| format!("RUNTARA_SEAL_PRIVATE_CIDRS: {error}"))?
+        {
+            config.network.private_rule_cidrs.push(
+                range
+                    .parse()
+                    .map_err(|_| format!("RUNTARA_SEAL_PRIVATE_CIDRS: `{range}` is not a range"))?,
+            );
+        }
         // A database with no TLS is reached only on a host this deployment
         // lets be reached in the clear; a password is sealed for one only
         // then.

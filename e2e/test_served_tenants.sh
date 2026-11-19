@@ -295,7 +295,7 @@ lock_memory = "off"
 
 [network]
 allow_private_cidrs = ["127.0.0.0/8", "::1/128"]
-honour_private_rules = true
+private_rule_cidrs = ["127.0.0.0/8", "::1/128"]
 honour_plaintext_postgres_rules = true
 
 [audit]
@@ -312,11 +312,13 @@ TOML
     print_error "seal did not listen"; exit 1
 }
 
-# Intake's seal: the same keys, for a caller that administers nothing.
+# Intake's seal: the same keys, for a caller that administers nothing and
+# may only verify.
 start_intakes_seal() {
     sed -e "s|${SEAL_DIR}/seal.sock|${SEAL_DIR}/seal-intake.sock|" \
         -e 's|name = "runtara-server"|name = "runtara-intake"|' \
-        -e 's|^admin = true|admin = false|' -e 's|^destroy_keysets = true|destroy_keysets = false|' \
+        -e 's|^admin = true|admin = false|' \
+        -e 's|^destroy_keysets = true|destroy_keysets = false\noperations = ["verify"]|' \
         -e "s|${SEAL_DIR}/audit.jsonl|${SEAL_DIR}/audit-intake.jsonl|" \
         "${SEAL_DIR}/seal.toml" > "${SEAL_DIR}/seal-intake.toml"
     chmod 600 "${SEAL_DIR}/seal-intake.toml"
@@ -451,7 +453,7 @@ start_server() {
 # One server process, in whatever role its environment names.
 start_one_server() {
     RUNTARA_SERVER_DATABASE_URL="${SERVER_DB_URL}" \
-    RUNTARA_DATABASE_CONNECTION_GUARD=off \
+    RUNTARA_DATABASE_CONNECTION_GUARD=off RUNTARA_SEAL_PRIVATE_CIDRS="${RUNTARA_SEAL_PRIVATE_CIDRS:-127.0.0.0/8,::1/128}" \
     RUNTARA_DATABASE_URL="postgresql://${RUNTIME_ROLE}:${RUNTIME_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_RUNTIME}" \
     TENANT_ID="${TENANT}" \
     RUNTARA_SERVED_TENANTS="${SECOND_TENANT}" \

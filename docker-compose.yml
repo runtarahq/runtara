@@ -127,6 +127,10 @@ services:
       # these two settings allow.
       RUNTARA_DATABASE_CONNECTION_GUARD: "off"
       RUNTARA_PROXY_ALLOW_HTTP_HOSTS: postgres
+      # The internal ranges seal in the server may reach for it: the ones
+      # Docker gives its networks. A deployment names its database's subnet
+      # and no more.
+      RUNTARA_SEAL_PRIVATE_CIDRS: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
       VALKEY_HOST: valkey
       VALKEY_PORT: "6379"
       # Connection credentials are always encrypted at rest. Pass your own

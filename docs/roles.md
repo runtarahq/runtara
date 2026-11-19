@@ -165,7 +165,9 @@ database role the triggers to read, the tables a queued run is written to,
 and nothing else: no connection, no workflow definition, no key, and no
 working across tenants. `scripts/roles/intake-valkey-user.acl` lets its
 Valkey user count admissions and write product events. Its seal caller is
-one that administers nothing (`admin = false`, `destroy_keysets = false`).
+one that administers nothing and may only verify (`admin = false`,
+`destroy_keysets = false`, `operations = ["verify"]`): seal refuses it a
+send, a connection or a presigned URL with any value it is handed.
 
 **How a signed webhook is checked without a connection.** What checks a
 trigger's webhook is kept on the trigger's row: the connection it is bound

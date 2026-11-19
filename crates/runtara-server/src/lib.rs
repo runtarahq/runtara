@@ -76,6 +76,12 @@ pub(crate) fn seal_allowances() -> runtara_connections::sealed::Allowances {
         // The address guard for database connections is seal's too.
         private_databases: config::try_get()
             .is_some_and(|config| !config.database_connection_guard),
+        private_ranges: std::env::var("RUNTARA_SEAL_PRIVATE_CIDRS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|range| range.trim().to_owned())
+            .filter(|range| !range.is_empty())
+            .collect(),
         ..Default::default()
     }
 }
