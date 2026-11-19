@@ -1205,6 +1205,32 @@ impl Engine for RemoteEngine {
         .await
     }
 
+    async fn conversation_token_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<crate::api::services::conversation_tokens::TokenGrant, String> {
+        self.ask(wire::ConversationTokenByHash {
+            token_hash: token_hash.to_owned(),
+        })
+        .await
+    }
+
+    async fn issue_conversation_token(
+        &self,
+        auth: crate::auth::AuthContext,
+        workflow_id: &str,
+        key: &str,
+        issue: crate::api::services::conversation_tokens::IssueToken,
+    ) -> ConversationResult<crate::api::services::conversation_tokens::IssuedToken> {
+        self.ask(wire::IssueConversationToken {
+            auth,
+            workflow_id: workflow_id.to_owned(),
+            key: key.to_owned(),
+            issue,
+        })
+        .await
+    }
+
     async fn set_current_version(
         &self,
         tenant_id: &str,
@@ -1995,8 +2021,9 @@ mod tests {
             .filter(|(_, needs)| needs.is_empty())
             .map(|(name, _)| *name)
             .collect();
-        // What the engine says of itself and whose a key is are no tenant's;
-        // agents are listed to every caller.
+        // What the engine says of itself, whose a key is and what a
+        // conversation token grants are no tenant's; agents are listed to
+        // every caller.
         assert_eq!(
             open,
             [
@@ -2007,7 +2034,8 @@ mod tests {
                 "ListAgents",
                 "AgentNamed",
                 "ComponentsStatusOf",
-                "ApiKeyByHash"
+                "ApiKeyByHash",
+                "ConversationTokenByHash"
             ]
         );
     }

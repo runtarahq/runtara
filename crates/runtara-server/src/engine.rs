@@ -485,6 +485,23 @@ pub trait Engine: Send + Sync {
         key_hash: &str,
     ) -> Result<crate::api::handlers::api_keys::ApiKey, String>;
 
+    /// What the conversation token whose hash is `token_hash` grants,
+    /// whichever tenant's it is, if it has not expired. Looked for across
+    /// tenants, as an API key is.
+    async fn conversation_token_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<crate::api::services::conversation_tokens::TokenGrant, String>;
+
+    /// Makes a token for one conversation, acting as `auth`, the caller.
+    async fn issue_conversation_token(
+        &self,
+        auth: crate::auth::AuthContext,
+        workflow_id: &str,
+        key: &str,
+        issue: crate::api::services::conversation_tokens::IssueToken,
+    ) -> ConversationResult<crate::api::services::conversation_tokens::IssuedToken>;
+
     /// Makes `version` the one that runs when a run names none, on the
     /// engine's own record. `Ok(false)` if the workflow has no such version.
     async fn set_current_version(
@@ -1365,6 +1382,45 @@ impl Engine for LocalEngine {
         // Within a tenant already named, only that tenant's keys are found.
         runtara_store_postgres::tenant_scope::locating(
             crate::api::handlers::api_keys::validate_api_key_by_hash(&self.pool, key_hash),
+        )
+        .await
+    }
+
+    async fn conversation_token_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<crate::api::services::conversation_tokens::TokenGrant, String> {
+        runtara_store_postgres::tenant_scope::locating(
+            crate::api::services::conversation_tokens::by_hash(&self.pool, token_hash),
+        )
+        .await
+    }
+
+    async fn issue_conversation_token(
+        &self,
+        auth: crate::auth::AuthContext,
+        workflow_id: &str,
+        key: &str,
+        issue: crate::api::services::conversation_tokens::IssueToken,
+    ) -> ConversationResult<crate::api::services::conversation_tokens::IssuedToken> {
+        // A token holder makes none: it is held to its own conversation.
+        if auth.conversation.is_some() {
+            return Err(
+                crate::api::services::conversations::ConversationError::Invalid(
+                    "a conversation token makes no tokens".into(),
+                ),
+            );
+        }
+        self.conversations
+            .open(&auth.org_id, workflow_id, key, OpenConversation::default())
+            .await?;
+        crate::api::services::conversation_tokens::issue(
+            &self.pool,
+            &auth.org_id,
+            workflow_id,
+            key,
+            &auth.user_id,
+            issue,
         )
         .await
     }

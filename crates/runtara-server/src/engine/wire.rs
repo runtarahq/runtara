@@ -105,6 +105,49 @@ fn permitted(caller: &AuthContext, needs: &[Permission]) -> bool {
     })
 }
 
+/// The operations a conversation token may ask: its conversation's state,
+/// messages, events and stop.
+const ASKED_WITH_A_CONVERSATION_TOKEN: &[&str] = &[
+    "ConversationOf",
+    "SendConversationMessage",
+    "ConversationEvents",
+    "StopConversation",
+];
+
+/// `operation`, as a conversation token's holder may ask it: one of
+/// [`ASKED_WITH_A_CONVERSATION_TOKEN`], of the grant's conversation, and a
+/// message sent as the grant's sender whoever the API says sent it. `None`
+/// if the token may not ask it.
+fn held_to<O: Serialize + serde::de::DeserializeOwned>(
+    grant: &crate::auth::ConversationGrant,
+    name: &str,
+    operation: &O,
+) -> Option<O> {
+    if !ASKED_WITH_A_CONVERSATION_TOKEN.contains(&name) {
+        return None;
+    }
+    let mut asked = serde_json::to_value(operation).ok()?;
+    if asked.get("workflow_id")?.as_str()? != grant.workflow_id
+        || asked.get("key")?.as_str()? != grant.key
+    {
+        return None;
+    }
+    if let Some(message) = asked
+        .get_mut("message")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        match &grant.sender {
+            Some(sender) => {
+                message.insert("sender".into(), serde_json::to_value(sender).ok()?);
+            }
+            None => {
+                message.remove("sender");
+            }
+        }
+    }
+    serde_json::from_value(asked).ok()
+}
+
 /// Who is on the other end of the engine's listener, by its certificate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Peer {
@@ -196,7 +239,17 @@ macro_rules! operations {
                                     Some(caller) if !permitted(caller, <$name>::NEEDS) => {
                                         return Some(Err(Refused::NotPermitted));
                                     }
-                                    Some(caller) => operation.of_caller(caller),
+                                    Some(caller) => {
+                                        // A conversation token asks of its
+                                        // conversation and nothing else.
+                                        if let Some(grant) = &caller.conversation {
+                                            match held_to(grant, stringify!($name), &operation) {
+                                                Some(held) => operation = held,
+                                                None => return Some(Err(Refused::NotPermitted)),
+                                            }
+                                        }
+                                        operation.of_caller(caller)
+                                    }
                                 }
                                 let asker = caller.map(|caller| caller.user_id.clone());
                                 scoped(tenant, async {
@@ -544,6 +597,18 @@ operations! {
         .stop_conversation(&op.tenant_id, &op.workflow_id, &op.key, op.clear_queue)
         .await;
 
+    // A credential for one conversation, made by the caller, who it acts as.
+    IssueConversationToken {
+        auth: AuthContext,
+        workflow_id: String,
+        key: String,
+        issue: crate::api::services::conversation_tokens::IssueToken,
+    } -> ConversationResult<crate::api::services::conversation_tokens::IssuedToken>,
+    needs [WorkflowExecute],
+    |engine, op| for Some(&op.auth.org_id), as auth => engine
+        .issue_conversation_token(op.auth, &op.workflow_id, &op.key, op.issue)
+        .await;
+
     DeleteConversation { tenant_id: String, workflow_id: String, key: String }
         -> ConversationResult<bool>,
     needs [WorkflowExecute],
@@ -682,6 +747,11 @@ operations! {
     needs [],
     |engine, op| for None => engine.api_key_by_hash(&op.key_hash).await;
 
+    ConversationTokenByHash { token_hash: String }
+        -> Result<crate::api::services::conversation_tokens::TokenGrant, String>,
+    needs [],
+    |engine, op| for None => engine.conversation_token_by_hash(&op.token_hash).await;
+
     SetCurrentVersion { tenant_id: String, workflow_id: String, version: i32 }
         -> Result<bool, String>,
     needs [WorkflowUpdate, WorkflowCreate],
@@ -767,4 +837,106 @@ operations! {
             op.engine,
         )
         .await;
+}
+
+#[cfg(test)]
+mod conversation_token_tests {
+    use super::*;
+    use crate::api::services::conversations::{Message, ReadEvents, Sender};
+    use crate::auth::ConversationGrant;
+
+    fn grant(sender: Option<Sender>) -> ConversationGrant {
+        ConversationGrant {
+            workflow_id: "wf-1".into(),
+            key: "k".into(),
+            sender,
+        }
+    }
+
+    fn message(sender: Option<Sender>) -> Message {
+        Message {
+            id: "m-1".into(),
+            text: Some("hi".into()),
+            payload: None,
+            sender,
+            attachments: Vec::new(),
+            in_reply_to: None,
+        }
+    }
+
+    fn send(workflow: &str, key: &str, sender: Option<Sender>) -> SendConversationMessage {
+        SendConversationMessage {
+            tenant_id: "acme".into(),
+            workflow_id: workflow.into(),
+            key: key.into(),
+            message: message(sender),
+            wait_ms: 0,
+        }
+    }
+
+    /// A conversation token asks its own conversation's four operations and
+    /// no other; what it sends is from the token's sender, whatever the API
+    /// passed on.
+    #[test]
+    fn a_token_asks_its_conversation_as_its_sender_and_nothing_else() {
+        let ann = Sender {
+            id: "ann".into(),
+            name: Some("Ann".into()),
+        };
+        let mallory = Sender {
+            id: "mallory".into(),
+            name: None,
+        };
+        // Its own conversation, said to be from someone else: from Ann.
+        let held = held_to(
+            &grant(Some(ann.clone())),
+            "SendConversationMessage",
+            &send("wf-1", "k", Some(mallory.clone())),
+        )
+        .expect("its own conversation");
+        assert_eq!(held.message.sender, Some(ann));
+        // A token made with no sender sends with none.
+        let held = held_to(
+            &grant(None),
+            "SendConversationMessage",
+            &send("wf-1", "k", Some(mallory)),
+        )
+        .expect("its own conversation");
+        assert_eq!(held.message.sender, None);
+        // Another conversation, or another workflow's: refused.
+        for (workflow, key) in [("wf-1", "other"), ("wf-2", "k")] {
+            assert!(
+                held_to(
+                    &grant(None),
+                    "SendConversationMessage",
+                    &send(workflow, key, None)
+                )
+                .is_none()
+            );
+        }
+        let read = ConversationEvents {
+            tenant_id: "acme".into(),
+            workflow_id: "wf-1".into(),
+            key: "k".into(),
+            read: ReadEvents::default(),
+        };
+        assert!(held_to(&grant(None), "ConversationEvents", &read).is_some());
+        // Its own conversation's other operations: refused.
+        let delete = DeleteConversation {
+            tenant_id: "acme".into(),
+            workflow_id: "wf-1".into(),
+            key: "k".into(),
+        };
+        assert!(held_to(&grant(None), "DeleteConversation", &delete).is_none());
+        let list = ConversationsOf {
+            tenant_id: "acme".into(),
+            workflow_id: "wf-1".into(),
+            list: Default::default(),
+        };
+        assert!(held_to(&grant(None), "ConversationsOf", &list).is_none());
+        // Every operation it may ask is one the engine has.
+        for name in ASKED_WITH_A_CONVERSATION_TOKEN {
+            assert!(NAMES.contains(name), "{name}");
+        }
+    }
 }
