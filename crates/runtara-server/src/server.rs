@@ -2689,6 +2689,9 @@ async fn start_as_platform(
     // runner. The platform components this server runs are a release in it:
     // published from the components directory when one is set, and the
     // agent allowlist is that release's agents.
+    // Whether every engine reads the same artifacts: a store the host
+    // supplied, or one named by URL, and not this engine's own disk.
+    let artifacts_shared = options.artifacts.is_some() || artifact_store_url().is_some();
     let artifacts: Arc<dyn runtara_environment::artifacts::ArtifactStore> =
         match options.artifacts.clone() {
             Some(artifacts) => artifacts,
@@ -3468,6 +3471,36 @@ async fn start_as_platform(
         config::shutdown_grace(),
     ));
     let shutdown_signal = shutdown_coordinator.signal();
+
+    // The engines on this runtime database know each other
+    // (docs/multiple-engines-plan.md). One that cannot share with a live
+    // peer does not start beside it.
+    if let Some(runtara) = embedded_runtara
+        .as_ref()
+        .filter(|_| roles.runs(crate::roles::Role::Engine))
+    {
+        let runtime_pool = runtara.pool().clone();
+        let me = crate::peers::members::Me::this_engine();
+        let sharing = crate::peers::members::Sharing::from_env(artifacts_shared);
+        let peers = crate::peers::members::live_peers(&runtime_pool, &me.id).await?;
+        if let Err(why) = crate::peers::members::may_join(&me, &peers, sharing) {
+            eprintln!("❌ This engine does not start: {why}");
+            std::process::exit(1);
+        }
+        crate::peers::members::join(&runtime_pool, &me).await?;
+        println!(
+            "✓ Engine {} joined ({} other engine(s) on this database)",
+            me.id,
+            peers.len()
+        );
+        let members_shutdown = shutdown_signal.clone();
+        workers.intake(
+            crate::roles::Role::Engine,
+            "engine membership",
+            &shutdown_coordinator,
+            crate::peers::members::run(runtime_pool, me, members_shutdown),
+        );
+    }
 
     // A lifecycle callback can commit an Environment transition and then lose
     // this process before it releases the matching server-side source

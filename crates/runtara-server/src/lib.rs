@@ -31,6 +31,7 @@ pub mod migrate_tenant;
 pub mod oauth_apps;
 pub mod object_model;
 pub mod observability;
+pub mod peers;
 pub mod plan_check;
 pub mod product_events;
 pub mod publish_release;
