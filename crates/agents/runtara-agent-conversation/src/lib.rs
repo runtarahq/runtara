@@ -29,6 +29,8 @@ pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_DATA_BYTES: usize = 64 * 1024;
 /// The longest id a reply is given.
 pub const MAX_ID_BYTES: usize = 128;
+/// The most text one piece of a reply carries.
+pub const MAX_PIECE_BYTES: usize = 8 * 1024;
 /// The most attachments one reply carries.
 pub const MAX_ATTACHMENTS: usize = 16;
 
@@ -89,6 +91,12 @@ pub struct ReplyInput {
     )]
     #[serde(default)]
     pub reply_id: Option<String>,
+    #[field(
+        display_name = "Partial",
+        description = "Say this text as a piece of the reply Reply ID names, shown as it is written and not kept. Say the whole reply under the same id, without Partial, to finish it"
+    )]
+    #[serde(default)]
+    pub partial: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, CapabilityOutput, PartialEq)]
@@ -205,9 +213,34 @@ fn reply_event(input: ReplyInput) -> Result<Value, String> {
     )
 )]
 pub async fn reply(input: ReplyInput) -> Result<ReplyOutput, String> {
+    if input.partial.unwrap_or(false) {
+        let piece = piece_request(input)?;
+        host::control(Call::Piece(piece)).await?;
+        return Ok(ReplyOutput { said: true });
+    }
     let event = reply_event(input)?;
     host::say(event).await?;
     Ok(ReplyOutput { said: true })
+}
+
+/// What a piece of a reply asks of the host: its reply's id and its text.
+fn piece_request(input: ReplyInput) -> Result<Value, String> {
+    let invalid = |message: &str| failed("CONVERSATION_INVALID", "permanent", message);
+    let reply_id = input
+        .reply_id
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| invalid("a piece of a reply names the reply it is of (Reply ID)"))?;
+    if reply_id.len() > MAX_ID_BYTES {
+        return Err(invalid("a reply's id is too long"));
+    }
+    let text = input
+        .text
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| invalid("a piece of a reply has text"))?;
+    if text.len() > MAX_PIECE_BYTES {
+        return Err(invalid("a piece of a reply is at most 8 KB"));
+    }
+    Ok(json!({"replyId": reply_id, "text": text}))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -219,6 +252,7 @@ mod host {
         let call = match call {
             super::Call::Send(body) => ControlCall::ConversationSend(body),
             super::Call::History(body) => ControlCall::ConversationHistory(body),
+            super::Call::Piece(body) => ControlCall::ConversationDelta(body),
         };
         runtara_workflow_sdk::control(&call, None)
             .await
@@ -514,6 +548,7 @@ pub async fn history(input: HistoryInput) -> Result<HistoryOutput, String> {
 enum Call {
     Send(Value),
     History(Value),
+    Piece(Value),
 }
 
 /// A host refusal, as the agent's error: what the host's code means here.
@@ -586,6 +621,7 @@ mod tests {
             data: None,
             format: None,
             reply_id: None,
+            partial: None,
         }
     }
 
@@ -699,6 +735,34 @@ mod tests {
         ] {
             let error: Value =
                 serde_json::from_str(&send_request(input(refused)).unwrap_err()).unwrap();
+            assert_eq!(error["code"], "CONVERSATION_INVALID");
+        }
+    }
+
+    #[test]
+    fn a_piece_of_a_reply_names_its_reply_and_carries_text() {
+        let piece = |reply_id: Option<&str>, text: Option<&str>| {
+            piece_request(ReplyInput {
+                reply_id: reply_id.map(str::to_owned),
+                partial: Some(true),
+                ..input(text, None)
+            })
+        };
+        assert_eq!(
+            piece(Some("answer"), Some("Hel")).unwrap(),
+            json!({"replyId": "answer", "text": "Hel"})
+        );
+        // A leading space is part of the text: pieces are joined as they are.
+        assert_eq!(
+            piece(Some("answer"), Some(" world")).unwrap()["text"],
+            " world"
+        );
+        for refused in [
+            piece(None, Some("x")),
+            piece(Some("answer"), None),
+            piece(Some("answer"), Some(&"x".repeat(MAX_PIECE_BYTES + 1))),
+        ] {
+            let error: Value = serde_json::from_str(&refused.unwrap_err()).unwrap();
             assert_eq!(error["code"], "CONVERSATION_INVALID");
         }
     }
