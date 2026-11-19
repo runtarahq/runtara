@@ -5929,6 +5929,8 @@ dependencies = [
  "async-trait",
  "axum",
  "bytes",
+ "futures-util",
+ "http-body-util",
  "serde",
  "serde_json",
  "sha2 0.10.9",

@@ -54,7 +54,7 @@ mod control;
 mod runtime;
 mod tasks;
 pub use crate::{CustomSignalNotice, Event, LifecycleNotice};
-pub use connections::OutboundReply;
+pub use connections::{OutboundReply, Streamed, StreamedReply};
 pub use runtime::{CheckpointWrite, LifecycleSignal};
 
 /// The effects behind the router. Implemented by the runtime that owns runs
@@ -387,6 +387,21 @@ pub trait WorkflowApiBackend: Send + Sync + 'static {
     ) -> Result<Result<OutboundReply, (crate::OutboundFailure, Vec<u8>)>, ApiError> {
         let _ = (binding, meta, body);
         Err(unsupported_service("outbound HTTP"))
+    }
+
+    /// Send an outbound HTTP call whose answer's body is handed over as it
+    /// arrives (`OutboundMeta::stream`). A backend that cannot stream
+    /// answers it whole, which a caller reads the same way.
+    async fn http_streamed(
+        &self,
+        binding: &Binding,
+        meta: crate::OutboundMeta,
+        body: Option<Vec<u8>>,
+    ) -> Result<Result<StreamedReply, (crate::OutboundFailure, Vec<u8>)>, ApiError> {
+        Ok(self
+            .http(binding, meta, body)
+            .await?
+            .map(StreamedReply::from))
     }
 
     /// Merge `patch` into the run's published state, once per SetState `key`.
@@ -1067,6 +1082,15 @@ async fn idempotency(
     }
 
     let response = next.run(Request::from_parts(parts, Body::from(body))).await;
+    // An answer that streams is handed on as it arrives, and is not kept: a
+    // retry of its call makes the call again.
+    if response
+        .extensions()
+        .get::<connections::Streamed>()
+        .is_some()
+    {
+        return response;
+    }
     let (parts, body) = response.into_parts();
     let body = match to_bytes(body, state.caps.response_body_bytes).await {
         Ok(body) => body,

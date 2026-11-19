@@ -1116,6 +1116,125 @@ async fn an_answer_too_large_to_keep_is_not_replayed() {
     assert_eq!((status, &body[..]), (StatusCode::OK, &b"ok"[..]));
 }
 
+/// Answers an outbound call that asks to stream with a body that arrives a
+/// piece at a time, and counts the calls it makes.
+struct Streaming(std::sync::atomic::AtomicUsize);
+
+#[async_trait]
+impl WorkflowApiBackend for Streaming {
+    async fn launch_state(&self, _: &Binding) -> Result<LaunchState, ApiError> {
+        Ok(LaunchState::Active)
+    }
+    async fn run_info(&self, _: &Binding) -> Result<RunInfo, ApiError> {
+        unreachable!()
+    }
+    async fn run_input(&self, _: &Binding) -> Result<Vec<u8>, ApiError> {
+        unreachable!()
+    }
+    async fn post_outcome(&self, _: &Binding, _: PostedOutcome) -> Result<(), ApiError> {
+        unreachable!()
+    }
+    async fn set_deadline(&self, _: &Binding, _: u64) -> Result<(), ApiError> {
+        unreachable!()
+    }
+    async fn http(
+        &self,
+        _: &Binding,
+        _: crate::OutboundMeta,
+        _: Option<Vec<u8>>,
+    ) -> Result<Result<OutboundReply, (crate::OutboundFailure, Vec<u8>)>, ApiError> {
+        Ok(Ok(OutboundReply {
+            status: 200,
+            headers: Vec::new(),
+            body: b"whole".to_vec(),
+        }))
+    }
+    async fn http_streamed(
+        &self,
+        _: &Binding,
+        _: crate::OutboundMeta,
+        _: Option<Vec<u8>>,
+    ) -> Result<Result<StreamedReply, (crate::OutboundFailure, Vec<u8>)>, ApiError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let pieces = futures_util::stream::unfold(0, |n| async move {
+            if n == 3 {
+                return None;
+            }
+            if n > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
+            Some((
+                Ok::<_, std::io::Error>(Bytes::from(format!("piece {n};"))),
+                n + 1,
+            ))
+        });
+        Ok(Ok(StreamedReply {
+            status: 200,
+            headers: vec![("content-type".into(), "text/event-stream".into())],
+            body: Body::from_stream(pieces),
+        }))
+    }
+}
+
+/// An outbound call that asks to stream is answered a piece at a time as the
+/// backend has them, through every layer of the API; its answer is kept for
+/// no retry, which makes the call again. One that does not ask is answered
+/// whole, as before.
+#[tokio::test]
+async fn an_outbound_answer_that_streams_arrives_a_piece_at_a_time_and_is_not_kept() {
+    use http_body_util::BodyExt;
+    let backend = Arc::new(Streaming(std::sync::atomic::AtomicUsize::new(0)));
+    let app = router(WorkflowApiState {
+        backend: backend.clone(),
+        receipts: Arc::new(MemoryReceiptStore::default()),
+        limiter: None,
+        caps: Caps::default(),
+    });
+    let streamed = r#"{"method":"POST","destination":{"connection":{"connectionId":"c","url":"https://x"}},"stream":true}"#;
+    let asked = std::time::Instant::now();
+    let response = app
+        .clone()
+        .oneshot(http_call("s1", Some(streamed), "{}"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[headers::UPSTREAM_STATUS]
+            .to_str()
+            .unwrap(),
+        "200"
+    );
+    let mut body = response.into_body();
+    let mut arrived = Vec::new();
+    while let Some(frame) = body.frame().await {
+        if let Ok(data) = frame.unwrap().into_data() {
+            arrived.push((asked.elapsed(), String::from_utf8(data.to_vec()).unwrap()));
+        }
+    }
+    let pieces: Vec<&str> = arrived.iter().map(|(_, piece)| piece.as_str()).collect();
+    assert_eq!(pieces, ["piece 0;", "piece 1;", "piece 2;"]);
+    assert!(
+        arrived[0].0 < std::time::Duration::from_millis(120),
+        "the first piece waited for the rest: {arrived:?}"
+    );
+    assert!(
+        arrived[2].0 - arrived[0].0 >= std::time::Duration::from_millis(250),
+        "the pieces arrived together: {arrived:?}"
+    );
+    // The same key again makes the call again: nothing was kept to replay.
+    let (status, _, body) = send(&app, http_call("s1", Some(streamed), "{}")).await;
+    assert_eq!(
+        (status, &body[..]),
+        (StatusCode::OK, &b"piece 0;piece 1;piece 2;"[..])
+    );
+    assert_eq!(backend.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+    // A call that does not ask to stream is answered whole.
+    let whole =
+        r#"{"method":"POST","destination":{"connection":{"connectionId":"c","url":"https://x"}}}"#;
+    let (status, _, body) = send(&app, http_call("w1", Some(whole), "{}")).await;
+    assert_eq!((status, &body[..]), (StatusCode::OK, &b"whole"[..]));
+}
+
 /// Answers every control call with what it was asked, so routing is visible.
 struct Control;
 

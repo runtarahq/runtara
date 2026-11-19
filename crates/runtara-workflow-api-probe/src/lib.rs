@@ -126,6 +126,7 @@ mod probe {
                         timeout_ms: Some(5000),
                         max_response_bytes: None,
                         has_body: false,
+                        stream: false,
                     };
                     let reply = match runtara_workflow_sdk::http(
                         &call(OutboundDestination::Connection(ConnectionTarget {

@@ -48,6 +48,7 @@ fn encode(request: RequestBuilder) -> Result<(OutboundMeta, Option<Vec<u8>>), Ht
                 .map(|timeout| timeout.as_millis().min(u64::MAX as u128) as u64),
             max_response_bytes: request.max_response_bytes,
             has_body: body.is_some(),
+            stream: false,
         },
         body,
     ))

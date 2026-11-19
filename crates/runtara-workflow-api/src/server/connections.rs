@@ -18,6 +18,28 @@ pub struct OutboundReply {
     pub body: Vec<u8>,
 }
 
+/// An outbound call's answer whose body is handed over as it arrives.
+pub struct StreamedReply {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: axum::body::Body,
+}
+
+impl From<OutboundReply> for StreamedReply {
+    fn from(reply: OutboundReply) -> Self {
+        Self {
+            status: reply.status,
+            headers: reply.headers,
+            body: axum::body::Body::from(reply.body),
+        }
+    }
+}
+
+/// Marks an answer whose body streams: the receipt layer passes it on as it
+/// is and keeps nothing of it.
+#[derive(Clone, Copy, Debug)]
+pub struct Streamed;
+
 fn with_type(body: Vec<u8>, content_type: &'static str, status: StatusCode) -> Response {
     let mut response = (status, Bytes::from(body)).into_response();
     response
@@ -102,6 +124,38 @@ pub(super) async fn post_http(
         .await
         .map_err(|_| ApiError::new(ErrorCode::TooLarge, "outbound body is over the cap"))?;
     let body = (meta.has_body || !body.is_empty()).then(|| body.to_vec());
+    if meta.stream {
+        return match state.backend.http_streamed(&binding, meta, body).await? {
+            Ok(reply) => {
+                let mut response = (StatusCode::OK, reply.body).into_response();
+                let response_headers = response.headers_mut();
+                response_headers.insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/octet-stream"),
+                );
+                response_headers.insert(
+                    headers::UPSTREAM_STATUS,
+                    HeaderValue::from_str(&reply.status.to_string()).map_err(|_| {
+                        ApiError::new(ErrorCode::Unavailable, "bad upstream status")
+                    })?,
+                );
+                response_headers.insert(headers::UPSTREAM_HEADERS, json_header(&reply.headers)?);
+                response.extensions_mut().insert(Streamed);
+                Ok(response)
+            }
+            Err((failure, upstream_body)) => {
+                let mut response = with_type(
+                    upstream_body,
+                    "application/octet-stream",
+                    StatusCode::BAD_GATEWAY,
+                );
+                response
+                    .headers_mut()
+                    .insert(headers::ERROR, json_header(&failure)?);
+                Ok(response)
+            }
+        };
+    }
     match state.backend.http(&binding, meta, body).await? {
         Ok(reply) => {
             let mut response = with_type(reply.body, "application/octet-stream", StatusCode::OK);
