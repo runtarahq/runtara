@@ -302,6 +302,7 @@ use runtime_client::RuntimeClient;
             api::services::conversations::ConversationSummary,
             api::services::conversations::LastSaid,
             api::services::conversations::Stopped,
+            api::services::conversations::ReplyDelta,
             api::services::conversations::TurnSoFar,
             api::handlers::conversations::StopConversation,
             api::services::conversation_tokens::IssueToken,

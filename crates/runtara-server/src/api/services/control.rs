@@ -1683,6 +1683,33 @@ impl ControlHost for NativeControl {
         serde_json::to_value(sent).map_err(|error| invalid(error.to_string()))
     }
 
+    async fn conversation_delta(
+        &self,
+        authority: &ControlAuthority,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ControlError> {
+        let tenant = self.tenant(authority)?.to_owned();
+        let caller = authority.caller.clone().ok_or_else(|| {
+            ControlError::new(
+                ControlErrorCode::RequiresInstance,
+                "a piece of a reply is said from the run that writes it",
+            )
+        })?;
+        let text = |name: &str| {
+            request
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| invalid(format!("a piece of a reply has a {name}")))
+        };
+        let (reply_id, piece) = (text("replyId")?, text("text")?);
+        let conversations = self.conversations().await?;
+        conversations
+            .piece_of_reply(&tenant, &caller, &reply_id, &piece)
+            .map_err(conversation_error)?;
+        Ok(serde_json::json!({"said": true}))
+    }
+
     async fn conversation_history(
         &self,
         authority: &ControlAuthority,

@@ -1755,3 +1755,130 @@ async fn a_conversation_token_is_found_by_itself_until_it_expires() {
     assert!(conversation_tokens::by_hash(&pool, &hash).await.is_err());
     assert!(conversation_tokens::sweep(&pool).await.unwrap() >= 1);
 }
+
+/// The pieces of a reply reach a reader that asks for them as they are
+/// said, in order, each saying where it begins; none is kept; and once the
+/// whole reply is said they are nothing to anyone.
+#[tokio::test]
+async fn the_pieces_of_a_reply_reach_its_readers_and_are_not_kept() {
+    use runtara_server::api::services::conversations::{ConversationEventKind, ReadEvents};
+    use std::time::Duration;
+    let talk = Talk::new().await;
+    talk.send("k", "m-1", "write me something").await;
+    let instance = talk.runs_of_workflow()[0].instance.clone();
+    let after = talk.events("k").await.last().unwrap().seq;
+    let read = |pieces_after: u64| {
+        let (conversations, tenant, workflow) = (
+            talk.conversations.clone(),
+            talk.tenant.clone(),
+            talk.workflow.clone(),
+        );
+        async move {
+            conversations
+                .read(
+                    &tenant,
+                    &workflow,
+                    "k",
+                    ReadEvents {
+                        after,
+                        limit: 100,
+                        wait_ms: 5_000,
+                        deltas_after: Some(pieces_after),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("read")
+        }
+    };
+    // A reader waiting is answered with the first piece.
+    let waiting = tokio::spawn(read(0));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    talk.conversations
+        .piece_of_reply(&talk.tenant, &instance, "answer", "Hel")
+        .unwrap();
+    let first = waiting.await.unwrap();
+    let pieces = |events: &[ConversationEvent]| -> Vec<(u64, String, u64)> {
+        events
+            .iter()
+            .map(|event| match &event.said {
+                ConversationEventKind::ReplyDelta(piece) => {
+                    (piece.offset, piece.text.clone(), piece.n)
+                }
+                other => panic!("not a piece: {other:?}"),
+            })
+            .collect()
+    };
+    assert_eq!(pieces(&first), [(0, "Hel".to_owned(), 1)]);
+    assert_eq!(first[0].seq, 0, "a piece has no place in the log");
+    talk.conversations
+        .piece_of_reply(&talk.tenant, &instance, "answer", "lo, wörld")
+        .unwrap();
+    // Read on from the last piece seen.
+    assert_eq!(pieces(&read(1).await), [(3, "lo, wörld".to_owned(), 2)]);
+    // A reader that asks for none is not given them.
+    let none = talk
+        .conversations
+        .read(
+            &talk.tenant,
+            &talk.workflow,
+            "k",
+            ReadEvents {
+                after,
+                limit: 100,
+                wait_ms: 300,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(none.is_empty());
+    // Nothing of them is kept.
+    assert!(
+        talk.events("k")
+            .await
+            .iter()
+            .all(|event| event.kind() != "reply_delta")
+    );
+
+    // The whole reply is said: its pieces go, and a reader is given it.
+    talk.runs.says(
+        &instance,
+        REPLY_EVENT,
+        json!({"text": "Hello, wörld", "replyId": "answer"}),
+    );
+    talk.advance("k").await;
+    let whole = read(0).await;
+    assert_eq!(whole.len(), 1);
+    assert_eq!(whole[0].body()["text"], "Hello, wörld");
+    assert!(
+        talk.conversations
+            .read(
+                &talk.tenant,
+                &talk.workflow,
+                "k",
+                ReadEvents {
+                    after: whole[0].seq,
+                    limit: 100,
+                    wait_ms: 200,
+                    deltas_after: Some(0),
+                    ..Default::default()
+                }
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // A run that carries no conversation, or another tenant's, says nothing.
+    for (tenant, run) in [
+        (talk.tenant.as_str(), "no-such-run"),
+        ("another-tenant", instance.as_str()),
+    ] {
+        assert!(matches!(
+            talk.conversations
+                .piece_of_reply(tenant, run, "answer", "x"),
+            Err(ConversationError::NotFound)
+        ));
+    }
+}

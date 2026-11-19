@@ -432,6 +432,11 @@ pub struct EventsQuery {
 /// `Authorization` header; read it with `fetch`. A tenant holds a bounded
 /// number of streams open (`429 CONVERSATION_STREAMS_FULL` past it).
 ///
+/// **Replies as they are written.** A stream that asks for every kind, or
+/// names `reply_delta`, is sent the pieces of a reply as the run writes them
+/// (`reply_delta`: `replyId`, `offset`, `text`). They are not kept and have
+/// no id; the `reply` with the same `replyId` carries the whole of it.
+///
 /// **Reading back.** `order=desc` reads from the newest, and `before=<seq>`
 /// reads on from there, newest first: how a UI shows the last screen and
 /// loads more as its user scrolls up. `kinds` names the kinds wanted,
@@ -503,6 +508,7 @@ pub async fn conversation_events(
         before: query.before.filter(|_| back),
         newest_first: back,
         kinds: kinds.clone(),
+        deltas_after: None,
     };
     let first = match engine
         .conversation_events(&tenant_id, &workflow_id, &key, first)
@@ -526,10 +532,14 @@ pub async fn conversation_events(
             .into_response();
     };
 
+    // The pieces of a reply as it is written go to a stream that asks for
+    // every kind, or names them.
+    let wants_pieces = kinds.is_empty() || kinds.iter().any(|kind| kind == "reply_delta");
     let stream = async_stream::stream! {
         // Held for as long as the stream is.
         let _open = open;
         let mut after = after;
+        let mut pieces_after = 0u64;
         let mut events = first;
         let mut caught_up = false;
         let started = std::time::Instant::now();
@@ -537,11 +547,22 @@ pub async fn conversation_events(
         loop {
             let read = events.len();
             for event in events {
+                let data = serde_json::to_string(&event).unwrap_or_default();
+                // A piece is not kept: it has no id, and a client that
+                // connects again resumes from what is.
+                if let crate::api::services::conversations::ConversationEventKind::ReplyDelta(
+                    piece,
+                ) = &event.said
+                {
+                    pieces_after = pieces_after.max(piece.n);
+                    yield Ok(Event::default().event(event.kind()).data(data));
+                    continue;
+                }
                 after = event.seq;
                 yield Ok(Event::default()
                     .id(event.seq.to_string())
                     .event(event.kind())
-                    .data(serde_json::to_string(&event).unwrap_or_default()));
+                    .data(data));
             }
             // Everything kept has been sent: what follows is said now.
             let behind = !caught_up && read >= limit.clamp(1, 500) as usize;
@@ -560,6 +581,7 @@ pub async fn conversation_events(
                 // Held by the engine until the conversation says something.
                 wait_ms: if behind { 0 } else { MAX_WAIT.as_millis() as u32 },
                 kinds: kinds.clone(),
+                deltas_after: wants_pieces.then_some(pieces_after),
                 ..ReadEvents::default()
             };
             events = match engine
