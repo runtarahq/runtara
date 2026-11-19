@@ -20,6 +20,10 @@ pub const REPLY_EVENT: &str = "conversation_reply";
 
 /// The most text one reply carries.
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
+/// The most structured data one reply carries.
+pub const MAX_DATA_BYTES: usize = 64 * 1024;
+/// The longest id a reply is given.
+pub const MAX_ID_BYTES: usize = 128;
 /// The most attachments one reply carries.
 pub const MAX_ATTACHMENTS: usize = 16;
 
@@ -60,6 +64,26 @@ pub struct ReplyInput {
     )]
     #[serde(default)]
     pub attachments: Option<Vec<Value>>,
+    #[field(
+        display_name = "Data",
+        description = "Structured data sent beside the text, for a client that acts on it and does not read prose"
+    )]
+    #[serde(default)]
+    pub data: Option<Value>,
+    #[field(
+        display_name = "Format",
+        description = "What the text is written in: markdown (the default) or plain",
+        example = "markdown"
+    )]
+    #[serde(default)]
+    pub format: Option<String>,
+    #[field(
+        display_name = "Reply ID",
+        description = "Your own id for this reply. A reply with an id is said once in a run, however often the step that says it is run",
+        example = "order-shipped"
+    )]
+    #[serde(default)]
+    pub reply_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, CapabilityOutput, PartialEq)]
@@ -106,14 +130,56 @@ fn reply_event(input: ReplyInput) -> Result<Value, String> {
             format!("a reply carries at most {MAX_ATTACHMENTS} attachments"),
         ));
     }
-    if text.is_none() && attachments.is_empty() {
+    let data = input.data.filter(|data| !data.is_null());
+    if data
+        .as_ref()
+        .is_some_and(|data| data.to_string().len() > MAX_DATA_BYTES)
+    {
         return Err(failed(
             "CONVERSATION_INVALID",
             "permanent",
-            "a reply carries text or an attachment",
+            format!("data is over {MAX_DATA_BYTES} bytes"),
         ));
     }
-    Ok(json!({"text": text, "attachments": attachments}))
+    if text.is_none() && attachments.is_empty() && data.is_none() {
+        return Err(failed(
+            "CONVERSATION_INVALID",
+            "permanent",
+            "a reply carries text, data or an attachment",
+        ));
+    }
+    let format = match input.format.as_deref().map(str::trim) {
+        None | Some("") | Some("markdown") => "markdown",
+        Some("plain") => "plain",
+        Some(other) => {
+            return Err(failed(
+                "CONVERSATION_INVALID",
+                "permanent",
+                format!("format is markdown or plain, not {other}"),
+            ));
+        }
+    };
+    let reply_id = input.reply_id.filter(|id| !id.trim().is_empty());
+    if reply_id.as_ref().is_some_and(|id| id.len() > MAX_ID_BYTES) {
+        return Err(failed(
+            "CONVERSATION_INVALID",
+            "permanent",
+            format!("a reply's id is at most {MAX_ID_BYTES} bytes"),
+        ));
+    }
+    let mut event = serde_json::Map::new();
+    event.insert("format".into(), json!(format));
+    event.insert("attachments".into(), json!(attachments));
+    for (name, value) in [
+        ("text", json!(text)),
+        ("data", json!(data)),
+        ("replyId", json!(reply_id)),
+    ] {
+        if !value.is_null() {
+            event.insert(name.into(), value);
+        }
+    }
+    Ok(Value::Object(event))
 }
 
 #[capability(
@@ -205,6 +271,9 @@ mod tests {
         ReplyInput {
             text: text.map(str::to_owned),
             attachments,
+            data: None,
+            format: None,
+            reply_id: None,
         }
     }
 
@@ -212,7 +281,7 @@ mod tests {
     fn a_reply_is_text_attachments_or_both() {
         assert_eq!(
             reply_event(input(Some("hello"), None)).unwrap(),
-            json!({"text": "hello", "attachments": []})
+            json!({"text": "hello", "format": "markdown", "attachments": []})
         );
         let file = json!({"name": "a.pdf", "contentType": "application/pdf", "url": "https://files.example/a.pdf"});
         let event = reply_event(input(None, Some(vec![file.clone()]))).unwrap();
@@ -238,6 +307,52 @@ mod tests {
             let error: Value = serde_json::from_str(&reply_event(refused).unwrap_err()).unwrap();
             assert_eq!(error["code"], "CONVERSATION_INVALID");
             assert_eq!(error["category"], "permanent");
+        }
+    }
+
+    #[test]
+    fn a_reply_carries_its_id_its_data_and_what_its_text_is_written_in() {
+        let event = reply_event(ReplyInput {
+            data: Some(json!({"order": 7})),
+            format: Some("plain".into()),
+            reply_id: Some("shipped".into()),
+            ..input(Some("Shipped."), None)
+        })
+        .unwrap();
+        assert_eq!(
+            event,
+            json!({
+                "text": "Shipped.",
+                "format": "plain",
+                "data": {"order": 7},
+                "replyId": "shipped",
+                "attachments": [],
+            })
+        );
+        // Data alone is a reply: for a client that reads no prose.
+        let data_only = reply_event(ReplyInput {
+            data: Some(json!([1, 2])),
+            ..input(None, None)
+        })
+        .unwrap();
+        assert_eq!(data_only.get("text"), None);
+        assert_eq!(data_only["data"], json!([1, 2]));
+        for refused in [
+            ReplyInput {
+                format: Some("html".into()),
+                ..input(Some("hi"), None)
+            },
+            ReplyInput {
+                reply_id: Some("x".repeat(MAX_ID_BYTES + 1)),
+                ..input(Some("hi"), None)
+            },
+            ReplyInput {
+                data: Some(json!("x".repeat(MAX_DATA_BYTES))),
+                ..input(Some("hi"), None)
+            },
+        ] {
+            let error: Value = serde_json::from_str(&reply_event(refused).unwrap_err()).unwrap();
+            assert_eq!(error["code"], "CONVERSATION_INVALID");
         }
     }
 
