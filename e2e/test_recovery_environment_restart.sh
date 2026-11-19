@@ -200,7 +200,7 @@ ROW_TABLE=$(psql_quiet -d "${TEST_DB_SERVER}" -c "SELECT tablename FROM pg_table
 echo "  Schema ${SCHEMA_ID}, table ${ROW_TABLE} ✓"
 
 print_step "Creating postgres connection..."
-RESP=$(api_post /connections "{\"title\": \"rec-e2e store\", \"integrationId\": \"postgres\", \"connectionParameters\": {\"database_url\": \"${SERVER_DB_URL}\"}}")
+RESP=$(api_post /connections "{\"title\": \"rec-e2e store\", \"integrationId\": \"postgres\", \"connectionParameters\": {\"database_url\": \"${SERVER_DB_URL}?sslmode=disable\"}}")
 CONN_ID=$(echo "${RESP}" | jq -r '.connection_id // .connectionId // empty')
 [ -n "${CONN_ID}" ] || { print_error "Connection create failed: ${RESP}"; exit 1; }
 echo "  Connection ${CONN_ID} ✓"

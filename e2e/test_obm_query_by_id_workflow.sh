@@ -190,7 +190,7 @@ print_step "Creating postgres connection for the object-model agent..."
 RESP=$(api_post /connections "{
   \"title\": \"obm-id-e2e store\",
   \"integrationId\": \"postgres\",
-  \"connectionParameters\": {\"database_url\": \"${SERVER_DB_URL}\"}
+  \"connectionParameters\": {\"database_url\": \"${SERVER_DB_URL}?sslmode=disable\"}
 }")
 CONN_ID=$(echo "${RESP}" | jq -r '.connection_id // .connectionId // empty')
 if [ -z "${CONN_ID}" ]; then

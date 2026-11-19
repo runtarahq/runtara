@@ -99,6 +99,7 @@ start() {
     DATA_DIR="${TEST_DATA_DIR}/$1" \
     RUST_LOG="warn,runtara_server=info" AUTH_PROVIDER=local \
     RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS=127.0.0.1 \
+    RUNTARA_PROXY_ALLOW_HTTP_HOSTS=127.0.0.1 RUNTARA_PROXY_ALLOWED_HOSTS=127.0.0.1 \
     VALKEY_HOST=127.0.0.1 VALKEY_PORT="${TEST_VALKEY_PORT}" \
     OTEL_SDK_DISABLED=true RUNTARA_SDK_BACKEND=http SQLX_OFFLINE="${SQLX_OFFLINE}" \
     "${RUNTARA_SERVER_BIN}" >>"${TEST_DATA_DIR}/$1.log" 2>&1 &
@@ -174,7 +175,7 @@ DATA_DIR="${TEST_DATA_DIR}/to" SQLX_OFFLINE="${SQLX_OFFLINE}" \
     "${RUNTARA_SERVER_BIN}" migrate-tenant --tenant-id "${MOVED}" > "${TEST_DATA_DIR}/report.json" 2> "${TEST_DATA_DIR}/migrate.log" \
     || { print_error "migrate-tenant failed: $(tail -3 "${TEST_DATA_DIR}/migrate.log")"; exit 1; }
 REPORT=$(grep '^{' "${TEST_DATA_DIR}/report.json" | tail -1)
-echo "${REPORT}" | jq -e '.rows.instances >= 2 and .rows.workflows == 2 and .rows.connection_data_entity >= 1 and .rows.api_keys == 1 and .artifacts >= 1' >/dev/null \
+echo "${REPORT}" | jq -e '.rows.instances >= 2 and .rows.workflows == 2 and .rows.connection_data_entity >= 1 and .rows.api_keys == 1 and .rows.workflow_approvals >= 2 and .artifacts >= 1' >/dev/null \
     || { print_error "unexpected copy: ${REPORT}"; exit 1; }
 echo "  copied: $(echo "${REPORT}" | jq -c '{instances: .rows.instances, checkpoints: .rows.checkpoints, events: .rows.instance_events, workflows: .rows.workflows, artifacts}') ✓"
 
