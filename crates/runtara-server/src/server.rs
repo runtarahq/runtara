@@ -3493,6 +3493,15 @@ async fn start_as_platform(
             me.id,
             peers.len()
         );
+        // A workflow-agent published or removed through one engine is
+        // staged or unstaged by every other.
+        workflow_agents::install_notices(pool.clone());
+        workers.intake(
+            crate::roles::Role::Engine,
+            "workflow-agent sync",
+            &shutdown_coordinator,
+            workflow_agents::keep_in_sync(pool.clone(), shutdown_signal.clone()),
+        );
         let members_shutdown = shutdown_signal.clone();
         workers.intake(
             crate::roles::Role::Engine,
