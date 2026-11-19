@@ -1152,7 +1152,9 @@ impl WorkflowApiBackend for Control {
             }
             crate::ControlCall::Start(body)
             | crate::ControlCall::Query(body)
-            | crate::ControlCall::PendingSignals(body) => (None, body.clone()),
+            | crate::ControlCall::PendingSignals(body)
+            | crate::ControlCall::ConversationSend(body)
+            | crate::ControlCall::ConversationHistory(body) => (None, body.clone()),
         };
         Ok(serde_json::json!({
             "call": call.name(),
@@ -1220,6 +1222,22 @@ async fn control_calls_route_to_their_names_with_the_operation() {
         ),
         (Some("send-signal"), Some("i-2"), Some("op-1"))
     );
+
+    // A run's calls on conversations: each is its own call, and changes no
+    // other run, so needs no operation.
+    for (path, name) in [
+        ("/v1/conversations/send", "conversation-send"),
+        ("/v1/conversations/history", "conversation-history"),
+    ] {
+        let (status, _, body) = send(&app, write("POST", path, name, r#"{"limit":3}"#)).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        let body = answer(&body);
+        assert_eq!(
+            (body["call"].as_str(), body["mutation"].as_bool()),
+            (Some(name), Some(false))
+        );
+        assert_eq!(body["body"]["limit"], 3);
+    }
 
     // An empty cancel body is allowed; pause and resume take none.
     for (path, name) in [
