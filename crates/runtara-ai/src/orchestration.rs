@@ -126,6 +126,17 @@ pub async fn run_completion_async(
     Ok(model.completion_async(request).await?)
 }
 
+/// As [`run_completion_async`], with the answer's text handed to `pieces` as
+/// the model writes it.
+#[cfg(feature = "completion")]
+pub async fn run_completion_streamed(
+    req: CompletionInvokeRequest,
+    pieces: &mut dyn crate::completion::Pieces,
+) -> Result<CompletionResponse, CompletionFailure> {
+    let (model, request) = prepare_completion(req)?;
+    Ok(model.completion_streamed(request, pieces).await?)
+}
+
 #[cfg(feature = "completion")]
 fn prepare_completion(
     req: CompletionInvokeRequest,

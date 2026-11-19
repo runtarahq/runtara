@@ -126,6 +126,45 @@ pub trait CompletionModel {
     /// serialized `timeout_ms`), not by preempting a running call. Default is a
     /// no-op so models that don't support it keep their prior behavior.
     fn set_timeout(&mut self, _timeout_ms: u64) {}
+
+    /// As [`Self::completion_async`], with the answer's text handed to
+    /// `pieces` as the model writes it. The response is the same as an
+    /// unstreamed call's. A provider that does not stream answers whole and
+    /// hands over its text as one piece.
+    fn completion_streamed<'a>(
+        &'a self,
+        request: CompletionRequest,
+        pieces: &'a mut dyn Pieces,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<CompletionResponse, CompletionError>> + 'a>,
+    > {
+        Box::pin(async move {
+            let response = self.completion_async(request).await?;
+            if let Some(text) = crate::message::assistant_text(response.choice.iter()) {
+                pieces.piece(&text).await;
+            }
+            Ok(response)
+        })
+    }
+}
+
+/// Where a streamed completion's text goes as the model writes it.
+pub trait Pieces {
+    /// A piece of the answer's text, in order. Awaited before the next.
+    fn piece<'a>(
+        &'a mut self,
+        text: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>>;
+}
+
+/// Pieces that go nowhere.
+impl Pieces for () {
+    fn piece<'a>(
+        &'a mut self,
+        _: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
+        Box::pin(async {})
+    }
 }
 
 // ================================================================
