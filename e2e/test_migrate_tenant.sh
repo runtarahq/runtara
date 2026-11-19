@@ -152,6 +152,10 @@ KEY_TOKEN=$(api POST /api-keys '{"name":"moved"}' | jq -r '.key // .data.key // 
 ANSWER_WF=$(compiled Answer "${ANSWER}")
 DONE_RUN=$(api POST "/workflows/${ANSWER_WF}/execute" '{"inputs":{"data":{}}}' | jq -r '.data.instanceId')
 until_status "${DONE_RUN}" completed 60
+# A conversation with it, with a title, and something said in it.
+CHAT=$(api POST "/workflows/${ANSWER_WF}/conversations/moved-chat/messages?wait=60" '{"id":"m-1","text":"before the move"}')
+[ "$(echo "${CHAT}" | jq -r '.data.turn.settled')" = "true" ] || { print_error "the conversation's first turn did not settle: ${CHAT:0:300}"; exit 1; }
+api PUT "/workflows/${ANSWER_WF}/conversations/moved-chat" '{"title":"Moved with its tenant"}' >/dev/null
 NAP_WF=$(compiled Nap "${NAP}")
 NAP_RUN=$(api POST "/workflows/${NAP_WF}/execute" '{"inputs":{"data":{}}}' | jq -r '.data.instanceId')
 until_status "${NAP_RUN}" suspended 30
@@ -192,11 +196,21 @@ CODE=$(http_status -X POST -H 'Content-Type: application/json' -d '{}' "${API}/$
 case "${CODE}" in 2??) ;; *) print_error "the moved webhook answered ${CODE}"; exit 1 ;; esac
 for _ in {1..120}; do
     RUNS=$(api GET "/workflows/${ANSWER_WF}/instances?size=50" | jq '[(.data.content // .data // [])[] | select(.status == "completed")] | length')
-    [ "${RUNS}" -ge 2 ] && break; sleep 1
+    [ "${RUNS}" -ge 3 ] && break; sleep 1
 done
-[ "${RUNS}" -ge 2 ] || { print_error "the webhook's run did not complete"; tail -30 "${TEST_DATA_DIR}/to.log"; exit 1; }
+[ "${RUNS}" -ge 3 ] || { print_error "the webhook's run did not complete"; tail -30 "${TEST_DATA_DIR}/to.log"; exit 1; }
 AUTHORIZE=$(api GET "/connections/${CONN}/oauth/authorize" | jq -r '.authorization_url // .authorizationUrl // empty')
 [[ "${AUTHORIZE}" == *client_id=moved-client* ]] || { print_error "the moved connection does not open: ${AUTHORIZE}"; exit 1; }
+# Its conversation came with it: listed with its title, what was said in it
+# still there, and the next message has its turn here.
+LISTED=$(api GET "/workflows/${ANSWER_WF}/conversations" | jq -c '[.data.conversations[] | [.key, .title]]')
+[ "${LISTED}" = '[["moved-chat","Moved with its tenant"]]' ] || { print_error "the moved tenant's conversations are ${LISTED}"; exit 1; }
+SAID=$(api GET "/workflows/${ANSWER_WF}/conversations/moved-chat/events?kinds=message" | jq -c '[.data[].body.text]')
+[ "${SAID}" = '["before the move"]' ] || { print_error "what was said before the move is ${SAID}"; exit 1; }
+CHAT=$(api POST "/workflows/${ANSWER_WF}/conversations/moved-chat/messages?wait=60" '{"id":"m-2","text":"after the move"}')
+[ "$(echo "${CHAT}" | jq -r '[.data.state, .data.turn.settled] | join(",")')" = "started,true" ] \
+    || { print_error "the moved conversation's next message had no turn: ${CHAT:0:300}"; exit 1; }
+echo "  the conversation moved with its tenant, and goes on ✓"
 AUTH=()
 # Saving a graph names the workflow after it, so compare ids.
 IDS=$(api GET /workflows | jq -r '[(.data.content // .data // [])[] | .id] | join(",")')

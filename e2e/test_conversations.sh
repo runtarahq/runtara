@@ -448,6 +448,41 @@ CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 -H 'Accept: text/eve
 print_success "A stream past the tenant's bound is refused, and a place is given back when one closes ✓"
 
 # ---------------------------------------------------------------------------
+print_step "4c. A person stops a run, names a conversation, lists them and reads back..."
+# The slow workflow is busy for six seconds; stopped, it ends as stopped,
+# and the message that waited has its turn.
+SENT=$(send "${SLOW}" stopped m-1 "too long")
+[ "$(sent_state "${SENT}")" = "started" ] || { print_error "Slow did not start: ${SENT}"; exit 1; }
+SENT=$(send "${SLOW}" stopped m-2 "after it")
+sleep 1
+read -r STATUS BODY <<< "$(api_status POST "$(conversation "${SLOW}" stopped)/stop" '{}')"
+[ "${STATUS}" = "200" ] && [ "$(echo "${BODY}" | jq -r '.data.cleared')" = "0" ] && [ -n "$(echo "${BODY}" | jq -r '.data.instanceId // empty')" ] \
+    || { print_error "Stop answered ${STATUS} ${BODY}"; exit 1; }
+wait_events "${SLOW}" stopped '[.[] | select(.kind == "run_ended")] | length >= 1'
+[ "$(events "${SLOW}" stopped | jq -r '[.[] | select(.kind == "run_ended")][0] | [.turn, .body.status] | join(",")')" = "m-1,stopped" ] \
+    || { print_error "The stopped run did not end as stopped: $(events "${SLOW}" stopped | jq -c '[.[] | select(.kind == "run_ended")]')"; exit 1; }
+wait_events "${SLOW}" stopped "$(ended 2)"
+[ "$(replies "${SLOW}" stopped)" = '["after it"]' ] || { print_error "The message that waited did not have its turn: $(replies "${SLOW}" stopped)"; exit 1; }
+print_success "A stopped run ends as stopped, and the message that waited has its turn ✓"
+
+read -r STATUS BODY <<< "$(api_status PUT "$(conversation "${SLOW}" stopped)" '{"title":"Stopped once","metadata":{"chat":42}}')"
+[ "$(echo "${BODY}" | jq -c '[.data.title, .data.metadata]')" = '["Stopped once",{"chat":42}]' ] || { print_error "Title and metadata were not kept: ${BODY}"; exit 1; }
+LISTED=$(curl -sS "${API}/workflows/${SLOW}/conversations" | jq -c '[.data.conversations[] | [.key, .title, .active, .lastSaid.kind, .lastSaid.text]]')
+[ "${LISTED}" = '[["stopped","Stopped once",false,"reply","after it"],["busy",null,false,"reply","three"]]' ] \
+    || { print_error "The list is not the workflow's conversations by activity: ${LISTED}"; exit 1; }
+PAGE=$(curl -sS "${API}/workflows/${SLOW}/conversations?limit=1")
+NEXT=$(echo "${PAGE}" | jq -r '.data.next // empty')
+[ -n "${NEXT}" ] && [ "$(curl -sS "${API}/workflows/${SLOW}/conversations?limit=1&cursor=${NEXT}" | jq -c '[.data.conversations[].key, .data.next]')" = '["busy",null]' ] \
+    || { print_error "The list does not page: ${PAGE}"; exit 1; }
+# Read back from the newest, only what was said.
+BACK=$(curl -sS "${API}$(conversation "${SLOW}" stopped)/events?order=desc&limit=2&kinds=message,reply" | jq -c '[.data[] | [.seq, .kind, .body.text]]')
+[ "$(echo "${BACK}" | jq -c '[.[] | .[1:]]')" = '[["reply","after it"],["message","after it"]]' ] || { print_error "Reading back from the newest gave ${BACK}"; exit 1; }
+BEFORE=$(echo "${BACK}" | jq -r '.[-1][0]')
+OLDER=$(curl -sS "${API}$(conversation "${SLOW}" stopped)/events?before=${BEFORE}&limit=10&kinds=message,reply" | jq -c '[.data[] | [.kind, .body.text]]')
+[ "${OLDER}" = '[["message","too long"]]' ] || { print_error "Reading further back gave ${OLDER}"; exit 1; }
+print_success "A conversation has a title and what its client keeps; they are listed by activity, a page at a time, and read back from the newest ✓"
+
+# ---------------------------------------------------------------------------
 print_step "5. A deleted conversation is gone..."
 read -r STATUS BODY <<< "$(api_status DELETE "$(conversation "${ECHO}" c1)")"
 [ "${STATUS}" = "200" ] || { print_error "Delete answered ${STATUS}: ${BODY}"; exit 1; }
