@@ -1172,7 +1172,10 @@ async fn stopping_ends_the_run_and_keeps_the_queue_unless_it_is_cleared() {
     let stopped = stop(false).await;
     assert_eq!(stopped.instance_id.as_deref(), Some(first.as_str()));
     assert_eq!(stopped.cleared, 0);
-    assert_eq!(*talk.runs.stopped.lock().unwrap(), [first.clone()]);
+    assert_eq!(
+        *talk.runs.stopped.lock().unwrap(),
+        std::slice::from_ref(&first)
+    );
     talk.advance("k").await;
     let ended: Vec<_> = talk
         .events("k")
