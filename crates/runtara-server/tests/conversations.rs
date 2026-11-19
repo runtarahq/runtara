@@ -1527,3 +1527,151 @@ async fn what_is_past_keeping_is_removed() {
         .await
         .unwrap();
 }
+
+/// A run reads what was said in the conversation it carries, as a
+/// transcript: oldest first, each with a role. A run that carries none is
+/// told so.
+#[tokio::test]
+async fn a_run_reads_what_was_said_in_its_own_conversation() {
+    let talk = Talk::new().await;
+    talk.send("k", "m-1", "What is 2+2?").await;
+    let first = talk.runs_of_workflow()[0].instance.clone();
+    talk.runs.says(
+        &first,
+        REPLY_EVENT,
+        json!({"text": "4.", "data": {"answer": 4}}),
+    );
+    talk.runs.ends(&first, json!({}));
+    talk.advance("k").await;
+    talk.send("k", "m-2", "And doubled?").await;
+    let second = talk.runs_of_workflow()[1].instance.clone();
+
+    let said = talk
+        .conversations
+        .history_of_run(&talk.tenant, &second, 20)
+        .await
+        .expect("the history");
+    let transcript: Vec<(String, Option<String>)> = said
+        .iter()
+        .map(|said| (said.role.clone(), said.text.clone()))
+        .collect();
+    let line = |role: &str, text: &str| (role.to_owned(), Some(text.to_owned()));
+    assert_eq!(
+        transcript,
+        [
+            line("user", "What is 2+2?"),
+            line("assistant", "4."),
+            line("user", "And doubled?"),
+        ]
+    );
+    assert_eq!(said[1].data, Some(json!({"answer": 4})));
+    // The last few, still oldest first.
+    let last = talk
+        .conversations
+        .history_of_run(&talk.tenant, &second, 2)
+        .await
+        .unwrap();
+    assert_eq!(last[0].text.as_deref(), Some("4."));
+    // A run that carries none, or another tenant's: none.
+    for (tenant, instance) in [
+        (talk.tenant.as_str(), first.as_str()),
+        ("another-tenant", second.as_str()),
+    ] {
+        assert!(matches!(
+            talk.conversations
+                .history_of_run(tenant, instance, 20)
+                .await,
+            Err(ConversationError::NotFound)
+        ));
+    }
+}
+
+/// What an adapter does: a run sends a platform's message into a
+/// conversation, opening it with the outbound workflow and what it keeps
+/// about the chat; the outbound workflow is then started with each reply,
+/// handed that, and with each kind of event the conversation asks for.
+#[tokio::test]
+async fn a_run_sends_into_a_conversation_and_its_reply_workflow_is_handed_what_was_kept() {
+    use runtara_server::api::services::conversations::SendFromRun;
+    let talk = Talk::new().await;
+    let outbound = format!("out-{}", Uuid::new_v4());
+    let send = |id: &str, text: &str| SendFromRun {
+        workflow_id: talk.workflow.clone(),
+        key: "telegram:42".into(),
+        message: text_message(id, text),
+        open: serde_json::from_value(json!({
+            "replyWorkflowId": outbound,
+            "metadata": {"chat": 42},
+            "replyEvents": ["reply", "run_ended"],
+        }))
+        .unwrap(),
+    };
+    let sent = talk
+        .conversations
+        .send_from_run(&talk.tenant, send("update-1", "hi"))
+        .await
+        .unwrap();
+    assert_eq!(sent.state, MessageState::Started);
+    // The platform delivers it again: the same message, nothing more.
+    let again = talk
+        .conversations
+        .send_from_run(&talk.tenant, send("update-1", "hi"))
+        .await
+        .unwrap();
+    assert!(again.duplicate);
+    assert_eq!(talk.runs_of_workflow().len(), 1);
+
+    // The run is told the conversation, with what the adapter kept.
+    let run = talk.runs_of_workflow()[0].clone();
+    assert_eq!(
+        run.inputs["data"]["conversation"]["metadata"],
+        json!({"chat": 42})
+    );
+    talk.runs
+        .says(&run.instance, REPLY_EVENT, json!({"text": "Hello."}));
+    talk.runs.waits(&run.instance, "req-1");
+    talk.advance("telegram:42").await;
+    talk.runs.ends(&run.instance, json!({}));
+    talk.advance("telegram:42").await;
+
+    let routed: Vec<(String, Value)> = talk
+        .runs
+        .started(&outbound)
+        .into_iter()
+        .map(|started| {
+            (
+                started.inputs["data"]["event"]["kind"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+                started.inputs["data"]["conversation"]["metadata"].clone(),
+            )
+        })
+        .collect();
+    // A reply and the run's end, each once, in order; not the wait, which
+    // this conversation did not ask for.
+    assert_eq!(
+        routed,
+        [
+            ("reply".to_owned(), json!({"chat": 42})),
+            ("run_ended".to_owned(), json!({"chat": 42})),
+        ]
+    );
+    let state = talk
+        .conversations
+        .state(&talk.tenant, &talk.workflow, "telegram:42")
+        .await
+        .unwrap();
+    assert_eq!(state.reply_events, ["reply", "run_ended"]);
+    assert!(matches!(
+        talk.conversations
+            .open(
+                &talk.tenant,
+                &talk.workflow,
+                "telegram:42",
+                serde_json::from_value(json!({"replyEvents": ["activity"]})).unwrap()
+            )
+            .await,
+        Err(ConversationError::Invalid(_))
+    ));
+}

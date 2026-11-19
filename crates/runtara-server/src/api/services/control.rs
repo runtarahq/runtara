@@ -211,6 +211,9 @@ pub struct NativeControl {
     /// The instance waits `WaitForInstances` steps call; installs and the
     /// relations reach it too.
     waits: Arc<InstanceWaits>,
+    /// The conversations a run sends into and reads its own from.
+    conversations:
+        tokio::sync::watch::Sender<Option<crate::api::services::conversations::Conversations>>,
 }
 
 impl NativeControl {
@@ -232,6 +235,7 @@ impl NativeControl {
             engine: tokio::sync::watch::channel(None).0,
             relations: None,
             audit: None,
+            conversations: tokio::sync::watch::channel(None).0,
         }
     }
 
@@ -267,6 +271,31 @@ impl NativeControl {
     pub fn install_engine(&self, engine: Arc<ExecutionEngine>) {
         self.waits.install_engine(engine.clone());
         self.engine.send_replace(Some(engine));
+    }
+
+    /// Bind the conversations; a run's calls on them that wait proceed.
+    pub fn install_conversations(
+        &self,
+        conversations: crate::api::services::conversations::Conversations,
+    ) {
+        self.conversations.send_replace(Some(conversations));
+    }
+
+    async fn conversations(
+        &self,
+    ) -> Result<crate::api::services::conversations::Conversations, ControlError> {
+        let mut receiver = self.conversations.subscribe();
+        match tokio::time::timeout(
+            self.install_wait,
+            receiver.wait_for(|conversations| conversations.is_some()),
+        )
+        .await
+        {
+            Ok(Ok(conversations)) => Ok(conversations
+                .clone()
+                .expect("waited for installed conversations")),
+            _ => Err(unavailable("conversations are not ready yet")),
+        }
     }
 
     /// The instance wait service for `WaitForInstances` steps, bound by
@@ -1612,8 +1641,76 @@ impl NativeControl {
     }
 }
 
+/// A conversation's refusal, as a control error.
+fn conversation_error(
+    error: crate::api::services::conversations::ConversationError,
+) -> ControlError {
+    use crate::api::services::conversations::ConversationError;
+    match error {
+        ConversationError::NotFound => ControlError::new(
+            ControlErrorCode::NotFound,
+            "the calling run carries no conversation",
+        ),
+        ConversationError::Invalid(message) => invalid(message),
+        ConversationError::QueueFull { bound } => ControlError::new(
+            ControlErrorCode::Capacity,
+            format!("the conversation already holds {bound} messages waiting their turn"),
+        ),
+        ConversationError::Storage(detail) => {
+            tracing::warn!(%detail, "A run's conversation call could not be served");
+            unavailable("the conversation is not available now")
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl ControlHost for NativeControl {
+    async fn conversation_send(
+        &self,
+        authority: &ControlAuthority,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ControlError> {
+        use crate::api::services::conversations::SendFromRun;
+        let tenant = self.tenant(authority)?.to_owned();
+        let send: SendFromRun = serde_json::from_value(request)
+            .map_err(|error| invalid(format!("a conversation send: {error}")))?;
+        let conversations = self.conversations().await?;
+        let sent = runtara_store_postgres::tenant_scope::scoped(tenant.clone(), async move {
+            conversations.send_from_run(&tenant, send).await
+        })
+        .await
+        .map_err(conversation_error)?;
+        serde_json::to_value(sent).map_err(|error| invalid(error.to_string()))
+    }
+
+    async fn conversation_history(
+        &self,
+        authority: &ControlAuthority,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ControlError> {
+        let tenant = self.tenant(authority)?.to_owned();
+        // The conversation is the calling run's, as the host knows it, and
+        // no other: a run names none.
+        let caller = authority.caller.clone().ok_or_else(|| {
+            ControlError::new(
+                ControlErrorCode::RequiresInstance,
+                "a conversation's history is read from the run that carries it",
+            )
+        })?;
+        let limit = request
+            .get("limit")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(20)
+            .min(100) as u32;
+        let conversations = self.conversations().await?;
+        let said = runtara_store_postgres::tenant_scope::scoped(tenant.clone(), async move {
+            conversations.history_of_run(&tenant, &caller, limit).await
+        })
+        .await
+        .map_err(conversation_error)?;
+        Ok(serde_json::json!({ "said": said }))
+    }
+
     async fn start(
         &self,
         authority: &ControlAuthority,

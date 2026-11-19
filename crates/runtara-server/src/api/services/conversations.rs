@@ -241,6 +241,34 @@ pub struct ListConversations {
     pub limit: u32,
 }
 
+/// One thing said in a conversation, as a model reads a transcript.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Spoken {
+    /// `user` for what was said to the workflow, `assistant` for its reply.
+    pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// A message's structured payload, or a reply's data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender: Option<Sender>,
+    pub at: DateTime<Utc>,
+}
+
+/// What a run asks to send into a conversation with a workflow.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SendFromRun {
+    pub workflow_id: String,
+    pub key: String,
+    pub message: Message,
+    /// As opening it would set them.
+    #[serde(flatten)]
+    pub open: OpenConversation,
+}
+
 /// What stopping a conversation did.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -251,6 +279,11 @@ pub struct Stopped {
     /// The messages that were waiting their turn and now never have it.
     pub cleared: i64,
 }
+
+/// The kinds the reply workflow is started for unless a conversation says.
+pub const REPLY_EVENTS: [&str; 2] = ["reply", "waiting_for_input"];
+/// The kinds it may be started for.
+const ROUTABLE: [&str; 4] = ["reply", "waiting_for_input", "run_ended", "message_failed"];
 
 /// The most a client keeps about a conversation.
 pub const MAX_METADATA_BYTES: usize = 4 * 1024;
@@ -354,9 +387,16 @@ pub struct OpenConversation {
     #[schema(value_type = Option<String>)]
     pub title: Option<Option<String>>,
     /// What the client keeps about it: an object of its own, up to 4 KB.
-    /// Left out, it is kept; given, it replaces what was there.
+    /// Left out, it is kept; given, it replaces what was there. It is handed
+    /// to each run and to the reply workflow, as `conversation.metadata`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
+    /// The kinds of event the reply workflow is started for: `reply` and
+    /// `waiting_for_input` unless set. `run_ended` and `message_failed`
+    /// may be added, for a client that says when something went wrong.
+    /// Left out, kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_events: Option<Vec<String>>,
 }
 
 /// Tells a field given as `null` from one left out.
@@ -378,6 +418,8 @@ pub struct ConversationState {
     /// What the client keeps about it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
+    /// The kinds of event the reply workflow is started for.
+    pub reply_events: Vec<String>,
     /// The run that carries it now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance_id: Option<String>,
@@ -698,13 +740,14 @@ struct Row_ {
     turn: Option<String>,
     title: Option<String>,
     metadata: Option<Value>,
+    reply_events: Option<Vec<String>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
 
 const COLUMNS: &str = "conversation_id, tenant_id, workflow_id, key, reply_workflow_id, \
     instance_id, run_started_at, events_read, run_replied, waiting, next_seq, turn, title, \
-    metadata, created_at, updated_at";
+    metadata, reply_events, created_at, updated_at";
 
 fn read(row: &sqlx::postgres::PgRow) -> Result<Row_, sqlx::Error> {
     Ok(Row_ {
@@ -722,6 +765,7 @@ fn read(row: &sqlx::postgres::PgRow) -> Result<Row_, sqlx::Error> {
         turn: row.try_get("turn")?,
         title: row.try_get("title")?,
         metadata: row.try_get("metadata")?,
+        reply_events: row.try_get("reply_events")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -781,6 +825,14 @@ impl Conversations {
                 )));
             }
         }
+        if let Some(kinds) = &open.reply_events
+            && let Some(kind) = kinds.iter().find(|kind| !ROUTABLE.contains(&kind.as_str()))
+        {
+            return Err(ConversationError::Invalid(format!(
+                "the reply workflow is started for {}, not {kind}",
+                ROUTABLE.join(", ")
+            )));
+        }
         let (sets_route, route) = match open.reply_workflow_id {
             Some(route) => (true, route),
             None => (false, None),
@@ -789,14 +841,17 @@ impl Conversations {
             Some(title) => (true, title),
             None => (false, None),
         };
-        let changes = sets_route || sets_title || open.metadata.is_some();
+        let changes =
+            sets_route || sets_title || open.metadata.is_some() || open.reply_events.is_some();
         sqlx::query(
-            "INSERT INTO conversations (tenant_id, workflow_id, key, reply_workflow_id, title, metadata) \
-             VALUES ($1, $2, $3, $5, $7, $8) \
+            "INSERT INTO conversations \
+                 (tenant_id, workflow_id, key, reply_workflow_id, title, metadata, reply_events) \
+             VALUES ($1, $2, $3, $5, $7, $8, $10) \
              ON CONFLICT (tenant_id, workflow_id, key) DO UPDATE SET \
                  reply_workflow_id = CASE WHEN $4 THEN $5 ELSE conversations.reply_workflow_id END, \
                  title = CASE WHEN $6 THEN $7 ELSE conversations.title END, \
                  metadata = COALESCE($8, conversations.metadata), \
+                 reply_events = COALESCE($10, conversations.reply_events), \
                  updated_at = CASE WHEN $9 THEN now() ELSE conversations.updated_at END",
         )
         .bind(tenant)
@@ -808,6 +863,7 @@ impl Conversations {
         .bind(title)
         .bind(open.metadata)
         .bind(changes)
+        .bind(open.reply_events)
         .execute(&self.pool)
         .await
         .map_err(storage)?;
@@ -851,6 +907,7 @@ impl Conversations {
             reply_workflow_id: row.reply_workflow_id,
             title: row.title,
             metadata: row.metadata,
+            reply_events: routed_kinds(row.reply_events.as_deref()),
             instance_id: row.instance_id,
             waiting_for: row.waiting,
             queued,
@@ -1126,6 +1183,79 @@ impl Conversations {
         Ok(sent)
     }
 
+    /// What was said in the conversation the run `instance` carries: the
+    /// last `limit` messages and replies, oldest first. `NotFound` if it
+    /// carries none.
+    pub async fn history_of_run(
+        &self,
+        tenant: &str,
+        instance: &str,
+        limit: u32,
+    ) -> ConversationResult<Vec<Spoken>> {
+        let rows = sqlx::query(
+            "SELECT e.kind, e.body, e.created_at FROM conversations c \
+             JOIN conversation_events e ON e.conversation_id = c.conversation_id \
+             WHERE c.tenant_id = $1 AND c.instance_id = $2 AND e.kind IN ('message', 'reply') \
+             ORDER BY e.seq DESC LIMIT $3",
+        )
+        .bind(tenant)
+        .bind(instance)
+        .bind(i64::from(limit.clamp(1, 100)))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        if rows.is_empty() {
+            // Carried, with nothing said yet, or not carried at all.
+            let carried: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM conversations \
+                                WHERE tenant_id = $1 AND instance_id = $2)",
+            )
+            .bind(tenant)
+            .bind(instance)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(storage)?;
+            if !carried {
+                return Err(ConversationError::NotFound);
+            }
+        }
+        let mut said = Vec::with_capacity(rows.len());
+        for row in rows.iter().rev() {
+            let kind: String = row.try_get("kind").map_err(storage)?;
+            let at = row.try_get("created_at").map_err(storage)?;
+            match ConversationEventKind::stored(&kind, row.try_get("body").map_err(storage)?) {
+                Some(ConversationEventKind::Message(message)) => said.push(Spoken {
+                    role: "user".into(),
+                    text: message.text,
+                    data: message.payload,
+                    sender: message.sender,
+                    at,
+                }),
+                Some(ConversationEventKind::Reply(reply)) => said.push(Spoken {
+                    role: "assistant".into(),
+                    text: reply.text,
+                    data: reply.data,
+                    sender: None,
+                    at,
+                }),
+                _ => {}
+            }
+        }
+        Ok(said)
+    }
+
+    /// Sends what a run asks into a conversation with a workflow of its
+    /// tenant, opening it as asked first. The message is not waited for.
+    pub async fn send_from_run(&self, tenant: &str, send: SendFromRun) -> ConversationResult<Sent> {
+        let opens = send.open != OpenConversation::default();
+        if opens {
+            self.open(tenant, &send.workflow_id, &send.key, send.open)
+                .await?;
+        }
+        self.send(tenant, &send.workflow_id, &send.key, send.message)
+            .await
+    }
+
     /// The conversation the run `instance` carries, and its tenant, if this
     /// process knows it to carry one.
     pub fn carried_by(&self, instance: &str) -> Option<(Uuid, String)> {
@@ -1366,7 +1496,8 @@ impl Conversations {
                 OR (c.reply_workflow_id IS NOT NULL AND EXISTS ( \
                         SELECT 1 FROM conversation_events e \
                         WHERE e.conversation_id = c.conversation_id AND NOT e.routed \
-                          AND e.kind IN ('reply', 'waiting_for_input'))) \
+                          AND e.kind = ANY(COALESCE(c.reply_events, \
+                                                    ARRAY['reply', 'waiting_for_input'])))) \
              ORDER BY c.updated_at LIMIT 500",
         )
         .fetch_all(&self.pool)
@@ -1687,12 +1818,14 @@ impl Conversations {
         let Some(route) = at.row.reply_workflow_id.clone() else {
             return Ok(());
         };
+        let kinds = routed_kinds(at.row.reply_events.as_deref());
         let rows = sqlx::query(
             "SELECT seq, kind, body FROM conversation_events \
              WHERE conversation_id = $1 AND NOT routed \
-               AND kind IN ('reply', 'waiting_for_input') ORDER BY seq LIMIT 50",
+               AND kind = ANY($2) ORDER BY seq LIMIT 50",
         )
         .bind(at.row.id)
+        .bind(&kinds)
         .fetch_all(&mut *at.tx)
         .await
         .map_err(storage)?;
@@ -1750,8 +1883,24 @@ struct Carried {
 }
 
 impl Carried {
+    /// The conversation as a run, and the reply workflow, are told it:
+    /// what the client keeps about it included, so an adapter's outbound
+    /// workflow looks nothing up.
     fn describe(&self) -> Value {
-        json!({"id": self.row.id, "workflowId": self.row.workflow_id, "key": self.row.key})
+        let mut described = json!({
+            "id": self.row.id,
+            "workflowId": self.row.workflow_id,
+            "key": self.row.key,
+        });
+        for (name, value) in [
+            ("title", json!(self.row.title)),
+            ("metadata", json!(self.row.metadata)),
+        ] {
+            if !value.is_null() {
+                described[name] = value;
+            }
+        }
+        described
     }
 
     /// Says `said` in the turn the conversation is in.
@@ -1887,6 +2036,14 @@ impl Carried {
         .await
         .map_err(storage)?;
         Ok(())
+    }
+}
+
+/// The kinds a conversation's reply workflow is started for.
+fn routed_kinds(set: Option<&[String]>) -> Vec<String> {
+    match set {
+        Some(kinds) => kinds.to_vec(),
+        None => REPLY_EVENTS.iter().map(|kind| (*kind).to_owned()).collect(),
     }
 }
 
