@@ -124,6 +124,7 @@ async fn a_tenants_object_model_database_is_entered_once_and_stored_sealed() {
         Allowances {
             plain_http_hosts: vec![host],
             private_databases: true,
+            private_ranges: vec!["127.0.0.0/8".to_owned()],
             ..Default::default()
         },
     )
