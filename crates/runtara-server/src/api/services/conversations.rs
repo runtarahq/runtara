@@ -183,6 +183,10 @@ pub struct ReadEvents {
     /// Only these kinds. Empty for all.
     #[serde(default)]
     pub kinds: Vec<String>,
+    /// The pieces of replies being written, after this one: asked for by a
+    /// reader that shows them. `None` for none.
+    #[serde(default)]
+    pub deltas_after: Option<u64>,
 }
 
 /// One of a workflow's conversations, as a list shows it.
@@ -305,7 +309,23 @@ struct Wakes {
     readers: std::sync::Mutex<std::collections::HashMap<Uuid, Arc<tokio::sync::Notify>>>,
     /// The run that carries each conversation, by the run's instance id.
     runs: std::sync::Mutex<std::collections::HashMap<String, (Uuid, String)>>,
+    /// The pieces of replies being written, by conversation.
+    deltas: std::sync::Mutex<std::collections::HashMap<Uuid, Pieces>>,
 }
+
+/// A conversation's pieces of the replies being written: the last few, and
+/// how far each reply has got.
+#[derive(Default)]
+struct Pieces {
+    next: u64,
+    held: std::collections::VecDeque<ReplyDelta>,
+    written: std::collections::HashMap<String, u64>,
+}
+
+/// How many pieces a conversation holds for a reader that joins late.
+const PIECES_HELD: usize = 512;
+/// The most one piece carries.
+pub const MAX_PIECE_BYTES: usize = 8 * 1024;
 
 impl Wakes {
     fn reader(&self, conversation: Uuid) -> Arc<tokio::sync::Notify> {
@@ -353,6 +373,71 @@ impl Wakes {
         runs.retain(|_, (carried, _)| *carried != conversation);
         if let Some(instance) = instance {
             runs.insert(instance.to_owned(), (conversation, tenant.to_owned()));
+        }
+    }
+
+    /// Holds a piece of the reply `reply_id`, and tells whoever waits.
+    fn piece(&self, conversation: Uuid, instance: &str, reply_id: &str, text: &str) {
+        {
+            let mut deltas = self
+                .deltas
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let pieces = deltas.entry(conversation).or_default();
+            pieces.next += 1;
+            let written = pieces.written.entry(reply_id.to_owned()).or_insert(0);
+            let offset = *written;
+            *written += text.chars().count() as u64;
+            pieces.held.push_back(ReplyDelta {
+                reply_id: reply_id.to_owned(),
+                offset,
+                text: text.to_owned(),
+                n: pieces.next,
+                instance_id: instance.to_owned(),
+            });
+            while pieces.held.len() > PIECES_HELD {
+                pieces.held.pop_front();
+            }
+        }
+        self.said(conversation);
+    }
+
+    /// The pieces after `after`.
+    fn pieces_after(&self, conversation: Uuid, after: u64) -> Vec<ReplyDelta> {
+        self.deltas
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&conversation)
+            .map(|pieces| {
+                pieces
+                    .held
+                    .iter()
+                    .filter(|piece| piece.n > after)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A reply is said whole: its pieces are nothing to anyone now. With no
+    /// reply named, the run ended, and all of them go.
+    fn written(&self, conversation: Uuid, reply_id: Option<&str>) {
+        let mut deltas = self
+            .deltas
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(pieces) = deltas.get_mut(&conversation) else {
+            return;
+        };
+        match reply_id {
+            Some(reply_id) => {
+                pieces.held.retain(|piece| piece.reply_id != reply_id);
+                pieces.written.remove(reply_id);
+            }
+            None => {
+                pieces.held.clear();
+                pieces.written.clear();
+            }
         }
     }
 
@@ -572,6 +657,24 @@ pub struct ReplyRouteFailed {
     pub reason: String,
 }
 
+/// A piece of a reply as it is written. Not kept: it is sent to whoever is
+/// reading the conversation then, and the `reply` with the same `replyId`
+/// carries the whole of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplyDelta {
+    pub reply_id: String,
+    /// Where `text` begins in the reply, in characters. A reader that has
+    /// less of the reply than this joined in the middle: it shows the reply
+    /// when its `reply` comes.
+    pub offset: u64,
+    pub text: String,
+    /// This piece's place among the conversation's pieces: read on from it
+    /// (`deltasAfter`).
+    pub n: u64,
+    pub instance_id: String,
+}
+
 /// What an event says: its `kind`, and the `body` that kind carries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "kind", content = "body", rename_all = "snake_case")]
@@ -585,6 +688,8 @@ pub enum ConversationEventKind {
     MessageFailed(MessageFailed),
     RunEnded(RunEnded),
     ReplyRouteFailed(ReplyRouteFailed),
+    /// A piece of a reply as it is written; not kept, with `seq` 0.
+    ReplyDelta(ReplyDelta),
     /// What a run is doing: a model call, a tool call, a step. Its own
     /// `type` says which.
     Activity(Value),
@@ -601,6 +706,7 @@ impl ConversationEventKind {
             Self::MessageFailed(_) => "message_failed",
             Self::RunEnded(_) => "run_ended",
             Self::ReplyRouteFailed(_) => "reply_route_failed",
+            Self::ReplyDelta(_) => "reply_delta",
             Self::Activity(_) => "activity",
         }
     }
@@ -1100,6 +1206,22 @@ impl Conversations {
                 if !events.is_empty() {
                     return Ok(events);
                 }
+                // Nothing kept is new: the pieces of a reply being written
+                // are, for a reader that shows them.
+                if let Some(after) = read.deltas_after {
+                    let pieces = self.wakes.pieces_after(conversation, after);
+                    if !pieces.is_empty() {
+                        return Ok(pieces
+                            .into_iter()
+                            .map(|piece| ConversationEvent {
+                                seq: 0,
+                                turn: None,
+                                said: ConversationEventKind::ReplyDelta(piece),
+                                created_at: Utc::now(),
+                            })
+                            .collect());
+                    }
+                }
                 if tokio::time::timeout_at(until, woken).await.is_err() {
                     return Ok(Vec::new());
                 }
@@ -1254,6 +1376,32 @@ impl Conversations {
         }
         self.send(tenant, &send.workflow_id, &send.key, send.message)
             .await
+    }
+
+    /// A piece of the reply `reply_id` that the run `instance` is writing,
+    /// for whoever reads the conversation it carries now. Nothing is kept.
+    /// `NotFound` if the run carries no conversation this process knows of.
+    pub fn piece_of_reply(
+        &self,
+        tenant: &str,
+        instance: &str,
+        reply_id: &str,
+        text: &str,
+    ) -> ConversationResult<()> {
+        checked("the reply's id", reply_id, MAX_MESSAGE_ID)?;
+        if text.len() > MAX_PIECE_BYTES {
+            return Err(ConversationError::Invalid(format!(
+                "a piece of a reply is at most {MAX_PIECE_BYTES} bytes"
+            )));
+        }
+        let Some((conversation, carried_for)) = self.wakes.conversation_of(instance) else {
+            return Err(ConversationError::NotFound);
+        };
+        if carried_for != tenant {
+            return Err(ConversationError::NotFound);
+        }
+        self.wakes.piece(conversation, instance, reply_id, text);
+        Ok(())
     }
 
     /// The conversation the run `instance` carries, and its tenant, if this
@@ -1614,6 +1762,9 @@ impl Conversations {
                     // reply's is left out, not refused.
                     let mut reply: Reply = serde_json::from_value(said.payload).unwrap_or_default();
                     reply.instance_id = Some(instance.clone());
+                    if let Some(reply_id) = &reply.reply_id {
+                        self.wakes.written(at.row.id, Some(reply_id));
+                    }
                     at.say(ConversationEventKind::Reply(reply)).await?;
                     continue;
                 }
@@ -1664,6 +1815,7 @@ impl Conversations {
                 (false, false) => "failed",
             };
             at.ended(&instance, status, error).await?;
+            self.wakes.written(at.row.id, None);
             return Ok(true);
         }
 

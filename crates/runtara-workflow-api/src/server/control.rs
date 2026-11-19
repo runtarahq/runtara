@@ -121,6 +121,13 @@ pub(super) async fn post_conversation_send(
     call(state, request, ControlCall::ConversationSend).await
 }
 
+pub(super) async fn post_conversation_delta(
+    State(state): State<WorkflowApiState>,
+    request: Request,
+) -> Result<Response, Failure> {
+    call(state, request, ControlCall::ConversationDelta).await
+}
+
 pub(super) async fn post_conversation_history(
     State(state): State<WorkflowApiState>,
     request: Request,

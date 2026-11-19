@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`runtara-validate-placed.wasm`; `RUNTARA_VALIDATE_GUEST_WASM` names
   another), and a server with executors does not start without it. Without
   executors nothing changes.
+- **Replies as they are written.** `conversation.reply` with `partial:
+  true` says a piece of the reply its `replyId` names; without it, the
+  whole reply. A conversation stream sends each piece as it is said
+  (`reply_delta`: `replyId`, `offset`, `text`, with no event id), then the
+  `reply`. Pieces are not kept. The AI Agent step does not yet stream its
+  model's answer this way.
 - **A credential for one conversation.** `POST
   …/conversations/{key}/token` makes a token (`rtc_…`, an hour unless
   `ttlSeconds`, a day at most) for a page that talks to the workflow for

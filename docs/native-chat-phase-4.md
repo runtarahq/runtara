@@ -1,7 +1,8 @@
 # The native chat, finished: phase 4
 
-Status: being built, a part at a time. What is built, and where it departs
-from what is written here, is under [As built](#as-built) at the end. It
+Status: built, 4.1 to 4.7, but for the AI Agent step streaming its
+model's answer (4.7). What was built, and where it departs from what is
+written here, is under [As built](#as-built) at the end. It
 follows [native-chat.md](native-chat.md), whose phases 1 to 3 are on
 `main`.
 
@@ -633,3 +634,43 @@ Departures:
 - **There is no route to withdraw one before it expires.** Expired tokens
   are removed by the conversation worker's sweep. A route to delete one is
   small, and is left until a client asks for it.
+
+### 4.7 Replies as they are written
+
+Built: the path for what is not kept, and a reply written in pieces.
+`conversation.reply` with `partial: true` says a piece of the reply its
+`replyId` names; the same call without it says the whole reply and ends
+it. A stream that asks for every kind, or names `reply_delta`, is sent each
+piece as it is said (`replyId`, `offset`, `text`, with no event id), and
+then the `reply`. Measured on a running server: three pieces a moment
+apart reach an open stream one by one, then the whole reply; none is in
+the log.
+
+Departures:
+
+- **Pieces go through the control host and are held in the engine's
+  memory, not through a Postgres notice.** The plan had a third notice
+  channel, `runtara_run_transient`. A piece is a control call
+  (`POST /v1/conversations/delta`), as `send` and `history` are: it reaches
+  the engine from a run in its process or on an executor, the host says
+  which run is writing, and the engine finds the conversation that run
+  carries. The engine is one process and holds each conversation's last
+  512 pieces, so a reader that joins late is given the reply so far.
+  Nothing touches a database.
+- **No 50 ms gathering.** Each piece is sent as it is said. A writer that
+  says many small pieces makes many events; the AI Agent step, when it
+  streams, is where gathering belongs.
+- **A stream sends pieces only after its first answer.** The first answer
+  is what is kept, at once; pieces come with the asks that wait. A reader
+  that connects in the middle of a reply is given the pieces held so far,
+  from offset 0.
+- **The AI Agent step does not stream its model's answer.** This is not
+  built. It needs, in order: a response body read as it arrives on the
+  host's side of a guest's HTTP request (`runtara-http` and the component
+  host read a whole body today); the same through seal, which attaches a
+  model provider's key; a streamed completion in each provider of
+  `runtara-ai`; and the step saying each piece with the call above when its
+  run carries a conversation, under a `replyId` of its own. The path a
+  piece takes, the stream's handling of it and the contract a client reads
+  are built and tested, so that work changes none of them. It is the next
+  piece of this phase, and the plan allowed it to follow the adapters.

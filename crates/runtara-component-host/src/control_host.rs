@@ -73,6 +73,16 @@ pub trait ControlHost: Send + Sync {
         Err(ControlError::unsupported())
     }
 
+    /// A piece of a reply the calling run is writing, handed to whoever reads
+    /// its conversation now. Nothing is kept.
+    async fn conversation_delta(
+        &self,
+        _authority: &ControlAuthority,
+        _request: serde_json::Value,
+    ) -> Result<serde_json::Value, ControlError> {
+        Err(ControlError::unsupported())
+    }
+
     /// Durably admit a child of the caller.
     async fn start(
         &self,

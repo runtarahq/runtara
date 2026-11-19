@@ -397,6 +397,9 @@ pub async fn dispatch(
             ControlCall::ConversationHistory(body) => {
                 host.conversation_history(authority, body).await?
             }
+            ControlCall::ConversationDelta(body) => {
+                host.conversation_delta(authority, body).await?
+            }
         })
     })
     .await;
