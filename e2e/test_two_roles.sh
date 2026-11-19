@@ -18,7 +18,9 @@
 #                       is started by a message into a conversation, and
 #                       one is published as an agent and called by another:
 #                       each compiled on an executor, none in the engine
-#   4. a connection     made through the API, sealed by seal, and used
+#   4. a connection     made through the API, sealed by seal, and used; a
+#                       model's answer streamed through it, an executor and
+#                       the engine reaches the API's stream as it is written
 #   5. certificates     the engine's listener takes the API's certificate and
 #                       not an executor's; the run channel refuses the API's
 #   6. the API dies     runs started before it was killed complete
@@ -90,6 +92,8 @@ SEAL_LOG="${WORK_DIR}/seal.log"
 ENGINE_PID=""; API_PID=""; SECOND_API_PID=""; SEAL_PID=""
 VALKEY_CONTAINER=""
 EXECUTOR_PIDS=("" "")
+PROVIDER_PID=""
+PROVIDER_PORT="${PROVIDER_PORT:-17999}"
 API="http://127.0.0.1:${API_PORT}/api/runtime"
 
 SERVER_DB_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}"
@@ -117,7 +121,7 @@ stop() {
 
 cleanup() {
     local code=$?
-    for pid in "${API_PID}" "${SECOND_API_PID}" "${EXECUTOR_PIDS[@]}" "${ENGINE_PID}" "${SEAL_PID}"; do
+    for pid in "${API_PID}" "${SECOND_API_PID}" "${EXECUTOR_PIDS[@]}" "${ENGINE_PID}" "${SEAL_PID}" "${PROVIDER_PID}"; do
         [ -z "${pid}" ] || kill "${pid}" 2>/dev/null || true
     done
     wait 2>/dev/null || true
@@ -171,8 +175,8 @@ engine_env() {
     RUST_LOG="warn,runtara_server=info,runtara_environment=info,runtara_runner_executor=info" \
     AUTH_PROVIDER=local \
     RUNTARA_DATABASE_CONNECTION_GUARD=off RUNTARA_SEAL_PRIVATE_CIDRS="${RUNTARA_SEAL_PRIVATE_CIDRS:-127.0.0.0/8,::1/128}" \
-    RUNTARA_PROXY_ALLOWED_HOSTS="${POSTGRES_HOST}" \
-    RUNTARA_PROXY_ALLOW_HTTP_HOSTS="${POSTGRES_HOST}" \
+    RUNTARA_PROXY_ALLOWED_HOSTS="${POSTGRES_HOST},127.0.0.1:${PROVIDER_PORT}" \
+    RUNTARA_PROXY_ALLOW_HTTP_HOSTS="${POSTGRES_HOST},127.0.0.1" \
     VALKEY_HOST=127.0.0.1 \
     VALKEY_PORT="${TEST_VALKEY_PORT}" \
     OTEL_SDK_DISABLED=true \
@@ -735,6 +739,86 @@ CONN=$(echo "${RESP}" | jq -r '.connection_id // .connectionId // empty')
 [ "$(psql_quiet -d "${TEST_DB_SERVER}" -c "SELECT count(*) FROM seal_wrapped_key")" = "0" ] \
     || { print_error "the server database holds a seal key"; exit 1; }
 print_success "the secret was sealed by seal, which the API cannot reach, and used by the engine"
+
+# --- 4b -----------------------------------------------------------------
+print_step "4b. A model's answer reaches the API's stream as it is written..."
+# A stand-in provider streams three pieces 400 ms apart. The run is on an
+# executor, the key is attached by seal, the pieces are said to the engine,
+# and the stream is read through the API.
+PROVIDER_LOG="${WORK_DIR}/provider.jsonl"
+python3 "${SCRIPT_DIR}/stand_in_model_provider.py" "${PROVIDER_PORT}" "${PROVIDER_LOG}" &
+PROVIDER_PID=$!
+for _ in {1..20}; do (echo > /dev/tcp/127.0.0.1/${PROVIDER_PORT}) 2>/dev/null && break; sleep 0.25; done
+RESP=$(api_post /connections "$(jq -nc --arg base "http://127.0.0.1:${PROVIDER_PORT}/v1" '{
+    title: "stand-in model", integrationId: "openai_api_key",
+    connectionParameters: { api_key: "sk-stand-in", base_url: $base } }')")
+MODEL=$(echo "${RESP}" | jq -r '.connection_id // .connectionId // empty')
+[ -n "${MODEL}" ] || { print_error "the model's connection was not made: ${RESP}"; exit 1; }
+RESP=$(api_post /workflows/create '{"name":"Streamed Answer","description":"an AI Agent step that streams"}')
+STORY=$(echo "${RESP}" | jq -r '.data.id // empty')
+[ -n "${STORY}" ] || { print_error "create failed: ${RESP}"; exit 1; }
+RESP=$(api_post "/workflows/${STORY}/update" "{\"executionGraph\": $(jq -nc --arg conn "${MODEL}" '{
+    name: "Streamed Answer", entryPoint: "answer",
+    steps: {
+        answer: { id: "answer", name: "Answer", stepType: "AiAgent", connectionId: $conn, config: {
+            systemPrompt: { valueType: "immediate", value: "Tell a story." },
+            userPrompt: { valueType: "reference", value: "data.message" } } },
+        finish: { id: "finish", stepType: "Finish", inputMapping: {
+            response: { valueType: "reference", value: "steps.answer.outputs.response" } } } },
+    executionPlan: [ { fromStep: "answer", toStep: "finish", label: "next" } ],
+    variables: {}, inputSchema: { message: { type: "string" } }, outputSchema: {} }')}")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "update failed: ${RESP}"; exit 1; }
+STORY_VERSION=$(curl -sS "${API}/workflows/${STORY}/versions" | jq -r '[.data[]?.version // .data[]?.versionNumber // empty] | max // 1')
+RESP=$(api_post "/workflows/${STORY}/versions/${STORY_VERSION}/compile" '{}' 900)
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "compile failed: ${RESP}"; exit 1; }
+api_post "/workflows/${STORY}/versions/${STORY_VERSION}/set-current" '{}' >/dev/null
+STORY_CONVERSATION="${API}/workflows/${STORY}/conversations/streamed"
+curl -sS -X PUT -H 'Content-Type: application/json' -d '{}' "${STORY_CONVERSATION}" >/dev/null
+HEARD="${WORK_DIR}/streamed-answer.txt"
+(curl -sS -N --max-time 60 -H 'Accept: text/event-stream' "${STORY_CONVERSATION}/events?kinds=reply_delta,reply,run_ended" 2>/dev/null \
+    | python3 -u -c 'import sys, time
+for line in sys.stdin:
+    print(int(time.time() * 1000), line.rstrip(), flush=True)') > "${HEARD}" &
+LISTENER=$!
+sleep 1
+curl -sS --max-time 60 -X POST -H 'Content-Type: application/json' \
+    -d '{"id":"m-1","text":"Tell me one."}' "${STORY_CONVERSATION}/messages" >/dev/null
+for _ in {1..120}; do grep -q 'event: run_ended' "${HEARD}" 2>/dev/null && break; sleep 0.5; done
+stop "${LISTENER}"
+SEEN=$(python3 - "${HEARD}" <<'PY'
+import json, sys
+seen, block = [], {}
+def done(block):
+    if block.get("event") in ("reply_delta", "reply") and "data" in block:
+        body = json.loads(block["data"])["body"]
+        seen.append([block["event"], body.get("replyId"), body.get("text"), block["at"]])
+for line in open(sys.argv[1]):
+    at, _, text = line.rstrip("\n").partition(" ")
+    if not text:
+        done(block)
+        block = {}
+        continue
+    name, _, value = text.partition(": ")
+    block.setdefault("at", int(at))
+    block[name] = value
+done(block)
+print(json.dumps(seen))
+PY
+)
+echo "  on the stream: $(echo "${SEEN}" | jq -c '[.[] | [.[0], .[2]]]')"
+[ "$(echo "${SEEN}" | jq -c '[.[] | select(.[0] == "reply_delta") | .[2]] | add')" = '"Once upon a time."' ] \
+    && [ "$(echo "${SEEN}" | jq '[.[] | select(.[0] == "reply_delta")] | length')" -ge 2 ] \
+    || { print_error "the answer did not reach the API's stream in pieces: ${SEEN}"; cat "${PROVIDER_LOG}" >&2 || true
+         curl -sS "${STORY_CONVERSATION}/events?limit=50" | jq -c '.data[]? | {kind, body}' >&2; exit 1; }
+[ "$(echo "${SEEN}" | jq -c '[.[] | select(.[0] == "reply") | .[2]]')" = '["Once upon a time."]' ] \
+    && [ "$(echo "${SEEN}" | jq '[.[] | .[1]] | unique | length')" = "1" ] \
+    || { print_error "the answer was not said once, whole, under its pieces' id: ${SEEN}"; exit 1; }
+SPREAD=$(echo "${SEEN}" | jq '[.[] | select(.[0] == "reply_delta") | .[3]] | (max - min)')
+[ "${SPREAD}" -ge 600 ] || { print_error "the pieces arrived together (${SPREAD} ms apart)"; exit 1; }
+[ "$(jq -sc '[.[] | [.stream, .authorized]]' "${PROVIDER_LOG}")" = '[[true,true]]' ] \
+    || { print_error "the provider was not asked to stream with the key: $(cat "${PROVIDER_LOG}")"; exit 1; }
+stop "${PROVIDER_PID}"; PROVIDER_PID=""
+print_success "the answer reached the API's stream in pieces over ${SPREAD} ms, then whole, once"
 
 # --- 5 ------------------------------------------------------------------
 print_step "5. A certificate is good for one channel..."
