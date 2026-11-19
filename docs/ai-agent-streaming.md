@@ -1,9 +1,49 @@
-# AI Agent streaming: the spike
+# AI Agent streaming
 
-Status: a spike, done. Nothing here is built. It answers whether an AI Agent
-step's model answer can reach a conversation as it is written
+Status: built (see [As built](#as-built)). What follows it is the spike
+that answered whether an AI Agent step's model answer can reach a
+conversation as it is written
 ([native-chat-phase-4.md](native-chat-phase-4.md), 4.7, the part not built),
-and what building it takes.
+and the decisions made on it.
+
+## As built
+
+An AI Agent step in a run that carries a conversation says its model's
+answer there as the model writes it, then whole as the reply. A step whose
+name begins with `_` (its id, when it has none) does not, nor one with an
+output schema: its answer is data, not text for a person.
+
+| Part | Where | What it does |
+|---|---|---|
+| The compiler | `runtara-workflows`, `manifest.rs` (`ai_agent_is_shown`) | gives a shown step's `chat-completion` or `chat-turn` input `stream: true`. Nothing in the DSL changes. |
+| The step | `runtara-agent-ai-tools`, `streaming.rs` | asks the run whether it carries a conversation (a history read); if not, calls the model as before. If so, calls it streamed, says the first piece at once and the rest gathered about every 50 ms (`ConversationDelta`), under a reply id it makes, then the whole answer as `conversation_reply` under that id. A turn that asks for tools says its pieces and no reply. |
+| The providers | `runtara-ai`, `completion_streamed` | OpenAI (`stream: true`, server-sent events), Gemini (`streamGenerateContent?alt=sse`) and Bedrock (`converse-stream`, AWS event stream framing). Each answers the same `CompletionResponse` as unstreamed, read by the same parser. An error, or an API that answers whole, is read as unstreamed. |
+| The guest's HTTP | `runtara-http` `call_streamed_async`; `runtara-workflow-sdk` `http_streamed` | a body read a piece at a time; a body that was cut ends with an error, not as if whole. The native backend reads it whole, as one piece. |
+| The way out | `/v1/http` with `stream`; `runtara-component-host` `send_streamed`; the server's `NativeOutboundHttp::request_streamed` | the answer is handed on as it arrives, through seal (`send_for_proxy`) or reqwest; no receipt is kept of it. In a run's own process (`runtara-run`) and the executor's relay, the body passes on unread. |
+| The bounds | `StreamLimits` | a streamed call is not held to the 120 s bound: no first byte in 60 s, none for 30 s after, or 10 minutes in all ends it (`RUNTARA_STREAM_FIRST_BYTE_SECS`, `RUNTARA_STREAM_STALL_SECS`, `RUNTARA_STREAM_TOTAL_SECS`). The bytes are still capped. |
+
+Where it departs from what the spike planned:
+
+- **The reply id is made by the step's component**, at random, not by the
+  compiled step: a component can make one as well, and the step need not
+  pass it in.
+- **A run is asked first whether it carries a conversation.** Only the
+  first piece would have told it; asking first leaves every run without
+  one calling its model as before, keeping the receipt and the 120 s bound
+  of an unstreamed call.
+- **A step with an output schema does not stream.**
+- **The text of a turn that asks for tools** is said in pieces with no
+  reply under their id; the pieces go when the run ends, as a retry's do.
+
+Tested: each provider's parser and the event stream framing (unit tests);
+a guest reading a streamed answer and being told when it is cut
+(`runtara-environment`, `embedded_runner_test.rs`); the server's outbound
+streaming through seal and reqwest (`runtara-server`,
+`tests/outbound_http.rs`); and on running servers,
+`e2e/test_ai_streaming.sh` (one process, and on an executor with
+`e2e/test_executor_runner.sh ai_streaming`) and `e2e/test_two_roles.sh`
+section 4b (the API and the engine apart, runs on executors, seal a process
+of its own).
 
 ## The two questions
 

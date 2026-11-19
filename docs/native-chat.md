@@ -110,6 +110,11 @@ been said.
   workflow said, not what was guessed from its debug events. The final
   output of a run is still a reply, so a workflow that only answers at its
   end needs no change.
+- **An AI Agent step says its answer as it is written.** In a run that
+  carries a conversation, its model's text arrives on the stream in pieces
+  (`reply_delta`), then whole as the reply under the same id. A step whose
+  name begins with `_` is not shown, so a step whose answer is not for the
+  user is named that way ([ai-agent-streaming.md](ai-agent-streaming.md)).
 - **Replies are pushed as well as pulled.** A conversation may have a
   **reply route**: a workflow to start with each reply (and with each
   "waiting for input"). Without one, replies are read from the stream, as
