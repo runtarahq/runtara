@@ -129,6 +129,24 @@ impl ConnectionsFacade {
         message: &[u8],
         signature_hex: &str,
     ) -> Result<SignatureCheck, ConnectionsError> {
+        let mac = hex::decode(signature_hex).unwrap_or_default();
+        self.check_webhook(connection, tenant_id, field, message, mac)
+            .await
+    }
+
+    /// Checks what a webhook presents against the connection's secret in
+    /// `field`, as its declared check reads it (`webhooks`): a MAC of
+    /// `message`, or, for a secret token, the token with an empty message.
+    /// seal says only yes or no; an error means the check could not be made,
+    /// and the webhook must then be refused.
+    pub async fn check_webhook(
+        &self,
+        connection: &ConnectionWithParameters,
+        tenant_id: &str,
+        field: &str,
+        message: &[u8],
+        mac: Vec<u8>,
+    ) -> Result<SignatureCheck, ConnectionsError> {
         let empty = Value::Null;
         let parameters = connection.connection_parameters.as_ref().unwrap_or(&empty);
         let secret = &parameters[field];
@@ -142,9 +160,9 @@ impl ConnectionsFacade {
                 ))
             };
         }
-        let Ok(signature) = hex::decode(signature_hex) else {
+        if mac.is_empty() {
             return Ok(SignatureCheck::Invalid);
-        };
+        }
         let valid = self
             .state
             .sealed
@@ -154,7 +172,7 @@ impl ConnectionsFacade {
                 parameters,
                 field,
                 message.to_vec(),
-                signature,
+                mac,
             )
             .await
             .map_err(|error| {

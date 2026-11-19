@@ -199,6 +199,8 @@ enum Usage {
     Postgres(PgTarget),
     /// Never sent: checks that a message came from the provider.
     Verify(HmacHash),
+    /// Never sent: checks that a token a message came with is this one.
+    VerifyToken,
 }
 
 /// The parameter a Postgres connection's URL is entered in. Sealed, it holds
@@ -1292,13 +1294,21 @@ fn secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
         ),
         // Telegram takes the token in the URL's path: `/bot<token>/<method>`.
         // A request names the method only, and seal puts the token before it.
-        "telegram_bot" => one(
-            "bot_token",
-            TELEGRAM_API_BASE,
-            Inject::Path {
-                prefix: "/bot{}".to_owned(),
+        // Its webhooks carry the secret token given to `setWebhook` as it
+        // is (`webhooks::declared`), checked and never sent.
+        "telegram_bot" => Some(vec![
+            sent(
+                "bot_token",
+                TELEGRAM_API_BASE,
+                Inject::Path {
+                    prefix: "/bot{}".to_owned(),
+                },
+            ),
+            Secret {
+                field: WEBHOOK_SECRET_FIELD,
+                usage: Usage::VerifyToken,
             },
-        ),
+        ]),
         "slack_bot" => Some(vec![
             sent("bot_token", "https://slack.com", bearer()),
             verifies("signing_secret"),
@@ -1389,9 +1399,13 @@ fn secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
 /// that are sent, and that its current settings use. A secret that only
 /// verifies is never among them, since it may go nowhere.
 pub fn request_fields(integration_id: &str, params: &Value) -> Vec<String> {
-    // A webhook's registration presents the webhook's secret token beside
-    // the bot token. It is among the parameters only for that request.
-    if integration_id == "telegram_bot" {
+    // A webhook's registration presents a secret token sealed to register it
+    // (`seal_webhook_secret`, whose marker names the connection) beside the
+    // bot token, for that request. One entered with the connection is only
+    // checked, and goes with no request.
+    if integration_id == "telegram_bot"
+        && params[WEBHOOK_SECRET_FIELD][super::SEALED_MARKER]["connection"].is_string()
+    {
         return vec!["bot_token".to_owned(), WEBHOOK_SECRET_FIELD.to_owned()];
     }
     // A client secret goes to its token endpoint only. What a request
@@ -1770,6 +1784,12 @@ pub fn policies(
                 definitions: BTreeMap::new(),
                 shared: false,
                 verify: Some(Verify::Hmac { hash: *hash }),
+            },
+            Usage::VerifyToken => Policy {
+                rules: Vec::new(),
+                definitions: BTreeMap::new(),
+                shared: false,
+                verify: Some(Verify::Equals),
             },
             Usage::Postgres(target) => {
                 // From its JSON form: a mode this build's seal does not have
@@ -3254,20 +3274,30 @@ mod tests {
 
     #[test]
     fn a_telegram_token_goes_in_the_path_of_the_bot_api() {
-        let (field, policy) = only("telegram_bot", json!({"bot_token": "1:a"}));
-        assert_eq!(field, "bot_token");
+        let sealed = policies(
+            "telegram_bot",
+            &json!({"bot_token": "1:a"}),
+            &Allowances::default(),
+        )
+        .unwrap();
         assert_eq!(
-            policy,
+            sealed.keys().collect::<Vec<_>>(),
+            ["bot_token", "webhook_secret"]
+        );
+        assert_eq!(
+            canonical(&sealed["bot_token"]),
             json!({"rules": [{
                 "destination": {"scheme": "https", "host": "api.telegram.org"},
                 "inject": {"path": {"prefix": "/bot{}"}},
             }]})
         );
-        // The webhook's secret token goes with it, for the one request that
-        // registers the webhook: only then is it among the parameters.
+        // The webhook's secret token is only checked: no request presents it.
+        assert_eq!(request_fields("telegram_bot", &json!({})), ["bot_token"]);
         assert_eq!(
-            request_fields("telegram_bot", &json!({})),
-            ["bot_token", "webhook_secret"]
+            canonical(
+                &policies("telegram_bot", &json!({}), &Allowances::default()).unwrap()["webhook_secret"]
+            ),
+            json!({"verify": "equals"})
         );
         assert_eq!(
             canonical(

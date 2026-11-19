@@ -17,6 +17,7 @@ pub mod service;
 pub mod tenant;
 pub mod types;
 pub mod util;
+pub mod webhooks;
 
 pub use auth::aws_signing::AwsSigningParams;
 pub use auth::azure_signing::AzureSigningParams;

@@ -467,6 +467,18 @@ pub struct TelegramBotParams {
         secret
     )]
     pub bot_token: String,
+
+    /// The secret token given to `setWebhook`, which Telegram sends back with
+    /// each webhook call. A trigger bound to the connection refuses a call
+    /// without it.
+    #[serde(default)]
+    #[field(
+        display_name = "Webhook Secret Token",
+        description = "The secret_token you gave setWebhook (1-256 of A-Z, a-z, 0-9, _ and -). Webhook calls without it are refused.",
+        placeholder = "a-long-random-token",
+        secret
+    )]
+    pub webhook_secret: Option<String>,
 }
 
 // ============================================================================
