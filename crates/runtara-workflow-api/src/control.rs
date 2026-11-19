@@ -25,6 +25,12 @@ pub enum ControlCall {
     Pause(String),
     /// `POST /v1/instances/{id}/resume`
     Resume(String),
+    /// `POST /v1/conversations/send`: a message into a conversation with a
+    /// workflow of the caller's tenant.
+    ConversationSend(Value),
+    /// `POST /v1/conversations/history`: what was said in the conversation
+    /// the calling run carries.
+    ConversationHistory(Value),
 }
 
 impl ControlCall {
@@ -40,6 +46,8 @@ impl ControlCall {
             Self::Cancel(..) => "cancel",
             Self::Pause(_) => "pause",
             Self::Resume(_) => "resume",
+            Self::ConversationSend(_) => "conversation-send",
+            Self::ConversationHistory(_) => "conversation-history",
         }
     }
 

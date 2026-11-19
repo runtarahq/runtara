@@ -53,6 +53,26 @@ pub struct ControlAuthority {
 /// Every operation defaults to `unsupported` until its slice lands.
 #[async_trait::async_trait]
 pub trait ControlHost: Send + Sync {
+    /// Sends a message into a conversation with a workflow of the caller's
+    /// tenant, opening it if it was not, and answers what became of it. The
+    /// body and answer are the conversation's own (`docs/native-chat.md`).
+    async fn conversation_send(
+        &self,
+        _authority: &ControlAuthority,
+        _request: serde_json::Value,
+    ) -> Result<serde_json::Value, ControlError> {
+        Err(ControlError::unsupported())
+    }
+
+    /// What was said in the conversation the calling run carries.
+    async fn conversation_history(
+        &self,
+        _authority: &ControlAuthority,
+        _request: serde_json::Value,
+    ) -> Result<serde_json::Value, ControlError> {
+        Err(ControlError::unsupported())
+    }
+
     /// Durably admit a child of the caller.
     async fn start(
         &self,

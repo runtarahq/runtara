@@ -393,6 +393,10 @@ pub async fn dispatch(
             ),
             ControlCall::Pause(id) => command_result(&host.pause(authority, id).await?),
             ControlCall::Resume(id) => command_result(&host.resume(authority, id).await?),
+            ControlCall::ConversationSend(body) => host.conversation_send(authority, body).await?,
+            ControlCall::ConversationHistory(body) => {
+                host.conversation_history(authority, body).await?
+            }
         })
     })
     .await;

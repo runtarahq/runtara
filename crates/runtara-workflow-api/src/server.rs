@@ -862,6 +862,14 @@ pub fn router(state: WorkflowApiState) -> Router {
         .route("/v1/instances/{id}/pause", post(control::post_pause))
         .route("/v1/instances/{id}/resume", post(control::post_resume))
         .route(
+            "/v1/conversations/send",
+            post(control::post_conversation_send).route_layer(paced()),
+        )
+        .route(
+            "/v1/conversations/history",
+            post(control::post_conversation_history),
+        )
+        .route(
             "/v1/trusted/{agent_id}/{capability_id}",
             post(control::post_trusted).route_layer(paced()),
         )
