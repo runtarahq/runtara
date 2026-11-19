@@ -124,6 +124,15 @@ pub(crate) async fn apply_transition(
         sqlx::query("INSERT INTO instance_events (instance_id, event_type, created_at) SELECT unnest($1::text[]), $2::instance_event_type, NOW()")
             .bind(ids).bind(crate::encoding::event_type_to_str(event)).execute(&mut **tx).await.db()?;
     }
+    // What follows each of these runs is told it changed.
+    if effects.status.is_some() || effects.event.is_some() {
+        sqlx::query("SELECT pg_notify($1, id) FROM unnest($2::text[]) AS id")
+            .bind(crate::notices::RUN)
+            .bind(ids)
+            .execute(&mut **tx)
+            .await
+            .db()?;
+    }
     if effects.acknowledge {
         sqlx::query(
             "UPDATE pending_signals SET acknowledged_at = NOW() WHERE instance_id = ANY($1)",
@@ -224,6 +233,12 @@ pub(crate) async fn complete(
         > 0;
     if updated && params.status.is_terminal() {
         crate::inputs::close_roots(tx, &[params.instance_id.to_string()])
+            .await
+            .db()?;
+    }
+    // What follows the run is told it ended, or is suspended and waits.
+    if updated {
+        crate::notices::tell(&mut **tx, params.instance_id)
             .await
             .db()?;
     }
