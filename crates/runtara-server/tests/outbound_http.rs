@@ -1683,3 +1683,174 @@ async fn native_outbound_presents_a_token_got_with_a_sealed_client_secret() -> a
     }
     Ok(())
 }
+
+/// A provider on this machine that answers each request with three pieces,
+/// 400 ms apart, as HTTP/1.1 chunks; it answers `count` requests, and hands
+/// back what each asked.
+async fn slow_provider(count: usize) -> (u16, tokio::task::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let served = tokio::spawn(async move {
+        let mut asked = Vec::new();
+        for _ in 0..count {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            let mut buffer = [0u8; 4096];
+            while !String::from_utf8_lossy(&head).contains("\r\n\r\n") {
+                let read = socket.read(&mut buffer).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buffer[..read]);
+            }
+            asked.push(String::from_utf8_lossy(&head).into_owned());
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                      transfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            for piece in ["data: one\n\n", "data: two\n\n", "data: three\n\n"] {
+                let chunk = format!("{:x}\r\n{piece}\r\n", piece.len());
+                socket.write_all(chunk.as_bytes()).await.unwrap();
+                socket.flush().await.unwrap();
+                tokio::time::sleep(Duration::from_millis(400)).await;
+            }
+            socket.write_all(b"0\r\n\r\n").await.unwrap();
+        }
+        asked
+    });
+    (port, served)
+}
+
+/// The pieces of a streamed answer, with when each came.
+async fn pieces_of(
+    response: runtara_component_host::outbound_http::StreamedResponse,
+) -> Vec<(Duration, String)> {
+    use http_body_util::BodyExt;
+    let started = std::time::Instant::now();
+    let mut body = response.body;
+    let mut pieces = Vec::new();
+    while let Some(frame) = body.frame().await {
+        if let Ok(data) = frame.expect("a body frame").into_data() {
+            pieces.push((
+                started.elapsed(),
+                String::from_utf8_lossy(&data).into_owned(),
+            ));
+        }
+    }
+    pieces
+}
+
+/// An answer asked for as it arrives comes a piece at a time, as the
+/// provider sends it: through seal for a sealed connection, which attaches
+/// its token, and straight for a public URL.
+#[tokio::test]
+async fn native_outbound_hands_on_a_streamed_answer_as_it_arrives() -> anyhow::Result<()> {
+    use runtara_connections::sealed::keys::PgKeySource;
+    use runtara_connections::sealed::{Allowances, SealedCredentials};
+    allow_local_egress_for_this_test_binary();
+    init_server_config();
+    let pool = test_pool().await;
+    let (port, served) = slow_provider(2).await;
+    let base = format!("http://127.0.0.1:{port}");
+    let sealed = Arc::new(
+        SealedCredentials::in_process(
+            Arc::new(PgKeySource::new(pool.clone())),
+            &[7_u8; 32],
+            Allowances {
+                private_hosts: vec!["127.0.0.1".into()],
+                plain_http_hosts: vec!["127.0.0.1".into()],
+                ..Default::default()
+            },
+        )
+        .map_err(|error| anyhow::anyhow!(error))?,
+    );
+    let tenant = format!("streamed-outbound-{}", Uuid::new_v4());
+    let connection = ConnectionService::new(
+        Arc::new(ConnectionRepository::new(
+            pool.clone(),
+            Arc::new(NoOpCipher),
+        )),
+        compatibility(),
+        sealed.clone(),
+    )
+    .create_connection(
+        CreateConnectionRequest {
+            title: format!("Streamed {}", Uuid::new_v4()),
+            integration_id: Some("http_bearer".into()),
+            connection_subtype: None,
+            connection_parameters: Some(json!({
+                "base_url": format!("{base}/v1"),
+                "token": "synthetic-model-token",
+            })),
+            rate_limit_config: None,
+            valid_until: None,
+            is_default_file_storage: None,
+            default_for: None,
+        },
+        &tenant,
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("sealed connection creation failed"))?;
+    let outbound = NativeOutboundHttp {
+        facade: Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
+            ConnectionsConfig {
+                sealed,
+                agent_access: Arc::new(runtara_connections::EveryAgent),
+                db_pool: pool.clone(),
+                redis_manager: None,
+                public_base_url: "http://localhost".to_string(),
+                oauth_complete_url: None,
+                http_client: runtara_connections::net::build_hardened_client(),
+                cipher: Arc::new(NoOpCipher),
+                compatibility: compatibility(),
+                agent_catalog: Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                    Vec::new(),
+                )),
+                connection_events: None,
+                oauth: Default::default(),
+            },
+        ))),
+        client: runtara_connections::net::build_hardened_client(),
+    };
+    let context = OutboundContext {
+        tenant_id: tenant.clone(),
+        instance_id: None,
+    };
+
+    let mut sealed_request = connection_request(&connection, "/chat");
+    sealed_request.method = "POST".into();
+    let public_request = RequestOptions {
+        destination: Destination::Public(format!("{base}/public")),
+        ..connection_request(&connection, "/chat")
+    };
+    for (what, request) in [("sealed", sealed_request), ("public", public_request)] {
+        let response = outbound
+            .request_streamed(&context, request)
+            .await
+            .map_err(|error| anyhow::anyhow!("{what}: {} {}", error.code, error.message))?;
+        assert_eq!(response.status, 200, "{what}");
+        let pieces = pieces_of(response).await;
+        let whole: String = pieces.iter().map(|(_, piece)| piece.as_str()).collect();
+        assert_eq!(whole, "data: one\n\ndata: two\n\ndata: three\n\n", "{what}");
+        let at: Vec<u128> = pieces.iter().map(|(at, _)| at.as_millis()).collect();
+        eprintln!("{what}: the pieces came at {at:?} ms");
+        assert!(pieces.len() >= 3, "{what}: {at:?}");
+        assert!(
+            pieces.last().unwrap().0 - pieces[0].0 >= Duration::from_millis(700),
+            "{what}: the pieces came together: {at:?}"
+        );
+    }
+    let asked = served.await?;
+    assert!(
+        asked[0]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer synthetic-model-token"),
+        "seal attached the token: {}",
+        asked[0]
+    );
+    assert!(!asked[1].to_ascii_lowercase().contains("authorization"));
+    Ok(())
+}

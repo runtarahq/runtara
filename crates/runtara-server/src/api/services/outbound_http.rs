@@ -190,21 +190,18 @@ struct OutboundRequest {
     max_response_bytes: Option<usize>,
 }
 
-#[async_trait::async_trait]
-impl OutboundHttpHost for NativeOutboundHttp {
-    #[tracing::instrument(skip_all, fields(tenant_id = %context.tenant_id, instance_id = context.instance_id.as_deref()))]
-    async fn request(
-        &self,
+impl NativeOutboundHttp {
+    /// The request as this process sends it, for the run `context` is of.
+    fn prepared(
         context: &OutboundContext,
         request: RequestOptions,
-    ) -> Result<Response, OutboundError> {
+    ) -> Result<OutboundRequest, OutboundError> {
         if context.tenant_id.trim().is_empty() {
             return Err(outbound_http::error(
                 "HTTP_UNAVAILABLE",
                 "Authoritative tenant is not configured",
             ));
         }
-        let timeout = outbound_http::timeout(request.timeout_ms)?;
         let limit = outbound_http::response_limit(request.max_response_bytes)?;
         let mut internal = OutboundRequest {
             method: request.method,
@@ -235,9 +232,29 @@ impl OutboundHttpHost for NativeOutboundHttp {
                 internal.endpoint = connection.endpoint;
             }
         }
-        tokio::time::timeout(
+        Ok(internal)
+    }
+}
+
+#[async_trait::async_trait]
+impl OutboundHttpHost for NativeOutboundHttp {
+    #[tracing::instrument(skip_all, fields(tenant_id = %context.tenant_id, instance_id = context.instance_id.as_deref()))]
+    async fn request(
+        &self,
+        context: &OutboundContext,
+        request: RequestOptions,
+    ) -> Result<Response, OutboundError> {
+        let timeout = outbound_http::timeout(request.timeout_ms)?;
+        let internal = Self::prepared(context, request)?;
+        let answered = tokio::time::timeout(
             timeout,
-            execute_request(&context.tenant_id, &self.facade, &self.client, internal),
+            execute_request(
+                &context.tenant_id,
+                &self.facade,
+                &self.client,
+                internal,
+                Reading::Whole,
+            ),
         )
         .await
         .map_err(|_| {
@@ -246,7 +263,58 @@ impl OutboundHttpHost for NativeOutboundHttp {
                 "HTTP request timeout: deadline elapsed",
             )
         })?
-        .map_err(|(status, body)| service_error(status, body))
+        .map_err(|(status, body)| service_error(status, body))?;
+        match answered {
+            Answered::Whole(response) => Ok(response),
+            Answered::Streamed(_) => unreachable!("a whole answer was asked for"),
+        }
+    }
+
+    /// The answer's body is handed over as it arrives. Its head is the
+    /// caller's to wait for and its body the caller's to bound
+    /// (`outbound_http::send_streamed`).
+    #[tracing::instrument(skip_all, fields(tenant_id = %context.tenant_id, instance_id = context.instance_id.as_deref()))]
+    async fn request_streamed(
+        &self,
+        context: &OutboundContext,
+        request: RequestOptions,
+    ) -> Result<outbound_http::StreamedResponse, OutboundError> {
+        let internal = Self::prepared(context, request)?;
+        match execute_request(
+            &context.tenant_id,
+            &self.facade,
+            &self.client,
+            internal,
+            Reading::Streamed,
+        )
+        .await
+        .map_err(|(status, body)| service_error(status, body))?
+        {
+            Answered::Whole(response) => Ok(response.into()),
+            Answered::Streamed(response) => Ok(response),
+        }
+    }
+}
+
+/// How an upstream answer is read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reading {
+    /// Whole, within the request's byte limit.
+    Whole,
+    /// As it arrives: the body is handed on.
+    Streamed,
+}
+
+/// An upstream answer, as it was asked to be read. An answer this process
+/// makes itself (a refusal, a 429 of its own) is whole either way.
+enum Answered {
+    Whole(Response),
+    Streamed(outbound_http::StreamedResponse),
+}
+
+impl From<Response> for Answered {
+    fn from(response: Response) -> Self {
+        Self::Whole(response)
     }
 }
 
@@ -533,7 +601,8 @@ async fn execute_request(
     facade: &ConnectionsFacade,
     client: &reqwest::Client,
     request: OutboundRequest,
-) -> Result<Response, (u16, Value)> {
+    reading: Reading,
+) -> Result<Answered, (u16, Value)> {
     // Mutable copies we'll enrich with connection data
     let response_limit = proxy_response_limit(request.max_response_bytes)?;
     let mut final_headers = request.headers.clone();
@@ -718,7 +787,7 @@ async fn execute_request(
             let mut headers = HashMap::new();
             headers.insert("retry-after".to_string(), retry_after_secs.to_string());
             headers.insert("retry-after-ms".to_string(), retry_after_ms.to_string());
-            return Ok(Response {
+            return Ok(Answered::Whole(Response {
                 status: 429,
                 headers: headers.into_iter().collect(),
                 body: serde_json::to_vec(&json!({
@@ -726,7 +795,7 @@ async fn execute_request(
                     "retry_after_ms": retry_after_ms
                 }))
                 .expect("rate limit JSON serializes"),
-            });
+            }));
         }
     }
 
@@ -793,6 +862,35 @@ async fn execute_request(
         (&sealed_connection, request.connection_id.as_deref())
     {
         let sealed = facade.sealed();
+        if reading == Reading::Streamed {
+            let upstream = sealed
+                .send_for_proxy(
+                    tenant_id,
+                    connection_id,
+                    integration_id,
+                    params,
+                    &method,
+                    &final_url,
+                    final_headers,
+                    body_bytes,
+                )
+                .await
+                .map_err(|error| map_sealed_send_error(&error, connection_id))?;
+            let status = upstream.status().as_u16();
+            let headers = header_pairs(upstream.headers());
+            track_upstream_429(
+                facade,
+                tenant_id,
+                Some(connection_id),
+                status,
+                retry_after(&headers),
+            );
+            return Ok(Answered::Streamed(outbound_http::StreamedResponse {
+                status,
+                headers,
+                body: axum::body::Body::new(upstream.into_body()),
+            }));
+        }
         let upstream = sealed
             .send_bounded(
                 tenant_id,
@@ -818,11 +916,11 @@ async fn execute_request(
                 .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
                 .map(|(_, value)| value.as_str()),
         );
-        return Ok(Response {
+        return Ok(Answered::Whole(Response {
             status: upstream.status,
             headers: upstream.headers,
             body: upstream.body,
-        });
+        }));
     }
 
     // A request that presents no credential is this process's to send.
@@ -849,6 +947,31 @@ async fn execute_request(
         .map_err(|_e| (502, json!({"error": "Upstream request failed"})))?;
 
     let status = response.status().as_u16();
+
+    // Handed on as it arrives: the caller holds it to its limits.
+    if reading == Reading::Streamed {
+        let headers = header_pairs(response.headers());
+        track_upstream_429(
+            facade,
+            tenant_id,
+            request.connection_id.as_deref(),
+            status,
+            retry_after(&headers),
+        );
+        let pieces = futures::stream::unfold(Some(response), |response| async move {
+            let mut response = response?;
+            match response.chunk().await {
+                Ok(Some(piece)) => Some((Ok(piece), Some(response))),
+                Ok(None) => None,
+                Err(error) => Some((Err(error), None)),
+            }
+        });
+        return Ok(Answered::Streamed(outbound_http::StreamedResponse {
+            status,
+            headers,
+            body: axum::body::Body::from_stream(pieces),
+        }));
+    }
 
     // Collect response headers
     let mut resp_headers = HashMap::new();
@@ -879,11 +1002,27 @@ async fn execute_request(
             .map(String::as_str),
     );
 
-    Ok(Response {
+    Ok(Answered::Whole(Response {
         status,
         headers: resp_headers.into_iter().collect(),
         body: resp_body_bytes,
-    })
+    }))
+}
+
+/// A response's headers that are text, as pairs.
+fn header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| Some((name.to_string(), value.to_str().ok()?.to_owned())))
+        .collect()
+}
+
+/// Its `Retry-After`, if it says one.
+fn retry_after(headers: &[(String, String)]) -> Option<&str> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+        .map(|(_, value)| value.as_str())
 }
 
 // ============================================================================
