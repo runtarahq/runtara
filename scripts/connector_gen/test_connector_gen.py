@@ -2192,6 +2192,122 @@ class InlineNameRenderTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Hand-written capabilities (`custom_capabilities`)
+# ---------------------------------------------------------------------------
+
+SYNC_ITEMS = {"function": "sync_items", "input": "SyncItemsInput", "outputs": ["SyncItemsOutput", "SyncedItem"]}
+
+
+class CustomCapabilitiesTest(unittest.TestCase):
+    def test_entries_are_read_with_their_ids(self):
+        capabilities = cg.custom_capabilities({"custom_capabilities": [
+            SYNC_ITEMS, {"function": "count_all", "input": "CountAllInput"},
+        ]})
+        self.assertEqual(
+            [(c["function"], c["metaName"], c["input"], c["outputs"], c["id"]) for c in capabilities],
+            [("sync_items", "SYNC_ITEMS", "SyncItemsInput", ["SyncItemsOutput", "SyncedItem"], "sync-items"),
+             ("count_all", "COUNT_ALL", "CountAllInput", [], "count-all")],
+        )
+        self.assertEqual(cg.custom_capabilities({}), [])
+
+    def test_malformed_entries_are_refused(self):
+        cases = {
+            "names `function` and `input`": [{"function": "sync_items"}],
+            "and optionally `outputs`": [{**SYNC_ITEMS, "id": "sync"}],
+            "outputs of `sync_items` are a list": [{**SYNC_ITEMS, "outputs": "SyncItemsOutput"}],
+            "is no Rust name": [{**SYNC_ITEMS, "function": "sync-items"}],
+            "`type` is no Rust name": [{**SYNC_ITEMS, "function": "type"}],
+            "lists `sync_items` twice": [SYNC_ITEMS, SYNC_ITEMS],
+            "is a list": {"function": "sync_items"},
+        }
+        for expected, entries in cases.items():
+            with self.subTest(expected):
+                with self.assertRaises(SystemExit) as stop:
+                    cg.custom_capabilities({"custom_capabilities": entries})
+                self.assertIn(expected, str(stop.exception.code))
+
+
+@unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
+class CustomCapabilitiesRenderTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_crate(Path(tmp), sample_spec(), OPERATIONS)
+            cls.plain = cg.render(Path(tmp))
+            write_crate(Path(tmp), sample_spec(), OPERATIONS, custom_capabilities=[SYNC_ITEMS])
+            cls.text = cg.render(Path(tmp))
+            cls.flat = re.sub(r"\s+", " ", cls.text)
+
+    @staticmethod
+    def compact(text: str) -> str:
+        """`text` with rustfmt's line breaks inside tuples undone."""
+        text = re.sub(r"\s+", " ", text)
+        return re.sub(r",? \)", ")", re.sub(r"\( ", "(", text))
+
+    def test_the_agent_lists_it_beside_the_generated_ones(self):
+        text = self.compact(self.text)
+        caps = text[text.index("let caps"):text.index("let input_types")]
+        self.assertIn("&__CAPABILITY_META_LIST_ITEMS,", caps)
+        self.assertIn("&crate::custom::__CAPABILITY_META_SYNC_ITEMS,", caps)
+        self.assertIn('("SyncItemsInput", &crate::custom::__INPUT_META_SyncItemsInput as &InputTypeMeta)', text)
+        for output in ("SyncItemsOutput", "SyncedItem"):
+            self.assertIn(f'("{output}", &crate::custom::__OUTPUT_META_{output} as &OutputTypeMeta)', text)
+
+    def test_the_component_exports_it(self):
+        export = self.flat[self.flat.index("agent_component!"):]
+        self.assertIn("list_items,", export)
+        self.assertIn("crate::custom::sync_items,", export)
+
+    def test_nothing_else_changes(self):
+        # The file with the hand-written entries taken out is the file without them.
+        without = re.sub(r"\(\"\w+\", &crate::custom::__\w+_META_\w+ as &\w+\), ", "", self.compact(self.text))
+        without = re.sub(r"&?crate::custom::\w+, ", "", without)
+        self.assertNotIn("custom", without)
+        self.assertEqual(without, self.compact(self.plain))
+
+    def test_an_id_a_generated_operation_has_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_crate(Path(tmp), sample_spec(), OPERATIONS,
+                        custom_capabilities=[{"function": "list_items", "input": "ListAllItemsInput"}])
+            with self.assertRaises(SystemExit) as stop:
+                cg.render(Path(tmp))
+        self.assertIn("`list_items` is the capability `list-items`, which a generated operation already is",
+                      str(stop.exception.code))
+
+    def test_an_id_on_a_one_line_attribute_is_refused_too(self):
+        # A short summary, no description and no side effects: rustfmt writes
+        # the generated `#[capability(...)]` on one line.
+        spec = sample_spec()
+        spec["paths"]["/count"]["get"]["summary"] = "Count"
+        with tempfile.TemporaryDirectory() as tmp:
+            write_crate(Path(tmp), spec, OPERATIONS,
+                        custom_capabilities=[{"function": "count_items", "input": "CountAllItemsInput"}])
+            with self.assertRaises(SystemExit) as stop:
+                cg.render(Path(tmp))
+            write_crate(Path(tmp), spec, OPERATIONS)
+            self.assertRegex(cg.render(Path(tmp)), r'#\[capability\(module = "sample", id = "count-items", ')
+        self.assertIn("`count_items` is the capability `count-items`", str(stop.exception.code))
+
+    def refusal(self, entry: dict) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            write_crate(Path(tmp), sample_spec(), OPERATIONS, custom_capabilities=[entry])
+            with self.assertRaises(SystemExit) as stop:
+                cg.render(Path(tmp))
+        return str(stop.exception.code)
+
+    def test_an_input_named_like_a_generated_input_is_refused(self):
+        # Its metadata would replace `list-items`' input fields.
+        message = self.refusal({"function": "list_everything", "input": "ListItemsInput"})
+        self.assertIn("the input struct `ListItemsInput` is named like a generated input type", message)
+
+    def test_an_output_named_like_a_generated_model_is_refused(self):
+        # Its metadata would replace the fields of `Item`, which `list-items` returns.
+        message = self.refusal({"function": "list_everything", "input": "ListEverythingInput",
+                                "outputs": ["ListEverythingOutput", "Item"]})
+        self.assertIn("the output struct `Item` is named like a generated output type", message)
+
+
+# ---------------------------------------------------------------------------
 # GraphQL APIs (graphql_source.py)
 # ---------------------------------------------------------------------------
 
