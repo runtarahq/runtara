@@ -20,6 +20,12 @@ pub struct OutboundMeta {
     /// empty body from none; providers can (a signed upload of zero bytes).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub has_body: bool,
+    /// Hand the answer's body over as it arrives, not when it is whole: for
+    /// an answer written a piece at a time (a model's, as server-sent
+    /// events). Such an answer is not kept for a retry of the call, which
+    /// makes it again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stream: bool,
 }
 
 /// Where an outbound call goes: through a connection's credentials, or to a
@@ -101,6 +107,7 @@ mod tests {
             timeout_ms: Some(1000),
             max_response_bytes: None,
             has_body: false,
+            stream: false,
         };
         assert_eq!(
             serde_json::to_value(&meta).unwrap(),

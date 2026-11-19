@@ -128,12 +128,81 @@ mod transport {
     use crate::bindings::wasi::http::types::{ErrorCode, Fields, Method, Request, Scheme};
     use crate::bindings::{wit_future, wit_stream};
 
+    /// A response's body, read a piece at a time as the host hands it over.
+    pub(crate) struct Pieces {
+        reader: Option<wit_bindgen::StreamReader<u8>>,
+        done: Option<wit_bindgen::FutureWriter<Result<(), ErrorCode>>>,
+        /// How the body ended: whole, or cut by the host.
+        ended: Option<
+            wit_bindgen::FutureReader<
+                Result<Option<crate::bindings::wasi::http::types::Fields>, ErrorCode>,
+            >,
+        >,
+    }
+
+    impl Pieces {
+        /// The next piece as it arrives; `None` once the body is whole, and an
+        /// error once if the host cut it (it stopped coming, or was too long).
+        pub(crate) async fn next(&mut self) -> Option<Result<Vec<u8>, Error>> {
+            const PIECE: usize = 16 * 1024;
+            loop {
+                let reader = self.reader.as_mut()?;
+                let (status, piece) = reader.read(Vec::with_capacity(PIECE)).await;
+                match status {
+                    wit_bindgen::StreamResult::Complete(_) if !piece.is_empty() => {
+                        return Some(Ok(piece));
+                    }
+                    wit_bindgen::StreamResult::Complete(_) => continue,
+                    _ => {
+                        self.reader = None;
+                        if let Some(done) = self.done.take() {
+                            let _ = done.write(Ok(())).await;
+                        }
+                        let cut = match self.ended.take() {
+                            Some(ended) => ended.await.err(),
+                            None => None,
+                        };
+                        return cut.map(|error| {
+                            Err(Error::Transport(format!("the answer was cut: {error:?}")))
+                        });
+                    }
+                }
+            }
+        }
+
+        /// The rest of the body.
+        pub(crate) async fn rest(&mut self) -> Vec<u8> {
+            let mut body = Vec::new();
+            while let Some(Ok(piece)) = self.next().await {
+                body.extend_from_slice(&piece);
+            }
+            body
+        }
+    }
+
     pub(crate) async fn raw(
         method: &str,
         path: &str,
         headers: &[(&str, &str)],
         body: Option<Vec<u8>>,
     ) -> Result<Response, Error> {
+        let (status, headers, mut pieces) = raw_streamed(method, path, headers, body).await?;
+        let body = pieces.rest().await;
+        Ok(Response {
+            status,
+            headers,
+            body,
+        })
+    }
+
+    /// Like [`raw`], but answers the status and headers as soon as they come,
+    /// and the body a piece at a time.
+    pub(crate) async fn raw_streamed(
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: Option<Vec<u8>>,
+    ) -> Result<(u16, Vec<(String, String)>, Pieces), Error> {
         let mut all: Vec<(String, Vec<u8>)> = vec![(
             runtara_workflow_api::headers::API_VERSION.to_string(),
             runtara_workflow_api::api_version().into_bytes(),
@@ -207,15 +276,17 @@ mod transport {
             .map(|(name, value)| (name, String::from_utf8_lossy(&value).into_owned()))
             .collect();
         let (done_tx, done_rx) = wit_future::new::<Result<(), ErrorCode>>(|| Ok(()));
-        let (body, _trailers) =
+        let (body, trailers) =
             crate::bindings::wasi::http::types::Response::consume_body(response, done_rx);
-        let body = body.collect().await;
-        let _ = done_tx.write(Ok(())).await;
-        Ok(Response {
+        Ok((
             status,
             headers,
-            body,
-        })
+            Pieces {
+                reader: Some(body),
+                done: Some(done_tx),
+                ended: Some(trailers),
+            },
+        ))
     }
 
     pub(crate) async fn call(
@@ -267,6 +338,30 @@ mod transport {
         _headers: &[(&str, &str)],
         _body: Option<Vec<u8>>,
     ) -> Result<Response, Error> {
+        Err(Error::Transport(
+            "the workflow API is only reachable from a wasm32 guest".into(),
+        ))
+    }
+
+    /// Nothing, outside a guest.
+    pub(crate) struct Pieces;
+
+    impl Pieces {
+        pub(crate) async fn next(&mut self) -> Option<Result<Vec<u8>, Error>> {
+            None
+        }
+
+        pub(crate) async fn rest(&mut self) -> Vec<u8> {
+            Vec::new()
+        }
+    }
+
+    pub(crate) async fn raw_streamed(
+        _method: &str,
+        _path: &str,
+        _headers: &[(&str, &str)],
+        _body: Option<Vec<u8>>,
+    ) -> Result<(u16, Vec<(String, String)>, Pieces), Error> {
         Err(Error::Transport(
             "the workflow API is only reachable from a wasm32 guest".into(),
         ))
@@ -821,6 +916,100 @@ pub async fn http(
         headers,
         body: raw.body,
     })
+}
+
+/// An outbound call's answer whose body arrives a piece at a time.
+pub struct OutboundStream {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pieces: transport::Pieces,
+}
+
+impl OutboundStream {
+    /// The next piece of the body as it arrives; `None` once it is whole, and
+    /// an error if the host cut it (it stopped coming, or was too long).
+    pub async fn next_piece(&mut self) -> Option<Result<Vec<u8>, Error>> {
+        self.pieces.next().await
+    }
+
+    /// The rest of the body.
+    pub async fn rest(&mut self) -> Vec<u8> {
+        self.pieces.rest().await
+    }
+}
+
+/// The result of [`http_streamed`]: the upstream answer, its body to come,
+/// or the call's failure with whatever upstream body was received.
+pub enum StreamedOutbound {
+    Reply(OutboundStream),
+    Failed {
+        failure: runtara_workflow_api::OutboundFailure,
+        body: Vec<u8>,
+    },
+}
+
+/// `POST /v1/http` with `stream`: an outbound call whose answer's body is
+/// handed over as it arrives, for an answer written a piece at a time (a
+/// model's). The answer is kept for no retry: calling again makes the call
+/// again.
+pub async fn http_streamed(
+    meta: &runtara_workflow_api::OutboundMeta,
+    body: Option<Vec<u8>>,
+) -> Result<StreamedOutbound, Error> {
+    let mut meta = meta.clone();
+    meta.has_body = body.is_some();
+    meta.stream = true;
+    let meta_json = serde_json::to_string(&meta).map_err(|e| Error::Transport(e.to_string()))?;
+    if !known::keeps("POST", "/v1/http") {
+        known::forget();
+    }
+    let key = next_idempotency_key();
+    let (status, headers, mut pieces) = transport::raw_streamed(
+        "POST",
+        "/v1/http",
+        &[
+            (runtara_workflow_api::headers::IDEMPOTENCY_KEY, key.as_str()),
+            (runtara_workflow_api::headers::OUTBOUND, meta_json.as_str()),
+        ],
+        body,
+    )
+    .await?;
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(header, _)| header.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.clone())
+    };
+    // A failure, or the API's own refusal, is read whole.
+    if !(200..300).contains(&status) {
+        let failure = header(runtara_workflow_api::headers::ERROR);
+        let response = Response {
+            status,
+            headers: headers.clone(),
+            body: pieces.rest().await,
+        };
+        if status == 502
+            && let Some(failure) = failure.and_then(|failure| serde_json::from_str(&failure).ok())
+        {
+            return Ok(StreamedOutbound::Failed {
+                failure,
+                body: response.body,
+            });
+        }
+        response.into_result()?;
+        return Err(Error::Transport("an unexpected answer".into()));
+    }
+    let upstream_status = header(runtara_workflow_api::headers::UPSTREAM_STATUS)
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| Error::Transport("reply without an upstream status".into()))?;
+    let upstream_headers = header(runtara_workflow_api::headers::UPSTREAM_HEADERS)
+        .and_then(|value| serde_json::from_str(&value).ok())
+        .unwrap_or_default();
+    Ok(StreamedOutbound::Reply(OutboundStream {
+        status: upstream_status,
+        headers: upstream_headers,
+        pieces,
+    }))
 }
 
 /// Like [`call`], but hands back non-2xx answers instead of decoding them.

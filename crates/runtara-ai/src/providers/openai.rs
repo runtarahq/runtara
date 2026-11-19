@@ -132,6 +132,121 @@ impl CompletionModel for OpenAICompletionModel {
             self.finish_http_response(response)
         })
     }
+
+    fn completion_streamed<'a>(
+        &'a self,
+        request: CompletionRequest,
+        pieces: &'a mut dyn crate::completion::Pieces,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<CompletionResponse, CompletionError>> + 'a>,
+    > {
+        Box::pin(async move {
+            let mut body = self.build_request_body(request)?;
+            body["stream"] = json!(true);
+            body["stream_options"] = json!({"include_usage": true});
+            let mut response = self
+                .http_request(body)
+                .call_streamed_async()
+                .await
+                .map_err(|e| CompletionError::HttpError(e.to_string()))?;
+            // An error, or an API that answered whole: read as unstreamed.
+            if response.status >= 400 || !super::sse::is_event_stream(&response.headers) {
+                return self.finish_http_response(super::sse::whole(response).await?);
+            }
+            let mut events = super::sse::Events::default();
+            let mut gathered = Gathered::default();
+            while let Some(piece) = response.next_piece().await {
+                let piece = piece.map_err(super::sse::cut)?;
+                for data in events.push(&piece) {
+                    if let Some(text) = gathered.take(&data)? {
+                        pieces.piece(&text).await;
+                    }
+                }
+            }
+            if let Some(data) = events.finish()
+                && let Some(text) = gathered.take(&data)?
+            {
+                pieces.piece(&text).await;
+            }
+            self.parse_response(gathered.into_response())
+        })
+    }
+}
+
+/// A streamed answer, gathered from its events: the text, each tool call by
+/// its index, and the usage the last event reports.
+#[derive(Default)]
+struct Gathered {
+    text: String,
+    tool_calls: Vec<ApiToolCall>,
+    usage: Option<ApiUsage>,
+}
+
+impl Gathered {
+    /// One event's `data`; the text it adds, if any.
+    fn take(&mut self, data: &str) -> Result<Option<String>, CompletionError> {
+        if data.trim() == "[DONE]" {
+            return Ok(None);
+        }
+        let event: Value = serde_json::from_str(data)?;
+        if let Some(error) = event.get("error").filter(|error| !error.is_null()) {
+            return Err(CompletionError::ResponseError(format!(
+                "OpenAI API error while streaming: {error}"
+            )));
+        }
+        if let Some(usage) = event.get("usage").filter(|usage| !usage.is_null()) {
+            self.usage = Some(serde_json::from_value(usage.clone())?);
+        }
+        let Some(delta) = event.pointer("/choices/0/delta") else {
+            return Ok(None);
+        };
+        for call in delta
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+            while self.tool_calls.len() <= index {
+                self.tool_calls.push(ApiToolCall {
+                    id: String::new(),
+                    function: ApiFunction {
+                        name: String::new(),
+                        arguments: String::new(),
+                    },
+                });
+            }
+            let gathered = &mut self.tool_calls[index];
+            if let Some(id) = call.get("id").and_then(Value::as_str) {
+                gathered.id = id.to_owned();
+            }
+            if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
+                gathered.function.name.push_str(name);
+            }
+            if let Some(arguments) = call.pointer("/function/arguments").and_then(Value::as_str) {
+                gathered.function.arguments.push_str(arguments);
+            }
+        }
+        match delta.get("content").and_then(Value::as_str) {
+            Some(text) if !text.is_empty() => {
+                self.text.push_str(text);
+                Ok(Some(text.to_owned()))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn into_response(self) -> ApiCompletionResponse {
+        ApiCompletionResponse {
+            choices: vec![ApiChoice {
+                message: ApiMessage {
+                    content: (!self.text.is_empty()).then_some(self.text),
+                    tool_calls: (!self.tool_calls.is_empty()).then_some(self.tool_calls),
+                },
+            }],
+            usage: self.usage,
+        }
+    }
 }
 
 /// Whether `model` belongs to the OpenAI "o-series" reasoning family
@@ -147,9 +262,11 @@ impl OpenAICompletionModel {
         &self,
         request: CompletionRequest,
     ) -> Result<runtara_http::RequestBuilder, CompletionError> {
-        let body = self.build_request_body(request)?;
+        Ok(self.http_request(self.build_request_body(request)?))
+    }
 
-        let req = if self.client.uses_proxy() {
+    fn http_request(&self, body: Value) -> runtara_http::RequestBuilder {
+        if self.client.uses_proxy() {
             // Proxy mode: relative path + connection_id header
             let mut req = self
                 .client
@@ -177,9 +294,7 @@ impl OpenAICompletionModel {
                 req = req.timeout(std::time::Duration::from_millis(ms));
             }
             req
-        };
-
-        Ok(req)
+        }
     }
 
     fn finish_http_response(
@@ -496,6 +611,92 @@ fn message_to_openai(msg: &Message) -> Vec<Value> {
 mod tests {
     use super::*;
     use crate::types::ToolDefinition;
+
+    #[test]
+    fn a_streamed_answer_is_gathered_from_its_events() {
+        let mut gathered = Gathered::default();
+        let events = [
+            r#"{"choices":[{"delta":{"role":"assistant","content":""}}]}"#,
+            r#"{"choices":[{"delta":{"content":"Checking"}}]}"#,
+            r#"{"choices":[{"delta":{"content":" now."}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":""}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"sku\":"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"A1\"}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":null}"#,
+            r#"{"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":4,"total_tokens":13}}"#,
+            "[DONE]",
+        ];
+        let mut said = Vec::new();
+        for event in events {
+            said.extend(gathered.take(event).unwrap());
+        }
+        assert_eq!(said, ["Checking", " now."]);
+        let model = Client::new("k").completion_model("gpt-4o");
+        let response = model.parse_response(gathered.into_response()).unwrap();
+        let choice: Vec<_> = response.choice.iter().cloned().collect();
+        assert_eq!(choice.len(), 2);
+        assert_eq!(
+            crate::message::assistant_text(choice.iter()).as_deref(),
+            Some("Checking now.")
+        );
+        let AssistantContent::ToolCall(call) = &choice[1] else {
+            panic!("{choice:?}")
+        };
+        assert_eq!(call.id, "call_1");
+        assert_eq!(call.function.name, "lookup");
+        assert_eq!(call.function.arguments, json!({"sku": "A1"}));
+        assert_eq!(response.usage.unwrap().total_tokens, 13);
+    }
+
+    #[test]
+    fn an_error_in_the_stream_fails_the_call() {
+        let error = Gathered::default()
+            .take(r#"{"error":{"message":"overloaded"}}"#)
+            .unwrap_err();
+        assert!(error.to_string().contains("overloaded"), "{error}");
+    }
+
+    #[test]
+    fn a_streamed_call_asks_to_stream_and_hands_on_the_text() {
+        use super::super::sse::stand_in;
+        let (base, served) = stand_in::serve(
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n\
+             data: [DONE]\n\n",
+        );
+        let model = Client::from_url("k", &base).completion_model("gpt-4o");
+        let mut kept = stand_in::Kept::default();
+        let request = model.completion_request(Message::user("hi")).build();
+        let response = stand_in::wait(model.completion_streamed(request, &mut kept)).unwrap();
+        assert_eq!(
+            crate::message::assistant_text(response.choice.iter()).as_deref(),
+            Some("Hello")
+        );
+        // The native client reads an answer whole: one piece here.
+        assert_eq!(kept.0.concat(), "Hello");
+        let asked = served.join().unwrap();
+        assert!(asked.contains("\"stream\":true"), "{asked}");
+        assert!(asked.contains("\"include_usage\":true"), "{asked}");
+    }
+
+    #[test]
+    fn a_streamed_call_answered_whole_is_read_whole() {
+        use super::super::sse::stand_in;
+        let (base, _served) = stand_in::serve(
+            "application/json",
+            r#"{"choices":[{"message":{"content":"Whole"}}]}"#,
+        );
+        let model = Client::from_url("k", &base).completion_model("gpt-4o");
+        let mut kept = stand_in::Kept::default();
+        let request = model.completion_request(Message::user("hi")).build();
+        let response = stand_in::wait(model.completion_streamed(request, &mut kept)).unwrap();
+        assert_eq!(
+            crate::message::assistant_text(response.choice.iter()).as_deref(),
+            Some("Whole")
+        );
+        assert!(kept.0.is_empty(), "{:?}", kept.0);
+    }
 
     #[test]
     fn test_message_to_openai_user_text() {

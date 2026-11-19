@@ -6,8 +6,12 @@
 pub mod bedrock;
 pub mod bedrock_models;
 #[cfg(feature = "completion")]
+pub(crate) mod eventstream;
+#[cfg(feature = "completion")]
 pub mod gemini;
 pub mod gemini_models;
 #[cfg(feature = "completion")]
 pub mod openai;
 pub mod openai_models;
+#[cfg(feature = "completion")]
+pub(crate) mod sse;

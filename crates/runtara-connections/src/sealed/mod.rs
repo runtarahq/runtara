@@ -900,6 +900,36 @@ impl SealedCredentials {
         body: Option<Vec<u8>>,
         limit: usize,
     ) -> Result<BoundedResponse, SendError> {
+        let response = self
+            .send_for_proxy(
+                tenant_id,
+                connection_id,
+                integration_id,
+                parameters,
+                method,
+                url,
+                headers,
+                body,
+            )
+            .await?;
+        bounded(response, limit).await
+    }
+
+    /// As [`Self::send_bounded`], with the response's body handed over as it
+    /// arrives and its headers as they are. Whoever reads the body holds it
+    /// to its limits.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_for_proxy(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        integration_id: &str,
+        parameters: &Value,
+        method: &str,
+        url: &str,
+        headers: impl IntoIterator<Item = (String, String)>,
+        body: Option<Vec<u8>>,
+    ) -> Result<SealedResponse, SendError> {
         let injected = policy::injected_headers(integration_id, parameters);
         let mut builder = http::Request::builder().method(method).uri(url);
         for (name, value) in headers {
@@ -914,17 +944,21 @@ impl SealedCredentials {
             }
         }
         let request = builder.body(body).map_err(|_| SendError::InvalidRequest)?;
-        let response = self
-            .send(
-                tenant_id,
-                connection_id,
-                integration_id,
-                parameters,
-                request,
-            )
-            .await
-            .map_err(SendError::Seal)?;
+        self.send(
+            tenant_id,
+            connection_id,
+            integration_id,
+            parameters,
+            request,
+        )
+        .await
+        .map_err(SendError::Seal)
+    }
+}
 
+/// `response` read whole, its headers and body within `limit` bytes.
+async fn bounded(response: SealedResponse, limit: usize) -> Result<BoundedResponse, SendError> {
+    {
         let status = response.status().as_u16();
         let headers: Vec<(String, String)> = response
             .headers()

@@ -28,4 +28,6 @@ tokio = { version = "1", features = ["time", "sync"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
+futures-util = "0.3"
+http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }

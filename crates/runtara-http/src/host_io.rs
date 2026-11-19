@@ -48,6 +48,7 @@ fn encode(request: RequestBuilder) -> Result<(OutboundMeta, Option<Vec<u8>>), Ht
                 .map(|timeout| timeout.as_millis().min(u64::MAX as u128) as u64),
             max_response_bytes: request.max_response_bytes,
             has_body: body.is_some(),
+            stream: false,
         },
         body,
     ))
@@ -118,6 +119,30 @@ pub(crate) fn execute(request: RequestBuilder) -> Result<HttpResponse, HttpError
 pub(crate) async fn execute_async(request: RequestBuilder) -> Result<HttpResponse, HttpError> {
     let (meta, body) = encode(request)?;
     decode(runtara_workflow_sdk::http(&meta, body).await)
+}
+
+/// As [`execute_async`], with the answer's body handed over as it arrives.
+/// A failure is decoded as a whole answer is.
+pub(crate) async fn execute_streamed_async(
+    request: RequestBuilder,
+) -> Result<crate::StreamingResponse, HttpError> {
+    use runtara_workflow_sdk::StreamedOutbound;
+    let (meta, body) = encode(request)?;
+    match runtara_workflow_sdk::http_streamed(&meta, body).await {
+        Ok(StreamedOutbound::Reply(stream)) => Ok(crate::StreamingResponse {
+            status: stream.status,
+            headers: stream
+                .headers
+                .iter()
+                .map(|(name, value)| (name.to_ascii_lowercase(), value.clone()))
+                .collect(),
+            body: crate::StreamingBody::Arriving(stream),
+        }),
+        Ok(StreamedOutbound::Failed { failure, body }) => {
+            decode(Ok(Outbound::Failed { failure, body })).map(crate::StreamingResponse::whole)
+        }
+        Err(error) => decode(Err(error)).map(crate::StreamingResponse::whole),
+    }
 }
 
 #[cfg(test)]

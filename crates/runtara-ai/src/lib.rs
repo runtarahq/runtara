@@ -20,9 +20,13 @@ pub mod providers;
 pub mod types;
 
 // Re-export key types at crate root for convenience.
-pub use completion::{CompletionError, CompletionModel, CompletionRequest, CompletionResponse};
+pub use completion::{
+    CompletionError, CompletionModel, CompletionRequest, CompletionResponse, Pieces,
+};
 pub use message::{AssistantContent, Message, UserContent};
 pub use one_or_many::OneOrMany;
 pub use orchestration::CompletionInvokeRequest;
 #[cfg(feature = "completion")]
-pub use orchestration::{CompletionFailure, run_completion, run_completion_async};
+pub use orchestration::{
+    CompletionFailure, run_completion, run_completion_async, run_completion_streamed,
+};

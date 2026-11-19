@@ -253,8 +253,8 @@ else: every client is right without it, and shows whole replies.
 
 Not here: editing a sent message, asking for another answer to the same
 message, more than one person in a conversation, uploading a file. An
-attachment stays a name, a type and a URL; where files are kept is decided
-with the adapters, which are the first to need it.
+attachment is a name, a type and a URL, and the conversation never keeps
+or fetches the file (decision 8).
 
 ### What an AI needs
 
@@ -412,8 +412,14 @@ Each with what this plan assumes.
    adapter turns it into what its platform takes.
 7. **What stop does to the queue.** Assumed: keeps it. The next message
    starts the next run.
-8. **Files.** Assumed: an attachment stays a URL through phase 4, and where
-   files are kept is decided with the first adapter.
+8. **Files.** Decided: an attachment is a name, a type and a URL, and the
+   conversation neither keeps nor fetches the file. What is done with a
+   platform's file is the adapter's: its workflows pass the platform's URL
+   on, or fetch the file and keep it where they choose, or hand it to a
+   model, as any workflow would. A person sending a file from the native
+   chat, who has no URL to give, needs a place for a tenant's files that
+   is no platform's. That is a feature of its own, for later; nothing in
+   phase 4 or 5 waits for it.
 
 ## What is not known yet
 
@@ -664,13 +670,11 @@ Departures:
   is what is kept, at once; pieces come with the asks that wait. A reader
   that connects in the middle of a reply is given the pieces held so far,
   from offset 0.
-- **The AI Agent step does not stream its model's answer.** This is not
-  built. It needs, in order: a response body read as it arrives on the
-  host's side of a guest's HTTP request (`runtara-http` and the component
-  host read a whole body today); the same through seal, which attaches a
-  model provider's key; a streamed completion in each provider of
-  `runtara-ai`; and the step saying each piece with the call above when its
-  run carries a conversation, under a `replyId` of its own. The path a
-  piece takes, the stream's handling of it and the contract a client reads
-  are built and tested, so that work changes none of them. It is the next
-  piece of this phase, and the plan allowed it to follow the adapters.
+- **The AI Agent step streams its model's answer**, built after the rest
+  of 4.7 and described in [ai-agent-streaming.md](ai-agent-streaming.md).
+  A response body is read as it arrives through the host and seal, each
+  provider of `runtara-ai` has a streamed completion, and a step whose run
+  carries a conversation says its answer in pieces, gathered every 50 ms,
+  under a `replyId` of its own, then the whole answer as the reply. A step
+  whose name begins with `_` is not streamed. The path a piece takes, the
+  stream's handling of it and the contract a client reads did not change.

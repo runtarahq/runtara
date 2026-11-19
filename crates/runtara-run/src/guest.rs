@@ -240,23 +240,24 @@ impl WasiHttpHooks for Api {
                 .send_request(relayed)
                 .await
                 .map_err(|_| HttpError::ConnectionTerminated)?;
-            let (parts, body) = response.into_parts();
+            // Handed on as it arrives, capped as it passes: an answer that
+            // streams reaches the guest a piece at a time.
             let limit = caps.response_body_bytes;
-            let body = Limited::new(body, limit)
-                .collect()
-                .await
-                .map_err(|_| HttpError::HttpResponseBodySize(Some(limit as u64)))?
-                .to_bytes();
-            Ok(http::Response::from_parts(parts, body))
+            Ok(response.map(|body| {
+                Limited::new(body, limit)
+                    .map_err(move |error| {
+                        if error.is::<http_body_util::LengthLimitError>() {
+                            HttpError::HttpResponseBodySize(Some(limit as u64))
+                        } else {
+                            HttpError::HttpProtocolError
+                        }
+                    })
+                    .boxed_unsync()
+            }))
         }));
         Box::new(async move {
-            let response: http::Response<Bytes> = served.await?;
+            let response: http::Response<WasiBody> = served.await?;
             let io: IoFuture = Box::new(async { Ok(()) });
-            let response = response.map(|body| {
-                Full::new(body)
-                    .map_err(|never| match never {})
-                    .boxed_unsync()
-            });
             Ok((response, io))
         })
     }

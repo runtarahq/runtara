@@ -29,6 +29,8 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::time::Duration;
 
+mod streaming;
+
 // ============================================================================
 // Local AgentError shim
 // ============================================================================
@@ -765,6 +767,12 @@ pub struct ChatCompletionInput {
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    #[field(
+        display_name = "Stream",
+        description = "Say the answer to the run's conversation as the model writes it, then as the reply. Set by the compiler for an AI Agent step whose name does not begin with _"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, CapabilityOutput)]
@@ -840,9 +848,23 @@ pub async fn chat_completion(
         timeout_ms: input.timeout_ms,
     };
 
-    let response = runtara_ai::run_completion_async(req)
-        .await
-        .map_err(|e| completion_error("AI_CHAT_COMPLETION_FAILED", e))?;
+    let to = match input.stream == Some(true) && input.output_schema.is_none() {
+        true => streaming::ToConversation::of_this_run().await,
+        false => None,
+    };
+    let response = if let Some(mut to) = to {
+        let response = runtara_ai::run_completion_streamed(req, &mut to)
+            .await
+            .map_err(|e| completion_error("AI_CHAT_COMPLETION_FAILED", e))?;
+        let text = runtara_ai::message::assistant_text(response.choice.iter()).unwrap_or_default();
+        // A reply not left is answered from the run's output instead.
+        let _ = to.reply(&text).await;
+        response
+    } else {
+        runtara_ai::run_completion_async(req)
+            .await
+            .map_err(|e| completion_error("AI_CHAT_COMPLETION_FAILED", e))?
+    };
 
     let choice = serde_json::to_value(&response.choice).map_err(|e| {
         AgentError::permanent(
@@ -965,6 +987,12 @@ pub struct ChatTurnInput {
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    #[field(
+        display_name = "Stream",
+        description = "Say the answer to the run's conversation as the model writes it, then as the reply. Set by the compiler for an AI Agent step whose name does not begin with _"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, CapabilityOutput)]
@@ -1083,9 +1111,15 @@ pub async fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentErro
         // DEFAULT_STEP_TIMEOUT_MS in run_completion.
         timeout_ms: input.timeout_ms,
     };
-    let response = runtara_ai::run_completion_async(req)
-        .await
-        .map_err(|e| completion_error("AI_TURN_COMPLETION_FAILED", e))?;
+    let mut to = match input.stream == Some(true) && input.output_schema.is_none() {
+        true => streaming::ToConversation::of_this_run().await,
+        false => None,
+    };
+    let response = match to.as_mut() {
+        Some(to) => runtara_ai::run_completion_streamed(req, to).await,
+        None => runtara_ai::run_completion_async(req).await,
+    }
+    .map_err(|e| completion_error("AI_TURN_COMPLETION_FAILED", e))?;
 
     // Record the user message (first turn only) then the assistant message.
     if is_first {
@@ -1140,6 +1174,10 @@ pub async fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentErro
         // final text must parse and validate against it — a non-conforming
         // response fails the turn instead of collapsing to a plain string.
         let text = final_text.unwrap_or_default();
+        if let Some(to) = to {
+            // A reply not left is answered from the run's output instead.
+            let _ = to.reply(&text).await;
+        }
         let response_value = match input.output_schema.as_ref() {
             Some(schema) => structured_response(&text, schema)?,
             None => Value::String(text),
@@ -1153,6 +1191,10 @@ pub async fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentErro
             response: Some(response_value),
         })
     } else {
+        // The text of a turn that asks for tools is not the reply.
+        if let Some(to) = to {
+            to.end().await;
+        }
         Ok(ChatTurnOutput {
             action: "tools".to_string(),
             chat_history,

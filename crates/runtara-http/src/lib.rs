@@ -65,6 +65,57 @@ pub struct HttpResponse {
     pub headers: HashMap<String, String>,
 }
 
+/// A response whose body arrives a piece at a time: for an answer written as
+/// it is made (a model's, as server-sent events).
+pub struct StreamingResponse {
+    /// HTTP status code.
+    pub status: u16,
+    /// Response headers (lowercase keys).
+    pub headers: HashMap<String, String>,
+    pub(crate) body: StreamingBody,
+}
+
+pub(crate) enum StreamingBody {
+    /// A body that came whole: one piece, then none.
+    Whole(Option<Vec<u8>>),
+    /// A body the workflow API hands over as it arrives.
+    #[cfg(all(feature = "wasi", not(feature = "native")))]
+    Arriving(runtara_workflow_sdk::OutboundStream),
+}
+
+impl StreamingResponse {
+    /// The next piece of the body as it arrives; `None` once it is whole, and
+    /// an error if it was cut (it stopped coming, or was too long).
+    pub async fn next_piece(&mut self) -> Option<Result<Vec<u8>, HttpError>> {
+        match &mut self.body {
+            StreamingBody::Whole(body) => body.take().map(Ok),
+            #[cfg(all(feature = "wasi", not(feature = "native")))]
+            StreamingBody::Arriving(stream) => stream
+                .next_piece()
+                .await
+                .map(|piece| piece.map_err(|error| HttpError::Transport(format!("{error:?}")))),
+        }
+    }
+
+    /// The rest of the body, whole.
+    pub async fn rest(&mut self) -> Result<Vec<u8>, HttpError> {
+        let mut body = Vec::new();
+        while let Some(piece) = self.next_piece().await {
+            body.extend_from_slice(&piece?);
+        }
+        Ok(body)
+    }
+
+    /// A response that came whole, as one that streams.
+    pub fn whole(response: HttpResponse) -> Self {
+        Self {
+            status: response.status,
+            headers: response.headers,
+            body: StreamingBody::Whole(Some(response.body)),
+        }
+    }
+}
+
 /// HTTP error.
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
@@ -216,6 +267,16 @@ impl RequestBuilder {
     /// Await an agent request using the same outbound contract.
     pub async fn call_agent_async(self) -> Result<HttpResponse, HttpError> {
         self.call_async().await
+    }
+
+    /// Await a request whose answer's body is handed over as it arrives. The
+    /// answer is kept for no retry: calling again makes the call again. The
+    /// native SDK reads it whole and hands it over as one piece.
+    pub async fn call_streamed_async(self) -> Result<StreamingResponse, HttpError> {
+        #[cfg(feature = "native")]
+        return native::execute(self).map(StreamingResponse::whole);
+        #[cfg(all(feature = "wasi", not(feature = "native")))]
+        return host_io::execute_streamed_async(self).await;
     }
 }
 

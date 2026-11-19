@@ -18,8 +18,16 @@ use http_body_util::{BodyExt, Full, Limited};
 use runtara_workflow_api::{Binding, Caps, headers};
 use wasmtime_wasi_http::{Error as HttpError, RequestOptions, WasiBody, WasiHttpHooks};
 
-/// A request the hook hands over, and the response it returns.
-pub type WorkflowApiFuture = Pin<Box<dyn Future<Output = http::Response<Bytes>> + Send>>;
+/// A request the hook hands over, and the response it returns. The response's
+/// body is handed to the guest as it arrives: a whole one is one piece.
+pub type WorkflowApiFuture = Pin<Box<dyn Future<Output = http::Response<WasiBody>> + Send>>;
+
+/// A whole body, as a response's.
+pub fn whole_body(body: Bytes) -> WasiBody {
+    Full::new(body)
+        .map_err(|never| match never {})
+        .boxed_unsync()
+}
 
 /// Serves workflow API requests. Implemented by whoever owns the `/v1` router
 /// (runtara-environment for the embedded runner). The request carries the
@@ -138,14 +146,6 @@ fn into_api_request(
     Ok(request)
 }
 
-fn from_api_response(response: http::Response<Bytes>) -> http::Response<HookBody> {
-    response.map(|body| {
-        Full::new(body)
-            .map_err(|never| match never {})
-            .boxed_unsync()
-    })
-}
-
 fn denied() -> SendFuture {
     Box::new(async { Err(HttpError::HttpRequestDenied) })
 }
@@ -206,7 +206,7 @@ impl WasiHttpHooks for WorkflowApiHooks {
         Box::new(async move {
             let response = served.await?;
             let io: IoFuture = Box::new(async { Ok(()) });
-            Ok((from_api_response(response), io))
+            Ok((response, io))
         })
     }
 }
@@ -229,7 +229,7 @@ mod tests {
                 http::Response::builder()
                     .status(200)
                     .header("content-type", "application/json")
-                    .body(Bytes::from_static(br#"{"ok":true}"#))
+                    .body(whole_body(Bytes::from_static(br#"{"ok":true}"#)))
                     .unwrap()
             })
         }

@@ -1387,6 +1387,12 @@ fn step_manifest(
                 }
                 "chat-turn"
             };
+            if ai_agent_is_shown(step) {
+                mapping.insert(
+                    "stream".to_string(),
+                    serde_json::json!({ "valueType": "immediate", "value": true }),
+                );
+            }
             let input_mapping_id = state.allocate_mapping_id();
             collections.mappings.push(DirectMappingManifest {
                 id: input_mapping_id,
@@ -1771,6 +1777,23 @@ fn ai_agent_mcp_prompt_addition(toolsets: &[String]) -> String {
 
 /// The AiAgent's tool edges as `(label, target_step_id)` pairs: labelled
 /// outgoing edges other than `next`/`onError`/`memory`/`mcp.*`.
+/// Whether an AI Agent step's answer is said to the run's conversation as it
+/// is written (`docs/ai-agent-streaming.md`): unless its name begins with `_`
+/// (its id, when it has no name), or it answers to an output schema, which
+/// is not text for a person.
+fn ai_agent_is_shown(step: &runtara_dsl::AiAgentStep) -> bool {
+    let named = step
+        .name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(&step.id);
+    !named.trim_start().starts_with('_')
+        && step
+            .config
+            .as_ref()
+            .is_none_or(|config| config.output_schema.is_none())
+}
+
 fn ai_agent_tool_edges(graph: &ExecutionGraph, step_id: &str) -> Vec<(String, String)> {
     graph
         .execution_plan
@@ -2511,6 +2534,68 @@ mod tests {
             "expected broad fixture coverage, got {parseable}"
         );
     }
+    /// An AI Agent step streams its answer to the run's conversation unless
+    /// its name (its id, when it has none) begins with `_`, or it answers to
+    /// an output schema.
+    #[test]
+    fn ai_agent_streams_unless_named_with_an_underscore() {
+        let step = |id: &str, name: Option<&str>, schema: bool| {
+            let mut config = serde_json::json!({
+                "systemPrompt": {"valueType": "immediate", "value": "sys"},
+                "userPrompt": {"valueType": "immediate", "value": "go"},
+            });
+            if schema {
+                config["outputSchema"] = serde_json::json!({"label": {"type": "string"}});
+            }
+            let mut step = serde_json::json!({
+                "id": id, "stepType": "AiAgent", "connectionId": "conn-1", "config": config,
+            });
+            if let Some(name) = name {
+                step["name"] = serde_json::json!(name);
+            }
+            step
+        };
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "answer",
+            "executionPlan": [
+                {"fromStep": "answer", "toStep": "hidden", "label": "next"},
+                {"fromStep": "hidden", "toStep": "_by_id", "label": "next"},
+                {"fromStep": "_by_id", "toStep": "named", "label": "next"},
+                {"fromStep": "named", "toStep": "typed", "label": "next"},
+                {"fromStep": "typed", "toStep": "finish", "label": "next"},
+            ],
+            "steps": {
+                "answer": step("answer", None, false),
+                "hidden": step("hidden", Some("_classify"), false),
+                "_by_id": step("_by_id", None, false),
+                "named": step("named", Some("Reply to the user"), false),
+                "typed": step("typed", Some("Extract"), true),
+                "finish": {"id": "finish", "stepType": "Finish"},
+            },
+        }))
+        .expect("graph parses");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest builds");
+        let streams = |step_id: &str| {
+            let mapping = manifest
+                .graph
+                .mappings
+                .iter()
+                .find(|mapping| {
+                    mapping.step_id == step_id && mapping.purpose == "agent.inputMapping"
+                })
+                .expect("the step's input mapping");
+            mapping
+                .value
+                .get("stream")
+                .map(|stream| stream["value"].clone())
+        };
+        assert_eq!(streams("answer"), Some(serde_json::json!(true)));
+        assert_eq!(streams("named"), Some(serde_json::json!(true)));
+        assert_eq!(streams("hidden"), None);
+        assert_eq!(streams("_by_id"), None);
+        assert_eq!(streams("typed"), None);
+    }
+
     #[test]
     fn ai_agent_manifest_threads_retry_config() {
         let graph: runtara_dsl::ExecutionGraph = serde_json::from_str(

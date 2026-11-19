@@ -13,6 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An AI Agent step's answer reaches its conversation as it is written.**
+  In a run that carries a conversation, an AI Agent step asks its model
+  to stream (OpenAI and compatible APIs, Gemini, Bedrock) and says the
+  text as `reply_delta` pieces, gathered about every 50 ms, then the whole
+  answer as the `reply` under the same `replyId`; the run is not answered
+  for again from its output. A step whose name begins with `_` (its id,
+  when it has no name) is not shown, nor one with an output schema.
+  Nothing in the DSL changes. A run with no conversation calls its model
+  as before. A streamed model call is held to bytes arriving, not to the
+  120 s bound on an outbound call: no first byte in 60 s, or none for 30 s
+  after, or 10 minutes in all, ends it (`RUNTARA_STREAM_FIRST_BYTE_SECS`,
+  `RUNTARA_STREAM_STALL_SECS`, `RUNTARA_STREAM_TOTAL_SECS`), and the run is
+  told the answer was cut. The workflow SDK reads an outbound answer a
+  piece at a time (`http_streamed`), and so does `runtara-http`
+  (`call_streamed_async`).
+
 - **A generated agent can carry hand-written capabilities.** A generated
   capability is one API call; one that takes several in one step (read every
   page, look up and then change, send a file in parts) is written by hand in
@@ -46,8 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   true` says a piece of the reply its `replyId` names; without it, the
   whole reply. A conversation stream sends each piece as it is said
   (`reply_delta`: `replyId`, `offset`, `text`, with no event id), then the
-  `reply`. Pieces are not kept. The AI Agent step does not yet stream its
-  model's answer this way.
+  `reply`. Pieces are not kept.
 - **A credential for one conversation.** `POST
   …/conversations/{key}/token` makes a token (`rtc_…`, an hour unless
   `ttlSeconds`, a day at most) for a page that talks to the workflow for
