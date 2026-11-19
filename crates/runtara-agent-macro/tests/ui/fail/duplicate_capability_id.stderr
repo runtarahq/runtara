@@ -1,0 +1,8 @@
+error[E0080]: evaluation panicked: two capabilities of this agent have the same id
+  --> tests/ui/fail/duplicate_capability_id.rs:24:1
+   |
+24 | / runtara_agent_macro::agent_component!(
+25 | |     agent = "probe",
+26 | |     capabilities = [get, custom::get_again],
+27 | | );
+   | |_^ evaluation of `_` failed here
