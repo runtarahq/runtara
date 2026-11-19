@@ -244,15 +244,19 @@ impl Talk {
     }
 
     async fn kinds(&self, key: &str) -> Vec<String> {
-        self.events(key).await.into_iter().map(|e| e.kind).collect()
+        self.events(key)
+            .await
+            .into_iter()
+            .map(|e| e.kind().to_owned())
+            .collect()
     }
 
     async fn replies(&self, key: &str) -> Vec<String> {
         self.events(key)
             .await
             .into_iter()
-            .filter(|event| event.kind == "reply")
-            .map(|event| event.body["text"].as_str().unwrap_or_default().to_owned())
+            .filter(|event| event.kind() == "reply")
+            .map(|event| event.body()["text"].as_str().unwrap_or_default().to_owned())
             .collect()
     }
 
@@ -268,6 +272,7 @@ fn text_message(id: &str, text: &str) -> Message {
         payload: None,
         sender: None,
         attachments: Vec::new(),
+        in_reply_to: None,
     }
 }
 
@@ -311,16 +316,18 @@ async fn a_conversation_is_carried_by_one_run_after_another() {
         .events("k")
         .await
         .into_iter()
-        .filter(|event| event.kind == "run_started")
-        .map(|event| event.body["text"].as_str().unwrap().to_owned())
+        .filter(|event| event.kind() == "run_started")
+        .map(|event| event.body()["text"].as_str().unwrap().to_owned())
         .collect();
     assert_eq!(sent, ["hello", "again"]);
     assert_eq!(
         talk.kinds("k").await,
         [
+            "message",
             "run_started",
             "reply",
             "run_ended",
+            "message",
             "run_started",
             "reply",
             "run_ended"
@@ -451,7 +458,7 @@ async fn a_run_replies_from_its_middle_and_its_output_is_not_said_twice() {
     // is not also answered for from its output.
     assert_eq!(talk.replies("k").await, ["On it.", "Done."]);
     let kinds = talk.kinds("k").await;
-    assert_eq!(kinds.first().map(String::as_str), Some("run_started"));
+    assert_eq!(kinds[..2], ["message", "run_started"]);
     assert_eq!(kinds.last().map(String::as_str), Some("run_ended"));
     assert!(kinds.iter().any(|kind| kind == "activity"));
 }
@@ -469,10 +476,10 @@ async fn a_message_answers_what_the_run_waits_for() {
         .events("k")
         .await
         .into_iter()
-        .filter(|event| event.kind == "waiting_for_input")
+        .filter(|event| event.kind() == "waiting_for_input")
         .collect();
     assert_eq!(waiting.len(), 1, "said once, however often it is read");
-    assert_eq!(waiting[0].body["requestId"], "req-1");
+    assert_eq!(waiting[0].body()["requestId"], "req-1");
     let state = talk
         .conversations
         .state(&talk.tenant, &talk.workflow, "k")
@@ -648,7 +655,7 @@ async fn a_reply_waits_for_a_reply_workflow_that_cannot_be_started_now() {
         .events("k")
         .await
         .into_iter()
-        .filter(|event| event.kind == "reply_route_failed")
+        .filter(|event| event.kind() == "reply_route_failed")
         .collect();
     assert_eq!(failed.len(), 1);
     assert_eq!(talk.replies("k").await, ["kept", "lost"], "still read");
@@ -727,7 +734,7 @@ async fn a_message_no_run_can_be_started_for_fails_and_says_why() {
         .unwrap();
     assert_eq!(sent.state, MessageState::Failed);
     assert!(sent.detail.unwrap().contains("Workflow not found"));
-    assert_eq!(talk.kinds("k").await, ["message_failed"]);
+    assert_eq!(talk.kinds("k").await, ["message", "message_failed"]);
 
     // A message with nothing to say starts a run with no `message` at all,
     // not a null one: how a client lets the workflow speak first.
@@ -765,4 +772,175 @@ async fn a_message_no_run_can_be_started_for_fails_and_says_why() {
             Err(ConversationError::Invalid(_))
         ));
     }
+}
+
+/// The log is the transcript: what was said to the workflow is in it from
+/// when it was said, and every event says which message it is for.
+#[tokio::test]
+async fn the_log_holds_each_message_and_says_which_turn_an_event_is_of() {
+    let talk = Talk::new().await;
+    talk.send("k", "m-1", "start").await;
+    let instance = talk.runs_of_workflow()[0].instance.clone();
+    // Sent while the run is busy: it is in the log now, before its turn.
+    assert_eq!(
+        talk.send("k", "m-2", "and then").await,
+        MessageState::Queued
+    );
+    talk.runs
+        .says(&instance, REPLY_EVENT, json!({"text": "First."}));
+    talk.runs.ends(&instance, json!({}));
+    talk.advance("k").await;
+    let second = talk.runs_of_workflow()[1].instance.clone();
+    talk.runs
+        .says(&second, REPLY_EVENT, json!({"text": "Second."}));
+    talk.runs.ends(&second, json!({}));
+    talk.advance("k").await;
+
+    let log: Vec<(String, Option<String>)> = talk
+        .events("k")
+        .await
+        .into_iter()
+        .map(|event| (event.kind().to_owned(), event.turn))
+        .collect();
+    let of = |kind: &str, turn: &str| (kind.to_owned(), Some(turn.to_owned()));
+    assert_eq!(
+        log,
+        [
+            of("message", "m-1"),
+            of("run_started", "m-1"),
+            of("message", "m-2"),
+            of("reply", "m-1"),
+            of("run_ended", "m-1"),
+            of("run_started", "m-2"),
+            of("reply", "m-2"),
+            of("run_ended", "m-2"),
+        ]
+    );
+    let said = &talk.events("k").await[2];
+    assert_eq!(said.body()["id"], "m-2");
+    assert_eq!(said.body()["text"], "and then");
+}
+
+/// A reply that carries an id is said once for its run, however often the
+/// step that says it is run; one without an id is said each time.
+#[tokio::test]
+async fn a_reply_with_an_id_is_said_once() {
+    let talk = Talk::new().await;
+    talk.send("k", "m-1", "start").await;
+    let instance = talk.runs_of_workflow()[0].instance.clone();
+    for _ in 0..2 {
+        talk.runs.says(
+            &instance,
+            REPLY_EVENT,
+            json!({"text": "Shipped.", "replyId": "r-1", "data": {"order": 7}, "format": "plain"}),
+        );
+        talk.runs
+            .says(&instance, REPLY_EVENT, json!({"text": "Hm."}));
+        talk.advance("k").await;
+    }
+    assert_eq!(talk.replies("k").await, ["Shipped.", "Hm.", "Hm."]);
+    let reply = talk
+        .events("k")
+        .await
+        .into_iter()
+        .find(|event| event.kind() == "reply")
+        .unwrap();
+    assert_eq!(
+        reply.body(),
+        json!({
+            "replyId": "r-1",
+            "text": "Shipped.",
+            "format": "plain",
+            "data": {"order": 7},
+            "instanceId": instance,
+        })
+    );
+    // The events are numbered with no gap where the repeat was passed over.
+    let seqs: Vec<i64> = talk
+        .events("k")
+        .await
+        .iter()
+        .map(|event| event.seq)
+        .collect();
+    assert_eq!(seqs, (1..=seqs.len() as i64).collect::<Vec<_>>());
+
+    // The same id from the next run is another reply.
+    talk.runs.ends(&instance, json!({}));
+    talk.advance("k").await;
+    talk.send("k", "m-2", "again").await;
+    let next = talk.runs_of_workflow()[1].instance.clone();
+    talk.runs.says(
+        &next,
+        REPLY_EVENT,
+        json!({"text": "Shipped again.", "replyId": "r-1"}),
+    );
+    talk.advance("k").await;
+    assert_eq!(talk.replies("k").await.last().unwrap(), "Shipped again.");
+}
+
+/// A message that names the request it answers answers that one, or fails:
+/// it is not given to another question, and does not start a run.
+#[tokio::test]
+async fn a_message_that_names_what_it_answers_answers_that_or_fails() {
+    let talk = Talk::new().await;
+    let answering = |id: &str, request: &str| Message {
+        payload: Some(json!({"approved": true})),
+        text: None,
+        in_reply_to: Some(request.to_owned()),
+        ..text_message(id, "")
+    };
+    let send = |message: Message| {
+        let talk = &talk;
+        async move {
+            talk.conversations
+                .send(&talk.tenant, &talk.workflow, "k", message)
+                .await
+                .expect("the message is taken")
+        }
+    };
+    talk.send("k", "m-1", "start").await;
+    let instance = talk.runs_of_workflow()[0].instance.clone();
+    talk.runs.waits(&instance, "req-1");
+    talk.advance("k").await;
+
+    // For a request that is not the one open: stale, and the run is told
+    // nothing.
+    let stale = send(answering("m-2", "req-0")).await;
+    assert_eq!(stale.state, MessageState::Failed);
+    assert!(stale.detail.unwrap().contains("no longer waited for"));
+    assert!(talk.runs.answers.lock().unwrap().is_empty());
+    // For the one that is open: delivered.
+    assert_eq!(
+        send(answering("m-3", "req-1")).await.state,
+        MessageState::Delivered
+    );
+    assert_eq!(talk.runs.answers.lock().unwrap()[0].1, "req-1");
+
+    // With no run to answer, it fails and starts none.
+    talk.runs.ends(&instance, json!({}));
+    talk.advance("k").await;
+    assert_eq!(
+        send(answering("m-4", "req-1")).await.state,
+        MessageState::Failed
+    );
+    assert_eq!(talk.runs_of_workflow().len(), 1);
+    let failed: Vec<_> = talk
+        .events("k")
+        .await
+        .into_iter()
+        .filter(|event| event.kind() == "message_failed")
+        .map(|event| {
+            (
+                event.body()["messageId"].as_str().unwrap().to_owned(),
+                event.turn,
+            )
+        })
+        .collect();
+    assert_eq!(
+        failed,
+        [
+            ("m-2".to_owned(), Some("m-2".to_owned())),
+            ("m-4".to_owned(), Some("m-4".to_owned()))
+        ]
+    );
 }

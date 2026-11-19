@@ -42,6 +42,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`runtara-validate-placed.wasm`; `RUNTARA_VALIDATE_GUEST_WASM` names
   another), and a server with executors does not start without it. Without
   executors nothing changes.
+- **A conversation's events have a contract.** Each event is one envelope,
+  `{seq, turn, kind, body, createdAt}`, and every kind's body is a type in
+  `openapi.json` (`ConversationEventKind`), so a client's types are
+  generated. `turn` is the id of the message an event is for. What is said
+  to a workflow is its own event, `message`, logged when it is sent. A
+  reply (`conversation.reply`) may carry `data` beside its text, says what
+  its text is written in (`format`: `markdown` unless `plain`), and with a
+  `replyId` is said once in its run however often its step is run. A
+  message may name the request it answers (`inReplyTo`) and then answers
+  that one or fails. `run_started` and `message_delivered` still carry the
+  message's text and sender, for clients written before `message`; read
+  `message` for them.
 - **A listener of intake's own.** With `RUNTARA_INTAKE_PUBLIC_LISTEN`,
   intake receives what anyone may send itself: a trigger's webhooks, the
   synchronous trigger and a provider's OAuth redirect, at the paths the API

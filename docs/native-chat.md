@@ -222,7 +222,9 @@ granted nothing on: `conversations`, `conversation_messages`,
   run, `payload` is the answer as it is, and `text` alone is `{"message":
   text}`. Its state is `queued`, `started`, `delivered` or `failed`; the
   answer to sending it says which, where that is known at once.
-- **Events** are numbered and kept: `run_started`, `reply`,
+- **Events** (since given a typed contract, a `message` event and a `turn`:
+  see [native-chat-phase-4.md](native-chat-phase-4.md#as-built)) are
+  numbered and kept: `run_started`, `reply`,
   `waiting_for_input`, `message_delivered`, `message_failed`, `run_ended`,
   `reply_route_failed`, and `activity`. `run_started` and
   `message_delivered` carry the message's text and sender, so the events
@@ -318,6 +320,12 @@ The architecture first, then the adapters (decision 2).
 
 **Later: what adapters need, and the adapters.** Not started until the
 core above is settled.
+
+Phase 4 has since been planned again, in
+[native-chat-phase-4.md](native-chat-phase-4.md): it is the native chat
+made whole (a typed log, pushed and streamed, with what a person, an AI, an
+adapter and a UI each need), and keeps only `conversation.send` of the list
+below. The rest of that list moves to phase 5, with the adapters.
 
 4. `conversation.send`, headers in the trigger's input, declared webhook
    checks in intake, a workflow's own answer to the synchronous trigger.
