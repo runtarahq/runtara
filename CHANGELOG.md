@@ -30,6 +30,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`runtara-validate-placed.wasm`; `RUNTARA_VALIDATE_GUEST_WASM` names
   another), and a server with executors does not start without it. Without
   executors nothing changes.
+- **What a person and a UI need of a conversation.** `POST
+  …/conversations/{key}/stop` stops the run that carries it (`run_ended`
+  with `status: stopped`); the messages waiting keep their turn unless
+  `clearQueue`. `GET /api/runtime/workflows/{id}/conversations` lists a
+  workflow's conversations, most recently active first, a page at a time,
+  each with the last thing said in it. A conversation has a `title` and
+  `metadata` (an object of its client's, up to 4 KB), set when it is
+  opened. Its events are read back from the newest (`order=desc`,
+  `before=<seq>`) and by kind (`kinds=message,reply`), on a stream too. A
+  conversation untouched for `RUNTARA_CONVERSATION_RETENTION_DAYS` (90) is
+  removed, a run's working (`activity`) after
+  `RUNTARA_CONVERSATION_ACTIVITY_DAYS` (7), and a deleted workflow's
+  conversations with it; `0` keeps for ever. `migrate-tenant` copies a
+  tenant's conversations.
 - **A conversation is pushed, not polled.** A run says when it has
   something new (a Postgres notice in the runtime database, in the
   transaction that makes it so), its conversation is read then, and
