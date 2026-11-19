@@ -532,6 +532,48 @@ answer (`nodes(ids:)` keeps a place for each id), so they are
 longer matches its endpoint: edited without `fetch`. Layout and comments do
 not count.
 
+## Hand-written capabilities
+
+A generated capability is one API call. Work that takes several in one step
+(read every page of a list, look an item up and then change it, send a file
+in parts) is a capability written by hand in the crate's `src/custom.rs`,
+which the agent carries beside the generated ones. List it in
+`connector.yaml` with its input struct and every output struct `custom.rs`
+declares that its output uses, nested ones included (a generated model it
+returns is registered already). An output struct left out compiles, but the
+step editor then shows that output without its fields.
+
+```yaml
+custom_capabilities:
+  - function: list_all_products
+    input: ListAllProductsInput
+    outputs: [ListAllProductsOutput]
+```
+
+`generate` adds each one to the agent's metadata (`agent_info()`) and to its
+component export (`agent_component!`), so it shows in the step editor and runs
+like a generated capability. In `custom.rs`:
+
+- Use the same macros as the generated code: `#[capability]` with
+  `module = "<agent id>"`, `CapabilityInput` (with the `_connection` field the
+  generated inputs have) and `CapabilityOutput`. The capability takes an input
+  struct of its own, declared in `custom.rs`, not a generated one.
+- Give every struct in `custom.rs` a name no generated type has. The agent's
+  metadata looks input and output types up by name, so a `ListProductsInput`
+  or `Product` of your own would replace the generated one's fields in the
+  step editor; `generate` refuses an input or output listed under a generated
+  type's name.
+- The capability's id is its function's name with `-` for `_`; set no `id` of
+  your own. `generate` refuses a function whose id a generated operation
+  already has, and `agent_component!` refuses two capabilities with one id
+  when the crate compiles.
+- A hand-written capability cannot suspend (`suspends = true`) or be
+  `trusted`: the generated agent declares neither.
+- Make calls through the generated operations' requests and the crate's
+  `kit.rs`, so errors read the same as everywhere else in the agent:
+  `ListProductsInput { first: Some(Some(250)), … }.request()?.send(connection, "SHOPIFY").await?`.
+- Declare the module in `src/lib.rs`: `pub mod custom;` and `pub use custom::*;`.
+
 ## A generated agent crate
 
 ```
@@ -543,7 +585,9 @@ crates/agents/runtara-agent-<id>/
   tests/*.rs          # hand-written tests
   src/generated.rs    # rendered by `generate`; never edit by hand
   src/kit.rs          # request builder and error envelope the generated code calls
+  src/custom.rs       # hand-written capabilities, if `custom_capabilities` lists any
   src/lib.rs          # hand-written: `pub mod kit; mod generated; pub use generated::*;`
+                      # (and `pub mod custom; pub use custom::*;` with custom.rs)
 ```
 
 ## How the templates map the spec
@@ -677,6 +721,7 @@ crates/agents/runtara-agent-<id>/
   editor as `any`, without its fields, and an explicit `null` inside it is dropped.
   Where that `null` means something, as in Jira's `update` (`{"set": null}`
   clears a field), type the input as a plain object with `input_types`.
-- Hand-written extra capabilities cannot be added to a generated agent yet.
+- A generated capability is one API call; one that takes several is written by
+  hand (see Hand-written capabilities).
 - A request-body field named like a path or query parameter of the same
   operation produces a compile error.
