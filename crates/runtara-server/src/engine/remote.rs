@@ -88,10 +88,83 @@ pub(crate) trait Transport: Send + Sync {
     ) -> Result<http::Response<Body>, Away>;
 }
 
-/// Over mutual TLS, to the engine at one address.
+/// Over mutual TLS, to the engine at an address: one engine, or several
+/// whose name resolves to each (docs/multiple-engines-plan.md, E6).
 struct Mtls {
     client: tls::Client,
     engine: String,
+    engines: Engines,
+}
+
+/// How often the engines' name is looked up again.
+const ENGINES_LOOKED_UP_EVERY: Duration = Duration::from_secs(10);
+
+/// The engines an address names, looked up now and then. Each request goes
+/// to one of them, at random; one that cannot be connected to is passed
+/// over for another, which a request that was never sent can be.
+struct Engines {
+    /// The host to look up and its port, unless the address is an IP.
+    lookup: Option<(String, u16)>,
+    found: std::sync::Mutex<Option<(tokio::time::Instant, Vec<String>)>>,
+}
+
+impl Engines {
+    fn of(engine: &str) -> Self {
+        let lookup = engine
+            .strip_prefix("https://")
+            .and_then(|rest| rest.rsplit_once(':'))
+            .and_then(|(host, port)| Some((host.to_owned(), port.parse::<u16>().ok()?)))
+            .filter(|(host, _)| {
+                !host.starts_with('[') && host.parse::<std::net::IpAddr>().is_err()
+            });
+        Self {
+            lookup,
+            found: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The engines' addresses, `https://ip:port`, in a random order; the
+    /// address as configured when its host is not looked up or not found.
+    async fn now(&self, engine: &str) -> Vec<String> {
+        let Some((host, port)) = &self.lookup else {
+            return vec![engine.to_owned()];
+        };
+        let known = self
+            .found
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut addresses = match known {
+            Some((at, addresses)) if at.elapsed() < ENGINES_LOOKED_UP_EVERY => addresses,
+            known => match tokio::net::lookup_host((host.as_str(), *port)).await {
+                Ok(found) => {
+                    let mut addresses: Vec<String> = found
+                        .map(|address| match address {
+                            std::net::SocketAddr::V4(v4) => format!("https://{v4}"),
+                            std::net::SocketAddr::V6(v6) => {
+                                format!("https://[{}]:{}", v6.ip(), v6.port())
+                            }
+                        })
+                        .collect();
+                    addresses.sort();
+                    addresses.dedup();
+                    *self
+                        .found
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some((tokio::time::Instant::now(), addresses.clone()));
+                    addresses
+                }
+                Err(_) => known.map(|(_, addresses)| addresses).unwrap_or_default(),
+            },
+        };
+        if addresses.is_empty() {
+            return vec![engine.to_owned()];
+        }
+        use rand::seq::SliceRandom;
+        addresses.shuffle(&mut rand::thread_rng());
+        addresses
+    }
 }
 
 #[async_trait]
@@ -101,29 +174,51 @@ impl Transport for Mtls {
         request: http::Request<Bytes>,
         within: Duration,
     ) -> Result<http::Response<Body>, Away> {
-        let (mut parts, body) = request.into_parts();
+        let (parts, body) = request.into_parts();
         let path = parts
             .uri
             .path_and_query()
             .map(|path| path.as_str())
-            .unwrap_or("/");
-        parts.uri = format!("{}{path}", self.engine).parse().map_err(|_| Away {
-            sent: false,
-            reason: "the request's path is not one".to_owned(),
-        })?;
-        let request = http::Request::from_parts(parts, http_body_util::Full::new(body));
-        match tokio::time::timeout(within, self.client.request(request)).await {
-            Err(_) => Err(Away {
-                sent: true,
-                reason: format!("no answer within {} seconds", within.as_secs()),
-            }),
-            Ok(Err(error)) => Err(Away {
-                // A connection that was never made carried nothing.
-                sent: !error.is_connect(),
-                reason: error.to_string(),
-            }),
-            Ok(Ok(response)) => Ok(response.map(Body::new)),
+            .unwrap_or("/")
+            .to_owned();
+        let until = tokio::time::Instant::now() + within;
+        let mut last = None;
+        for engine in self.engines.now(&self.engine).await {
+            let mut request = http::Request::builder()
+                .method(parts.method.clone())
+                .version(parts.version)
+                .uri(format!("{engine}{path}"))
+                .body(http_body_util::Full::new(body.clone()))
+                .map_err(|_| Away {
+                    sent: false,
+                    reason: "the request's path is not one".to_owned(),
+                })?;
+            *request.headers_mut() = parts.headers.clone();
+            match tokio::time::timeout_at(until, self.client.request(request)).await {
+                Err(_) => {
+                    return Err(Away {
+                        sent: true,
+                        reason: format!("no answer within {} seconds", within.as_secs()),
+                    });
+                }
+                // A connection that was never made carried nothing: another
+                // engine is asked.
+                Ok(Err(error)) if error.is_connect() => {
+                    last = Some(error.to_string());
+                }
+                Ok(Err(error)) => {
+                    return Err(Away {
+                        sent: true,
+                        reason: error.to_string(),
+                    });
+                }
+                Ok(Ok(response)) => return Ok(response.map(Body::new)),
+            }
         }
+        Err(Away {
+            sent: false,
+            reason: last.unwrap_or_else(|| "no engine is known".to_owned()),
+        })
     }
 }
 
@@ -293,7 +388,11 @@ impl RemoteEngine {
         let config = identity.client_config(&identity.ca_pem, None)?;
         let client = tls::client(config, server_name)?;
         Ok(Arc::new(Self {
-            transport: Arc::new(Mtls { client, engine }),
+            transport: Arc::new(Mtls {
+                client,
+                engines: Engines::of(&engine),
+                engine,
+            }),
             facts: RwLock::new(None),
             judges_by_it,
         }))
@@ -365,6 +464,22 @@ impl RemoteEngine {
     pub async fn learn(&self) -> bool {
         match self.try_ask(wire::Facts {}, Duration::from_secs(10)).await {
             Ok(facts) => {
+                // Engines behind one address are one release, compiling and
+                // running alike: an answer that differs from the last says
+                // they are not, or that one was upgraded.
+                if let Some(before) = self.facts()
+                    && (before.release != facts.release
+                        || before.trusted_pins != facts.trusted_pins
+                        || before.compiles_by != facts.compiles_by)
+                {
+                    tracing::warn!(
+                        before = ?before.release,
+                        now = ?facts.release,
+                        "The engine answers with other facts than before: engines behind one \
+                         address that differ in release, compiler or trusted built-ins judge \
+                         compiled workflows differently"
+                    );
+                }
                 // What this process judges compiled workflows by is the
                 // engine's compiler and what the engine runs, not its own.
                 if self.judges_by_it {
@@ -2535,6 +2650,97 @@ mod tests {
         assert_eq!(ask(&certificates.executor).await, Ok(StatusCode::OK));
         assert!(ask(&certificates.api).await.is_err());
         serving.abort();
+    }
+
+    #[test]
+    fn an_address_by_name_is_looked_up_and_one_by_ip_is_not() {
+        assert_eq!(
+            Engines::of("https://runtara:7445").lookup,
+            Some(("runtara".to_owned(), 7445))
+        );
+        assert_eq!(Engines::of("https://10.0.0.2:7445").lookup, None);
+        assert_eq!(Engines::of("https://[::1]:7445").lookup, None);
+    }
+
+    /// Engines behind one name: each request goes to one of them, and one
+    /// that is gone is passed over, its requests never sent
+    /// (docs/multiple-engines-plan.md, E6). `localhost` is the name, where it
+    /// resolves to both 127.0.0.1 and ::1 and both can be listened on.
+    #[tokio::test]
+    async fn requests_go_to_every_engine_a_name_resolves_to_and_pass_over_one_that_is_gone() {
+        let found: Vec<std::net::SocketAddr> = tokio::net::lookup_host(("localhost", 0))
+            .await
+            .map(|found| found.collect())
+            .unwrap_or_default();
+        if !(found.iter().any(|a| a.is_ipv4()) && found.iter().any(|a| a.is_ipv6())) {
+            eprintln!("localhost is not both 127.0.0.1 and ::1 here; nothing to spread over");
+            return;
+        }
+        let certificates = certificates();
+        let identity = tls::Identity::load(&certificates.engine).unwrap();
+        let v4 = tls::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let port = v4.local_addr().unwrap().port();
+        let Ok(v6) = tls::bind(format!("[::1]:{port}").parse().unwrap()).await else {
+            eprintln!("::1 cannot be listened on here; nothing to spread over");
+            return;
+        };
+        let serve = |listener, name: &'static str| {
+            tokio::spawn(tls::serve(
+                listener,
+                identity.server_config().unwrap(),
+                runtara_executor::protocol::EXECUTOR_NAME,
+                axum::Router::new().fallback(get(move || async move { name })),
+            ))
+        };
+        let first = serve(v4, "first");
+        let second = serve(v6, "second");
+        let remote = connected(&format!("https://localhost:{port}"), &certificates.executor);
+        let ask = || async {
+            let request = http::Request::get("/which").body(Bytes::new()).unwrap();
+            let response = remote
+                .transport
+                .send(request, Duration::from_secs(10))
+                .await
+                .expect("an engine answers");
+            String::from_utf8(
+                http_body_util::BodyExt::collect(response.into_body())
+                    .await
+                    .unwrap()
+                    .to_bytes()
+                    .to_vec(),
+            )
+            .unwrap()
+        };
+        let mut answered = std::collections::BTreeSet::new();
+        for _ in 0..40 {
+            answered.insert(ask().await);
+        }
+        assert_eq!(
+            answered.into_iter().collect::<Vec<_>>(),
+            ["first", "second"],
+            "requests go to both engines"
+        );
+
+        // One is gone (its listener closed; a client that had a connection
+        // to it would lose that with the process): every request is
+        // answered by the other.
+        second.abort();
+        let _ = second.await;
+        let remote = connected(&format!("https://localhost:{port}"), &certificates.executor);
+        for _ in 0..20 {
+            let request = http::Request::get("/which").body(Bytes::new()).unwrap();
+            let response = remote
+                .transport
+                .send(request, Duration::from_secs(10))
+                .await
+                .expect("the engine left answers");
+            let body = http_body_util::BodyExt::collect(response.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
+            assert_eq!(&body[..], b"first");
+        }
+        first.abort();
     }
 
     #[tokio::test]
