@@ -95,12 +95,40 @@ impl Singleton {
         lease: Duration,
         shutdown: ShutdownSignal,
     ) -> Self {
-        let name = name.into();
-        let owner = owner.into();
-        let (tx, held) = watch::channel(false);
+        Self::keep(manager, name.into(), owner.into(), lease, shutdown, false)
+    }
+
+    /// As [`Self::start`], having made the first attempt: whether it holds
+    /// the lease is known when this returns.
+    pub async fn begin(
+        manager: ConnectionManager,
+        name: impl Into<String>,
+        owner: impl Into<String>,
+        lease: Duration,
+        shutdown: ShutdownSignal,
+    ) -> Self {
+        let (name, owner) = (name.into(), owner.into());
+        let held = take_or_renew(&manager, &name, &owner, lease)
+            .await
+            .unwrap_or(false);
+        Self::keep(manager, name, owner, lease, shutdown, held)
+    }
+
+    fn keep(
+        manager: ConnectionManager,
+        name: String,
+        owner: String,
+        lease: Duration,
+        shutdown: ShutdownSignal,
+        held_now: bool,
+    ) -> Self {
+        let (tx, held) = watch::channel(held_now);
         let task_name = name.clone();
         runtara_store_postgres::tenant_scope::spawn(async move {
             let every = lease / 3;
+            if held_now {
+                tokio::time::sleep(every).await;
+            }
             loop {
                 let now_held = match take_or_renew(&manager, &task_name, &owner, lease).await {
                     Ok(held) => held,
@@ -168,5 +196,34 @@ impl Singleton {
                 return;
             }
         }
+    }
+}
+
+/// A job that runs on one engine at a time where engines share a Valkey,
+/// and on this one where there is none: this engine is then the only one.
+#[derive(Clone)]
+pub struct Job(Option<Singleton>);
+
+/// How long a job's lease stands unrenewed.
+pub const JOB_LEASE: Duration = Duration::from_secs(60);
+
+impl Job {
+    /// The job `name`, as this engine's when it holds its lease.
+    pub async fn new(
+        valkey: Option<ConnectionManager>,
+        name: impl Into<String>,
+        shutdown: ShutdownSignal,
+    ) -> Self {
+        match valkey {
+            Some(manager) => Self(Some(
+                Singleton::begin(manager, name, super::engine_id(), JOB_LEASE, shutdown).await,
+            )),
+            None => Self(None),
+        }
+    }
+
+    /// The job is this engine's to run now.
+    pub fn is_mine(&self) -> bool {
+        self.0.as_ref().is_none_or(Singleton::is_held)
     }
 }

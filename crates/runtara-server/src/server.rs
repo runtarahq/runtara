@@ -3579,6 +3579,7 @@ async fn start_as_platform(
     {
         let cleanup_pool = pool.clone();
         let cleanup_shutdown = shutdown_signal.clone();
+        let cleanup_valkey = redis_manager.clone();
         workers.intake(
             crate::roles::Role::Engine,
             "invocation cleanup",
@@ -3586,11 +3587,18 @@ async fn start_as_platform(
             async move {
                 let cfg =
                     workers::invocation_cleanup_worker::InvocationCleanupWorkerConfig::from_env();
+                let job = crate::peers::singleton::Job::new(
+                    cleanup_valkey,
+                    "invocation-cleanup",
+                    cleanup_shutdown.clone(),
+                )
+                .await;
                 let worker = workers::invocation_cleanup_worker::InvocationCleanupWorker::new(
                     cleanup_pool,
                     cfg,
                     cleanup_shutdown,
-                );
+                )
+                .with_job(job);
                 worker.run().await;
             },
         );
@@ -3603,18 +3611,29 @@ async fn start_as_platform(
     {
         let state = runtara_connections::ConnectionsState::from_config(connections_config.clone());
         let pending_shutdown = shutdown_signal.clone();
+        let pending_valkey = redis_manager.clone();
         workers.intake(
             crate::roles::Role::Engine,
             "unconfirmed OAuth sweep",
             &shutdown_coordinator,
             async move {
                 let service = runtara_connections::service::oauth::OAuthService::from_state(&state);
+                // One engine at a time: a provider is asked to revoke once.
+                let job = crate::peers::singleton::Job::new(
+                    pending_valkey,
+                    "unconfirmed-oauth-sweep",
+                    pending_shutdown.clone(),
+                )
+                .await;
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
                 loop {
                     tokio::select! {
                         biased;
                         _ = pending_shutdown.clone().wait() => return,
                         _ = interval.tick() => {}
+                    }
+                    if !job.is_mine() {
+                        continue;
                     }
                     match service.expire_pending(config::served_tenants()).await {
                         Ok(0) => {}
@@ -3857,6 +3876,8 @@ async fn start_as_platform(
         // not `spawn_intake`: it trims streams on its own interval and never
         // reads the shutdown flag, so waiting for it would spend the whole
         // intake grace on every shutdown for a task that cannot exit.
+        let stream_cleanup_valkey = redis_manager.clone();
+        let stream_cleanup_shutdown = shutdown_signal.clone();
         workers.detached(
             crate::roles::Role::Engine,
             "trigger stream cleanup",
@@ -3864,7 +3885,14 @@ async fn start_as_platform(
                 let redis_url = cleanup_config.connection_url();
                 match valkey::open_client(redis_url.as_str()) {
                     Ok(redis_client) => {
-                        valkey::cleanup::start_cleanup_task(redis_client, cleanup_config).await;
+                        let job = crate::peers::singleton::Job::new(
+                            stream_cleanup_valkey,
+                            "trigger-stream-cleanup",
+                            stream_cleanup_shutdown,
+                        )
+                        .await;
+                        valkey::cleanup::start_cleanup_task(redis_client, cleanup_config, job)
+                            .await;
                     }
                     Err(e) => {
                         eprintln!("Failed to create Redis client for cleanup task: {}", e);

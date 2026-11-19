@@ -253,3 +253,28 @@ async fn a_wait_in_process_on_one_engine_is_seen_by_every_other() {
     sharing.await.unwrap();
     members::leave(&pool, &here.id).await.unwrap();
 }
+
+/// A job is this engine's alone where there is no Valkey, and one engine's
+/// at a time where there is.
+#[tokio::test]
+async fn a_job_runs_on_one_engine_and_on_the_only_one() {
+    use runtara_server::peers::singleton::Job;
+    let alone = Job::new(None, "anything", ShutdownSignal::new()).await;
+    assert!(alone.is_mine());
+
+    let manager = manager().await;
+    let name = format!("job-{}", uuid::Uuid::new_v4().simple());
+    // Another engine holds it.
+    assert!(
+        singleton::take_or_renew(&manager, &name, "engine-other", Duration::from_secs(30))
+            .await
+            .unwrap()
+    );
+    let stop = ShutdownSignal::new();
+    let here = Job::new(Some(manager.clone()), &name, stop.clone()).await;
+    assert!(!here.is_mine(), "the other engine runs it");
+    singleton::release(&manager, &name, "engine-other")
+        .await
+        .unwrap();
+    stop.trigger();
+}
