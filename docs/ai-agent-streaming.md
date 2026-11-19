@@ -102,26 +102,38 @@ A rough size: 1 and 2 are the larger, three to four days together; 3 and 5
 a day each; 4 a day for OpenAI and Gemini and a day for Bedrock's framing;
 tests throughout.
 
-## Decisions it needs
+## Decisions
 
-1. **Which steps stream.** An AI Agent step's answer is not always for the
-   user: a step that classifies a message, or drafts what another step
-   sends, should not be shown as it is written. Recommended: a step streams
-   only when its author says so (`streamToConversation: true` on the step's
-   config), which is a change to the DSL, and so to its validation, the
-   validation package and the console's editor.
-2. **How a streamed answer ends.** The pieces carry a reply id; a client
-   shows them until the `reply` with that id arrives. Today an AI Agent's
-   answer reaches a conversation from the run's output (`answer.response`)
-   with no id, or from a `conversation.reply` step the author added.
-   Recommended: a step that streams also says its whole answer as the reply
-   under that id when it finishes, and the run's output is then not said
-   again (as for any run that replied).
-3. **A retry part-way through.** A step retried after it failed mid-answer
-   streams its answer again from the start, under a new reply id, and the
-   pieces of the first attempt go when the run ends. The idempotency receipt
-   of `/v1/http` is stored only when the body ends, so a guest that retries
-   the call itself after a cut makes the call again.
-4. **Timeouts.** An outbound call is bounded at 120 s in all. A long answer
-   that keeps arriving should not be cut: recommended, for a streamed call,
-   a bound on time without bytes (as seal has) beside the total.
+Made on 2026-11-19.
+
+1. **Which steps stream: by the step's name, not by the DSL.** The DSL is
+   not to carry anything chat-specific. An AI Agent step whose run carries
+   a conversation streams its answer there unless its name begins with `_`
+   (a step with no name goes by its id). `_classify` is not shown;
+   `answer` is. Nothing else in the DSL changes, and no validation or
+   editor change follows. An existing chat workflow shows every AI Agent
+   step not so named, so a step whose answer is not for the user is renamed
+   with a leading `_`.
+2. **How a streamed answer ends: as the whole reply, under the same id.**
+   A step that streams says its whole answer as the conversation's reply
+   under the reply id its pieces carried, when it finishes. A client
+   replaces the pieces with it. A run that replied this way is not
+   answered for again from its output.
+3. **A retry part-way through** is as the spike found: the step streams
+   its answer again from the start, under a new reply id, and the first
+   attempt's pieces go when the run ends.
+4. **Timeouts: a streamed call is judged by whether bytes keep coming.**
+   The 120 s bound on an outbound call stays as it is for every call that
+   does not stream. A streamed call is not held to it; it fails, as any
+   outbound call can, when:
+
+   | | Default |
+   |---|---|
+   | no first byte arrives within | 60 s |
+   | no byte arrives for | 30 s, once the first has |
+   | it has run in all for | 10 min |
+
+   The first is long because a reasoning model may think before it writes;
+   the second because a stream that is alive sends something every few
+   seconds; the third so a provider that trickles for ever still ends. They
+   are settings with these defaults, not constants.
