@@ -25,6 +25,9 @@
 #                            engine is back; the synchronous trigger says
 #                            the engine is away.
 #   8. WITHOUT INTAKE        webhooks answer 503; the rest of the API works.
+#   9. A LISTENER OF ITS OWN intake receives what anyone may send itself
+#                            (RUNTARA_INTAKE_PUBLIC_LISTEN), with no API in
+#                            the way, and serves nothing else there.
 #
 # Prerequisites: Postgres (POSTGRES_PASSWORD or PGPASSWORD in the
 # environment; `psql` on PATH or the container PG_CONTAINER), docker (an
@@ -63,6 +66,7 @@ ENGINE_PUBLIC_PORT="${TEST_ENGINE_PUBLIC_PORT:-17896}"
 ENGINE_HEALTH_PORT="${TEST_ENGINE_HEALTH_PORT:-17897}"
 INTAKE_PORT="${TEST_INTAKE_PORT:-17898}"
 INTAKE_HEALTH_PORT="${TEST_INTAKE_HEALTH_PORT:-17899}"
+INTAKE_PUBLIC_PORT="${TEST_INTAKE_PUBLIC_PORT:-17900}"
 TEST_CORE_PORT="${TEST_CORE_PORT:-18891}"
 TEST_ENV_PORT="${TEST_ENV_PORT:-18892}"
 TEST_CORE_HTTP_PORT="${TEST_CORE_HTTP_PORT:-18893}"
@@ -226,6 +230,7 @@ INTAKE_ENV=(
     "HOME=${HOME}"
     RUNTARA_ROLE=intake
     "RUNTARA_INTAKE_LISTEN=127.0.0.1:${INTAKE_PORT}"
+    "RUNTARA_INTAKE_PUBLIC_LISTEN=127.0.0.1:${INTAKE_PUBLIC_PORT}"
     "RUNTARA_INTAKE_HEALTH_LISTEN=127.0.0.1:${INTAKE_HEALTH_PORT}"
     "RUNTARA_INTAKE_TLS_DIR=${WORK_DIR}/pki-intake"
     "RUNTARA_ENGINE_URL=https://127.0.0.1:${ENGINE_PORT}"
@@ -373,7 +378,15 @@ echo "${SAID}" | grep -q "was given RUNTARA_CONNECTIONS_ENCRYPTION_KEY" \
 SAID=$(refused_start env -i "${INTAKE_ENV[@]}" RUNTARA_SEAL_MODE=in_process "${RUNTARA_SERVER_BIN}")
 echo "${SAID}" | grep -q "RUNTARA_ROLE=intake needs a seal of its own" \
     || { print_error "an intake with seal in itself did not refuse to start: ${SAID}"; exit 1; }
-print_success "intake refuses the runtime database, the key that opens connections, and a seal in itself"
+# With nowhere to listen it has nothing to do.
+NOWHERE=()
+for setting in "${INTAKE_ENV[@]}"; do
+    case "${setting}" in RUNTARA_INTAKE_LISTEN=*|RUNTARA_INTAKE_PUBLIC_LISTEN=*) ;; *) NOWHERE+=("${setting}") ;; esac
+done
+SAID=$(refused_start env -i "${NOWHERE[@]}" "${RUNTARA_SERVER_BIN}")
+echo "${SAID}" | grep -q "RUNTARA_ROLE=intake needs somewhere to listen" \
+    || { print_error "an intake with nowhere to listen did not refuse to start: ${SAID}"; exit 1; }
+print_success "intake refuses the runtime database, the key that opens connections, a seal in itself, and to start with nowhere to listen"
 
 print_step "Starting the engine, intake and the API..."
 start_engine
@@ -583,6 +596,51 @@ RESP=$(curl -sS --max-time 60 -X POST -H 'Content-Type: application/json' -d '{"
 [ "$(echo "${RESP}" | jq -r '.status // empty')" = "queued" ] \
     || { print_error "with intake back the webhook was not queued: ${RESP}"; exit 1; }
 print_success "with intake away webhooks answered 503 and callers' work went on; with it back, webhooks were queued"
+
+#-------------------------------------------------------------------------
+print_step "9. On a listener of its own, intake receives what anyone may send with no API in the way..."
+# The API is stopped, and intake is started with no listener for it: what
+# arrives now can have come through no other process.
+stop "${API_PID}"; API_PID=""
+stop "${INTAKE_PID}"; INTAKE_PID=""
+KEPT_ENV=("${INTAKE_ENV[@]}")
+INTAKE_ENV=()
+for setting in "${KEPT_ENV[@]}"; do
+    case "${setting}" in RUNTARA_INTAKE_LISTEN=*) ;; *) INTAKE_ENV+=("${setting}") ;; esac
+done
+start_intake
+grep -q "Intake listening for anyone" "${INTAKE_LOG}" \
+    || { print_error "intake does not say it listens for anyone"; exit 1; }
+ANYONE="http://127.0.0.1:${INTAKE_PUBLIC_PORT}"
+BEFORE=$(completed_runs)
+RESP=$(curl -sS --max-time 60 -X POST -H 'Content-Type: application/json' -d '{"n": 9}' \
+    "${ANYONE}/api/runtime/events/http/${TRIGGER}/run")
+[ "$(echo "${RESP}" | jq -r '.status // empty')" = "queued" ] \
+    || { print_error "a webhook sent to intake itself was not queued: ${RESP}"; exit 1; }
+wait_for_a_run "${BEFORE}" || { print_error "the webhook sent to intake itself did not run"; exit 1; }
+# The tenant's own form of the path, as an edge sends it.
+RESP=$(curl -sS --max-time 120 -X POST -H 'Content-Type: application/json' -d '{}' \
+    "${ANYONE}/api/runtime/${TENANT}/events/http-sync/${WF}")
+echo "${RESP}" | jq -e '.success == true and .outputs.answer == 42' >/dev/null \
+    || { print_error "the synchronous trigger sent to intake itself did not run: $(echo "${RESP}" | head -c 400)"; exit 1; }
+# A signed webhook is checked there as it is anywhere: a bad signature is refused.
+CODE=$(http_status -X POST -H 'Content-Type: application/json' \
+    -d '{"signature":{"timestamp":"1","token":"t","signature":"00"}}' \
+    "${ANYONE}/api/runtime/events/http/${SIGNED_TRIGGER}/run")
+case "${CODE}" in 401|403) ;; *) print_error "a badly signed webhook sent to intake itself answered ${CODE}"; exit 1 ;; esac
+RESP=$(curl -sS --max-time 60 -D - "${ANYONE}/api/oauth/${TENANT}/callback?state=nobody-began-this&code=c1")
+echo "${RESP}" | grep -qiE "Invalid or expired authorization|^location: .*[?&]error=invalid_state" \
+    || { print_error "a redirect sent to intake itself was not answered by the engine: ${RESP}"; exit 1; }
+# Nothing else of the API is there, with a key or without, nor what the API
+# and intake say to each other.
+KEY_HEADER=(-H "Authorization: Bearer rt_not-a-key")
+for path in /api/runtime/workflows /api/runtime/connections "/api/runtime/${TENANT}/workflows" \
+    /api/runtime/me /mcp "/engine/v1/served/events/api/runtime/events/http/${TRIGGER}/run"; do
+    [ "$(http_status "${ANYONE}${path}")" = "404" ] && [ "$(http_status "${KEY_HEADER[@]}" "${ANYONE}${path}")" = "404" ] \
+        || { print_error "intake's own listener answers ${path}"; exit 1; }
+done
+[ "$(http_status "${ANYONE}/health")" = "200" ] || { print_error "intake's own listener does not say it is up"; exit 1; }
+print_success "with the API stopped, intake queued a webhook, ran the synchronous trigger, refused a bad signature and finished a redirect; it serves nothing else there"
 
 echo
 print_success "intake received what anyone may send, and held nothing a run is made of"

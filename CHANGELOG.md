@@ -30,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`runtara-validate-placed.wasm`; `RUNTARA_VALIDATE_GUEST_WASM` names
   another), and a server with executors does not start without it. Without
   executors nothing changes.
+- **A listener of intake's own.** With `RUNTARA_INTAKE_PUBLIC_LISTEN`,
+  intake receives what anyone may send itself: a trigger's webhooks, the
+  synchronous trigger and a provider's OAuth redirect, at the paths the API
+  serves them at, and `404` for everything else. A deployment routes those
+  paths to it at its edge, so that none of it passes through the API.
+  `RUNTARA_INTAKE_LISTEN`, where the API hands it the same, is no longer
+  required: intake needs one of the two. See `docs/roles.md`.
 - **With executors, workflows are compiled on one.** A server whose
   runner is executors (`RUNTARA_RUNNER=executor`) places the compiler as a
   guest there, like a run: in a `runtara-run` that can open no file and

@@ -108,10 +108,11 @@ too). A stack that has already run without it is brought over as it is.
 
 ## Intake
 
-A trigger's webhook and the synchronous trigger are sent by anyone. By
-default the API hands them to the engine as they arrived. With
-`RUNTARA_ROLE=intake` a third process receives them instead, so that
-anonymous traffic does not reach the process that holds run state.
+A trigger's webhook, the synchronous trigger and a provider's OAuth
+redirect are sent by anyone. A single process receives them itself. An
+engine that is a process of its own does not: with `RUNTARA_ROLE=intake` a
+third process receives them, so that anonymous traffic does not reach the
+process that holds run state.
 
 Intake looks up the trigger a webhook names, checks its signature where the
 trigger is bound to a connection that signs, and queues the run. The engine
@@ -120,7 +121,8 @@ and wait.
 
 | | Intake |
 |---|---|
-| `RUNTARA_INTAKE_LISTEN` | the address it listens on for the API, `host:port` |
+| `RUNTARA_INTAKE_PUBLIC_LISTEN` | the address it receives what anyone may send on itself, `host:port`, in plain HTTP behind whatever terminates TLS |
+| `RUNTARA_INTAKE_LISTEN` | the address it listens on for the API, `host:port`, over mutual TLS. One of the two is needed; both may be set |
 | `RUNTARA_INTAKE_TLS_DIR` | its certificate directory, from `init-pki --intake-dir` |
 | `RUNTARA_ENGINE_URL` | where the engine listens |
 | `RUNTARA_INTAKE_HEALTH_LISTEN` | optional: where it answers `/health`, and nothing else |
@@ -137,6 +139,26 @@ provider's redirect as it arrived, it answers `403 NOT_FOR_THE_ENGINE`. So
 an API in front of one, given no `RUNTARA_INTAKE_URL`, has nowhere to hand
 those and answers them `503 NO_INTAKE`; everything else it does goes on. A
 single process (`RUNTARA_ROLE=all`) receives them itself, as before.
+
+**A listener of its own.** Handed over by the API, what anyone may send
+still passes through the process that holds callers' sessions and keys to
+the rest of the API. With `RUNTARA_INTAKE_PUBLIC_LISTEN`, intake receives
+it itself, and the deployment's edge routes these paths there and
+everything else to the API:
+
+| Path | |
+|---|---|
+| `/api/runtime/events/…` | a trigger's webhooks and the synchronous trigger |
+| `/api/runtime/{tenant}/events/…` | the same, in a tenant's own form |
+| `/api/oauth/…` | a provider's OAuth redirect |
+
+The listener answers those, `/health`, and `404` to everything else: no
+other part of the API is there, with a credential or without. It takes
+nothing a request says of itself in the API's words (a caller, a tenant, a
+source). The API then needs no `RUNTARA_INTAKE_URL`, and intake no
+`RUNTARA_INTAKE_LISTEN`; an API that is still sent one of these paths says
+`503 NO_INTAKE`. The evaluation stack's proxy forwards a port and routes no
+path, so its overlay has the API hand them over instead.
 
 **What it is granted.** `scripts/roles/intake-database-role.sql` gives its
 database role the triggers to read, the tables a queued run is written to,
