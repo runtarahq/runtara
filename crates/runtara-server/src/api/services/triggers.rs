@@ -125,8 +125,12 @@ impl TriggerService {
                 }
             }
             TriggerType::Http => {
-                // HTTP triggers might have path configuration
-                // Validation can be added here if needed
+                // `synchronous`: the webhook is answered by the workflow's run.
+                if let Some(synchronous) = configuration.as_ref().and_then(|c| c.get("synchronous"))
+                    && !synchronous.is_boolean()
+                {
+                    return Err("HTTP trigger's 'synchronous' must be true or false".to_string());
+                }
             }
             TriggerType::Email => {
                 // Email triggers might have sender/subject filters

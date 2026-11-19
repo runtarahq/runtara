@@ -681,6 +681,12 @@ async fn execute_request(
             &mut resolved,
         )?;
 
+        // A stand-in for the type's API, in end-to-end tests
+        // (`RUNTARA_STAND_IN_API_BASES`): seal's policy names it too.
+        if let Some(base) = crate::stand_in_api_bases().get(integration_id) {
+            resolved.base_url = Some(base.clone());
+        }
+
         // Unlike generic HTTP connections, mTLS has no development HTTP
         // escape hatch. A manually-created or legacy record must not gain a
         // warn/off-mode path around that invariant. seal presents the

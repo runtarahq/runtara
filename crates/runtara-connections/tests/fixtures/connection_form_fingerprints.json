@@ -175,9 +175,9 @@
   },
   {
     "integrationId": "telegram_bot",
-    "fieldCount": 1,
-    "serializedBytes": 499,
-    "fnv1a64": "608b4e5db01474c4"
+    "fieldCount": 2,
+    "serializedBytes": 908,
+    "fnv1a64": "e60fab3b5c825cbb"
   },
   {
     "integrationId": "ups_client_credentials",

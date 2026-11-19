@@ -1,0 +1,49 @@
+{
+  "name": "Slack: replies out",
+  "description": "The conversation's reply workflow: started with each reply, it posts the reply's text to the Slack channel, and thread, the message came from.",
+  "entryPoint": "has_text",
+  "inputSchema": {
+    "conversation": { "type": "object" },
+    "event": { "type": "object" }
+  },
+  "steps": {
+    "has_text": {
+      "id": "has_text",
+      "stepType": "Conditional",
+      "name": "Is there anything to say?",
+      "condition": {
+        "type": "operation", "op": "IS_NOT_EMPTY",
+        "arguments": [ { "valueType": "reference", "value": "data.event.body.text" } ]
+      }
+    },
+    "post": {
+      "id": "post",
+      "stepType": "Agent",
+      "name": "Post to Slack",
+      "agentId": "slack",
+      "capabilityId": "send-message",
+      "connectionId": "__SLACK_CONNECTION__",
+      "inputMapping": {
+        "channel": { "valueType": "reference", "value": "data.conversation.metadata.channel" },
+        "thread_ts": { "valueType": "reference", "value": "data.conversation.metadata.thread_ts" },
+        "text": { "valueType": "reference", "value": "data.event.body.text" }
+      }
+    },
+    "posted": {
+      "id": "posted",
+      "stepType": "Finish",
+      "inputMapping": {
+        "channel": { "valueType": "reference", "value": "steps.post.outputs.channel" },
+        "ts": { "valueType": "reference", "value": "steps.post.outputs.ts" }
+      }
+    },
+    "silent": { "id": "silent", "stepType": "Finish", "inputMapping": {} }
+  },
+  "executionPlan": [
+    { "fromStep": "has_text", "toStep": "post", "label": "true" },
+    { "fromStep": "has_text", "toStep": "silent", "label": "false" },
+    { "fromStep": "post", "toStep": "posted" }
+  ],
+  "variables": {},
+  "outputSchema": {}
+}

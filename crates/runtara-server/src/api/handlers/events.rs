@@ -76,7 +76,8 @@ pub async fn capture_http_event(
     Path((trigger_id, action)): Path<(String, String)>,
     Query(metadata): Query<crate::api::dto::workflows::RunLabelQuery>,
     request: Request,
-) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+    use axum::response::IntoResponse;
     // Extract parts from request
     let (parts, body) = request.into_parts();
     let method = parts.method.clone();
@@ -165,21 +166,33 @@ pub async fn capture_http_event(
         .clone()
         .unwrap_or_else(|| crate::config::tenant_id().to_string());
 
-    // Verify webhook signature if the trigger has a linked connection.
-    // From here on the work is the trigger's tenant's.
-    if let Some(ref body_bytes) = raw_body_bytes
-        && let Err(e) = runtara_store_postgres::tenant_scope::scoped(
-            tenant_id.clone(),
-            check.check(&trigger, &tenant_id, &headers, body_bytes),
-        )
-        .await
+    // Check the webhook if the trigger has a linked connection. A form's
+    // fields are read from what was parsed of it; its body is not kept, so a
+    // check that signs the body refuses it. From here on the work is the
+    // trigger's tenant's.
+    let withheld = match runtara_store_postgres::tenant_scope::scoped(
+        tenant_id.clone(),
+        check.check(
+            &trigger,
+            &tenant_id,
+            crate::api::services::webhook_verification::Received {
+                headers: &headers,
+                body: raw_body_bytes.as_deref().unwrap_or_default(),
+                fields: is_multipart.then(|| &parsed_body["fields"]),
+            },
+        ),
+    )
+    .await
     {
-        let error_response = json!({
-            "success": false,
-            "message": format!("Webhook verification failed: {}", e)
-        });
-        return Err((StatusCode::UNAUTHORIZED, Json(error_response)));
-    }
+        Ok(withheld) => withheld,
+        Err(e) => {
+            let error_response = json!({
+                "success": false,
+                "message": format!("Webhook verification failed: {}", e)
+            });
+            return Err((StatusCode::UNAUTHORIZED, Json(error_response)));
+        }
+    };
 
     // Process the trigger
     {
@@ -193,7 +206,7 @@ pub async fn capture_http_event(
         }
 
         // Build inputs from HTTP request
-        let inputs = build_inputs_from_http_parsed(&method, &uri, &headers, parsed_body);
+        let inputs = build_inputs_from_http_parsed(&method, &uri, &headers, &withheld, parsed_body);
 
         // Extract headers for the event
         let header_pairs: Vec<(String, String)> = headers
@@ -225,6 +238,39 @@ pub async fn capture_http_event(
                     format!("{tenant_id}:{trigger_id}:{action}:{identity}").as_bytes(),
                 )
             });
+
+        // A synchronous trigger runs its workflow and waits, and is answered
+        // with what the workflow answers (`httpResponse`), for a platform that
+        // needs an answer of its own at once.
+        let synchronous = trigger
+            .configuration
+            .as_ref()
+            .and_then(|c| c.get("synchronous"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if synchronous {
+            let ran = runtara_store_postgres::tenant_scope::scoped(
+                tenant_id.clone(),
+                engine.run_sync(crate::workers::execution_engine::SyncRequest {
+                    run_label: metadata.run_label,
+                    tenant_id: &tenant_id,
+                    workflow_id: &trigger.workflow_id,
+                    version: None,
+                    inputs,
+                }),
+            )
+            .await;
+            return match ran {
+                Ok(result) => Ok(crate::api::handlers::workflows_sync::answer(result)),
+                Err(error) => {
+                    tracing::debug!("Synchronous trigger run failed: {error}");
+                    Ok(
+                        crate::api::handlers::common::execution_error_response(&error)
+                            .into_response(),
+                    )
+                }
+            };
+        }
 
         // Read debug flag from trigger configuration
         let debug = trigger
@@ -264,7 +310,7 @@ pub async fn capture_http_event(
                     "duplicate": enqueued.duplicate,
                     "workflow_id": trigger.workflow_id,
                 });
-                Ok((StatusCode::OK, Json(response)))
+                Ok((StatusCode::OK, Json(response)).into_response())
             }
             Err(crate::workers::execution_engine::ExecutionError::EntitlementDenied(denial)) => {
                 Err((denial.status(), Json(denial.json_body())))
@@ -397,6 +443,36 @@ fn parse_body_as_json(body: &Bytes) -> Value {
     })
 }
 
+/// Headers a webhook's run is never handed: the caller's own credentials.
+/// A run's input is kept with the run and shown with it.
+const WITHHELD_HEADERS: &[&str] = &["authorization", "cookie", "proxy-authorization"];
+
+/// A webhook's headers as its run reads them (`data.headers`): by name in
+/// lower case, a repeated header's values joined with `, `, without the
+/// caller's credentials and without `withheld` (a header a check found a
+/// secret in). A value that is not text is left out.
+fn webhook_headers(headers: &HeaderMap, withheld: &[String]) -> serde_json::Map<String, Value> {
+    let mut map = serde_json::Map::new();
+    for (name, value) in headers {
+        let name = name.as_str();
+        if WITHHELD_HEADERS.contains(&name) || withheld.iter().any(|w| w.eq_ignore_ascii_case(name))
+        {
+            continue;
+        }
+        let Ok(value) = value.to_str() else { continue };
+        match map.get_mut(name) {
+            Some(Value::String(joined)) => {
+                joined.push_str(", ");
+                joined.push_str(value);
+            }
+            _ => {
+                map.insert(name.to_owned(), Value::String(value.to_owned()));
+            }
+        }
+    }
+    map
+}
+
 /// Build workflow inputs from HTTP request data with pre-parsed body
 ///
 /// Returns the canonical Runtara format: `{"data": {...}, "variables": {}}`
@@ -404,6 +480,7 @@ fn build_inputs_from_http_parsed(
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
+    withheld: &[String],
     parsed_body: Value,
 ) -> Value {
     // Extract query string
@@ -423,6 +500,7 @@ fn build_inputs_from_http_parsed(
             "path": uri.path(),
             "query": query,
             "content_type": content_type,
+            "headers": webhook_headers(headers, withheld),
             "body": parsed_body,
         },
         "variables": {}
@@ -432,6 +510,35 @@ fn build_inputs_from_http_parsed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_webhooks_run_reads_its_headers_but_not_its_callers_credentials() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Signature", "v0=abc".parse().unwrap());
+        headers.append("x-forwarded-for", "10.0.0.1".parse().unwrap());
+        headers.append("x-forwarded-for", "10.0.0.2".parse().unwrap());
+        headers.insert("authorization", "Bearer secret".parse().unwrap());
+        headers.insert("cookie", "session=secret".parse().unwrap());
+        headers.insert("x-token", "checked-secret".parse().unwrap());
+        headers.insert("content-type", "application/json".parse().unwrap());
+
+        let inputs = build_inputs_from_http_parsed(
+            &Method::POST,
+            &"/x?a=1".parse().unwrap(),
+            &headers,
+            &["X-Token".to_owned()],
+            json!({"k": 1}),
+        );
+        assert_eq!(
+            inputs["data"]["headers"],
+            json!({
+                "x-signature": "v0=abc",
+                "x-forwarded-for": "10.0.0.1, 10.0.0.2",
+                "content-type": "application/json",
+            })
+        );
+        assert_eq!(inputs["data"]["body"], json!({"k": 1}));
+    }
 
     #[test]
     fn env_parsing() {

@@ -82,6 +82,51 @@ pub(crate) fn seal_allowances() -> runtara_connections::sealed::Allowances {
             .map(|range| range.trim().to_owned())
             .filter(|range| !range.is_empty())
             .collect(),
+        api_bases: stand_in_api_bases().clone(),
         ..Default::default()
+    }
+}
+
+/// `RUNTARA_STAND_IN_API_BASES`: for end-to-end tests, a stand-in for the
+/// API of a connection type whose API is otherwise fixed, by type
+/// (`slack_bot=http://127.0.0.1:18996,…`). Its requests go there, in seal's
+/// policy and in the proxy. Unset, nothing is stood in for. Like
+/// `RUNTARA_PROXY_ALLOWED_HOSTS`, it is the deployment's to set, and a
+/// stand-in's host must also be one the proxy may reach.
+pub(crate) fn stand_in_api_bases() -> &'static std::collections::BTreeMap<String, String> {
+    static BASES: std::sync::OnceLock<std::collections::BTreeMap<String, String>> =
+        std::sync::OnceLock::new();
+    BASES.get_or_init(|| {
+        parse_stand_in_api_bases(&std::env::var("RUNTARA_STAND_IN_API_BASES").unwrap_or_default())
+    })
+}
+
+fn parse_stand_in_api_bases(raw: &str) -> std::collections::BTreeMap<String, String> {
+    raw.split(',')
+        .filter_map(|entry| {
+            let (integration, base) = entry.split_once('=')?;
+            let (integration, base) = (integration.trim(), base.trim());
+            (!integration.is_empty() && url::Url::parse(base).is_ok()).then(|| {
+                (
+                    integration.to_owned(),
+                    base.trim_end_matches('/').to_owned(),
+                )
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod stand_in_tests {
+    #[test]
+    fn a_stand_in_is_named_by_type() {
+        let bases = super::parse_stand_in_api_bases(
+            " slack_bot=http://127.0.0.1:18996/ ,telegram_bot=not a url,=http://x,junk",
+        );
+        assert_eq!(
+            bases.into_iter().collect::<Vec<_>>(),
+            [("slack_bot".to_owned(), "http://127.0.0.1:18996".to_owned())]
+        );
+        assert!(super::parse_stand_in_api_bases("").is_empty());
     }
 }

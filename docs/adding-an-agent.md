@@ -226,6 +226,13 @@ existing connection type (`http_bearer`, `http_api_key`,
      token comes back sealed for the API. Send the body the vendor documents
      (`TokenRequestBody::Json` or `FormUrlEncoded`), and ask for a token
      lifetime when the vendor's default is a token that never expires.
+   - A type whose platform signs the webhooks it sends declares how in
+     `crates/runtara-connections/src/webhooks.rs` (`declared`, and
+     `DECLARING_TYPES`): the parameter holding the secret, and a token
+     header or an HMAC-SHA256 over a template of the request. That secret's
+     policy only verifies (`verifies(...)`, or `Usage::VerifyToken` for a
+     token). A trigger bound to such a connection then checks each webhook
+     with no further code; a test holds each declaration to its policy.
 5. `crates/runtara-connections/src/util/rate_limit_defaults.rs`: a default
    rate limit from the vendor's documented limits, or, only when they are
    genuinely unknowable, an entry in `RATE_LIMIT_OPT_OUT`. Required: a test

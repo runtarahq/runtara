@@ -15,7 +15,9 @@
 #   4. A SIGNED WEBHOOK      a trigger bound to a Mailgun connection is
 #                            checked by intake from the trigger's row, with
 #                            seal: a good signature is queued, a bad one is
-#                            refused.
+#                            refused. A synchronous trigger bound to a Slack
+#                            connection is checked as Slack signs, and
+#                            answered with what its workflow says.
 #   5. WHAT INTAKE HOLDS     no runtime database, no connection, no workflow
 #                            definition; its seal caller may not send; its
 #                            Valkey user cannot write a trigger stream.
@@ -478,6 +480,49 @@ CODE=$(http_status -X POST -H 'Content-Type: application/json' -d '{"event-data"
 [ "$(server_sql "SELECT count(*) FROM execution_requests")" = "${QUEUED}" ] \
     || { print_error "a refused webhook queued a run"; exit 1; }
 print_success "a webhook signed with the connection's key was queued; one signed with another, or unsigned, was refused and queued nothing"
+
+#-------------------------------------------------------------------------
+print_step "4b. A synchronous trigger, checked as its connection type declares, answered by its workflow..."
+SLACK_SECRET="secret-$(openssl rand -hex 16)"
+RESP=$(api_post /connections "{\"title\":\"Chat\",\"integrationId\":\"slack_bot\",\"connectionParameters\":{\"bot_token\":\"xoxb-$(openssl rand -hex 8)\",\"signing_secret\":\"${SLACK_SECRET}\"}}")
+SLACK_CONN=$(echo "${RESP}" | jq -r '.connection_id // .connectionId // empty')
+[ -n "${SLACK_CONN}" ] || { print_error "the Slack connection was not made: ${RESP}"; exit 1; }
+# Answers with what it was sent and a header it was handed.
+OWN='{"name":"Own answer","steps":{"finish":{"stepType":"Finish","id":"finish","inputMapping":{"httpResponse":{"valueType":"composite","value":{"status":{"valueType":"immediate","value":201},"headers":{"valueType":"composite","value":{"x-said":{"valueType":"reference","value":"data.headers.x-slack-request-timestamp"}}},"body":{"valueType":"composite","value":{"challenge":{"valueType":"reference","value":"data.body.challenge"}}}}}}}},"entryPoint":"finish","executionPlan":[],"variables":{},"inputSchema":{"body":{"type":"object"},"headers":{"type":"object"}},"outputSchema":{}}'
+RESP=$(api_post /workflows/create '{"name":"Own answer","description":"intake e2e"}')
+OWN_WF=$(echo "${RESP}" | jq -r '.data.id // empty')
+RESP=$(api_post "/workflows/${OWN_WF}/update" "{\"executionGraph\": ${OWN}}")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "update failed: ${RESP}"; exit 1; }
+RESP=$(api_post "/workflows/${OWN_WF}/versions/$(curl -sS "${API}/workflows/${OWN_WF}/versions" | jq -r '[.data[]?.version // .data[]?.versionNumber // empty] | max // 1')/compile" '{}' 900)
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "compile failed: ${RESP}"; exit 1; }
+RESP=$(api_post /triggers "{\"workflow_id\": \"${OWN_WF}\", \"trigger_type\": \"HTTP\", \"active\": true, \"configuration\": {\"connection_id\": \"${SLACK_CONN}\", \"synchronous\": true}}")
+SYNC_TRIGGER=$(echo "${RESP}" | jq -r '.data.id // .id // empty' 2>/dev/null || true)
+[ -n "${SYNC_TRIGGER}" ] || { print_error "the synchronous trigger was not made: ${RESP}"; exit 1; }
+[ "$(server_sql "SELECT webhook_verification->'check'->>'secretField' FROM invocation_trigger WHERE id = '${SYNC_TRIGGER}'")" = "signing_secret" ] \
+    || { print_error "how the trigger's webhooks are checked was not kept with it"; exit 1; }
+slack_signed() {  # slack_signed SECRET BODY: curl's headers for BODY, signed as Slack signs
+    local at signature
+    at=$(date +%s)
+    signature=$(printf 'v0:%s:%s' "${at}" "$2" | openssl dgst -sha256 -hmac "$1" | sed 's/^.*= //')
+    printf '%s\n' -H "X-Slack-Request-Timestamp: ${at}" -H "X-Slack-Signature: v0=${signature}"
+}
+HANDSHAKE='{"type":"url_verification","challenge":"c-42"}'
+SYNC_WEBHOOK="${API}/events/http/${SYNC_TRIGGER}/slack"
+OUT=$(mktemp)
+SIGNED_HEADERS=()
+while IFS= read -r line; do SIGNED_HEADERS+=("${line}"); done < <(slack_signed "${SLACK_SECRET}" "${HANDSHAKE}")
+CODE=$(curl -sS --max-time 120 -o "${OUT}" -D "${OUT}.headers" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+    "${SIGNED_HEADERS[@]}" -d "${HANDSHAKE}" "${SYNC_WEBHOOK}")
+[ "${CODE}" = "201" ] && [ "$(cat "${OUT}")" = '{"challenge":"c-42"}' ] \
+    || { print_error "the workflow's own answer was not sent (${CODE}): $(head -c 400 "${OUT}")"; exit 1; }
+grep -qi "^x-said: [0-9]" "${OUT}.headers" \
+    || { print_error "the run was not handed the webhook's headers: $(cat "${OUT}.headers")"; exit 1; }
+SIGNED_HEADERS=()
+while IFS= read -r line; do SIGNED_HEADERS+=("${line}"); done < <(slack_signed "another-secret" "${HANDSHAKE}")
+CODE=$(http_status -X POST -H 'Content-Type: application/json' "${SIGNED_HEADERS[@]}" -d "${HANDSHAKE}" "${SYNC_WEBHOOK}")
+[ "${CODE}" = "401" ] || { print_error "a webhook signed with another secret answered ${CODE}"; exit 1; }
+rm -f "${OUT}" "${OUT}.headers"
+print_success "intake checked a Slack-signed webhook from the trigger's row, ran it at once, and answered with what the workflow said"
 
 #-------------------------------------------------------------------------
 print_step "5. Intake holds nothing a run is made of..."

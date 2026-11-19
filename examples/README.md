@@ -15,6 +15,10 @@ running `seed.py` directly.
 
 `index.json` is the manifest `seed.py` reads to find the workflow files.
 
+`integrations/` holds chat platform adapters, each a pair of workflows and
+an install script: [`integrations/slack`](integrations/slack/README.md). They
+need a connection and a workflow to answer, so they are not seeded.
+
 ## Seeding
 
 ### Via the evaluation stack (opt-in)
