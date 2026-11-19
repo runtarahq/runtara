@@ -44,7 +44,8 @@ pub struct Config {
     /// `ca.pem`, `tls.pem` and `tls.key` (`RUNTARA_EXECUTOR_TLS_DIR`).
     pub tls_dir: PathBuf,
     /// `https://host:port` of the server's run channel, where this executor
-    /// says it is here (`RUNTARA_EXECUTOR_SERVER_URL`).
+    /// says it is here (`RUNTARA_EXECUTOR_SERVER_URL`): one or more,
+    /// comma-separated, each host resolving to one engine or several.
     pub server_url: String,
     /// `https://host:port` at which the server places runs here, when that
     /// is not where this executor's calls come from
@@ -117,7 +118,7 @@ pub struct Executor {
     listener: tokio::net::TcpListener,
     tls: rustls::ServerConfig,
     api: api::Api,
-    registrar: Arc<registration::Registrar>,
+    registrar: Arc<registration::Registrars>,
 }
 
 /// A task that ends with what holds this.
@@ -151,14 +152,14 @@ impl Executor {
             .local_addr()
             .map_err(|error| error.to_string())?
             .port();
-        let registrar = Arc::new(registration::Registrar::new(
-            &identity,
-            &config.server_url,
+        let registrar = Arc::new(registration::Registrars::new(
+            identity.clone(),
+            registration::servers(&config.server_url)?,
             config.advertise_url.clone(),
             port,
             config.max_runs,
             runs.clone(),
-        )?);
+        ));
         Ok(Self {
             listener,
             tls,
@@ -179,8 +180,8 @@ impl Executor {
         self.api.runs.clone()
     }
 
-    /// What tells the server this executor is here.
-    pub fn registrar(&self) -> Arc<registration::Registrar> {
+    /// What tells the servers this executor is here.
+    pub fn registrar(&self) -> Arc<registration::Registrars> {
         self.registrar.clone()
     }
 
