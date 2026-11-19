@@ -3762,6 +3762,27 @@ async fn start_as_platform(
             );
         }
 
+        // The consumers of workers that stopped are removed from the
+        // groups, by one engine at a time.
+        if let (Some(manager), Some(valkey_config)) = (redis_manager.clone(), valkey_config.clone())
+        {
+            let streams = served
+                .iter()
+                .map(|tenant| (tenant.clone(), valkey_config.trigger_stream_key(tenant)))
+                .collect();
+            workers.intake(
+                crate::roles::Role::Engine,
+                "trigger consumer cleanup",
+                &shutdown_coordinator,
+                workers::trigger_worker::keep_consumers_tidy(
+                    manager,
+                    streams,
+                    valkey_config.trigger_consumer_group.clone(),
+                    shutdown_signal.clone(),
+                ),
+            );
+        }
+
         // Start compilation worker (processes compilation queue)
         // This worker handles async compilation requests queued by save operations.
         // We hand it the runtime agent catalog so compiled workflows see the

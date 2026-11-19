@@ -394,6 +394,103 @@ pub async fn run(
     }
 }
 
+/// How long a consumer with nothing pending may be idle before it is taken
+/// to be a worker that is gone, and removed from the group.
+pub const CONSUMER_IDLE_LIMIT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+/// How often the group's consumers are looked at.
+const CONSUMERS_LOOKED_AT_EVERY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Removes from `group` on `stream` the consumers that hold nothing pending
+/// and have been idle past `idle_limit`: workers that stopped, whose names
+/// are never used again (each worker has a new one). One with entries
+/// pending is left; another worker claims them, and then it goes.
+pub async fn forget_dead_consumers(
+    manager: &redis::aio::ConnectionManager,
+    stream: &str,
+    group: &str,
+    idle_limit: std::time::Duration,
+) -> Result<usize, redis::RedisError> {
+    let mut conn = manager.clone();
+    let consumers: Vec<std::collections::HashMap<String, redis::Value>> = redis::cmd("XINFO")
+        .arg("CONSUMERS")
+        .arg(stream)
+        .arg(group)
+        .query_async(&mut conn)
+        .await?;
+    let number = |value: Option<&redis::Value>| match value {
+        Some(redis::Value::Int(n)) => *n,
+        _ => -1,
+    };
+    let mut forgotten = 0;
+    for consumer in consumers {
+        let Some(redis::Value::BulkString(name)) = consumer.get("name") else {
+            continue;
+        };
+        let name = String::from_utf8_lossy(name).into_owned();
+        // `inactive` (Valkey 7.2+) is since its last successful read, -1 for
+        // one that never read anything; `idle` since its last interaction of
+        // any kind.
+        let idle = match number(consumer.get("inactive")) {
+            -1 => number(consumer.get("idle")),
+            inactive => inactive,
+        };
+        if number(consumer.get("pending")) == 0 && idle >= idle_limit.as_millis() as i64 {
+            let _: i64 = redis::cmd("XGROUP")
+                .arg("DELCONSUMER")
+                .arg(stream)
+                .arg(group)
+                .arg(&name)
+                .query_async(&mut conn)
+                .await?;
+            forgotten += 1;
+        }
+    }
+    Ok(forgotten)
+}
+
+/// Removes the trigger groups' dead consumers, every ten minutes, on one
+/// engine at a time (`trigger-consumers:<tenant>`), until shutdown.
+pub async fn keep_consumers_tidy(
+    manager: redis::aio::ConnectionManager,
+    streams: Vec<(String, String)>,
+    group: String,
+    shutdown: ShutdownSignal,
+) {
+    let leases: Vec<(String, crate::peers::singleton::Singleton)> = streams
+        .into_iter()
+        .map(|(tenant, stream)| {
+            let lease = crate::peers::singleton::Singleton::start(
+                manager.clone(),
+                format!("trigger-consumers:{tenant}"),
+                crate::peers::engine_id(),
+                std::time::Duration::from_secs(60),
+                shutdown.clone(),
+            );
+            (stream, lease)
+        })
+        .collect();
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(CONSUMERS_LOOKED_AT_EVERY) => {}
+            _ = shutdown.clone().wait() => return,
+        }
+        for (stream, lease) in &leases {
+            if !lease.is_held() {
+                continue;
+            }
+            match forget_dead_consumers(&manager, stream, &group, CONSUMER_IDLE_LIMIT).await {
+                Ok(0) => {}
+                Ok(forgotten) => {
+                    info!(stream = %stream, forgotten, "Removed trigger consumers of workers that are gone")
+                }
+                Err(e) => {
+                    warn!(stream = %stream, error = %e, "Could not look at the trigger consumers")
+                }
+            }
+        }
+    }
+}
+
 /// `true` when Valkey replied `NOGROUP` — the stream/consumer group is gone, as after a restart that lost its dataset.
 fn is_consumer_group_missing(err: &redis::RedisError) -> bool {
     err.code() == Some("NOGROUP")

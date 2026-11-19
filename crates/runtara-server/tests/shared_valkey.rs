@@ -288,3 +288,76 @@ async fn a_compile_taken_by_an_earlier_release_without_a_lease_is_put_back_at_st
 
     cleanup(&manager, &[&tenant]).await;
 }
+
+#[tokio::test]
+async fn the_consumers_of_workers_that_are_gone_leave_the_trigger_group() {
+    use runtara_server::workers::trigger_worker::forget_dead_consumers;
+    let manager = fresh_manager().await;
+    let stream = unique("triggers");
+    let group = "workers";
+    let mut conn = manager.clone();
+    let _: () = redis::cmd("XGROUP")
+        .arg("CREATE")
+        .arg(&stream)
+        .arg(group)
+        .arg("$")
+        .arg("MKSTREAM")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let _: String = conn.xadd(&stream, "*", &[("n", "1")]).await.unwrap();
+    // One worker read the entry and holds it pending; another read nothing.
+    for consumer in ["holding", "gone"] {
+        let _: redis::Value = redis::cmd("XREADGROUP")
+            .arg("GROUP")
+            .arg(group)
+            .arg(consumer)
+            .arg("COUNT")
+            .arg(1)
+            .arg("STREAMS")
+            .arg(&stream)
+            .arg(">")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+    }
+    let names = |manager: redis::aio::ConnectionManager, stream: String| async move {
+        let mut conn = manager;
+        let consumers: Vec<std::collections::HashMap<String, redis::Value>> = redis::cmd("XINFO")
+            .arg("CONSUMERS")
+            .arg(&stream)
+            .arg(group)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let mut names: Vec<String> = consumers
+            .iter()
+            .filter_map(|c| match c.get("name") {
+                Some(redis::Value::BulkString(name)) => {
+                    Some(String::from_utf8_lossy(name).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        names
+    };
+    // Not idle long enough: both stay.
+    assert_eq!(
+        forget_dead_consumers(&manager, &stream, group, Duration::from_secs(3600))
+            .await
+            .unwrap(),
+        0
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Idle past the limit: the one with nothing pending goes, the one
+    // holding an entry stays for another to claim it from.
+    assert_eq!(
+        forget_dead_consumers(&manager, &stream, group, Duration::from_millis(200))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(names(manager.clone(), stream.clone()).await, ["holding"]);
+    let _: () = conn.del(&stream).await.unwrap();
+}
