@@ -102,11 +102,16 @@ mod probe {
                         ConnectionTarget, OutboundDestination, OutboundMeta,
                     };
                     use runtara_workflow_sdk::StreamedOutbound;
+                    let url = data
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .unwrap_or("https://model.example/v1/chat")
+                        .to_owned();
                     let meta = OutboundMeta {
                         method: "POST".into(),
                         destination: OutboundDestination::Connection(ConnectionTarget {
                             connection_id: "conn-1".into(),
-                            url: "https://model.example/v1/chat".into(),
+                            url,
                             endpoint: None,
                             endpoint_ref: None,
                             ai_provider: None,
@@ -124,14 +129,25 @@ mod probe {
                     {
                         StreamedOutbound::Reply(mut answer) => {
                             let mut pieces = Vec::new();
-                            while let Some(piece) = answer.next_piece().await {
-                                let at = runtara_workflow_sdk::now_ms().await.map_err(|_| ())?;
-                                pieces.push(json!({
-                                    "at": at,
-                                    "text": String::from_utf8_lossy(&piece),
-                                }));
+                            let mut cut = None;
+                            loop {
+                                match answer.next_piece().await {
+                                    Some(Ok(piece)) => {
+                                        let at =
+                                            runtara_workflow_sdk::now_ms().await.map_err(|_| ())?;
+                                        pieces.push(json!({
+                                            "at": at,
+                                            "text": String::from_utf8_lossy(&piece),
+                                        }));
+                                    }
+                                    Some(Err(error)) => {
+                                        cut = Some(format!("{error:?}"));
+                                        break;
+                                    }
+                                    None => break,
+                                }
                             }
-                            json!({"status": answer.status, "pieces": pieces})
+                            json!({"status": answer.status, "pieces": pieces, "cut": cut})
                         }
                         StreamedOutbound::Failed { failure, .. } => json!({"failed": failure}),
                     };

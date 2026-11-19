@@ -1387,15 +1387,21 @@ mod workflow_api_connections {
         async fn request_streamed(
             &self,
             _: &OutboundContext,
-            _: RequestOptions,
+            request: RequestOptions,
         ) -> Result<runtara_component_host::outbound_http::StreamedResponse, OutboundError>
         {
-            let pieces = futures_util::stream::unfold(0, |n| async move {
+            // Asked for `/stalls`: one piece, then nothing for 3 s.
+            let stalls = matches!(
+                &request.destination,
+                Destination::Connection(target) if target.url.ends_with("/stalls")
+            );
+            let pause = if stalls { 3_000 } else { 300 };
+            let pieces = futures_util::stream::unfold(0, move |n| async move {
                 if n == 3 {
                     return None;
                 }
                 if n > 0 {
-                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    tokio::time::sleep(Duration::from_millis(pause)).await;
                 }
                 Some((
                     Ok::<_, std::io::Error>(bytes::Bytes::from(format!("piece {n}"))),
@@ -1476,6 +1482,68 @@ mod workflow_api_connections {
         assert!(
             at[2] - at[0] >= 450,
             "the pieces reached the guest together: {at:?}"
+        );
+    }
+
+    /// A streamed answer that stops coming is cut, and the run is told it
+    /// was cut, not handed what came as if it were whole.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_api_tells_the_run_when_a_streamed_answer_is_cut() {
+        // Stopped for 1 s is stopped, in this test binary.
+        unsafe { std::env::set_var("RUNTARA_STREAM_STALL_SECS", "1") };
+        let h = harness().await;
+        let runner = EmbeddedWasmRunner::new(
+            WorkflowRunnerConfig {
+                data_dir: h.dir.path().join("stalled"),
+                default_timeout: Duration::from_secs(30),
+                skip_cert_verification: false,
+            },
+            Arc::clone(&h.persistence),
+            artifacts().clone(),
+        )
+        .unwrap()
+        .with_in_process_precompiler_for_tests()
+        .with_outbound_http(Arc::new(Streaming))
+        .unwrap();
+        let probe = workflow_api_probe();
+        let inst_id = unique("inst-workflow-api-stalled");
+        let input = serde_json::to_vec(&serde_json::json!({
+            "data": {"mode": "stream", "url": "https://model.example/stalls"},
+            "variables": {},
+        }))
+        .unwrap();
+        assert!(
+            h.persistence
+                .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+                .await
+                .expect("register instance")
+        );
+        let handle = runner
+            .try_launch_detached(&options(inst_id.as_str(), &probe))
+            .await
+            .expect("launch");
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            runner.wait_for_exit(&handle, Duration::from_millis(50)),
+        )
+        .await
+        .expect("wait_for_exit hung");
+        let instance = h
+            .persistence
+            .get_instance(inst_id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        let output: serde_json::Value =
+            serde_json::from_slice(instance.output.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            output["pieces"].as_array().map(Vec::len),
+            Some(1),
+            "{output}"
+        );
+        assert!(
+            output["cut"].as_str().is_some(),
+            "the run was not told: {output}"
         );
     }
 

@@ -132,18 +132,25 @@ mod transport {
     pub(crate) struct Pieces {
         reader: Option<wit_bindgen::StreamReader<u8>>,
         done: Option<wit_bindgen::FutureWriter<Result<(), ErrorCode>>>,
+        /// How the body ended: whole, or cut by the host.
+        ended: Option<
+            wit_bindgen::FutureReader<
+                Result<Option<crate::bindings::wasi::http::types::Fields>, ErrorCode>,
+            >,
+        >,
     }
 
     impl Pieces {
-        /// The next piece as it arrives, or `None` once the body is whole.
-        pub(crate) async fn next(&mut self) -> Option<Vec<u8>> {
+        /// The next piece as it arrives; `None` once the body is whole, and an
+        /// error once if the host cut it (it stopped coming, or was too long).
+        pub(crate) async fn next(&mut self) -> Option<Result<Vec<u8>, Error>> {
             const PIECE: usize = 16 * 1024;
             loop {
                 let reader = self.reader.as_mut()?;
                 let (status, piece) = reader.read(Vec::with_capacity(PIECE)).await;
                 match status {
                     wit_bindgen::StreamResult::Complete(_) if !piece.is_empty() => {
-                        return Some(piece);
+                        return Some(Ok(piece));
                     }
                     wit_bindgen::StreamResult::Complete(_) => continue,
                     _ => {
@@ -151,7 +158,13 @@ mod transport {
                         if let Some(done) = self.done.take() {
                             let _ = done.write(Ok(())).await;
                         }
-                        return None;
+                        let cut = match self.ended.take() {
+                            Some(ended) => ended.await.err(),
+                            None => None,
+                        };
+                        return cut.map(|error| {
+                            Err(Error::Transport(format!("the answer was cut: {error:?}")))
+                        });
                     }
                 }
             }
@@ -160,7 +173,7 @@ mod transport {
         /// The rest of the body.
         pub(crate) async fn rest(&mut self) -> Vec<u8> {
             let mut body = Vec::new();
-            while let Some(piece) = self.next().await {
+            while let Some(Ok(piece)) = self.next().await {
                 body.extend_from_slice(&piece);
             }
             body
@@ -263,7 +276,7 @@ mod transport {
             .map(|(name, value)| (name, String::from_utf8_lossy(&value).into_owned()))
             .collect();
         let (done_tx, done_rx) = wit_future::new::<Result<(), ErrorCode>>(|| Ok(()));
-        let (body, _trailers) =
+        let (body, trailers) =
             crate::bindings::wasi::http::types::Response::consume_body(response, done_rx);
         Ok((
             status,
@@ -271,6 +284,7 @@ mod transport {
             Pieces {
                 reader: Some(body),
                 done: Some(done_tx),
+                ended: Some(trailers),
             },
         ))
     }
@@ -333,7 +347,7 @@ mod transport {
     pub(crate) struct Pieces;
 
     impl Pieces {
-        pub(crate) async fn next(&mut self) -> Option<Vec<u8>> {
+        pub(crate) async fn next(&mut self) -> Option<Result<Vec<u8>, Error>> {
             None
         }
 
@@ -912,8 +926,9 @@ pub struct OutboundStream {
 }
 
 impl OutboundStream {
-    /// The next piece of the body as it arrives, or `None` once it is whole.
-    pub async fn next_piece(&mut self) -> Option<Vec<u8>> {
+    /// The next piece of the body as it arrives; `None` once it is whole, and
+    /// an error if the host cut it (it stopped coming, or was too long).
+    pub async fn next_piece(&mut self) -> Option<Result<Vec<u8>, Error>> {
         self.pieces.next().await
     }
 
