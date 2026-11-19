@@ -1,7 +1,9 @@
 # The native chat, finished: phase 4
 
-Status: a plan. Nothing here is built. It follows
-[native-chat.md](native-chat.md), whose phases 1 to 3 are on `main`.
+Status: being built, a part at a time. What is built, and where it departs
+from what is written here, is under [As built](#as-built) at the end. It
+follows [native-chat.md](native-chat.md), whose phases 1 to 3 are on
+`main`.
 
 ## What changes about phase 4
 
@@ -426,3 +428,46 @@ Each with what this plan assumes.
   message**, for example one that sleeps and replies the next day. It is
   still the message that started the run; a UI may want to show such a
   reply as new. Settled in 4.1 with the console.
+
+## As built
+
+Each part as it landed, and where it departs from the plan above. The plan
+is left as it was written, so the two can be compared.
+
+### 4.1 The contract
+
+Built: the typed event (`ConversationEvent`, `ConversationEventKind` and a
+type for each body, all in the API's document), `turn` on every event, the
+`message` event, a reply's `replyId`, `data` and `format`, and a message's
+`inReplyTo`. A forward migration adds `turn` to the events and to the
+conversation, and an index that makes a reply's id unique in its run.
+
+Departures:
+
+- **A reply's id is the author's, or it has none.** The plan had one made
+  from the step and how many replies the step had said. The `conversation`
+  agent is a component called by the step and is told nothing of it: not
+  which step, not which call. So a reply with a `replyId` is said once in
+  its run, and one without is said each time, as before. The AI Agent step
+  gives its own in 4.7.
+- **`run_started` and `message_delivered` still carry the message's text
+  and sender**, beside the new `message` event. The plan dropped both at
+  once, on the reasoning that only the console reads them and moves with
+  the server. The console that is released reads them, and a server
+  release must not break its chat before a console release that reads
+  `message` exists. They are marked as going, and go when that console is
+  the one the release runs.
+- **`message_delivered` stays.** The plan removed it. Without it nothing
+  says that a queued message was taken as an answer and not as the start
+  of a run, or which request it answered.
+- **A `message` is logged when it is sent, not when its turn comes.** The
+  plan did not say. A message sent while a run is busy is therefore in the
+  log before the busy run's later replies, each still marked with its own
+  turn: the log is in the order things were said, and `turn` is what groups
+  them.
+- **The envelope's time is `createdAt`**, as every other time in the API
+  is, not `at`.
+- **A message with `inReplyTo` and no run to answer fails.** The plan said
+  only "answers that request or fails as stale". With no run, the request
+  it names is gone, so it fails and starts none: an answer is not a first
+  message.

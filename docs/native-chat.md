@@ -222,7 +222,9 @@ granted nothing on: `conversations`, `conversation_messages`,
   run, `payload` is the answer as it is, and `text` alone is `{"message":
   text}`. Its state is `queued`, `started`, `delivered` or `failed`; the
   answer to sending it says which, where that is known at once.
-- **Events** are numbered and kept: `run_started`, `reply`,
+- **Events** (since given a typed contract, a `message` event and a `turn`:
+  see [native-chat-phase-4.md](native-chat-phase-4.md#as-built)) are
+  numbered and kept: `run_started`, `reply`,
   `waiting_for_input`, `message_delivered`, `message_failed`, `run_ended`,
   `reply_route_failed`, and `activity`. `run_started` and
   `message_delivered` carry the message's text and sender, so the events
