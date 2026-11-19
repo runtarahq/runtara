@@ -244,6 +244,25 @@ PACED=$(workflow conv-paced "$(jq -n \
                      { fromStep: "two", toStep: "p2" }, { fromStep: "p2", toStep: "three" },
                      { fromStep: "three", toStep: "finish" } ],
     variables: {}, inputSchema: {}, outputSchema: {} }')")
+# Writes a reply in pieces, a moment apart, then says it whole.
+piece() {
+    jq -n --arg id "$1" --arg text "$2" '{
+        id: $id, stepType: "Agent", agentId: "conversation", capabilityId: "reply", maxRetries: 0,
+        inputMapping: { text: { valueType: "immediate", value: $text },
+                        replyId: { valueType: "immediate", value: "story" },
+                        partial: { valueType: "immediate", value: true } } }'
+}
+short() { jq -n --arg id "$1" '{ id: $id, stepType: "Delay", durationMs: { valueType: "immediate", value: 700 } }'; }
+WRITER=$(workflow conv-writer "$(jq -n \
+    --argjson a "$(piece a "Once")" --argjson b "$(piece b " upon")" --argjson c "$(piece c " a time")" \
+    --argjson w1 "$(short w1)" --argjson w2 "$(short w2)" \
+    --argjson whole "$(say whole '{"valueType": "immediate", "value": "Once upon a time."}' | jq '.inputMapping.replyId = {valueType: "immediate", value: "story"}')" '{
+    name: "conv-writer", durable: true, entryPoint: "a",
+    steps: { a: $a, w1: $w1, b: $b, w2: $w2, c: $c, whole: $whole,
+             finish: { id: "finish", stepType: "Finish", inputMapping: {} } },
+    executionPlan: [ { fromStep: "a", toStep: "w1" }, { fromStep: "w1", toStep: "b" }, { fromStep: "b", toStep: "w2" },
+                     { fromStep: "w2", toStep: "c" }, { fromStep: "c", toStep: "whole" }, { fromStep: "whole", toStep: "finish" } ],
+    variables: {}, inputSchema: {}, outputSchema: {} }')")
 # Reads what was said in its conversation and hands it back as data.
 HISTORIAN=$(workflow conv-historian "$(jq -n '{
     name: "conv-historian", entryPoint: "history",
@@ -456,6 +475,52 @@ SPREAD=$(python3 -c 'import sys
 a = [int(x) for x in sys.argv[1].split()]; print(a[-1] - a[0])' "${ARRIVED_AT}")
 [ "${SPREAD}" -gt 1800 ] || { print_error "The replies arrived together (${SPREAD} ms apart), not as they were said"; exit 1; }
 print_success "Each reply reached the open stream within 400 ms of being said (${LAGS} ms) ✓"
+
+# A reply written in pieces reaches an open stream piece by piece, then whole.
+api_status PUT "$(conversation "${WRITER}" story)" '{}' >/dev/null
+PIECES="${TEST_DATA_DIR}/pieces.txt"
+(curl -sS -N --max-time 30 -H 'Accept: text/event-stream' "${API}$(conversation "${WRITER}" story)/events?kinds=reply_delta,reply,run_ended" 2>/dev/null \
+    | python3 -u -c 'import sys, time
+for line in sys.stdin:
+    print(int(time.time() * 1000), line.rstrip(), flush=True)' > "${PIECES}") &
+PIECES_PID=$!
+sleep 1
+send "${WRITER}" story m-1 go >/dev/null
+for _ in {1..60}; do grep -q 'event: run_ended' "${PIECES}" 2>/dev/null && break; sleep 0.5; done
+kill "${PIECES_PID}" 2>/dev/null || true; wait "${PIECES_PID}" 2>/dev/null || true
+SEEN=$(python3 - "${PIECES}" <<'PY'
+import json, sys
+# Each event is a block of fields ended by an empty line, in any order.
+seen, ids, block = [], 0, {}
+def done(block):
+    global ids
+    kind = block.get("event")
+    if kind == "reply_delta" and "id" in block:
+        ids += 1
+    if kind in ("reply_delta", "reply") and "data" in block:
+        body = json.loads(block["data"])["body"]
+        seen.append([kind, body.get("offset"), body["text"], block["at"]])
+for line in open(sys.argv[1]):
+    at, _, text = line.rstrip("\n").partition(" ")
+    if not text:
+        done(block)
+        block = {}
+        continue
+    name, _, value = text.partition(": ")
+    block.setdefault("at", int(at))
+    block[name] = value
+done(block)
+print(json.dumps({"seen": seen, "delta_ids": ids}))
+PY
+)
+echo "  on the stream: $(echo "${SEEN}" | jq -c '[.seen[] | .[0:3]]')"
+[ "$(echo "${SEEN}" | jq -c '[.seen[] | .[0:3]]')" = '[["reply_delta",0,"Once"],["reply_delta",4," upon"],["reply_delta",9," a time"],["reply",null,"Once upon a time."]]' ] \
+    || { print_error "The reply did not reach the stream piece by piece, then whole: ${SEEN}"; exit 1; }
+[ "$(echo "${SEEN}" | jq '.delta_ids')" = "0" ] || { print_error "A piece of a reply was given an event id: ${SEEN}"; exit 1; }
+SPREAD=$(echo "${SEEN}" | jq '.seen[2][3] - .seen[0][3]')
+[ "${SPREAD}" -gt 1000 ] || { print_error "The pieces arrived together (${SPREAD} ms apart), not as they were written"; exit 1; }
+[ "$(events "${WRITER}" story | jq '[.[] | select(.kind == "reply_delta")] | length')" = "0" ] || { print_error "A piece of a reply was kept"; exit 1; }
+print_success "A reply written in pieces reaches an open stream as it is written (${SPREAD} ms from first to last), then whole; no piece is kept ✓"
 
 # A client that makes one request at a time waits in that request.
 LAST=$(events "${PACED}" live | jq -r '.[-1].seq')
