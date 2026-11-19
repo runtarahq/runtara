@@ -76,7 +76,8 @@ pub async fn capture_http_event(
     Path((trigger_id, action)): Path<(String, String)>,
     Query(metadata): Query<crate::api::dto::workflows::RunLabelQuery>,
     request: Request,
-) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+    use axum::response::IntoResponse;
     // Extract parts from request
     let (parts, body) = request.into_parts();
     let method = parts.method.clone();
@@ -238,6 +239,39 @@ pub async fn capture_http_event(
                 )
             });
 
+        // A synchronous trigger runs its workflow and waits, and is answered
+        // with what the workflow answers (`httpResponse`), for a platform that
+        // needs an answer of its own at once.
+        let synchronous = trigger
+            .configuration
+            .as_ref()
+            .and_then(|c| c.get("synchronous"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if synchronous {
+            let ran = runtara_store_postgres::tenant_scope::scoped(
+                tenant_id.clone(),
+                engine.run_sync(crate::workers::execution_engine::SyncRequest {
+                    run_label: metadata.run_label,
+                    tenant_id: &tenant_id,
+                    workflow_id: &trigger.workflow_id,
+                    version: None,
+                    inputs,
+                }),
+            )
+            .await;
+            return match ran {
+                Ok(result) => Ok(crate::api::handlers::workflows_sync::answer(result)),
+                Err(error) => {
+                    tracing::debug!("Synchronous trigger run failed: {error}");
+                    Ok(
+                        crate::api::handlers::common::execution_error_response(&error)
+                            .into_response(),
+                    )
+                }
+            };
+        }
+
         // Read debug flag from trigger configuration
         let debug = trigger
             .configuration
@@ -276,7 +310,7 @@ pub async fn capture_http_event(
                     "duplicate": enqueued.duplicate,
                     "workflow_id": trigger.workflow_id,
                 });
-                Ok((StatusCode::OK, Json(response)))
+                Ok((StatusCode::OK, Json(response)).into_response())
             }
             Err(crate::workers::execution_engine::ExecutionError::EntitlementDenied(denial)) => {
                 Err((denial.status(), Json(denial.json_body())))
