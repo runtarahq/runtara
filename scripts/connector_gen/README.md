@@ -558,6 +558,11 @@ like a generated capability. In `custom.rs`:
   `module = "<agent id>"`, `CapabilityInput` (with the `_connection` field the
   generated inputs have) and `CapabilityOutput`. The capability takes an input
   struct of its own, declared in `custom.rs`, not a generated one.
+- Give every struct in `custom.rs` a name no generated type has. The agent's
+  metadata looks input and output types up by name, so a `ListProductsInput`
+  or `Product` of your own would replace the generated one's fields in the
+  step editor; `generate` refuses an input or output listed under a generated
+  type's name.
 - The capability's id is its function's name with `-` for `_`; set no `id` of
   your own. `generate` refuses a function whose id a generated operation
   already has, and `agent_component!` refuses two capabilities with one id

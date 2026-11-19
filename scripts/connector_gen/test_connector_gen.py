@@ -2288,6 +2288,24 @@ class CustomCapabilitiesRenderTest(unittest.TestCase):
             self.assertRegex(cg.render(Path(tmp)), r'#\[capability\(module = "sample", id = "count-items", ')
         self.assertIn("`count_items` is the capability `count-items`", str(stop.exception.code))
 
+    def refusal(self, entry: dict) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            write_crate(Path(tmp), sample_spec(), OPERATIONS, custom_capabilities=[entry])
+            with self.assertRaises(SystemExit) as stop:
+                cg.render(Path(tmp))
+        return str(stop.exception.code)
+
+    def test_an_input_named_like_a_generated_input_is_refused(self):
+        # Its metadata would replace `list-items`' input fields.
+        message = self.refusal({"function": "list_everything", "input": "ListItemsInput"})
+        self.assertIn("the input struct `ListItemsInput` is named like a generated input type", message)
+
+    def test_an_output_named_like_a_generated_model_is_refused(self):
+        # Its metadata would replace the fields of `Item`, which `list-items` returns.
+        message = self.refusal({"function": "list_everything", "input": "ListEverythingInput",
+                                "outputs": ["ListEverythingOutput", "Item"]})
+        self.assertIn("the output struct `Item` is named like a generated output type", message)
+
 
 # ---------------------------------------------------------------------------
 # GraphQL APIs (graphql_source.py)

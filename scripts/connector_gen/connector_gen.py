@@ -2040,6 +2040,25 @@ def check_custom_ids(text: str, capabilities: list) -> None:
                      f"`{capability['id']}`, which a generated operation already is; rename it")
 
 
+def check_custom_type_names(text: str, capabilities: list) -> None:
+    """A hand-written input or output struct must not be named like a generated
+    one. The agent's metadata keys its input and output types by name, and the
+    hand-written entries come last, so the struct in `custom.rs` would replace
+    the generated type's fields for every capability that uses it. It compiles
+    all the same: the two structs live in different modules. The generated
+    names are read from the rendered registries, `("Name", &__INPUT_META_Name`;
+    a hand-written entry reads `&crate::custom::__INPUT_META_`."""
+    for kind, names in (("input", [c["input"] for c in capabilities]),
+                        ("output", [n for c in capabilities for n in c["outputs"]])):
+        meta = kind.upper()
+        generated = set(re.findall(rf'"(\w+)",\s*&__{meta}_META_\w+ as &{kind.title()}TypeMeta', text))
+        for name in names:
+            if name in generated:
+                sys.exit(f"custom_capabilities: the {kind} struct `{name}` is named like a generated "
+                         f"{kind} type, whose fields it would replace in the agent's metadata; "
+                         "rename it in custom.rs")
+
+
 def render(crate: Path) -> str:
     """Render `generated.rs` for `crate` and return its rustfmt-ed text."""
     config = load_config(crate)
@@ -2095,6 +2114,7 @@ def render(crate: Path) -> str:
         subprocess.run(["rustfmt", "--edition", "2024", str(generated)], cwd=REPO_ROOT, check=True)
         text = generated.read_text()
         check_custom_ids(text, custom)
+        check_custom_type_names(text, custom)
         return text
 
 

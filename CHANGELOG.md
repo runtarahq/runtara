@@ -19,10 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the crate's `src/custom.rs` and listed under `custom_capabilities` in
   `connector.yaml`. `generate` adds it to the agent's metadata and component
   export beside the generated ones, and refuses one whose id a generated
-  operation already has. The existing generated agents are unchanged.
-  `agent_component!` now also refuses, at compile time, two capabilities of
-  one agent with the same id, which left all but the first unreachable; that
-  holds for hand-written agents too.
+  operation already has, or whose input or output struct is named like a
+  generated type (its fields would replace that type's). The existing
+  generated agents are unchanged. `agent_component!` now also refuses, at
+  compile time, two capabilities of one agent with the same id, which left
+  all but the first unreachable; that holds for hand-written agents too.
 
 - **With executors, a test of an agent's capability runs on one.** The
   call is compiled into a workflow of one step and run on an executor as a
