@@ -1,6 +1,6 @@
 # More than one engine: a plan
 
-Status: planned.
+Status: built ([As built](#as-built)).
 
 The engine is one process today (`docs/roles.md`: "The engine is one
 process"). More than one API may stand in front of it, and executors run its
@@ -195,6 +195,48 @@ with engines:
 - **Valkey pub/sub instead of `NOTIFY`** for conversation wakes if a
   deployment's database is behind a pooler in transaction mode, which
   drops `LISTEN`. The runtime notices have the same constraint today.
+
+## As built
+
+| Part | Where | Tests |
+|---|---|---|
+| E1 | `peers::members` (`engine_members`, runtime migration `20261119400000`), `peers::singleton` | `tests/peers.rs` |
+| E2 | `workers/admission_counter.rs`: a keeper per tenant (`admission-counter:<tenant>`) | `tests/admission_keeper.rs` |
+| E3 | `valkey/compilation_queue.rs` (`<tenant>:compilation:inflight`), the worker renews | `tests/shared_valkey.rs` |
+| E4 | `conversations.rs`: the `conversation_said` trigger (server migration `20261119400000`), `hear_conversations`, `hear_pieces`, pieces in Valkey | `tests/conversations.rs` |
+| E5 | `runtara-executor`'s `Registrars` | `runtara-executor/tests/executor.rs` |
+| E6 | `engine/remote.rs` (`Engines`), `release` in the engine's facts | `engine::remote` tests |
+| E7 | (a) `workflow_agents::keep_in_sync`; (b) `runtara-connections`' `auth::refresh_lock`; (c) `in_process_waits::share` (runtime migration `20261119500000`); (d) `trigger_worker::keep_consumers_tidy`; (e) `peers::singleton::Job` | `workflow_agents` tests, `tests/sealed_oauth_flow.rs`, `tests/peers.rs`, `tests/shared_valkey.rs` |
+| E8 | `docker-compose.engines.yml`, `e2e/test_two_engines.sh`, `docs/roles.md` | the script, against the stack with two engines |
+
+Departures and details:
+
+- **One release, checked at start.** Engines that start at the same moment
+  may each miss the other in the check; they run one image in practice.
+- **The API spreads requests itself.** HTTP/2 holds one connection to one
+  address, so a name that resolves to several engines is looked up every
+  10 seconds and each request goes to one of them; one that cannot be
+  connected to is passed over. A request already sent to an engine that
+  dies fails, as for one engine.
+- **The compose overlay scales the engine service.** Every replica answers
+  to `runtara`, which executors and the API resolve to each; each works out
+  its own run-channel endpoint and data directory, and they share artifacts
+  in a `file://` store on the data volume.
+- **A refresh re-reads the connection.** A lock alone would not do: an
+  engine that waited would refresh with the token it read before, which a
+  rotating provider has voided. It reads the connection again under the
+  lock and uses what the other stored.
+- **Artifact restaging at boot stays each engine's.** It restages only
+  what is missing, once.
+
+On the open question of a superseded launch: the e2e kills the engine that
+runs a durable run; the run is launched again by the other engine from its
+checkpoint and completes once (two launch rows, one completion). A run whose
+steps have effects outside runtara between checkpoints may repeat them, as
+it would after any crash; that is the checkpointing model, not new here.
+
+Measured locally: `e2e/test_two_engines.sh` passes against the evaluation
+stack with two engines and two executors.
 
 ## Not here
 

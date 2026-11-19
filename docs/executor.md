@@ -103,7 +103,7 @@ copy it to each, or mount it read-only.
 
 | Setting | |
 |---|---|
-| `RUNTARA_EXECUTOR_SERVER_URL` | `https://host:port` of the server's run channel (required): where it says it is here |
+| `RUNTARA_EXECUTOR_SERVER_URL` | `https://host:port` of the server's run channel (required): where it says it is here. With more than one engine, several, comma-separated, or a host that resolves to each: it is looked up every 10 seconds and each engine is told, with one boot id |
 | `RUNTARA_EXECUTOR_TLS_DIR` | the executor's directory from `init-pki` (required) |
 | `RUNTARA_EXECUTOR_STATE_DIR` | where compiled workflows are kept (required); a cache, safe to lose, and not shared between executors |
 | `RUNTARA_EXECUTOR_LISTEN` | where the server connects; default `0.0.0.0:7443` |

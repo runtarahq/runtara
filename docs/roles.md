@@ -267,9 +267,49 @@ not answer`). While the engine is away:
 Runs do not depend on the API. Stopping or killing it loses none: they are
 the engine's, and they complete.
 
-More than one API may run in front of one engine. The engine is one
-process, as the server is. A server that runs both roles also listens for
-further APIs if it is given `RUNTARA_ENGINE_LISTEN`.
+More than one API may run in front of the engines, and more than one
+engine may run behind them ([multiple-engines-plan.md](multiple-engines-plan.md)):
+`RUNTARA_ENGINE_URL` may name a host that resolves to each engine. The API
+and intake look it up every 10 seconds and send each request to one of
+them; one that cannot be connected to is passed over. A request already
+sent to an engine that dies is answered with the error that says it may
+have been done, as for one engine. A server that runs both roles also
+listens for further APIs if it is given `RUNTARA_ENGINE_LISTEN`.
+
+## More than one engine
+
+Engines on one server database, one runtime database and one Valkey share
+the work: each claims runs, wakes, compiles and conversations row by row,
+under the leases each already has. A run is its owner's: the engine that
+launched it serves its run channel, and when that engine dies its launch
+lease expires (60 seconds) and another engine launches the run again from
+its last checkpoint.
+
+- Each engine has a row in `engine_members` (runtime database), renewed
+  every 10 seconds. An engine refuses to start beside a live one when its
+  artifacts are on its own disk (set `RUNTARA_ARTIFACT_STORE_URL` to a
+  store every engine reads), or when that one runs another release (unless
+  `RUNTARA_ROLLING_UPGRADE=true`). Engines that start at the same moment
+  may each miss the other in this check.
+- Each engine has a run-channel endpoint of its own
+  (`RUNTARA_RUN_CHANNEL_ENDPOINT`), never behind a load balancer.
+  Executors are told of every engine ([executor.md](executor.md)).
+- A job that must run on one engine at a time holds a lease in Valkey
+  (`runtara:singleton:<name>`): the keeper of each tenant's admission
+  counter, the unconfirmed OAuth sweep, the cleanups.
+- What crosses between engines: a conversation's new event
+  (`pg_notify('runtara_conversation')`), the pieces of a reply being
+  written (a Valkey stream per conversation, `runtara:conversation-pieces`),
+  a workflow-agent published or removed (`pg_notify('runtara_workflow_agents')`),
+  a run waiting in process (`in_process_waits`), a connection's refresh
+  (`<tenant>:oauth-refresh:<connection>`).
+- These stay each engine's own, and add up with engines: its request,
+  compile, validation and agent-test concurrency; its pools to tenants'
+  object model databases; its short caches (a change is seen by every
+  engine within their life); a run's stderr log, on its owner's disk.
+
+`docker-compose.engines.yml` runs the evaluation stack with two engines;
+`e2e/test_two_engines.sh` runs against it.
 
 ## Who a call is for
 
@@ -408,9 +448,10 @@ The same three processes map onto hosts:
 - **API processes** scale out behind it. Each is given the API's
   certificate, the API's database role and the API's Valkey user, and none
   of what the table above marks refused.
-- **The engine** is one process, on a host the proxy does not reach, with
-  both databases, the engine's Valkey user and its certificate. Its health
-  is `RUNTARA_ENGINE_HEALTH_LISTEN`.
+- **The engines**, one or more, on hosts the proxy does not reach, with
+  both databases, the engine's Valkey user and its certificate. Their
+  health is `RUNTARA_ENGINE_HEALTH_LISTEN`. With more than one, see
+  [More than one engine](#more-than-one-engine).
 - **seal** is on a host of its own where it can be, with the keys
   ([seal.md](seal.md)); executors are on theirs ([executor.md](executor.md)).
 - **Postgres** takes the engine's role for both databases and the API's for

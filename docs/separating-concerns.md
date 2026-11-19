@@ -345,8 +345,10 @@ says how to run it.
   serves). A call that was never sent says nothing was done; one that was
   sent and not answered says it may have been. The API starts, and keeps
   answering for its own records, whether or not the engine answers.
-- **More than one API process** runs in front of one engine. The engine
-  stays one process.
+- **More than one API process** runs in front of the engines, and more
+  than one engine may run behind them
+  ([multiple-engines-plan.md](multiple-engines-plan.md), roles.md's "More
+  than one engine").
 - **Background work by role.** The engine starts all of its own. The API
   starts the consumer of member control events. The watch on the database
   pool, the product events drain and the heartbeat are each process's own,
