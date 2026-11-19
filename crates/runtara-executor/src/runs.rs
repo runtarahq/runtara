@@ -114,7 +114,7 @@ impl Upstream {
         path_and_query: &str,
         guest_headers: &http::HeaderMap,
         body: Bytes,
-    ) -> Result<http::Response<Bytes>, http::StatusCode> {
+    ) -> Result<http::Response<RelayBody>, http::StatusCode> {
         let mut request = http::Request::builder()
             .method(method)
             .uri(format!("{}{path_and_query}", self.endpoint))
@@ -142,11 +142,9 @@ impl Upstream {
             .await
             .map_err(|_| http::StatusCode::BAD_GATEWAY)?;
         let (mut parts, body) = response.into_parts();
-        let body = Limited::new(body, self.caps.response_body_bytes)
-            .collect()
-            .await
-            .map_err(|_| http::StatusCode::BAD_GATEWAY)?
-            .to_bytes();
+        // Handed on as it arrives, capped as it passes: an answer that
+        // streams reaches the run a piece at a time.
+        let body = Limited::new(body, self.caps.response_body_bytes).boxed_unsync();
         parts.headers.remove(http::header::CONTENT_LENGTH);
         parts.headers.remove(http::header::TRANSFER_ENCODING);
         parts.headers.remove(http::header::CONNECTION);
@@ -248,8 +246,17 @@ impl Failure {
     }
 }
 
-fn answer(status: http::StatusCode) -> http::Response<Full<Bytes>> {
-    let mut response = http::Response::new(Full::default());
+/// A body relayed to a run: as it arrives from the server, or the executor's
+/// own.
+type RelayBody =
+    http_body_util::combinators::UnsyncBoxBody<Bytes, Box<dyn std::error::Error + Send + Sync>>;
+
+fn answer(status: http::StatusCode) -> http::Response<RelayBody> {
+    let mut response = http::Response::new(
+        Full::default()
+            .map_err(|never| match never {})
+            .boxed_unsync(),
+    );
     *response.status_mut() = status;
     response
 }
@@ -259,7 +266,7 @@ async fn relay(
     request: http::Request<Incoming>,
     upstream: Arc<Upstream>,
     posted: Arc<AtomicBool>,
-) -> Result<http::Response<Full<Bytes>>, Infallible> {
+) -> Result<http::Response<RelayBody>, Infallible> {
     let (parts, body) = request.into_parts();
     let path_and_query = parts
         .uri
@@ -290,7 +297,7 @@ async fn relay(
             if outcome && response.status().is_success() {
                 posted.store(true, Ordering::Release);
             }
-            Ok(response.map(Full::new))
+            Ok(response)
         }
         Err(status) => Ok(answer(status)),
     }
