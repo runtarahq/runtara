@@ -1,132 +1,123 @@
-//! Generic webhook signature verification for trigger-linked connections.
+//! Webhook checks for trigger-linked connections.
 //!
-//! When a trigger has a `connection_id` in its configuration, incoming webhook
-//! requests are verified against the connection's credentials. Each integration
-//! type defines its own verification method.
+//! When a trigger has a `connection_id` in its configuration, each webhook it
+//! receives is checked against the connection's secret, the way the
+//! connection's type declares its webhooks are signed
+//! (`runtara_connections::webhooks`). There is no code here of any platform's.
 
 use axum::http::HeaderMap;
+use runtara_connections::webhooks::{self, Presented, WebhookCheck as Declared};
 use runtara_connections::{ConnectionWithParameters, ConnectionsFacade, SignatureCheck};
 use serde_json::Value;
 use tracing::debug;
 
-/// Verify a webhook request against the trigger's linked connection.
+/// The time a webhook is checked at, in seconds since the epoch.
+fn now() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+/// A webhook as it arrived: its headers, its body, and, for a form, the
+/// fields read from it.
+#[derive(Clone, Copy)]
+pub struct Received<'a> {
+    pub headers: &'a HeaderMap,
+    pub body: &'a [u8],
+    pub fields: Option<&'a Value>,
+}
+
+/// What `received` presents to `declared`.
+fn presented(declared: &Declared, received: Received<'_>) -> Result<Presented, String> {
+    let mut request = webhooks::Request::new(
+        received
+            .headers
+            .iter()
+            .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?))),
+        received.body,
+    );
+    if let Some(fields) = received.fields {
+        request = request.with_fields(fields.clone());
+    }
+    declared.presented(&request, now())
+}
+
+/// Verify a webhook request against the trigger's linked connection, read as
+/// it is now. Answers the headers the run is not to be handed.
 ///
-/// Returns Ok(()) if verification passes or if no verification is needed.
-/// Returns Err with a message if verification fails.
+/// `Ok` if the check passes, or if no check is needed: no connection, one
+/// that cannot be found, a type that declares no check, or a connection
+/// that holds no secret. `Err` says why the webhook is refused.
 pub async fn verify_webhook(
     facade: &ConnectionsFacade,
     trigger_config: &Option<Value>,
     tenant_id: &str,
-    headers: &HeaderMap,
-    body: &[u8],
-) -> Result<(), String> {
+    received: Received<'_>,
+) -> Result<Vec<String>, String> {
     let connection_id = match trigger_config
         .as_ref()
         .and_then(|c| c.get("connection_id"))
         .and_then(|v| v.as_str())
     {
         Some(id) => id,
-        None => return Ok(()),
+        None => return Ok(Vec::new()),
     };
 
     let conn = match facade.get_with_parameters(connection_id, tenant_id).await {
         Ok(Some(c)) => c,
         Ok(None) => {
             debug!(connection_id = %connection_id, "Webhook verification skipped: connection not found");
-            return Ok(());
+            return Ok(Vec::new());
         }
         Err(e) => {
             debug!(error = %e, "Webhook verification skipped: DB error");
-            return Ok(());
+            return Ok(Vec::new());
         }
     };
-
-    let integration_id = conn.integration_id.as_deref().unwrap_or("");
-    if conn.connection_parameters.is_none() {
-        return Ok(());
-    }
-
-    match integration_id {
-        "mailgun" => verify_mailgun(facade, &conn, tenant_id, headers, body).await,
-        _ => Ok(()),
-    }
-}
-
-/// The connection's field that holds Mailgun's webhook signing key.
-const MAILGUN_FIELD: &str = "webhook_signing_key";
-
-/// What a Mailgun webhook signs, and the signature it carries, from its
-/// body: Mailgun signs HMAC-SHA256(signing_key, timestamp + token), and puts
-/// all three in the body, at the top level or under `signature`.
-fn mailgun_signed(body: &[u8]) -> Result<(String, String), String> {
-    let body_value: Value = serde_json::from_slice(body).unwrap_or_default();
-    let sig_obj = body_value.get("signature").unwrap_or(&body_value);
-
-    let timestamp_str = match sig_obj.get("timestamp") {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Number(n)) => n.to_string(),
-        _ => return Err("Missing timestamp in webhook body".to_string()),
+    let Some(declared) = webhooks::declared(conn.integration_id.as_deref().unwrap_or("")) else {
+        return Ok(Vec::new());
     };
-    let token = sig_obj
-        .get("token")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing token in webhook body")?;
-    let signature = sig_obj
-        .get("signature")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing signature in webhook body")?;
-    Ok((format!("{timestamp_str}{token}"), signature.to_owned()))
-}
-
-/// Verify Mailgun webhook signature.
-///
-/// A connection with no signing key accepts the webhook unchecked; a sealed
-/// key is checked by seal.
-async fn verify_mailgun(
-    facade: &ConnectionsFacade,
-    conn: &ConnectionWithParameters,
-    tenant_id: &str,
-    _headers: &HeaderMap,
-    body: &[u8],
-) -> Result<(), String> {
-    let has_key = conn
-        .connection_parameters
-        .as_ref()
-        .and_then(|params| params.get(MAILGUN_FIELD))
-        .is_some_and(|key| !key.is_null() && key.as_str() != Some(""));
-    if !has_key {
-        return Ok(());
+    let withheld = declared.withheld_headers();
+    if !holds_secret(&conn, &declared) {
+        return Ok(withheld);
     }
-
-    let (message, signature) = mailgun_signed(body)?;
+    let presented = presented(&declared, received)?;
     match facade
-        .check_webhook_signature(
-            conn,
+        .check_webhook(
+            &conn,
             tenant_id,
-            MAILGUN_FIELD,
-            message.as_bytes(),
-            &signature,
+            &declared.secret_field,
+            &presented.message,
+            presented.mac,
         )
         .await
-        .map_err(|e| format!("Mailgun webhook signature could not be checked: {e}"))?
+        .map_err(|e| format!("the webhook could not be checked: {e}"))?
     {
-        SignatureCheck::Valid | SignatureCheck::NoSecret => Ok(()),
-        SignatureCheck::Invalid => Err("Mailgun webhook signature mismatch".to_string()),
+        SignatureCheck::Valid | SignatureCheck::NoSecret => Ok(withheld),
+        SignatureCheck::Invalid => Err("the webhook's signature does not match".to_string()),
     }
+}
+
+/// Whether the connection holds the secret its webhooks are checked with. A
+/// connection with none accepts its webhooks unchecked.
+fn holds_secret(connection: &ConnectionWithParameters, declared: &Declared) -> bool {
+    connection
+        .connection_parameters
+        .as_ref()
+        .and_then(|params| params.get(&declared.secret_field))
+        .is_some_and(|key| !key.is_null() && key.as_str() != Some(""))
 }
 
 /// Checks a trigger's webhook before a run is accepted for it.
 #[async_trait::async_trait]
 pub trait WebhookCheck: Send + Sync {
-    /// `Ok` if the webhook is the provider's, or needs no check. `Err` says
-    /// why it is refused.
+    /// `Ok` if the webhook is the provider's, or needs no check, with the
+    /// headers its run is not to be handed (one a secret came in). `Err`
+    /// says why it is refused.
     async fn check(
         &self,
         trigger: &crate::api::dto::triggers::InvocationTrigger,
         tenant_id: &str,
-        headers: &HeaderMap,
-        body: &[u8],
-    ) -> Result<(), String>;
+        received: Received<'_>,
+    ) -> Result<Vec<String>, String>;
 }
 
 /// The check the engine makes: against the trigger's connection, read as it
@@ -139,25 +130,29 @@ impl WebhookCheck for ByConnection {
         &self,
         trigger: &crate::api::dto::triggers::InvocationTrigger,
         tenant_id: &str,
-        headers: &HeaderMap,
-        body: &[u8],
-    ) -> Result<(), String> {
-        verify_webhook(&self.0, &trigger.configuration, tenant_id, headers, body).await
+        received: Received<'_>,
+    ) -> Result<Vec<String>, String> {
+        verify_webhook(&self.0, &trigger.configuration, tenant_id, received).await
     }
 }
 
 /// What is kept with a trigger for checking its webhook
 /// (`invocation_trigger.webhook_verification`): the connection it is bound
-/// to, that connection's kind, and its signing secret as it is stored,
-/// sealed. A process that receives webhooks checks them from this alone.
+/// to, that connection's kind, how its kind's webhooks are checked, and the
+/// secret as it is stored, sealed. A process that receives webhooks checks
+/// them from this alone.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Material {
     /// The connection the trigger was bound to when this was written.
     pub connection_id: String,
-    /// The connection's kind, which says how its webhooks are signed.
+    /// The connection's kind.
     pub integration: String,
-    /// The signing secret's field and its sealed value, if the kind signs
-    /// its webhooks and the connection holds a secret.
+    /// How the kind's webhooks are checked, if they are. Kept before
+    /// checks were declared, it is absent, and the kind's is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<Declared>,
+    /// The secret's field and its sealed value, if the kind's webhooks are
+    /// checked and the connection holds a secret.
     pub secret: Option<(String, Value)>,
 }
 
@@ -165,20 +160,29 @@ impl Material {
     /// What is kept for a trigger bound to `connection`.
     pub fn of(connection: &ConnectionWithParameters) -> Self {
         let integration = connection.integration_id.clone().unwrap_or_default();
-        let secret = match integration.as_str() {
-            "mailgun" => connection
+        let check = webhooks::declared(&integration);
+        let secret = check.as_ref().and_then(|check| {
+            connection
                 .connection_parameters
                 .as_ref()
-                .and_then(|parameters| parameters.get(MAILGUN_FIELD))
+                .and_then(|parameters| parameters.get(&check.secret_field))
                 .filter(|value| runtara_connections::sealed::is_sealed(value))
-                .map(|value| (MAILGUN_FIELD.to_owned(), value.clone())),
-            _ => None,
-        };
+                .map(|value| (check.secret_field.clone(), value.clone()))
+        });
         Self {
             connection_id: connection.id.clone(),
             integration,
+            check,
             secret,
         }
+    }
+
+    /// How webhooks are checked: as kept, or, kept before checks were
+    /// declared, as the kind declares.
+    fn declared(&self) -> Option<Declared> {
+        self.check
+            .clone()
+            .or_else(|| webhooks::declared(&self.integration))
     }
 }
 
@@ -197,16 +201,15 @@ impl WebhookCheck for ByTrigger {
         &self,
         trigger: &crate::api::dto::triggers::InvocationTrigger,
         tenant_id: &str,
-        _headers: &HeaderMap,
-        body: &[u8],
-    ) -> Result<(), String> {
+        received: Received<'_>,
+    ) -> Result<Vec<String>, String> {
         let Some(connection_id) = trigger
             .configuration
             .as_ref()
             .and_then(|c| c.get("connection_id"))
             .and_then(|v| v.as_str())
         else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let kept = crate::api::repositories::triggers::TriggerRepository::new(self.pool.clone())
             .webhook_verification(&trigger.id)
@@ -232,39 +235,38 @@ impl WebhookCheck for ByTrigger {
                     .await
                     .map_err(|error| format!("{}: {}", error.code.as_str(), error.detail))
             },
-            body,
+            received,
         )
         .await
     }
 }
 
-/// Checks `body` against `material`, asking `verify` (seal) whether the
-/// signature is the secret's. A kind that signs nothing, or a connection
-/// with no secret, needs no check.
-async fn check_with<F, Fut>(material: &Material, verify: F, body: &[u8]) -> Result<(), String>
+/// Checks a webhook against `material`, asking `verify` (seal) whether
+/// what it presents is the secret's. A kind whose webhooks are not checked,
+/// or a connection with no secret, needs no check. Answers the headers the
+/// run is not to be handed.
+async fn check_with<F, Fut>(
+    material: &Material,
+    verify: F,
+    received: Received<'_>,
+) -> Result<Vec<String>, String>
 where
     F: FnOnce(String, Value, Vec<u8>, Vec<u8>) -> Fut,
     Fut: std::future::Future<Output = Result<bool, String>>,
 {
-    let Some((field, sealed)) = &material.secret else {
-        return Ok(());
+    let Some(declared) = material.declared() else {
+        return Ok(Vec::new());
     };
-    match material.integration.as_str() {
-        "mailgun" => {
-            let (message, signature) = mailgun_signed(body)?;
-            let Ok(signature) = hex::decode(signature) else {
-                return Err("Mailgun webhook signature mismatch".to_string());
-            };
-            let parameters = serde_json::json!({ field.as_str(): sealed });
-            match verify(field.clone(), parameters, message.into_bytes(), signature).await {
-                Ok(true) => Ok(()),
-                Ok(false) => Err("Mailgun webhook signature mismatch".to_string()),
-                Err(error) => Err(format!(
-                    "Mailgun webhook signature could not be checked: {error}"
-                )),
-            }
-        }
-        _ => Ok(()),
+    let withheld = declared.withheld_headers();
+    let Some((field, sealed)) = &material.secret else {
+        return Ok(withheld);
+    };
+    let presented = presented(&declared, received)?;
+    let parameters = serde_json::json!({ field.as_str(): sealed });
+    match verify(field.clone(), parameters, presented.message, presented.mac).await {
+        Ok(true) => Ok(withheld),
+        Ok(false) => Err("the webhook's signature does not match".to_string()),
+        Err(error) => Err(format!("the webhook could not be checked: {error}")),
     }
 }
 
@@ -311,10 +313,21 @@ pub async fn keep_material_current(
 mod material_tests {
     use super::*;
 
+    const MAILGUN_FIELD: &str = "webhook_signing_key";
+
+    fn received<'a>(headers: &'a HeaderMap, body: &'a [u8]) -> Received<'a> {
+        Received {
+            headers,
+            body,
+            fields: None,
+        }
+    }
+
     fn mailgun(secret: Option<&str>) -> Material {
         Material {
             connection_id: "c-1".into(),
             integration: "mailgun".into(),
+            check: webhooks::declared("mailgun"),
             secret: secret.map(|sealed| (MAILGUN_FIELD.to_owned(), serde_json::json!(sealed))),
         }
     }
@@ -326,7 +339,7 @@ mod material_tests {
         material: &Material,
         body: &[u8],
         answer: Result<bool, String>,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<String>, String> {
         check_with(
             material,
             |field, parameters, message, signature| async move {
@@ -336,7 +349,7 @@ mod material_tests {
                 assert_eq!(signature, [0xab, 0xcd]);
                 answer
             },
-            body,
+            received(&HeaderMap::new(), body),
         )
         .await
     }
@@ -347,7 +360,7 @@ mod material_tests {
         assert!(checked(&material, SIGNED, Ok(true)).await.is_ok());
         assert_eq!(
             checked(&material, SIGNED, Ok(false)).await.unwrap_err(),
-            "Mailgun webhook signature mismatch"
+            "the webhook's signature does not match"
         );
         // A check that could not be made refuses the webhook.
         assert!(
@@ -360,25 +373,112 @@ mod material_tests {
 
     #[tokio::test]
     async fn a_webhook_that_carries_no_signature_is_refused_without_asking() {
-        let never = |_, _, _, _| async { panic!("seal is not asked") };
         let material = mailgun(Some("sealed"));
-        assert!(check_with(&material, never, b"{}").await.is_err());
+        let never = |_, _, _, _| async { panic!("seal is not asked") };
+        assert!(
+            check_with(&material, never, received(&HeaderMap::new(), b"{}"))
+                .await
+                .is_err()
+        );
         let not_hex = br#"{"timestamp":"1","token":"t","signature":"zz"}"#;
         let never = |_, _, _, _| async { panic!("seal is not asked") };
-        assert!(check_with(&material, never, not_hex).await.is_err());
+        assert!(
+            check_with(&material, never, received(&HeaderMap::new(), not_hex))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn a_connection_with_nothing_to_check_against_needs_no_check() {
         let never = |_, _, _, _| async { panic!("seal is not asked") };
-        assert!(check_with(&mailgun(None), never, b"anything").await.is_ok());
+        assert!(
+            check_with(
+                &mailgun(None),
+                never,
+                received(&HeaderMap::new(), b"anything")
+            )
+            .await
+            .is_ok()
+        );
         let other = Material {
             connection_id: "c-1".into(),
-            integration: "slack".into(),
+            integration: "http_bearer".into(),
+            check: None,
             secret: None,
         };
         let never = |_, _, _, _| async { panic!("seal is not asked") };
-        assert!(check_with(&other, never, b"anything").await.is_ok());
+        assert!(
+            check_with(&other, never, received(&HeaderMap::new(), b"anything"))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_slack_webhook_is_checked_as_slack_signs_it() {
+        let material = Material {
+            connection_id: "c-1".into(),
+            integration: "slack_bot".into(),
+            check: webhooks::declared("slack_bot"),
+            secret: Some(("signing_secret".into(), serde_json::json!("sealed"))),
+        };
+        let at = now().to_string();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-slack-request-timestamp", at.parse().unwrap());
+        headers.insert("x-slack-signature", "v0=0a0b".parse().unwrap());
+        let body = br#"{"type":"event_callback"}"#;
+        let expected = format!("v0:{at}:{}", std::str::from_utf8(body).unwrap());
+        let withheld = check_with(
+            &material,
+            |field, _, message, mac| async move {
+                assert_eq!(field, "signing_secret");
+                assert_eq!(message, expected.into_bytes());
+                assert_eq!(mac, [0x0a, 0x0b]);
+                Ok(true)
+            },
+            received(&headers, body),
+        )
+        .await
+        .unwrap();
+        assert!(withheld.is_empty());
+
+        // Signed an hour ago: refused without asking.
+        let mut stale = headers.clone();
+        stale.insert(
+            "x-slack-request-timestamp",
+            (now() - 3600).to_string().parse().unwrap(),
+        );
+        let never = |_, _, _, _| async { panic!("seal is not asked") };
+        assert!(
+            check_with(&material, never, received(&stale, body))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_telegram_token_is_checked_and_not_handed_to_the_run() {
+        let material = Material {
+            connection_id: "c-1".into(),
+            integration: "telegram_bot".into(),
+            check: webhooks::declared("telegram_bot"),
+            secret: Some(("webhook_secret".into(), serde_json::json!("sealed"))),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-telegram-bot-api-secret-token", "tok".parse().unwrap());
+        let withheld = check_with(
+            &material,
+            |_, _, message, mac| async move {
+                assert!(message.is_empty());
+                assert_eq!(mac, b"tok");
+                Ok(true)
+            },
+            received(&headers, b"{}"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(withheld, ["x-telegram-bot-api-secret-token"]);
     }
 
     #[test]
@@ -389,5 +489,13 @@ mod material_tests {
             serde_json::from_value::<Material>(written).unwrap(),
             material
         );
+        // Kept before checks were declared: checked as its kind declares.
+        let old: Material = serde_json::from_value(serde_json::json!({
+            "connection_id": "c-1",
+            "integration": "mailgun",
+            "secret": [MAILGUN_FIELD, "sealed"],
+        }))
+        .unwrap();
+        assert_eq!(old.declared(), webhooks::declared("mailgun"));
     }
 }

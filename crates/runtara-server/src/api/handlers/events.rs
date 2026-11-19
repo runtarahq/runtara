@@ -165,21 +165,33 @@ pub async fn capture_http_event(
         .clone()
         .unwrap_or_else(|| crate::config::tenant_id().to_string());
 
-    // Verify webhook signature if the trigger has a linked connection.
-    // From here on the work is the trigger's tenant's.
-    if let Some(ref body_bytes) = raw_body_bytes
-        && let Err(e) = runtara_store_postgres::tenant_scope::scoped(
-            tenant_id.clone(),
-            check.check(&trigger, &tenant_id, &headers, body_bytes),
-        )
-        .await
+    // Check the webhook if the trigger has a linked connection. A form's
+    // fields are read from what was parsed of it; its body is not kept, so a
+    // check that signs the body refuses it. From here on the work is the
+    // trigger's tenant's.
+    let withheld = match runtara_store_postgres::tenant_scope::scoped(
+        tenant_id.clone(),
+        check.check(
+            &trigger,
+            &tenant_id,
+            crate::api::services::webhook_verification::Received {
+                headers: &headers,
+                body: raw_body_bytes.as_deref().unwrap_or_default(),
+                fields: is_multipart.then(|| &parsed_body["fields"]),
+            },
+        ),
+    )
+    .await
     {
-        let error_response = json!({
-            "success": false,
-            "message": format!("Webhook verification failed: {}", e)
-        });
-        return Err((StatusCode::UNAUTHORIZED, Json(error_response)));
-    }
+        Ok(withheld) => withheld,
+        Err(e) => {
+            let error_response = json!({
+                "success": false,
+                "message": format!("Webhook verification failed: {}", e)
+            });
+            return Err((StatusCode::UNAUTHORIZED, Json(error_response)));
+        }
+    };
 
     // Process the trigger
     {
@@ -193,7 +205,7 @@ pub async fn capture_http_event(
         }
 
         // Build inputs from HTTP request
-        let inputs = build_inputs_from_http_parsed(&method, &uri, &headers, &[], parsed_body);
+        let inputs = build_inputs_from_http_parsed(&method, &uri, &headers, &withheld, parsed_body);
 
         // Extract headers for the event
         let header_pairs: Vec<(String, String)> = headers
