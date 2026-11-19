@@ -213,6 +213,10 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 {{/operations}}
 {{/apis}}
 {{/apiInfo}}
+{{! Hand-written capabilities (`custom_capabilities` in connector.yaml), in src/custom.rs. }}
+{{#customCapabilities}}
+        &crate::custom::__CAPABILITY_META_{{metaName}},
+{{/customCapabilities}}
     ];
 
     let input_types: HashMap<&'static str, &'static InputTypeMeta> = [
@@ -225,6 +229,9 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 {{/operations}}
 {{/apis}}
 {{/apiInfo}}
+{{#customCapabilities}}
+        ("{{input}}", &crate::custom::__INPUT_META_{{input}} as &InputTypeMeta),
+{{/customCapabilities}}
     ]
     .into_iter()
     .collect();
@@ -241,6 +248,9 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 {{/isEnum}}
 {{/model}}
 {{/models}}
+{{#customOutputs}}
+        ("{{.}}", &crate::custom::__OUTPUT_META_{{.}} as &OutputTypeMeta),
+{{/customOutputs}}
     ]
     .into_iter()
     .collect();
@@ -280,5 +290,8 @@ runtara_agent_macro::agent_component!(
 {{/operations}}
 {{/apis}}
 {{/apiInfo}}
+{{#customCapabilities}}
+        crate::custom::{{function}},
+{{/customCapabilities}}
     ],
 );
