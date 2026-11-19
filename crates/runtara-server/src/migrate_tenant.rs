@@ -135,6 +135,11 @@ const RUNTIME_TABLES: &[Table] = &[
     by("images", "tenant_id = $1"),
     by("instance_images", "tenant_id = $1"),
     by("instance_launches", "tenant_id = $1"),
+    // What the engine approved to run, and the version of each workflow that
+    // runs when none is named: without them the tenant's workflows are there
+    // and none of them runs.
+    by("workflow_approvals", "tenant_id = $1"),
+    by("workflow_current_versions", "tenant_id = $1"),
 ];
 
 const SERVER_TABLES: &[Table] = &[

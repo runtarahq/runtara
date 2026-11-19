@@ -1804,6 +1804,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A tenant moved with `migrate-tenant` could run none of its workflows.**
+  The engine's record of what it approved to run, and of the version of
+  each workflow that runs when none is named, was not copied with the
+  tenant, so the target refused every run of it until each version was
+  compiled again. Both are copied now.
 - **A workflow that calls a published agent which sleeps or waits compiles
   where compiles are checked.** Such an agent runs as a child run and is
   composed into nobody, so a build does not record it; a server that
