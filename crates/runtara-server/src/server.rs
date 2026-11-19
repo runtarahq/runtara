@@ -3891,7 +3891,8 @@ async fn start_as_platform(
         .with_agent_catalog(agent_catalog.clone())
         .with_agent_testing(agent_testing.clone())
         .with_agents(agents_service.clone())
-        .with_connections(connections_facade.clone()),
+        .with_connections(connections_facade.clone())
+        .with_valkey(redis_manager.clone()),
     );
     let engine_api: Arc<dyn crate::engine::Engine> = local_engine.clone();
     native_control.install_engine(execution_engine.clone());
@@ -3926,6 +3927,32 @@ async fn start_as_platform(
                     runtara.pool().clone(),
                     shutdown_signal.clone(),
                     tell,
+                ),
+            );
+        }
+        // What another engine stores, or a piece of a reply it is given,
+        // wakes this engine's readers too.
+        workers.intake(
+            crate::roles::Role::Engine,
+            "conversation-notices",
+            &shutdown_coordinator,
+            crate::api::services::conversations::hear_conversations(
+                pool.clone(),
+                local_engine.conversations(),
+                shutdown_signal.clone(),
+            ),
+        );
+        if let Some(redis_url) =
+            crate::valkey::build_redis_url().filter(|_| redis_manager.is_some())
+        {
+            workers.intake(
+                crate::roles::Role::Engine,
+                "conversation-pieces",
+                &shutdown_coordinator,
+                crate::api::services::conversations::hear_pieces(
+                    redis_url,
+                    local_engine.conversations(),
+                    shutdown_signal.clone(),
                 ),
             );
         }

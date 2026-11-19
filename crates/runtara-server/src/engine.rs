@@ -728,6 +728,13 @@ impl LocalEngine {
         self.conversations.clone()
     }
 
+    /// Keeps the pieces of conversations' replies in Valkey, where every
+    /// engine reads them.
+    pub fn with_valkey(mut self, valkey: Option<redis::aio::ConnectionManager>) -> Self {
+        self.conversations = self.conversations.with_pieces_in(valkey);
+        self
+    }
+
     /// For intake: workflows are run by `engine`, in another process.
     pub fn with_runs_elsewhere(mut self, engine: Arc<remote::RemoteEngine>) -> Self {
         self.runs_elsewhere = Some(engine);

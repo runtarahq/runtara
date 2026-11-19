@@ -1706,6 +1706,7 @@ impl ControlHost for NativeControl {
         let conversations = self.conversations().await?;
         conversations
             .piece_of_reply(&tenant, &caller, &reply_id, &piece)
+            .await
             .map_err(conversation_error)?;
         Ok(serde_json::json!({"said": true}))
     }

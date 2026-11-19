@@ -1796,6 +1796,7 @@ async fn the_pieces_of_a_reply_reach_its_readers_and_are_not_kept() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     talk.conversations
         .piece_of_reply(&talk.tenant, &instance, "answer", "Hel")
+        .await
         .unwrap();
     let first = waiting.await.unwrap();
     let pieces = |events: &[ConversationEvent]| -> Vec<(u64, String, u64)> {
@@ -1813,6 +1814,7 @@ async fn the_pieces_of_a_reply_reach_its_readers_and_are_not_kept() {
     assert_eq!(first[0].seq, 0, "a piece has no place in the log");
     talk.conversations
         .piece_of_reply(&talk.tenant, &instance, "answer", "lo, wörld")
+        .await
         .unwrap();
     // Read on from the last piece seen.
     assert_eq!(pieces(&read(1).await), [(3, "lo, wörld".to_owned(), 2)]);
@@ -1877,8 +1879,206 @@ async fn the_pieces_of_a_reply_reach_its_readers_and_are_not_kept() {
     ] {
         assert!(matches!(
             talk.conversations
-                .piece_of_reply(tenant, run, "answer", "x"),
+                .piece_of_reply(tenant, run, "answer", "x")
+                .await,
             Err(ConversationError::NotFound)
         ));
     }
+}
+
+/// Another engine on the same database: the same runs, conversations of
+/// its own in memory.
+fn another_engine(talk: &Talk, pool: PgPool) -> Conversations {
+    Conversations::new(pool, talk.runs.clone())
+}
+
+/// A reader on one engine is answered when another engine stores what it
+/// waits for: the transaction that stored it says so, and every engine
+/// hears it (docs/multiple-engines-plan.md, E4).
+#[tokio::test]
+async fn a_reader_on_one_engine_is_answered_when_another_stores_something() {
+    use runtara_server::api::services::conversations::{ReadEvents, hear_conversations};
+    use std::time::{Duration, Instant};
+    let talk = Talk::new().await;
+    talk.send("k", "m-1", "start").await;
+    let after = talk.events("k").await.last().unwrap().seq;
+    let pool = pool().await;
+    let other = another_engine(&talk, pool.clone());
+    let stop = runtara_server::shutdown::ShutdownSignal::new();
+    tokio::spawn(hear_conversations(pool, other.clone(), stop.clone()));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let (tenant, workflow) = (talk.tenant.clone(), talk.workflow.clone());
+    let reading = other.clone();
+    let waiting = tokio::spawn(async move {
+        let asked = Instant::now();
+        let events = reading
+            .read(
+                &tenant,
+                &workflow,
+                "k",
+                ReadEvents {
+                    after,
+                    limit: 100,
+                    wait_ms: 20_000,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("read");
+        (events, asked.elapsed())
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The first engine stores a message: the second's reader is answered.
+    talk.send("k", "m-2", "more").await;
+    let (events, took) = waiting.await.unwrap();
+    assert!(!events.is_empty());
+    assert!(took < Duration::from_secs(3), "{took:?}");
+    stop.trigger();
+}
+
+/// A run that writes a reply through an engine that did not start it is
+/// not refused: its conversation is found in the database.
+#[tokio::test]
+async fn a_run_writes_through_an_engine_that_did_not_start_it() {
+    let talk = Talk::new().await;
+    talk.send("k", "m-1", "write").await;
+    let instance = talk.runs_of_workflow()[0].instance.clone();
+    let other = another_engine(&talk, pool().await);
+    assert!(other.carried_by(&instance).is_none());
+    other
+        .piece_of_reply(&talk.tenant, &instance, "answer", "Hi")
+        .await
+        .expect("the run's conversation is found");
+    assert!(other.carried_by(&instance).is_some());
+    let found = other.find_carried_by(&instance).await.unwrap();
+    assert_eq!(found.map(|(_, tenant)| tenant), Some(talk.tenant.clone()));
+    // Another tenant's run is still not this one's.
+    assert!(matches!(
+        other
+            .piece_of_reply("another-tenant", &instance, "answer", "x")
+            .await,
+        Err(ConversationError::NotFound)
+    ));
+}
+
+/// The pieces of a reply are kept where every engine reads them, numbered
+/// the same on each: a reader on one engine is given the pieces a run
+/// writes through another, in order, and reads on from a number another
+/// gave it; once the reply is said whole they are gone for every engine.
+#[cfg(feature = "valkey-integration-tests")]
+#[tokio::test]
+async fn the_pieces_of_a_reply_reach_readers_on_every_engine() {
+    use runtara_server::api::services::conversations::{
+        ConversationEventKind, ReadEvents, hear_pieces,
+    };
+    use std::time::{Duration, Instant};
+    let redis_url = runtara_server::valkey::ValkeyConfig::from_env()
+        .expect("VALKEY_HOST")
+        .connection_url();
+    let valkey = redis::aio::ConnectionManager::new(
+        runtara_server::valkey::open_client(&redis_url).unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut talk = Talk::new().await;
+    talk.conversations = talk
+        .conversations
+        .clone()
+        .with_pieces_in(Some(valkey.clone()));
+    talk.send("k", "m-1", "write me something").await;
+    let instance = talk.runs_of_workflow()[0].instance.clone();
+    let after = talk.events("k").await.last().unwrap().seq;
+    let other = another_engine(&talk, pool().await).with_pieces_in(Some(valkey));
+    let stop = runtara_server::shutdown::ShutdownSignal::new();
+    tokio::spawn(hear_pieces(redis_url.clone(), other.clone(), stop.clone()));
+    tokio::spawn(hear_pieces(
+        redis_url,
+        talk.conversations.clone(),
+        stop.clone(),
+    ));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let read = |on: Conversations, pieces_after: u64, wait_ms: u32| {
+        let (tenant, workflow) = (talk.tenant.clone(), talk.workflow.clone());
+        async move {
+            let asked = Instant::now();
+            let events = on
+                .read(
+                    &tenant,
+                    &workflow,
+                    "k",
+                    ReadEvents {
+                        after,
+                        limit: 100,
+                        wait_ms,
+                        deltas_after: Some(pieces_after),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("read");
+            let pieces: Vec<(u64, String, u64)> = events
+                .iter()
+                .filter_map(|event| match &event.said {
+                    ConversationEventKind::ReplyDelta(piece) => {
+                        Some((piece.offset, piece.text.clone(), piece.n))
+                    }
+                    _ => None,
+                })
+                .collect();
+            (pieces, asked.elapsed())
+        }
+    };
+
+    // A reader on the other engine waits; the run writes through the first.
+    let waiting = tokio::spawn(read(other.clone(), 0, 20_000));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    talk.conversations
+        .piece_of_reply(&talk.tenant, &instance, "answer", "Hel")
+        .await
+        .unwrap();
+    let (pieces, took) = waiting.await.unwrap();
+    assert_eq!(pieces, [(0, "Hel".to_owned(), 1)]);
+    assert!(took < Duration::from_secs(3), "{took:?}");
+
+    // The run writes on through the other engine, which never carried it,
+    // and a reader on the first reads on from the number it was given.
+    let waiting = tokio::spawn(read(talk.conversations.clone(), 1, 20_000));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    other
+        .piece_of_reply(&talk.tenant, &instance, "answer", "lo")
+        .await
+        .unwrap();
+    let (pieces, took) = waiting.await.unwrap();
+    assert_eq!(pieces, [(3, "lo".to_owned(), 2)]);
+    assert!(took < Duration::from_secs(3), "{took:?}");
+
+    // The reply is said whole: its pieces are gone, read from either.
+    talk.runs.says(
+        &instance,
+        REPLY_EVENT,
+        json!({"text": "Hello", "replyId": "answer"}),
+    );
+    talk.advance("k").await;
+    let whole_seq = talk.events("k").await.last().unwrap().seq;
+    for on in [talk.conversations.clone(), other.clone()] {
+        let left = on
+            .read(
+                &talk.tenant,
+                &talk.workflow,
+                "k",
+                ReadEvents {
+                    after: whole_seq,
+                    limit: 100,
+                    wait_ms: 200,
+                    deltas_after: Some(0),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(left.is_empty(), "{left:?}");
+    }
+    stop.trigger();
 }

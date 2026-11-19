@@ -302,15 +302,76 @@ pub const MAX_WAIT: Duration = Duration::from_secs(25);
 /// each run carries: what lets a conversation be read when there is
 /// something to read, and not on a clock.
 ///
-/// It is this process's alone. The engine is one process; conversations are
-/// carried and read in it.
+/// It is this engine's. Another engine's readers are woken by the notice the
+/// transaction that stored an event sends (`runtara_conversation`, heard by
+/// [`hear_conversations`]), and by the notice of a piece of a reply
+/// ([`PIECES_CHANNEL`], heard by [`hear_pieces`]); which run carries a
+/// conversation is in the database, and kept here only as a cache.
 #[derive(Default)]
 struct Wakes {
     readers: std::sync::Mutex<std::collections::HashMap<Uuid, Arc<tokio::sync::Notify>>>,
     /// The run that carries each conversation, by the run's instance id.
     runs: std::sync::Mutex<std::collections::HashMap<String, (Uuid, String)>>,
-    /// The pieces of replies being written, by conversation.
+    /// The pieces of replies being written, by conversation, where there is
+    /// no Valkey to keep them for every engine.
     deltas: std::sync::Mutex<std::collections::HashMap<Uuid, Pieces>>,
+}
+
+/// The channel on which an engine says a conversation has a new piece of a
+/// reply; its payload is the conversation's id.
+pub const PIECES_CHANNEL: &str = "runtara:conversation-pieces";
+/// The channel on which the database says a conversation has a new event.
+pub const SAID_CHANNEL: &str = "runtara_conversation";
+/// How long a conversation's pieces are kept after the last one.
+const PIECES_KEPT_MS: u64 = 60 * 60 * 1000;
+
+/// A conversation's pieces in Valkey: a stream of them, the counter that
+/// numbers them, and how far each reply has got.
+fn pieces_keys(tenant: &str, conversation: Uuid) -> [String; 3] {
+    let base = format!("{tenant}:conversation:{conversation}:pieces");
+    [base.clone(), format!("{base}:n"), format!("{base}:written")]
+}
+
+/// Holds a piece: numbers it, places it in its reply, keeps it, and says so.
+const HOLD_PIECE: &str = r#"
+local n = redis.call('INCR', KEYS[2])
+local chars = tonumber(ARGV[3])
+local offset = redis.call('HINCRBY', KEYS[3], ARGV[1], chars) - chars
+redis.call('XADD', KEYS[1], 'MAXLEN', ARGV[5], '*',
+  'n', n, 'reply', ARGV[1], 'offset', offset, 'text', ARGV[2], 'instance', ARGV[4])
+for i = 1, 3 do redis.call('PEXPIRE', KEYS[i], ARGV[6]) end
+redis.call('PUBLISH', ARGV[7], ARGV[8])
+return n
+"#;
+
+/// Drops the pieces of a reply said whole, or all of them (`''`). The
+/// counter stays, so a number is never given twice.
+const DROP_PIECES: &str = r#"
+if ARGV[1] == '' then
+  redis.call('DEL', KEYS[1], KEYS[2])
+  return 0
+end
+for _, entry in ipairs(redis.call('XRANGE', KEYS[1], '-', '+')) do
+  local fields = entry[2]
+  for i = 1, #fields, 2 do
+    if fields[i] == 'reply' and fields[i + 1] == ARGV[1] then
+      redis.call('XDEL', KEYS[1], entry[1])
+    end
+  end
+end
+redis.call('HDEL', KEYS[2], ARGV[1])
+return 0
+"#;
+
+/// A piece read back from Valkey.
+fn piece_from_fields(fields: &std::collections::HashMap<String, String>) -> Option<ReplyDelta> {
+    Some(ReplyDelta {
+        reply_id: fields.get("reply")?.clone(),
+        offset: fields.get("offset")?.parse().ok()?,
+        text: fields.get("text")?.clone(),
+        n: fields.get("n")?.parse().ok()?,
+        instance_id: fields.get("instance")?.clone(),
+    })
 }
 
 /// A conversation's pieces of the replies being written: the last few, and
@@ -828,6 +889,9 @@ pub struct Conversations {
     runs: Arc<dyn Runs>,
     queue_bound: usize,
     wakes: Arc<Wakes>,
+    /// Where the pieces of replies are kept for every engine; `None` keeps
+    /// them in this process.
+    pieces: Option<redis::aio::ConnectionManager>,
 }
 
 struct Row_ {
@@ -896,7 +960,20 @@ impl Conversations {
             runs,
             queue_bound: QUEUE_BOUND,
             wakes: Arc::default(),
+            pieces: None,
         }
+    }
+
+    /// Keeps the pieces of replies in Valkey, where every engine reads them.
+    pub fn with_pieces_in(mut self, valkey: Option<redis::aio::ConnectionManager>) -> Self {
+        self.pieces = valkey;
+        self
+    }
+
+    /// Wakes this engine's readers of `conversation`: it said something,
+    /// here or on another engine.
+    pub fn woken(&self, conversation: Uuid) {
+        self.wakes.said(conversation);
     }
 
     /// With another bound on the messages one conversation holds.
@@ -1209,7 +1286,7 @@ impl Conversations {
                 // Nothing kept is new: the pieces of a reply being written
                 // are, for a reader that shows them.
                 if let Some(after) = read.deltas_after {
-                    let pieces = self.wakes.pieces_after(conversation, after);
+                    let pieces = self.pieces_after(tenant, conversation, after).await?;
                     if !pieces.is_empty() {
                         return Ok(pieces
                             .into_iter()
@@ -1379,9 +1456,10 @@ impl Conversations {
     }
 
     /// A piece of the reply `reply_id` that the run `instance` is writing,
-    /// for whoever reads the conversation it carries now. Nothing is kept.
-    /// `NotFound` if the run carries no conversation this process knows of.
-    pub fn piece_of_reply(
+    /// for whoever reads the conversation it carries now. It is kept only
+    /// until the reply is said whole. `NotFound` if the run carries no
+    /// conversation of `tenant`.
+    pub async fn piece_of_reply(
         &self,
         tenant: &str,
         instance: &str,
@@ -1394,20 +1472,145 @@ impl Conversations {
                 "a piece of a reply is at most {MAX_PIECE_BYTES} bytes"
             )));
         }
-        let Some((conversation, carried_for)) = self.wakes.conversation_of(instance) else {
-            return Err(ConversationError::NotFound);
+        let conversation = match self.wakes.conversation_of(instance) {
+            Some((conversation, carried_for)) if carried_for == tenant => conversation,
+            Some(_) => return Err(ConversationError::NotFound),
+            // Carried by a run another engine started: the database knows.
+            None => {
+                let found: Option<Uuid> = runtara_store_postgres::tenant_scope::scoped(
+                    tenant.to_owned(),
+                    sqlx::query_scalar(
+                        "SELECT conversation_id FROM conversations \
+                         WHERE tenant_id = $1 AND instance_id = $2",
+                    )
+                    .bind(tenant)
+                    .bind(instance)
+                    .fetch_optional(&self.pool),
+                )
+                .await
+                .map_err(storage)?;
+                let conversation = found.ok_or(ConversationError::NotFound)?;
+                self.wakes.carried_by(conversation, tenant, Some(instance));
+                conversation
+            }
         };
-        if carried_for != tenant {
-            return Err(ConversationError::NotFound);
-        }
-        self.wakes.piece(conversation, instance, reply_id, text);
+        self.hold_piece(tenant, conversation, instance, reply_id, text)
+            .await
+    }
+
+    /// Keeps a piece, where every engine's readers read it, and wakes them.
+    async fn hold_piece(
+        &self,
+        tenant: &str,
+        conversation: Uuid,
+        instance: &str,
+        reply_id: &str,
+        text: &str,
+    ) -> ConversationResult<()> {
+        let Some(valkey) = &self.pieces else {
+            self.wakes.piece(conversation, instance, reply_id, text);
+            return Ok(());
+        };
+        let [stream, counter, written] = pieces_keys(tenant, conversation);
+        let mut conn = valkey.clone();
+        let _: i64 = redis::Script::new(HOLD_PIECE)
+            .key(stream)
+            .key(counter)
+            .key(written)
+            .arg(reply_id)
+            .arg(text)
+            .arg(text.chars().count() as u64)
+            .arg(instance)
+            .arg(PIECES_HELD)
+            .arg(PIECES_KEPT_MS)
+            .arg(PIECES_CHANNEL)
+            .arg(conversation.to_string())
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|error| ConversationError::Storage(error.to_string()))?;
+        // This engine's readers at once; others when they hear it.
+        self.wakes.said(conversation);
         Ok(())
     }
 
+    /// The pieces after `after`.
+    async fn pieces_after(
+        &self,
+        tenant: &str,
+        conversation: Uuid,
+        after: u64,
+    ) -> ConversationResult<Vec<ReplyDelta>> {
+        let Some(valkey) = &self.pieces else {
+            return Ok(self.wakes.pieces_after(conversation, after));
+        };
+        let [stream, _, _] = pieces_keys(tenant, conversation);
+        let mut conn = valkey.clone();
+        let entries: Vec<(String, std::collections::HashMap<String, String>)> =
+            redis::cmd("XRANGE")
+                .arg(stream)
+                .arg("-")
+                .arg("+")
+                .query_async(&mut conn)
+                .await
+                .map_err(|error| ConversationError::Storage(error.to_string()))?;
+        Ok(entries
+            .iter()
+            .filter_map(|(_, fields)| piece_from_fields(fields))
+            .filter(|piece| piece.n > after)
+            .collect())
+    }
+
+    /// A reply is said whole: its pieces are nothing to anyone now. With no
+    /// reply named, the run ended, and all of them go.
+    async fn written(&self, tenant: &str, conversation: Uuid, reply_id: Option<&str>) {
+        let Some(valkey) = &self.pieces else {
+            self.wakes.written(conversation, reply_id);
+            return;
+        };
+        let [stream, _, written] = pieces_keys(tenant, conversation);
+        let mut conn = valkey.clone();
+        let dropped: Result<i64, _> = redis::Script::new(DROP_PIECES)
+            .key(stream)
+            .key(written)
+            .arg(reply_id.unwrap_or_default())
+            .invoke_async(&mut conn)
+            .await;
+        if let Err(error) = dropped {
+            // They expire on their own; a reader drops a written reply's
+            // pieces as it reads the reply.
+            tracing::debug!(%conversation, %error, "The pieces of a reply were not dropped");
+        }
+    }
+
     /// The conversation the run `instance` carries, and its tenant, if this
-    /// process knows it to carry one.
+    /// engine knows it to carry one.
     pub fn carried_by(&self, instance: &str) -> Option<(Uuid, String)> {
         self.wakes.conversation_of(instance)
+    }
+
+    /// The conversation the run `instance` carries, and its tenant, from
+    /// the database when this engine does not know: the run may have been
+    /// started by another. Across tenants: a run's notice names no tenant.
+    pub async fn find_carried_by(
+        &self,
+        instance: &str,
+    ) -> ConversationResult<Option<(Uuid, String)>> {
+        if let Some(found) = self.wakes.conversation_of(instance) {
+            return Ok(Some(found));
+        }
+        let row: Option<(Uuid, String)> = runtara_store_postgres::tenant_scope::system(
+            sqlx::query_as(
+                "SELECT conversation_id, tenant_id FROM conversations WHERE instance_id = $1",
+            )
+            .bind(instance)
+            .fetch_optional(&self.pool),
+        )
+        .await
+        .map_err(storage)?;
+        if let Some((conversation, tenant)) = &row {
+            self.wakes.carried_by(*conversation, tenant, Some(instance));
+        }
+        Ok(row)
     }
 
     /// A workflow's conversations, most recently active first.
@@ -1763,7 +1966,7 @@ impl Conversations {
                     let mut reply: Reply = serde_json::from_value(said.payload).unwrap_or_default();
                     reply.instance_id = Some(instance.clone());
                     if let Some(reply_id) = &reply.reply_id {
-                        self.wakes.written(at.row.id, Some(reply_id));
+                        self.written(&tenant, at.row.id, Some(reply_id)).await;
                     }
                     at.say(ConversationEventKind::Reply(reply)).await?;
                     continue;
@@ -1815,7 +2018,7 @@ impl Conversations {
                 (false, false) => "failed",
             };
             at.ended(&instance, status, error).await?;
-            self.wakes.written(at.row.id, None);
+            self.written(&tenant, at.row.id, None).await;
             return Ok(true);
         }
 
@@ -2306,7 +2509,11 @@ pub async fn carry(
     use runtara_store_postgres::tenant_scope::{scoped, system};
     let mut telling = true;
     let mut swept: Option<tokio::time::Instant> = None;
+    // The runs found to carry no conversation, until the next look at all
+    // of them: most runs carry none, and are not asked about at each notice.
+    let mut carry_none = std::collections::HashSet::<String>::new();
     loop {
+        carry_none.clear();
         // What is past keeping goes, now and then.
         if swept.is_none_or(|swept| swept.elapsed() >= SWEPT_EVERY) {
             swept = Some(tokio::time::Instant::now());
@@ -2348,10 +2555,21 @@ pub async fn carry(
                         instances.insert(more);
                     }
                     for instance in instances {
-                        let Some((conversation, tenant)) = conversations.carried_by(&instance)
-                        else {
+                        if carry_none.contains(&instance) {
                             continue;
-                        };
+                        }
+                        let (conversation, tenant) =
+                            match conversations.find_carried_by(&instance).await {
+                                Ok(Some(found)) => found,
+                                Ok(None) => {
+                                    carry_none.insert(instance);
+                                    continue;
+                                }
+                                Err(error) => {
+                                    tracing::debug!(%instance, %error, "A run's conversation was not looked up");
+                                    continue;
+                                }
+                            };
                         if let Err(error) =
                             scoped(tenant, conversations.advance(conversation)).await
                         {
@@ -2392,6 +2610,81 @@ pub async fn hear_runs(
                 Err(error) => {
                     tracing::warn!(%error, "The runs' notices are not heard; listening again");
                 }
+            },
+        }
+        tokio::select! {
+            biased;
+            _ = shutdown.clone().wait() => return,
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+        }
+    }
+}
+
+/// Listens for the conversations of the server database that have a new
+/// event, said by the transaction that stored it on any engine, and wakes
+/// this engine's readers of each, until the server stops. What is said
+/// while the listener reconnects is read at a reader's next ask.
+pub async fn hear_conversations(
+    pool: PgPool,
+    conversations: Conversations,
+    shutdown: crate::shutdown::ShutdownSignal,
+) {
+    loop {
+        let heard = async {
+            let mut listener = sqlx::postgres::PgListener::connect_with(&pool).await?;
+            listener.listen(SAID_CHANNEL).await?;
+            loop {
+                let notice = listener.recv().await?;
+                if let Ok(conversation) = notice.payload().parse::<Uuid>() {
+                    conversations.woken(conversation);
+                }
+            }
+            #[allow(unreachable_code)]
+            Ok::<_, sqlx::Error>(())
+        };
+        tokio::select! {
+            biased;
+            _ = shutdown.clone().wait() => return,
+            heard = heard => if let Err(error) = heard {
+                tracing::warn!(%error, "The conversations' notices are not heard; listening again");
+            },
+        }
+        tokio::select! {
+            biased;
+            _ = shutdown.clone().wait() => return,
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+        }
+    }
+}
+
+/// Listens for the pieces of replies said on any engine
+/// ([`PIECES_CHANNEL`]), and wakes this engine's readers of each
+/// conversation, until the server stops.
+pub async fn hear_pieces(
+    redis_url: String,
+    conversations: Conversations,
+    shutdown: crate::shutdown::ShutdownSignal,
+) {
+    use futures::StreamExt;
+    loop {
+        let heard = async {
+            let client = crate::valkey::open_client(&redis_url)?;
+            let mut pubsub = client.get_async_pubsub().await?;
+            pubsub.subscribe(PIECES_CHANNEL).await?;
+            let mut messages = pubsub.on_message();
+            while let Some(message) = messages.next().await {
+                let payload: String = message.get_payload().unwrap_or_default();
+                if let Ok(conversation) = payload.parse::<Uuid>() {
+                    conversations.woken(conversation);
+                }
+            }
+            Ok::<_, redis::RedisError>(())
+        };
+        tokio::select! {
+            biased;
+            _ = shutdown.clone().wait() => return,
+            heard = heard => if let Err(error) = heard {
+                tracing::warn!(%error, "The pieces of replies are not heard; listening again");
             },
         }
         tokio::select! {
