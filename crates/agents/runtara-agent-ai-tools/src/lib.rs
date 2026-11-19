@@ -848,8 +848,11 @@ pub async fn chat_completion(
         timeout_ms: input.timeout_ms,
     };
 
-    let response = if input.stream == Some(true) && input.output_schema.is_none() {
-        let mut to = streaming::ToConversation::new();
+    let to = match input.stream == Some(true) && input.output_schema.is_none() {
+        true => streaming::ToConversation::of_this_run().await,
+        false => None,
+    };
+    let response = if let Some(mut to) = to {
         let response = runtara_ai::run_completion_streamed(req, &mut to)
             .await
             .map_err(|e| completion_error("AI_CHAT_COMPLETION_FAILED", e))?;
@@ -1108,8 +1111,10 @@ pub async fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentErro
         // DEFAULT_STEP_TIMEOUT_MS in run_completion.
         timeout_ms: input.timeout_ms,
     };
-    let mut to = (input.stream == Some(true) && input.output_schema.is_none())
-        .then(streaming::ToConversation::new);
+    let mut to = match input.stream == Some(true) && input.output_schema.is_none() {
+        true => streaming::ToConversation::of_this_run().await,
+        false => None,
+    };
     let response = match to.as_mut() {
         Some(to) => runtara_ai::run_completion_streamed(req, to).await,
         None => runtara_ai::run_completion_async(req).await,

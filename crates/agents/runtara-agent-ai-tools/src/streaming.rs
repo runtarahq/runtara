@@ -5,9 +5,10 @@
 //! 50 ms, under a reply id made for it; then the whole answer as the reply,
 //! under the same id, which a client puts in the pieces' place.
 //!
-//! A run that carries no conversation is told so on the first piece, and
-//! nothing more is said. A piece that is not said is not a failure of the
-//! step: the whole reply still is, and the answer is the step's either way.
+//! The run is first asked whether it carries a conversation; one that does
+//! not calls its model as it always has, unstreamed. A piece that is not
+//! said is not a failure of the step: the whole reply still is, and the
+//! answer is the step's either way.
 
 use std::time::{Duration, Instant};
 
@@ -36,27 +37,33 @@ pub(crate) struct ToConversation<H: Host = Run> {
 
 /// What a streamed answer is said through: the run's workflow API.
 pub(crate) trait Host {
+    /// Whether the run carries a conversation.
+    async fn carries_conversation(&mut self) -> bool;
     /// Says a piece; `Err(true)` when there is no conversation to say it to.
     async fn piece(&mut self, piece: Value) -> Result<(), bool>;
     async fn reply(&mut self, reply: Value) -> Result<(), String>;
 }
 
 impl ToConversation<Run> {
-    pub(crate) fn new() -> Self {
-        Self::with(Run)
+    /// The conversation this run carries; none if it carries none.
+    pub(crate) async fn of_this_run() -> Option<Self> {
+        Self::with(Run).await
     }
 }
 
 impl<H: Host> ToConversation<H> {
-    pub(crate) fn with(host: H) -> Self {
-        Self {
+    pub(crate) async fn with(mut host: H) -> Option<Self> {
+        if !host.carries_conversation().await {
+            return None;
+        }
+        Some(Self {
             host,
             reply_id: reply_id(),
             held: String::new(),
             last_said: None,
             no_conversation: false,
             stopped: false,
-        }
+        })
     }
 
     /// Says what is held, in pieces of at most the conversation's bound.
@@ -156,6 +163,12 @@ pub(crate) struct Run;
 
 #[cfg(target_arch = "wasm32")]
 impl Host for Run {
+    async fn carries_conversation(&mut self) -> bool {
+        use runtara_workflow_api::ControlCall;
+        let ask = ControlCall::ConversationHistory(json!({"limit": 1}));
+        runtara_workflow_sdk::control(&ask, None).await.is_ok()
+    }
+
     async fn piece(&mut self, piece: Value) -> Result<(), bool> {
         use runtara_workflow_api::ControlCall;
         match runtara_workflow_sdk::control(&ControlCall::ConversationDelta(piece), None).await {
@@ -181,6 +194,10 @@ impl Host for Run {
 /// Outside a component there is no run, and so no conversation.
 #[cfg(not(target_arch = "wasm32"))]
 impl Host for Run {
+    async fn carries_conversation(&mut self) -> bool {
+        false
+    }
+
     async fn piece(&mut self, _: Value) -> Result<(), bool> {
         Err(true)
     }
@@ -204,6 +221,10 @@ mod tests {
     }
 
     impl Host for &mut Kept {
+        async fn carries_conversation(&mut self) -> bool {
+            !self.no_conversation
+        }
+
         async fn piece(&mut self, piece: Value) -> Result<(), bool> {
             if self.no_conversation {
                 return Err(true);
@@ -221,7 +242,7 @@ mod tests {
     #[tokio::test]
     async fn pieces_are_gathered_then_the_whole_answer_is_the_reply() {
         let mut kept = Kept::default();
-        let mut to = ToConversation::with(&mut kept);
+        let mut to = ToConversation::with(&mut kept).await.unwrap();
         for text in ["Once", " upon", " a"] {
             to.piece(text).await;
         }
@@ -247,13 +268,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_run_with_no_conversation_is_told_once_and_not_replied_for() {
+    async fn a_run_with_no_conversation_does_not_stream() {
         let mut kept = Kept {
             no_conversation: true,
             ..Kept::default()
         };
-        let mut to = ToConversation::with(&mut kept);
+        assert!(ToConversation::with(&mut kept).await.is_none());
+    }
+
+    /// A conversation that is gone part-way is told nothing more.
+    #[tokio::test]
+    async fn a_conversation_gone_part_way_is_told_nothing_more() {
+        let mut kept = Kept::default();
+        let mut to = ToConversation::with(&mut kept).await.unwrap();
+        to.host.no_conversation = true;
         to.piece("Hi").await;
+        to.host.no_conversation = false;
+        std::thread::sleep(GATHER);
         to.piece(" there").await;
         to.reply("Hi there").await.unwrap();
         assert!(kept.pieces.is_empty());
