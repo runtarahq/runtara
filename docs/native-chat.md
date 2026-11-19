@@ -213,6 +213,12 @@ granted nothing on: `conversations`, `conversation_messages`,
   waits for, hands it the next message, starts the next run, and starts the
   reply workflow. A run's id is made from the conversation's and the
   message's, so starting it again starts the same run.
+- **A workflow that answers in context** reads what was said with the
+  `conversation` agent's `history`, and an AI Agent step remembers by
+  conversation when its memory's `conversationId` is mapped to
+  `data.conversation.id`, which every run a conversation starts is given
+  (with the conversation's `key`, `title` and `metadata`). A workflow sends
+  into another workflow's conversation with `send`.
 - **A message** is `{id, text?, payload?, sender?, attachments?}`. It
   starts a run with `data: {message, payload, messageId, sender,
   attachments, conversation: {id, key, workflowId}}`, leaving out what the
