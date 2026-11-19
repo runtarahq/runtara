@@ -66,6 +66,50 @@ pub struct AuthContext {
     /// trusts one issuer, so membership is keyed by the subject alone.
     #[serde(default)]
     pub issuer: Option<String>,
+    /// The one conversation this credential is held to, where it is a
+    /// conversation token: it reads and sends there and does nothing else.
+    #[serde(default)]
+    pub conversation: Option<ConversationGrant>,
+}
+
+/// What a conversation token lets its holder do: read and send in one
+/// conversation, as `sender`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationGrant {
+    pub workflow_id: String,
+    pub key: String,
+    #[serde(default)]
+    pub sender: Option<crate::api::services::conversations::Sender>,
+}
+
+impl ConversationGrant {
+    /// Whether a request of `method` to `path` (as routed, a served tenant's
+    /// segment taken out) is one this grant lets through: the conversation's
+    /// own state, messages, events and stop, of this conversation.
+    pub fn admits(&self, method: &axum::http::Method, path: &str) -> bool {
+        use axum::http::Method;
+        let Some(rest) = path.strip_prefix("/api/runtime/workflows/") else {
+            return false;
+        };
+        let mut segments = rest.split('/');
+        let (Some(workflow), Some("conversations"), Some(key)) =
+            (segments.next(), segments.next(), segments.next())
+        else {
+            return false;
+        };
+        let key = urlencoding::decode(key).map(|key| key.into_owned());
+        if workflow != self.workflow_id || key.as_deref() != Ok(self.key.as_str()) {
+            return false;
+        }
+        matches!(
+            (method, segments.next(), segments.next()),
+            (&Method::GET, None, _)
+                | (&Method::POST, Some("messages"), None)
+                | (&Method::GET, Some("events"), None)
+                | (&Method::POST, Some("stop"), None)
+        )
+    }
 }
 
 impl AuthContext {
@@ -84,6 +128,7 @@ impl AuthContext {
             name: None,
             tenant_slug: None,
             issuer: None,
+            conversation: None,
         }
     }
 }
@@ -93,6 +138,8 @@ impl AuthContext {
 pub enum AuthMethod {
     Jwt,
     ApiKey,
+    /// A conversation token: a member's, held to one conversation.
+    ConversationToken,
     /// No per-request auth was performed inside RUNTARA — request was either trusted
     /// unconditionally (`local`) or trusted because it arrived through a reverse proxy
     /// that terminated auth upstream (`trust_proxy`).
@@ -108,6 +155,7 @@ impl AuthMethod {
             AuthMethod::Jwt => "jwt",
             AuthMethod::ApiKey => "api_key",
             AuthMethod::Unauthenticated => "unauthenticated",
+            AuthMethod::ConversationToken => "conversation_token",
         }
     }
 }
@@ -268,6 +316,57 @@ mod tests {
         for kind in [Oidc, Local, TrustProxy] {
             assert_eq!(MembershipPolicy::default_for(kind, true), Disabled);
             assert_eq!(MembershipPolicy::default_for(kind, false), Disabled);
+        }
+    }
+}
+
+#[cfg(test)]
+mod conversation_grant_tests {
+    use super::ConversationGrant;
+    use axum::http::Method;
+
+    /// A grant lets through its own conversation's state, messages, events
+    /// and stop, and nothing else: not another conversation, another
+    /// workflow, the conversation's other routes, or any other route.
+    #[test]
+    fn a_grant_admits_its_conversations_four_routes_and_nothing_else() {
+        let grant = ConversationGrant {
+            workflow_id: "wf-1".into(),
+            key: "chat:42/a b".into(),
+            sender: None,
+        };
+        let own = "/api/runtime/workflows/wf-1/conversations/chat%3A42%2Fa%20b";
+        for (method, path) in [
+            (Method::GET, own.to_owned()),
+            (Method::POST, format!("{own}/messages")),
+            (Method::GET, format!("{own}/events")),
+            (Method::POST, format!("{own}/stop")),
+        ] {
+            assert!(grant.admits(&method, &path), "{method} {path}");
+        }
+        for (method, path) in [
+            // Its conversation's other routes.
+            (Method::PUT, own.to_owned()),
+            (Method::DELETE, own.to_owned()),
+            (Method::POST, format!("{own}/token")),
+            (Method::GET, format!("{own}/messages")),
+            (Method::GET, format!("{own}/events/more")),
+            // Another conversation, another workflow, the list.
+            (
+                Method::GET,
+                "/api/runtime/workflows/wf-1/conversations/chat%3A43".to_owned(),
+            ),
+            (Method::GET, own.replace("wf-1", "wf-2")),
+            (
+                Method::GET,
+                "/api/runtime/workflows/wf-1/conversations".to_owned(),
+            ),
+            // Anything else.
+            (Method::GET, "/api/runtime/workflows/wf-1".to_owned()),
+            (Method::GET, "/api/runtime/connections".to_owned()),
+            (Method::GET, "/api/runtime/me".to_owned()),
+        ] {
+            assert!(!grant.admits(&method, &path), "{method} {path}");
         }
     }
 }

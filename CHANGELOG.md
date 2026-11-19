@@ -42,6 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`runtara-validate-placed.wasm`; `RUNTARA_VALIDATE_GUEST_WASM` names
   another), and a server with executors does not start without it. Without
   executors nothing changes.
+- **A credential for one conversation.** `POST
+  …/conversations/{key}/token` makes a token (`rtc_…`, an hour unless
+  `ttlSeconds`, a day at most) for a page that talks to the workflow for
+  its end user, in place of a tenant's credential. It reads and sends in
+  that conversation (its state, messages, events and stop) and is refused
+  everywhere else, MCP included; every message sent with it is from the
+  `sender` it was made with. It acts as the member who made it, held to
+  that conversation, and is verified again by an engine in another process.
 - **A conversation for a model, and for an adapter.** Four MCP tools:
   `conversation_send` (send a message and be answered with its turn, so
   talking to a workflow is one tool call), `conversation_read`,

@@ -604,6 +604,51 @@ STOPPED=$(tool conversation_stop "$(jq -nc --arg w "${TALKER}" '{workflow_id: $w
 print_success "Over MCP: three turns, one a structured answer to what the run asked, read back, listed and stopped ✓"
 
 # ---------------------------------------------------------------------------
+print_step "4f. A page holds a credential for one conversation and nothing else..."
+read -r STATUS BODY <<< "$(api_status POST "$(conversation "${ECHO}" web-1)/token" '{"ttlSeconds": 600, "sender": {"id": "visitor-1", "name": "Visitor"}}')"
+TOKEN=$(echo "${BODY}" | jq -r '.data.token // empty')
+[ "${STATUS}" = "200" ] && [[ "${TOKEN}" == rtc_* ]] || { print_error "No conversation token was made: ${STATUS} ${BODY}"; exit 1; }
+as_page() { # method path [body] -> "<status> <body>", as the page that holds the token
+    local body
+    body=$(curl -sS -o - -w '\n%{http_code}' --max-time 90 -X "$1" -H "Authorization: Bearer ${TOKEN}" \
+        -H 'Content-Type: application/json' ${3:+-d "$3"} "${API}$2")
+    echo "${body##*$'\n'} ${body%$'\n'*}"
+}
+# It sends, and the message is from the visitor whoever it says it is from.
+read -r STATUS BODY <<< "$(as_page POST "$(conversation "${ECHO}" web-1)/messages?wait=60" '{"id":"m-1","text":"from the page","sender":{"id":"admin","name":"Not me"}}')"
+[ "${STATUS}" = "200" ] && [ "$(echo "${BODY}" | jq -c '[.data.state, .data.turn.settled]')" = '["started",true]' ] \
+    || { print_error "The page could not send with its token: ${STATUS} ${BODY}"; exit 1; }
+[ "$(events "${ECHO}" web-1 | jq -c '[.[] | select(.kind == "message")][0].body.sender')" = '{"id":"visitor-1","name":"Visitor"}' ] \
+    || { print_error "A message sent with the token is not from its sender: $(events "${ECHO}" web-1 | jq -c '[.[] | select(.kind == "message")]')"; exit 1; }
+# It reads, and streams.
+read -r STATUS BODY <<< "$(as_page GET "$(conversation "${ECHO}" web-1)/events?kinds=reply")"
+[ "${STATUS}" = "200" ] && [ "$(echo "${BODY}" | jq -c '[.data[].body.text]')" = '["from the page"]' ] || { print_error "The page could not read with its token: ${STATUS} ${BODY}"; exit 1; }
+STREAM=$(curl -sS -N --max-time 3 -H 'Accept: text/event-stream' -H "Authorization: Bearer ${TOKEN}" "${API}$(conversation "${ECHO}" web-1)/events" 2>/dev/null || true)
+echo "${STREAM}" | grep -q '^event: caught_up' || { print_error "The page could not stream with its token: ${STREAM}"; exit 1; }
+read -r STATUS BODY <<< "$(as_page GET "$(conversation "${ECHO}" web-1)")"
+[ "${STATUS}" = "200" ] || { print_error "The page could not read its conversation's state: ${STATUS}"; exit 1; }
+# Nothing else: another conversation, the conversation's other routes, the
+# workflow, the API, a new token, MCP.
+for refused in "GET $(conversation "${ECHO}" web-2)" "POST $(conversation "${ECHO}" web-2)/messages" \
+               "GET $(conversation "${TALKER}" web-1)" "PUT $(conversation "${ECHO}" web-1)" \
+               "DELETE $(conversation "${ECHO}" web-1)" "POST $(conversation "${ECHO}" web-1)/token" \
+               "GET /workflows/${ECHO}/conversations" "GET /workflows/${ECHO}" "GET /workflows" "GET /me/tenants"; do
+    read -r STATUS BODY <<< "$(as_page ${refused} '{"id":"x","text":"x"}')"
+    [ "${STATUS}" = "403" ] || { print_error "The token was taken by ${refused}: ${STATUS} ${BODY}"; exit 1; }
+done
+CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${TEST_PORT_PUBLIC}/mcp" -H "Authorization: Bearer ${TOKEN}" \
+    -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
+    -d '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"x","version":"1"}}}')
+[ "${CODE}" = "403" ] || { print_error "MCP took a conversation token: ${CODE}"; exit 1; }
+# A token nobody made, and one that has expired, are no credential.
+CODE=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer rtc_$(openssl rand -hex 32)" "${API}$(conversation "${ECHO}" web-1)")
+[ "${CODE}" = "401" ] || { print_error "A token nobody made answered ${CODE}"; exit 1; }
+psql_quiet -d "${TEST_DB_SERVER}" -c "UPDATE conversation_tokens SET expires_at = now() - interval '1 second'" >/dev/null
+read -r STATUS BODY <<< "$(as_page GET "$(conversation "${ECHO}" web-1)")"
+[ "${STATUS}" = "401" ] || { print_error "An expired token answered ${STATUS}"; exit 1; }
+print_success "A conversation token sends as its sender, reads and streams its conversation, and is refused everywhere else, and once expired ✓"
+
+# ---------------------------------------------------------------------------
 print_step "5. A deleted conversation is gone..."
 read -r STATUS BODY <<< "$(api_status DELETE "$(conversation "${ECHO}" c1)")"
 [ "${STATUS}" = "200" ] || { print_error "Delete answered ${STATUS}: ${BODY}"; exit 1; }

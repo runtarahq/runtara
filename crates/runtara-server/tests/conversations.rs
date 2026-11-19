@@ -1675,3 +1675,83 @@ async fn a_run_sends_into_a_conversation_and_its_reply_workflow_is_handed_what_w
         Err(ConversationError::Invalid(_))
     ));
 }
+
+/// A conversation token is kept as its hash, found by the token alone,
+/// grants its one conversation as its sender, and is no credential once it
+/// expires.
+#[tokio::test]
+async fn a_conversation_token_is_found_by_itself_until_it_expires() {
+    use runtara_server::api::services::conversation_tokens::{self, IssueToken};
+    let pool = pool().await;
+    let tenant = format!("tenant-{}", Uuid::new_v4());
+    let sender = Sender {
+        id: "visitor".into(),
+        name: Some("Visitor".into()),
+    };
+    let issued = conversation_tokens::issue(
+        &pool,
+        &tenant,
+        "wf-1",
+        "page",
+        "member-1",
+        IssueToken {
+            ttl_seconds: Some(600),
+            sender: Some(sender.clone()),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(issued.token.starts_with(conversation_tokens::PREFIX));
+    let hash = conversation_tokens::hash_of(&issued.token);
+    // Only the hash is kept.
+    let kept: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM conversation_tokens WHERE token_hash = $1 OR token_hash = $2",
+    )
+    .bind(&hash)
+    .bind(&issued.token)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(kept, 1);
+    let grant = conversation_tokens::by_hash(&pool, &hash).await.unwrap();
+    assert_eq!(
+        (
+            grant.tenant_id.as_str(),
+            grant.workflow_id.as_str(),
+            grant.key.as_str()
+        ),
+        (tenant.as_str(), "wf-1", "page")
+    );
+    assert_eq!(grant.sender, Some(sender));
+    assert_eq!(grant.issued_by, "member-1");
+    assert!(
+        conversation_tokens::by_hash(&pool, &conversation_tokens::hash_of("rtc_nobodys"))
+            .await
+            .is_err()
+    );
+    for refused in [Some(10), Some(2 * 24 * 60 * 60)] {
+        assert!(matches!(
+            conversation_tokens::issue(
+                &pool,
+                &tenant,
+                "wf-1",
+                "page",
+                "m",
+                IssueToken {
+                    ttl_seconds: refused,
+                    sender: None,
+                }
+            )
+            .await,
+            Err(ConversationError::Invalid(_))
+        ));
+    }
+    // Expired: no credential, and swept.
+    sqlx::query("UPDATE conversation_tokens SET expires_at = now() - interval '1 second' WHERE token_hash = $1")
+        .bind(&hash)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(conversation_tokens::by_hash(&pool, &hash).await.is_err());
+    assert!(conversation_tokens::sweep(&pool).await.unwrap() >= 1);
+}

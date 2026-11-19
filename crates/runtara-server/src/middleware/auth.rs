@@ -78,6 +78,16 @@ async fn authenticate_with(
         Ok(ctx) => ctx,
         Err(response) => return response,
     };
+    // A conversation token reaches its conversation's routes and no other,
+    // whichever group of routes this is.
+    if let Some(grant) = &auth_context.conversation
+        && !grant.admits(request.method(), request.uri().path())
+    {
+        return forbidden(
+            "CONVERSATION_TOKEN_NOT_HERE",
+            "a conversation token is taken by its conversation's routes only",
+        );
+    }
 
     // Counted once the caller is known, so nobody else spends the tenant's.
     if enforce_membership_here
@@ -122,6 +132,32 @@ pub(crate) async fn verify(
     let headers = presented.headers();
     let requested_tenant = presented.requested_tenant.clone();
     let enforce_membership_here = presented.as_a_member;
+
+    // A conversation token: one conversation, for a page's end user. It is
+    // not taken at MCP's door, nor where a caller is answered about across
+    // tenants: it is held to its conversation's routes.
+    if let Some(token) = conversation_token(&headers) {
+        if presented.door == crate::auth::presented::Door::Mcp || !enforce_membership_here {
+            return Err(forbidden(
+                "CONVERSATION_TOKEN_NOT_HERE",
+                "a conversation token is taken by its conversation's routes only",
+            ));
+        }
+        let grant = validate_conversation_token(token, auth_state).await?;
+        if !crate::config::is_served_tenant(&grant.tenant_id) {
+            return Err(
+                crate::auth::provider::AuthError::TenantMismatch(grant.tenant_id)
+                    .into_http_response(),
+            );
+        }
+        if let Some(requested) = requested_tenant.filter(|t| *t != grant.tenant_id) {
+            return Err(
+                crate::auth::provider::AuthError::TenantMismatch(requested).into_http_response()
+            );
+        }
+        enforce_tenant_status(auth_state, &grant.tenant_id).await?;
+        return Ok(conversation_token_context(grant));
+    }
 
     // Fast path: RUNTARA-issued API key. Works in every provider mode.
     if let Some(token) = api_key_token(&headers) {
@@ -221,6 +257,70 @@ fn api_key_token(headers: &axum::http::HeaderMap) -> Option<&str> {
     } else {
         None
     }
+}
+
+/// The bearer credential, if it is a conversation token.
+fn conversation_token(headers: &axum::http::HeaderMap) -> Option<&str> {
+    let value = headers.get("Authorization")?.to_str().ok()?;
+    let token = value.strip_prefix("Bearer ").unwrap_or(value);
+    token
+        .starts_with(crate::api::services::conversation_tokens::PREFIX)
+        .then_some(token)
+}
+
+/// What a conversation token grants, by its row, which only the engine may
+/// look for across tenants: an API that is a process of its own asks it.
+async fn validate_conversation_token(
+    token: &str,
+    auth_state: &AuthState,
+) -> Result<crate::api::services::conversation_tokens::TokenGrant, Response> {
+    let token_hash = crate::api::services::conversation_tokens::hash_of(token);
+    let found = match KEYS_ELSEWHERE.get() {
+        Some(engine) => engine.conversation_token_by_hash(&token_hash).await,
+        None => {
+            runtara_store_postgres::tenant_scope::locating(
+                crate::api::services::conversation_tokens::by_hash(&auth_state.pool, &token_hash),
+            )
+            .await
+        }
+    };
+    found.map_err(|error| {
+        tracing::debug!(%error, "A conversation token was not taken");
+        unauthorized("Invalid or expired conversation token")
+    })
+}
+
+/// The caller a conversation token is: the member who made it, held to
+/// running and reading, in its one conversation.
+fn conversation_token_context(
+    grant: crate::api::services::conversation_tokens::TokenGrant,
+) -> AuthContext {
+    use crate::authz::{Permission, PermissionSet};
+    let mut ctx = AuthContext::new(
+        grant.tenant_id,
+        grant.issued_by,
+        AuthMethod::ConversationToken,
+    );
+    ctx.role = Some(crate::authz::Role::Member);
+    ctx.api_key_scope = ApiKeyScope::Restricted(PermissionSet::from_permissions([
+        Permission::WorkflowExecute,
+        Permission::InvocationHistoryRead,
+    ]));
+    ctx.jti = Some(format!("conversation-token:{}", grant.token_id));
+    ctx.conversation = Some(crate::auth::ConversationGrant {
+        workflow_id: grant.workflow_id,
+        key: grant.key,
+        sender: grant.sender,
+    });
+    ctx
+}
+
+fn forbidden(code: &str, message: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({"error": "Forbidden", "code": code, "message": message})),
+    )
+        .into_response()
 }
 
 /// Validate an API key token via the local database, returning the key row.

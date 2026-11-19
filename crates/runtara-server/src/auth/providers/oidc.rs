@@ -92,6 +92,7 @@ impl AuthProvider for OidcProvider {
             name: claims.name,
             tenant_slug: claims.tenant_slug,
             issuer: claims.iss,
+            conversation: None,
         })
     }
 

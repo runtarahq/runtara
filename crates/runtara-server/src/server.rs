@@ -171,6 +171,7 @@ use runtime_client::RuntimeClient;
         api::handlers::conversations::conversation_events,
         api::handlers::conversations::list_conversations,
         api::handlers::conversations::stop_conversation,
+        api::handlers::conversations::issue_conversation_token,
         // API Key endpoints
         api::handlers::api_keys::create_api_key,
         api::handlers::api_keys::list_api_keys,
@@ -303,6 +304,8 @@ use runtime_client::RuntimeClient;
             api::services::conversations::Stopped,
             api::services::conversations::TurnSoFar,
             api::handlers::conversations::StopConversation,
+            api::services::conversation_tokens::IssueToken,
+            api::services::conversation_tokens::IssuedToken,
             api::services::conversations::RunStarted,
             api::services::conversations::Reply,
             api::services::conversations::TextFormat,
@@ -1042,6 +1045,10 @@ fn api_app(parts: ApiParts) -> Router {
         .route(
             "/api/runtime/workflows/{id}/conversations/{key}/stop",
             post(api::handlers::conversations::stop_conversation),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/conversations/{key}/token",
+            post(api::handlers::conversations::issue_conversation_token),
         )
         .route(
             "/api/runtime/workflows/{id}/conversations/{key}",

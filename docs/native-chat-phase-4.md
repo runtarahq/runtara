@@ -601,3 +601,35 @@ Departures:
   HTTP agent's work with a connection, and is the platform's adapter's to
   test; what the conversation owes the adapter (each reply once, in order,
   with the metadata) is what the stand-in checks.
+
+### 4.6 A credential for one conversation
+
+Built: `POST …/conversations/{key}/token` makes a token (`rtc_…`, an hour
+unless asked, a day at most) for a member who may run the workflow. It is
+taken by that conversation's state, messages, events (a stream too) and
+stop, and refused everywhere else; every message sent with it is from the
+sender fixed when it was made; it makes no tokens. Held to that by the API's
+authentication middleware, by path, whatever group of routes is asked, and
+again by the engine for every operation an API in another process asks
+with it (`wire::held_to`). A forward migration adds `conversation_tokens`.
+
+Departures:
+
+- **A token is a random string kept as its hash, not one the engine
+  signs.** It is found by its row, as an API key is: by the engine across
+  tenants, and asked of the engine by an API that is a process of its own.
+  So there is no signing key to give to the processes that verify it, a
+  token is withdrawn by deleting its row, and the API role is granted
+  nothing new. The engine still does not take the API's word: it verifies
+  the token the caller presented, from its own table.
+- **It acts as the member who made it**, as `Member`, its credential held
+  to running and reading (`workflow:execute`, `invocation_history:read`)
+  and to its one conversation. The member's membership is not looked at
+  again while the token lasts; that is what a day at most bounds.
+- **It is refused at MCP's door, and where a caller is answered about
+  across tenants** (`/me/tenants`). The plan did not say; neither is a
+  conversation's route, and the second would tell a page which tenants the
+  member who made the token belongs to.
+- **There is no route to withdraw one before it expires.** Expired tokens
+  are removed by the conversation worker's sweep. A route to delete one is
+  small, and is left until a client asks for it.

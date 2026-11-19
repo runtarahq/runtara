@@ -1449,6 +1449,10 @@ impl Conversations {
             .map_err(storage)?
             .rows_affected();
         }
+        // A token that has expired is nothing to anyone.
+        if let Err(error) = crate::api::services::conversation_tokens::sweep(&self.pool).await {
+            tracing::warn!(%error, "Expired conversation tokens were not removed");
+        }
         let mut events = 0;
         if let Some(kept) = activity_kept {
             events = sqlx::query(

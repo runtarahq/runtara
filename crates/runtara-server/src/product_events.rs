@@ -188,7 +188,7 @@ impl ProductEvent {
         let mut event = Self::for_tenant(event_type, &ctx.org_id);
         event.user_id = Some(ctx.user_id.clone());
         match ctx.auth_method {
-            AuthMethod::ApiKey => {
+            AuthMethod::ApiKey | AuthMethod::ConversationToken => {
                 event.actor_type = Some(ActorType::ApiKey);
                 // The key's token id identifies the credential. Fall back to the user sub
                 // in the (unexpected) case a key request carries no jti.

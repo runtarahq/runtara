@@ -18,6 +18,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::api::dto::common::ApiResponse;
+use crate::api::services::conversation_tokens::{IssueToken, IssuedToken};
 use crate::api::services::conversations::{
     ConversationError, ConversationEvent, ConversationList, ConversationState, ListConversations,
     MAX_SEND_WAIT, MAX_WAIT, Message, OpenConversation, ReadEvents, Sent, Stopped,
@@ -266,6 +267,45 @@ pub async fn stop_conversation(
     }
 }
 
+/// Make a credential for one conversation, for a page that talks to the
+/// workflow for its end user.
+///
+/// The token acts as the caller who makes it, held to reading and sending
+/// in this conversation and nothing else, until it expires (`ttlSeconds`,
+/// an hour unless given, a day at most). Every message sent with it is from
+/// `sender`, which the page cannot change. It is handed over once; present
+/// it as `Authorization: Bearer <token>` to this conversation's state,
+/// messages, events (a stream too) and stop. A token makes no tokens.
+#[utoipa::path(
+    post,
+    path = "/api/runtime/workflows/{id}/conversations/{key}/token",
+    params(
+        ("id" = String, Path, description = "Workflow ID"),
+        ("key" = String, Path, description = "The client's name for the conversation"),
+    ),
+    request_body(content = IssueToken, description = "Optional"),
+    responses(
+        (status = 200, description = "The token, once", body = ApiResponse<IssuedToken>),
+        (status = 400, description = "A lifetime out of range"),
+    ),
+    tag = "Conversations"
+)]
+pub async fn issue_conversation_token(
+    State(engine): State<Arc<dyn Engine>>,
+    Path((workflow_id, key)): Path<(String, String)>,
+    axum::Extension(caller): axum::Extension<crate::auth::AuthContext>,
+    issue: Option<Json<IssueToken>>,
+) -> Response {
+    let issue = issue.map(|Json(issue)| issue).unwrap_or_default();
+    match engine
+        .issue_conversation_token(caller, &workflow_id, &key, issue)
+        .await
+    {
+        Ok(issued) => answered(issued),
+        Err(error) => refused(error),
+    }
+}
+
 /// Delete a conversation and what was said in it.
 #[utoipa::path(
     delete,
@@ -328,8 +368,17 @@ pub async fn send_message(
     State(engine): State<Arc<dyn Engine>>,
     Path((workflow_id, key)): Path<(String, String)>,
     Query(query): Query<SendQuery>,
-    Json(message): Json<Message>,
+    caller: Option<axum::Extension<crate::auth::AuthContext>>,
+    Json(mut message): Json<Message>,
 ) -> Response {
+    // A conversation token speaks as the sender it was made for, whoever the
+    // message says it is from.
+    if let Some(grant) = caller
+        .as_ref()
+        .and_then(|caller| caller.conversation.as_ref())
+    {
+        message.sender = grant.sender.clone();
+    }
     let wait = Duration::from_secs(u64::from(query.wait.unwrap_or(0))).min(MAX_SEND_WAIT);
     match engine
         .send_conversation_message(

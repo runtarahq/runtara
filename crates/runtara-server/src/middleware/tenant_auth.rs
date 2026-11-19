@@ -38,7 +38,7 @@ fn connections_caller(auth: &AuthContext, via_mcp: bool) -> runtara_connections:
     } else {
         match auth.auth_method {
             AuthMethod::Jwt => CallerChannel::Member,
-            AuthMethod::ApiKey => CallerChannel::ApiKey,
+            AuthMethod::ApiKey | AuthMethod::ConversationToken => CallerChannel::ApiKey,
             AuthMethod::Unauthenticated => CallerChannel::Trusted,
         }
     };

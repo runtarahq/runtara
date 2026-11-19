@@ -312,7 +312,8 @@ pub fn api_key_decision(
 ) -> Result<(), EntitlementDenial> {
     match auth_method {
         AuthMethod::ApiKey => gate_decision(snapshot, FeatureKey::Api),
-        AuthMethod::Jwt | AuthMethod::Unauthenticated => Ok(()),
+        // A conversation token is a page's, not the tenant's API.
+        AuthMethod::Jwt | AuthMethod::Unauthenticated | AuthMethod::ConversationToken => Ok(()),
     }
 }
 

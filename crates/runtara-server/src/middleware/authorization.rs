@@ -357,6 +357,7 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         ("PUT" | "DELETE", "/api/runtime/workflows/{id}/conversations/{key}") => WorkflowExecute,
         ("POST", "/api/runtime/workflows/{id}/conversations/{key}/messages") => WorkflowExecute,
         ("POST", "/api/runtime/workflows/{id}/conversations/{key}/stop") => WorkflowExecute,
+        ("POST", "/api/runtime/workflows/{id}/conversations/{key}/token") => WorkflowExecute,
         ("POST", "/api/runtime/workflows/{id}/schedule") => WorkflowExecute,
         ("POST", "/api/runtime/workflows/instances/{instanceId}/stop") => WorkflowExecute,
         ("POST", "/api/runtime/workflows/instances/{instanceId}/pause") => WorkflowExecute,

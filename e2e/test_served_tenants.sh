@@ -917,6 +917,28 @@ print(f"  {asked} GET routes asked as the primary for the second tenant's object
 PY
 
 #-------------------------------------------------------------------------
+print_step "10b. A conversation token is its tenant's, and its conversation's..."
+# Made by the second tenant, for a conversation with its workflow; looked
+# for across tenants as a plain role, under row-level security.
+AUTH=(-H "Authorization: Bearer ${SECOND_KEY}")
+CONV_TOKEN=$(api_post "/workflows/${B_WF}/conversations/page-1/token" '{"sender":{"id":"visitor"}}' | jq -r '.data.token // empty')
+AUTH=()
+[[ "${CONV_TOKEN}" == rtc_* ]] || { print_error "the second tenant could not make a conversation token"; exit 1; }
+RESP=$(curl -sS --max-time 120 -X POST -H "Authorization: Bearer ${CONV_TOKEN}" -H 'Content-Type: application/json' \
+    -d '{"id":"m-1","text":"hello"}' "${API}/${SECOND_TENANT}/workflows/${B_WF}/conversations/page-1/messages")
+# The second tenant's one workflow is slow by now: that the message started
+# a run, as the token's sender, is what is asked here.
+[ "$(echo "${RESP}" | jq -c '.data.state')" = '"started"' ] \
+    || { print_error "the second tenant's conversation token could not send: ${RESP}"; exit 1; }
+[ "$(runtime_sql "SELECT tenant_id FROM instances WHERE instance_id = '$(echo "${RESP}" | jq -r '.data.instanceId')'")" = "${SECOND_TENANT}" ] \
+    || { print_error "a run started with the second tenant's token is not the second tenant's"; exit 1; }
+# Named for the primary tenant, it is not the primary tenant's.
+CODE=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${CONV_TOKEN}" \
+    "${API}/${TENANT}/workflows/${B_WF}/conversations/page-1")
+case "${CODE}" in 401|403) ;; *) print_error "the second tenant's conversation token was taken for the primary tenant (${CODE})"; exit 1 ;; esac
+echo "  a conversation token sends in its own tenant's conversation, and in no other tenant ✓"
+
+#-------------------------------------------------------------------------
 if [ "${TWO_ROLES}" = "true" ]; then
 print_step "11. The engine decides, with all the API holds turned against it..."
 AUTH=()
@@ -959,6 +981,20 @@ done
 # The second tenant's own key is answered.
 CODE=$(ask_engine ListExecutions "${B_LIST}" "$(presented "${SECOND_KEY}")")
 [ "${CODE}" = "200" ] || { print_error "the engine refused the second tenant's own key (${CODE}): $(head -c 300 "${TEST_DATA_DIR}/engine_body")"; exit 1; }
+# A conversation token, presented to the engine as the API would: its own
+# conversation is answered; anything else the API might ask with it is not,
+# and a token nobody made is nobody's.
+OWN_EVENTS="{\"tenant_id\": \"${SECOND_TENANT}\", \"workflow_id\": \"${B_WF}\", \"key\": \"page-1\", \"read\": {\"after\": 0, \"limit\": 10}}"
+CODE=$(ask_engine ConversationEvents "${OWN_EVENTS}" "$(presented "${CONV_TOKEN}")")
+[ "${CODE}" = "200" ] || { print_error "the engine refused a conversation token its own conversation (${CODE}): $(head -c 300 "${TEST_DATA_DIR}/engine_body")"; exit 1; }
+for operation in "ConversationEvents ${OWN_EVENTS/page-1/page-2}" \
+                 "DeleteConversation {\"tenant_id\": \"${SECOND_TENANT}\", \"workflow_id\": \"${B_WF}\", \"key\": \"page-1\"}" \
+                 "ListExecutions ${B_LIST}"; do
+    CODE=$(ask_engine "${operation%% *}" "${operation#* }" "$(presented "${CONV_TOKEN}")")
+    [ "${CODE}" = "403" ] || { print_error "the engine answered ${operation%% *} to a conversation token with ${CODE}"; exit 1; }
+done
+CODE=$(ask_engine ConversationEvents "${OWN_EVENTS}" "$(presented "rtc_$(openssl rand -hex 32)")")
+[ "${CODE}" = "401" ] || { print_error "the engine answered a conversation token nobody made with ${CODE}"; exit 1; }
 # A part of the API that has a caller is served to nobody without one.
 CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 \
     --cacert "${TEST_DATA_DIR}/pki-api/ca.pem" --cert "${TEST_DATA_DIR}/pki-api/tls.pem" --key "${TEST_DATA_DIR}/pki-api/tls.key" \
