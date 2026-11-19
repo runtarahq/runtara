@@ -114,6 +114,7 @@ start_server() {
         RUNTARA_ENV_HTTP_PORT="${TEST_ENV_HTTP_PORT}" \
         RUNTARA_AGENT_COMPONENTS_DIR="${COMPONENTS_DIR}" \
         RUNTARA_CONVERSATION_QUEUE_BOUND=2 \
+        RUNTARA_CONVERSATION_STREAMS=3 \
         DATA_DIR="${TEST_DATA_DIR}" \
         RUNTARA_DEV_MODE=false \
         RUST_LOG="warn,runtara_server=info" \
@@ -227,6 +228,21 @@ SLOW=$(workflow conv-slow "$(jq -n '{
                  response: { valueType: "reference", value: "data.message" } } } },
     executionPlan: [ { fromStep: "hold", toStep: "finish" } ],
     variables: {}, inputSchema: { message: { type: "string" } }, outputSchema: {} }')")
+# Says three things, a while apart.
+pause() { jq -n --arg id "$1" '{ id: $id, stepType: "Delay", durationMs: { valueType: "immediate", value: 1200 } }'; }
+PACED=$(workflow conv-paced "$(jq -n \
+    --argjson one "$(say one '{"valueType": "immediate", "value": "one"}')" \
+    --argjson two "$(say two '{"valueType": "immediate", "value": "two"}')" \
+    --argjson three "$(say three '{"valueType": "immediate", "value": "three"}')" \
+    --argjson p1 "$(pause p1)" --argjson p2 "$(pause p2)" '{
+    name: "conv-paced", durable: true, entryPoint: "one",
+    steps: { one: $one, p1: $p1, two: $two, p2: $p2, three: $three,
+             finish: { id: "finish", stepType: "Finish", inputMapping: {
+                 response: { valueType: "immediate", value: "not said" } } } },
+    executionPlan: [ { fromStep: "one", toStep: "p1" }, { fromStep: "p1", toStep: "two" },
+                     { fromStep: "two", toStep: "p2" }, { fromStep: "p2", toStep: "three" },
+                     { fromStep: "three", toStep: "finish" } ],
+    variables: {}, inputSchema: {}, outputSchema: {} }')")
 # What an integration's outbound half would be: started with each reply.
 ROUTE=$(workflow conv-route "$(jq -n '{
     name: "conv-route", entryPoint: "finish",
@@ -354,7 +370,82 @@ echo "${STREAM}" | grep -q '^event: reply' || { print_error "The stream carried 
 [ "$(echo "${STREAM}" | grep -c '^id: ')" = "${LAST}" ] || { print_error "Expected ${LAST} events on the stream: ${STREAM}"; exit 1; }
 STREAM=$(curl -sS -N --max-time 3 -H 'Accept: text/event-stream' -H "Last-Event-ID: $((LAST - 2))" "${API}$(conversation "${ECHO}" c1)/events" 2>/dev/null || true)
 [ "$(echo "${STREAM}" | grep '^id: ' | tr -d '\r' | tr '\n' ' ')" = "id: $((LAST - 1)) id: ${LAST} " ] || { print_error "The stream did not read on from event $((LAST - 2)): ${STREAM}"; exit 1; }
-print_success "A stream of events, resumed by event id ✓"
+# It says how to come back, and when everything kept has been sent.
+echo "${STREAM}" | grep -q '^retry: 2000' || { print_error "The stream does not say when to connect again: ${STREAM}"; exit 1; }
+[ "$(echo "${STREAM}" | grep -c '^event: caught_up')" = "1" ] || { print_error "The stream does not say it has caught up: ${STREAM}"; exit 1; }
+echo "${STREAM}" | grep -A1 '^event: caught_up' | grep -q "\"lastSeq\":${LAST}" || { print_error "caught_up does not say the last event: ${STREAM}"; exit 1; }
+print_success "A stream of events, resumed by event id, that says when it has caught up ✓"
+
+# ---------------------------------------------------------------------------
+print_step "4b. What a run says reaches an open stream as it is said, not on a clock..."
+api_status PUT "$(conversation "${PACED}" live)" '{}' >/dev/null
+ARRIVED="${TEST_DATA_DIR}/arrived.txt"
+# Each line of the stream, with the millisecond it arrived.
+(curl -sS -N --max-time 25 -H 'Accept: text/event-stream' "${API}$(conversation "${PACED}" live)/events" 2>/dev/null \
+    | python3 -u -c 'import sys, time
+for line in sys.stdin:
+    print(int(time.time() * 1000), line.rstrip(), flush=True)' > "${ARRIVED}") &
+STREAM_PID=$!
+sleep 1
+SENT=$(send "${PACED}" live m-1 go)
+[ "$(sent_state "${SENT}")" = "started" ] || { print_error "Paced did not start: ${SENT}"; kill "${STREAM_PID}" 2>/dev/null; exit 1; }
+for _ in {1..60}; do
+    grep -q 'event: run_ended' "${ARRIVED}" 2>/dev/null && break
+    sleep 0.5
+done
+kill "${STREAM_PID}" 2>/dev/null || true; wait "${STREAM_PID}" 2>/dev/null || true
+grep -q 'event: run_ended' "${ARRIVED}" || { print_error "The run's end did not reach the stream: $(cat "${ARRIVED}")"; exit 1; }
+PACED_RUN=$(events "${PACED}" live | jq -r '[.[] | select(.kind == "run_started")][0].body.instanceId')
+# When each reply was said (the run's own event), and when it arrived.
+SAID_AT=$(psql_quiet -d "${TEST_DB_RUNTIME}" -c \
+    "SELECT string_agg(((extract(epoch FROM created_at) * 1000)::bigint)::text, ' ' ORDER BY id) FROM instance_events \
+     WHERE instance_id = '${PACED_RUN}' AND subtype = 'conversation_reply'")
+ARRIVED_AT=$(grep 'event: reply' "${ARRIVED}" | awk '{print $1}' | tr '\n' ' ')
+LAGS=$(python3 -c 'import sys
+said = [int(x) for x in sys.argv[1].split()]; arrived = [int(x) for x in sys.argv[2].split()]
+assert len(said) == 3 and len(arrived) == 3, (said, arrived)
+print(" ".join(str(a - s) for s, a in zip(said, arrived)))' "${SAID_AT}" "${ARRIVED_AT}") \
+    || { print_error "Three replies were not said and received: said at '${SAID_AT}', arrived at '${ARRIVED_AT}'"; exit 1; }
+echo "  each reply reached the stream this many ms after it was said: ${LAGS}"
+for lag in ${LAGS}; do
+    [ "${lag}" -lt 400 ] || { print_error "A reply took ${lag} ms to reach an open stream"; exit 1; }
+done
+# The replies came one by one, a pause apart, and not together at the end.
+SPREAD=$(python3 -c 'import sys
+a = [int(x) for x in sys.argv[1].split()]; print(a[-1] - a[0])' "${ARRIVED_AT}")
+[ "${SPREAD}" -gt 1800 ] || { print_error "The replies arrived together (${SPREAD} ms apart), not as they were said"; exit 1; }
+print_success "Each reply reached the open stream within 400 ms of being said (${LAGS} ms) ✓"
+
+# A client that makes one request at a time waits in that request.
+LAST=$(events "${PACED}" live | jq -r '.[-1].seq')
+STARTED=$(python3 -c 'import time; print(int(time.time() * 1000))')
+WAITED=$(curl -sS --max-time 30 "${API}$(conversation "${PACED}" live)/events?after=${LAST}&wait=1" | jq -c '.data')
+TOOK=$(( $(python3 -c 'import time; print(int(time.time() * 1000))') - STARTED ))
+[ "${WAITED}" = "[]" ] && [ "${TOOK}" -ge 900 ] && [ "${TOOK}" -lt 5000 ] \
+    || { print_error "Waiting for an event that did not come answered ${WAITED} after ${TOOK} ms"; exit 1; }
+# And a whole exchange is one request: the message, and its turn.
+read -r STATUS BODY <<< "$(api_status POST "$(conversation "${ECHO}" one-request)/messages?wait=60" '{"id":"m-1","text":"in one"}')"
+[ "$(echo "${BODY}" | jq -c '[.data.state, .data.turn.settled, ([.data.turn.events[] | select(.kind == "reply") | .body.text])]')" = '["started",true,["in one"]]' ] \
+    || { print_error "Sending and waiting did not answer with the turn: ${STATUS} ${BODY}"; exit 1; }
+[ "$(echo "${BODY}" | jq -c '[.data.turn.events[].kind | select(. != "activity")]')" = '["message","run_started","reply","run_ended"]' ] \
+    || { print_error "The turn is not the message's events: ${BODY}"; exit 1; }
+print_success "One request waits for an event; one request sends a message and answers with its turn ✓"
+
+# A tenant holds a bounded number of streams open.
+HELD_PIDS=()
+for _ in 1 2 3; do
+    curl -sS -N --max-time 20 -o /dev/null -H 'Accept: text/event-stream' "${API}$(conversation "${PACED}" live)/events" 2>/dev/null &
+    HELD_PIDS+=($!)
+done
+sleep 1
+CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -H 'Accept: text/event-stream' "${API}$(conversation "${PACED}" live)/events")
+for pid in "${HELD_PIDS[@]}"; do kill "${pid}" 2>/dev/null || true; done
+wait "${HELD_PIDS[@]}" 2>/dev/null || true
+[ "${CODE}" = "429" ] || { print_error "A stream past the tenant's bound answered ${CODE}, not 429"; exit 1; }
+sleep 1
+CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 -H 'Accept: text/event-stream' "${API}$(conversation "${PACED}" live)/events" || true)
+[ "${CODE}" = "200" ] || { print_error "With the streams closed a new one answered ${CODE}"; exit 1; }
+print_success "A stream past the tenant's bound is refused, and a place is given back when one closes ✓"
 
 # ---------------------------------------------------------------------------
 print_step "5. A deleted conversation is gone..."
