@@ -91,6 +91,7 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
         .map(|path| quote! { #path(&input) })
         .unwrap_or_else(|| quote! { serde_json::from_slice(&input) });
     let mut arms = Vec::new();
+    let mut ids = Vec::new();
     let mut seen = std::collections::HashSet::new();
     // `(module path, function name)` of every listed capability, for the
     // suspension metadata assertions.
@@ -123,13 +124,40 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
         let id = format_ident!("__CAPABILITY_ID_{}", name.to_string().to_uppercase());
         let invoke = format_ident!("__invoke_{name}");
         arms.push(quote! { #(#module::)* #id => #(#module::)* #invoke(value).await, });
+        ids.push(quote! { #(#module::)* #id });
         listed.push((quote!(#path).to_string(), path.clone()));
     }
+    // Two capabilities under one id would leave all but the first unreachable:
+    // the dispatch answers an id with the first arm that has it. Ids can be set
+    // by hand (`#[capability(id = …)]`) and live in several modules (a generated
+    // agent's hand-written ones), so they are compared at compile time.
+    let distinct_ids = quote! {
+        const _: () = {
+            const IDS: &[&str] = &[#(#ids),*];
+            let mut i = 0;
+            while i < IDS.len() {
+                let mut j = i + 1;
+                while j < IDS.len() {
+                    let (a, b) = (IDS[i].as_bytes(), IDS[j].as_bytes());
+                    let mut same = a.len() == b.len();
+                    let mut k = 0;
+                    while same && k < a.len() {
+                        same = a[k] == b[k];
+                        k += 1;
+                    }
+                    assert!(!same, "two capabilities of this agent have the same id");
+                    j += 1;
+                }
+                i += 1;
+            }
+        };
+    };
     let (suspension, suspending_dispatch) = match ordinary_suspension(&args, agent, &listed) {
         Ok(tokens) => tokens,
         Err(error) => return error.into_compile_error(),
     };
     quote! {
+        #distinct_ids
         #[cfg(target_arch = "wasm32")]
         #[allow(warnings)]
         mod bindings {
@@ -501,6 +529,18 @@ mod tests {
         assert!(!glue.contains("suspendable"));
         assert!(!glue.contains("agent_suspension"));
         assert!(glue.contains(&format!(r#"path:["{}/agent"]"#, runtara_wit::WIT_DIR)));
+    }
+
+    #[test]
+    fn capability_ids_are_checked_distinct_across_modules() {
+        let glue = expand(quote! { agent = "plain", capabilities = [get, crate::custom::get_all] });
+        assert!(
+            glue.contains(
+                "constIDS:&[&str]=&[__CAPABILITY_ID_GET,crate::custom::__CAPABILITY_ID_GET_ALL]"
+            ),
+            "{glue}"
+        );
+        assert!(glue.contains("twocapabilitiesofthisagenthavethesameid"));
     }
 
     #[test]
