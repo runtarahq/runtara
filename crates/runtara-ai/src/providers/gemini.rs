@@ -102,6 +102,119 @@ impl CompletionModel for GeminiCompletionModel {
             self.finish_http_response(response)
         })
     }
+
+    fn completion_streamed<'a>(
+        &'a self,
+        request: CompletionRequest,
+        pieces: &'a mut dyn crate::completion::Pieces,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<CompletionResponse, CompletionError>> + 'a>,
+    > {
+        Box::pin(async move {
+            let mut response = self
+                .http_request(
+                    self.build_request_body(request)?,
+                    "streamGenerateContent?alt=sse",
+                )
+                .call_streamed_async()
+                .await
+                .map_err(|e| CompletionError::HttpError(e.to_string()))?;
+            if response.status >= 400 || !super::sse::is_event_stream(&response.headers) {
+                return self.finish_http_response(super::sse::whole(response).await?);
+            }
+            let mut events = super::sse::Events::default();
+            let mut gathered = Gathered::default();
+            while let Some(piece) = response.next_piece().await {
+                let piece = piece.map_err(super::sse::cut)?;
+                for data in events.push(&piece) {
+                    if let Some(text) = gathered.take(&data)? {
+                        pieces.piece(&text).await;
+                    }
+                }
+            }
+            if let Some(data) = events.finish()
+                && let Some(text) = gathered.take(&data)?
+            {
+                pieces.piece(&text).await;
+            }
+            self.parse_response(gathered.into_response())
+        })
+    }
+}
+
+/// A streamed answer, gathered from its events into one `generateContent`
+/// answer: each event carries the next parts, and the last the finish reason
+/// and the usage.
+#[derive(Default)]
+struct Gathered {
+    parts: Vec<Value>,
+    /// The fields of the latest event that has them.
+    last: Map<String, Value>,
+    finish: Map<String, Value>,
+}
+
+impl Gathered {
+    /// One event's `data`; the answer text it adds, if any.
+    fn take(&mut self, data: &str) -> Result<Option<String>, CompletionError> {
+        let event: Value = serde_json::from_str(data)?;
+        if let Some(error) = event.get("error") {
+            return Err(CompletionError::ResponseError(format!(
+                "Gemini API error while streaming: {error}"
+            )));
+        }
+        for field in ["promptFeedback", "usageMetadata", "modelVersion"] {
+            if let Some(value) = event.get(field) {
+                self.last.insert(field.to_owned(), value.clone());
+            }
+        }
+        let Some(candidate) = event.pointer("/candidates/0") else {
+            return Ok(None);
+        };
+        for field in ["finishReason", "finishMessage"] {
+            if let Some(value) = candidate.get(field) {
+                self.finish.insert(field.to_owned(), value.clone());
+            }
+        }
+        let mut said = String::new();
+        for part in candidate
+            .pointer("/content/parts")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let thought = part.get("thought").and_then(Value::as_bool) == Some(true);
+            let plain_text = part
+                .get("text")
+                .and_then(Value::as_str)
+                .filter(|_| part.as_object().is_some_and(|fields| fields.len() == 1));
+            if !thought && let Some(text) = part.get("text").and_then(Value::as_str) {
+                said.push_str(text);
+            }
+            // Unsigned text continues the text before it; any other part stays
+            // its own, as Google rules out merging a signed part.
+            match (plain_text, self.parts.last_mut()) {
+                (Some(text), Some(Value::Object(last)))
+                    if last.len() == 1 && last.get("text").is_some_and(Value::is_string) =>
+                {
+                    let joined = format!("{}{text}", last["text"].as_str().unwrap_or_default());
+                    last.insert("text".to_owned(), Value::String(joined));
+                }
+                _ => self.parts.push(part.clone()),
+            }
+        }
+        Ok((!said.is_empty()).then_some(said))
+    }
+
+    fn into_response(self) -> Value {
+        let mut candidate = self.finish;
+        candidate.insert(
+            "content".to_owned(),
+            json!({"role": "model", "parts": self.parts}),
+        );
+        let mut response = self.last;
+        response.insert("candidates".to_owned(), json!([candidate]));
+        Value::Object(response)
+    }
 }
 
 impl GeminiCompletionModel {
@@ -109,9 +222,12 @@ impl GeminiCompletionModel {
         &self,
         request: CompletionRequest,
     ) -> Result<runtara_http::RequestBuilder, CompletionError> {
-        let body = self.build_request_body(request)?;
+        Ok(self.http_request(self.build_request_body(request)?, "generateContent"))
+    }
+
+    fn http_request(&self, body: Value, method: &str) -> runtara_http::RequestBuilder {
         let model = self.model.strip_prefix("models/").unwrap_or(&self.model);
-        let path = format!("/models/{model}:generateContent");
+        let path = format!("/models/{model}:{method}");
 
         let mut req = self
             .client
@@ -124,7 +240,7 @@ impl GeminiCompletionModel {
         if let Some(ms) = self.timeout_ms {
             req = req.timeout(std::time::Duration::from_millis(ms));
         }
-        Ok(req)
+        req
     }
 
     fn finish_http_response(
@@ -485,6 +601,50 @@ fn sendable_id(id: &str) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::types::ToolDefinition;
+
+    #[test]
+    fn a_streamed_answer_is_gathered_from_its_events() {
+        let mut gathered = Gathered::default();
+        let events = [
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"pondering","thought":true}]}}]}"#,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"Let me"}]}}]}"#,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":" check."}]}}],"usageMetadata":{"promptTokenCount":5}}"#,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{"sku":"A1"}},"thoughtSignature":"sig"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":7,"totalTokenCount":12}}"#,
+        ];
+        let mut said = Vec::new();
+        for event in events {
+            said.extend(gathered.take(event).unwrap());
+        }
+        assert_eq!(said, ["Let me", " check."]);
+        let response = model().parse_response(gathered.into_response()).unwrap();
+        let choice: Vec<_> = response.choice.iter().cloned().collect();
+        assert_eq!(choice.len(), 2, "{choice:?}");
+        assert_eq!(
+            message::assistant_text(choice.iter()).as_deref(),
+            Some("Let me check.")
+        );
+        let AssistantContent::ToolCall(call) = &choice[1] else {
+            panic!("{choice:?}")
+        };
+        assert_eq!(call.function.name, "lookup");
+        assert_eq!(call.function.arguments, json!({"sku": "A1"}));
+        assert_eq!(response.usage.unwrap().total_tokens, 12);
+    }
+
+    #[test]
+    fn a_streamed_answer_stopped_for_safety_fails() {
+        let mut gathered = Gathered::default();
+        gathered
+            .take(r#"{"candidates":[{"content":{"parts":[{"text":"Sure"}]}}]}"#)
+            .unwrap();
+        gathered
+            .take(r#"{"candidates":[{"finishReason":"SAFETY"}]}"#)
+            .unwrap();
+        let Err(error) = model().parse_response(gathered.into_response()) else {
+            panic!("an answer stopped for safety was taken")
+        };
+        assert!(error.to_string().contains("SAFETY"), "{error}");
+    }
 
     fn model() -> GeminiCompletionModel {
         Client::from_connection_id("conn").completion_model(None)
