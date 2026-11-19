@@ -2029,8 +2029,11 @@ def custom_capabilities(config: dict) -> list:
 def check_custom_ids(text: str, capabilities: list) -> None:
     """A hand-written capability's id must not be a generated one's: the agent
     would export two capabilities under one id. The generated ids are read from
-    the rendered file, as `#[capability(... id = "...")]` writes them."""
-    generated = set(re.findall(r'^\s+id = "([^"]+)",$', text, re.MULTILINE))
+    the rendered file, where the template writes each right after the module:
+    `module = "...", id = "..."`, on one line or on two as rustfmt lays the
+    attribute out. (`agent_component!` also refuses two equal ids when the crate
+    is compiled, including one a hand-written capability sets itself.)"""
+    generated = set(re.findall(r'\bmodule = "[^"]*",\s*id = "([^"]+)"', text))
     for capability in capabilities:
         if capability["id"] in generated:
             sys.exit(f"custom_capabilities: `{capability['function']}` is the capability "

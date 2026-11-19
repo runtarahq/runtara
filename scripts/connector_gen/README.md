@@ -538,8 +538,10 @@ A generated capability is one API call. Work that takes several in one step
 (read every page of a list, look an item up and then change it, send a file
 in parts) is a capability written by hand in the crate's `src/custom.rs`,
 which the agent carries beside the generated ones. List it in
-`connector.yaml` with its input struct and the output structs `custom.rs`
-declares (a generated model it returns is registered already):
+`connector.yaml` with its input struct and every output struct `custom.rs`
+declares that its output uses, nested ones included (a generated model it
+returns is registered already). An output struct left out compiles, but the
+step editor then shows that output without its fields.
 
 ```yaml
 custom_capabilities:
@@ -554,9 +556,14 @@ like a generated capability. In `custom.rs`:
 
 - Use the same macros as the generated code: `#[capability]` with
   `module = "<agent id>"`, `CapabilityInput` (with the `_connection` field the
-  generated inputs have) and `CapabilityOutput`. The capability's id is its
-  function's name with `-` for `_`; set no `id` of your own. `generate` refuses
-  a function whose id a generated operation already has.
+  generated inputs have) and `CapabilityOutput`. The capability takes an input
+  struct of its own, declared in `custom.rs`, not a generated one.
+- The capability's id is its function's name with `-` for `_`; set no `id` of
+  your own. `generate` refuses a function whose id a generated operation
+  already has, and `agent_component!` refuses two capabilities with one id
+  when the crate compiles.
+- A hand-written capability cannot suspend (`suspends = true`) or be
+  `trusted`: the generated agent declares neither.
 - Make calls through the generated operations' requests and the crate's
   `kit.rs`, so errors read the same as everywhere else in the agent:
   `ListProductsInput { first: Some(Some(250)), … }.request()?.send(connection, "SHOPIFY").await?`.

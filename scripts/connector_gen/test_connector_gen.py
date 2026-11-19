@@ -10,7 +10,6 @@ repository's rustfmt; they are skipped when the generator is not installed.
 import contextlib
 import hashlib
 import copy
-import difflib
 import io
 import json
 import re
@@ -2222,9 +2221,10 @@ class CustomCapabilitiesTest(unittest.TestCase):
             "is a list": {"function": "sync_items"},
         }
         for expected, entries in cases.items():
-            with self.subTest(expected), self.assertRaises(SystemExit) as stop:
-                cg.custom_capabilities({"custom_capabilities": entries})
-            self.assertIn(expected, str(stop.exception.code))
+            with self.subTest(expected):
+                with self.assertRaises(SystemExit) as stop:
+                    cg.custom_capabilities({"custom_capabilities": entries})
+                self.assertIn(expected, str(stop.exception.code))
 
 
 @unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
@@ -2273,6 +2273,20 @@ class CustomCapabilitiesRenderTest(unittest.TestCase):
                 cg.render(Path(tmp))
         self.assertIn("`list_items` is the capability `list-items`, which a generated operation already is",
                       str(stop.exception.code))
+
+    def test_an_id_on_a_one_line_attribute_is_refused_too(self):
+        # A short summary, no description and no side effects: rustfmt writes
+        # the generated `#[capability(...)]` on one line.
+        spec = sample_spec()
+        spec["paths"]["/count"]["get"]["summary"] = "Count"
+        with tempfile.TemporaryDirectory() as tmp:
+            write_crate(Path(tmp), spec, OPERATIONS,
+                        custom_capabilities=[{"function": "count_items", "input": "CountAllItemsInput"}])
+            with self.assertRaises(SystemExit) as stop:
+                cg.render(Path(tmp))
+            write_crate(Path(tmp), spec, OPERATIONS)
+            self.assertRegex(cg.render(Path(tmp)), r'#\[capability\(module = "sample", id = "count-items", ')
+        self.assertIn("`count_items` is the capability `count-items`", str(stop.exception.code))
 
 
 # ---------------------------------------------------------------------------
