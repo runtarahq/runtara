@@ -1,0 +1,119 @@
+{
+  "name": "Slack: messages in",
+  "description": "Slack's Events API, received by a synchronous HTTP trigger bound to the Slack connection (which checks each call's signature). Answers Slack's URL handshake, and sends each person's message into the conversation of its channel, which the target workflow answers.",
+  "entryPoint": "is_handshake",
+  "inputSchema": {
+    "body": { "type": "object" },
+    "headers": { "type": "object" }
+  },
+  "steps": {
+    "is_handshake": {
+      "id": "is_handshake",
+      "stepType": "Conditional",
+      "name": "Is Slack's URL handshake?",
+      "condition": {
+        "type": "operation", "op": "EQ",
+        "arguments": [
+          { "valueType": "reference", "value": "data.body.type" },
+          { "valueType": "immediate", "value": "url_verification" }
+        ]
+      }
+    },
+    "handshake": {
+      "id": "handshake",
+      "stepType": "Finish",
+      "name": "Answer the handshake",
+      "inputMapping": {
+        "httpResponse": {
+          "valueType": "composite",
+          "value": {
+            "status": { "valueType": "immediate", "value": 200 },
+            "body": {
+              "valueType": "composite",
+              "value": { "challenge": { "valueType": "reference", "value": "data.body.challenge" } }
+            }
+          }
+        }
+      }
+    },
+    "is_a_persons_message": {
+      "id": "is_a_persons_message",
+      "stepType": "Conditional",
+      "name": "Is it a person's message?",
+      "condition": {
+        "type": "operation", "op": "AND",
+        "arguments": [
+          { "type": "operation", "op": "EQ", "arguments": [
+            { "valueType": "reference", "value": "data.body.type" },
+            { "valueType": "immediate", "value": "event_callback" } ] },
+          { "type": "operation", "op": "EQ", "arguments": [
+            { "valueType": "reference", "value": "data.body.event.type" },
+            { "valueType": "immediate", "value": "message" } ] },
+          { "type": "operation", "op": "NOT", "arguments": [
+            { "type": "operation", "op": "IS_DEFINED", "arguments": [
+              { "valueType": "reference", "value": "data.body.event.bot_id" } ] } ] },
+          { "type": "operation", "op": "NOT", "arguments": [
+            { "type": "operation", "op": "IS_DEFINED", "arguments": [
+              { "valueType": "reference", "value": "data.body.event.subtype" } ] } ] }
+        ]
+      }
+    },
+    "send": {
+      "id": "send",
+      "stepType": "Agent",
+      "name": "Into the conversation",
+      "agentId": "conversation",
+      "capabilityId": "send",
+      "inputMapping": {
+        "workflowId": { "valueType": "immediate", "value": "__TARGET_WORKFLOW__" },
+        "key": { "valueType": "template", "value": "slack:{{ data.body.team_id }}:{{ data.body.event.channel }}" },
+        "messageId": { "valueType": "reference", "value": "data.body.event_id" },
+        "text": { "valueType": "reference", "value": "data.body.event.text" },
+        "sender": {
+          "valueType": "composite",
+          "value": { "id": { "valueType": "reference", "value": "data.body.event.user" } }
+        },
+        "replyWorkflowId": { "valueType": "immediate", "value": "__OUTBOUND_WORKFLOW__" },
+        "metadata": {
+          "valueType": "composite",
+          "value": {
+            "channel": { "valueType": "reference", "value": "data.body.event.channel" },
+            "thread_ts": { "valueType": "reference", "value": "data.body.event.thread_ts" }
+          }
+        }
+      }
+    },
+    "accepted": {
+      "id": "accepted",
+      "stepType": "Finish",
+      "name": "Tell Slack it was received",
+      "inputMapping": {
+        "state": { "valueType": "reference", "value": "steps.send.outputs.state" },
+        "httpResponse": {
+          "valueType": "composite",
+          "value": { "status": { "valueType": "immediate", "value": 200 } }
+        }
+      }
+    },
+    "ignored": {
+      "id": "ignored",
+      "stepType": "Finish",
+      "name": "Nothing to send on",
+      "inputMapping": {
+        "httpResponse": {
+          "valueType": "composite",
+          "value": { "status": { "valueType": "immediate", "value": 200 } }
+        }
+      }
+    }
+  },
+  "executionPlan": [
+    { "fromStep": "is_handshake", "toStep": "handshake", "label": "true" },
+    { "fromStep": "is_handshake", "toStep": "is_a_persons_message", "label": "false" },
+    { "fromStep": "is_a_persons_message", "toStep": "send", "label": "true" },
+    { "fromStep": "is_a_persons_message", "toStep": "ignored", "label": "false" },
+    { "fromStep": "send", "toStep": "accepted" }
+  ],
+  "variables": {},
+  "outputSchema": {}
+}
