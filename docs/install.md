@@ -289,7 +289,16 @@ Tenant database connections must reach public addresses: loopback, private
 ranges, local sockets and the cloud metadata address are refused before
 anything connects, unless the host is listed in
 `RUNTARA_PROXY_ALLOWED_HOSTS`. `RUNTARA_DATABASE_CONNECTION_GUARD` (`enforce`
-or `off`) overrides that. `OBJECT_MODEL_TENANT_POOL_MAX` (default 16) caps
+or `off`) overrides that. Either lets a password be sealed for such a
+database; seal then reaches it only inside the internal ranges the
+deployment names. A host listed by its address is that address and needs
+nothing more. A host listed by name, or any private database with the
+guard off, needs its range in `RUNTARA_SEAL_PRIVATE_CIDRS`
+(comma-separated, like `10.20.0.0/16`), or in seal's own
+`private_rule_cidrs` where seal is a process of its own
+([seal.md](seal.md)). Anyone who can seal a value can name any host in
+it, so a range listed is one every caller of seal can send requests to:
+name the database's subnet and no more. `OBJECT_MODEL_TENANT_POOL_MAX` (default 16) caps
 how many database pools one tenant's connections hold open at once.
 
 ## Service management

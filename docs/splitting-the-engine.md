@@ -245,16 +245,15 @@ Done since:
   and what anyone may send passes through neither the engine nor the API.
   It serves those paths and nothing else.
 
-Still not built:
+- **A seal permission to verify alone.** Intake's seal caller is given
+  `operations = ["verify"]` (seal 0.2.0): seal refuses it a send, a
+  connection or a presigned URL, where before only its having no
+  connection to read stopped it.
 
-- **A seal permission to verify alone.** seal's callers are held to
-  keysets and to administering or not. Intake's caller administers nothing
-  and its keyset rule gives it `send` and `connect` as well as `verify`;
-  what stops it using a connection is that it cannot read one: its
-  database role has no connection table and it has no at-rest key. A
-  permission for `verify` alone is in seal since 0.2.0 (a caller's
-  `operations`); the revision pinned here is older, and taking the newer
-  one changes how private destinations and single endpoints are named.
+Not yet run:
+
+- **A console and a proxy in front of a split deployment**, run end to
+  end.
 
 ### The design
 
