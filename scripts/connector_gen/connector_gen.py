@@ -1990,10 +1990,58 @@ def nullable_as_type_lists(sliced: dict) -> dict:
     return copied
 
 
+def custom_capabilities(config: dict) -> list:
+    """`custom_capabilities` in connector.yaml: capabilities written by hand in
+    the crate's `src/custom.rs`, for work one generated operation cannot do
+    (several calls in one step). Each names its function, its input struct and
+    the output structs `custom.rs` declares; the template adds them to the
+    agent's metadata and its component export beside the generated ones."""
+    entries = config.get("custom_capabilities") or []
+    if not isinstance(entries, list):
+        sys.exit("custom_capabilities in connector.yaml is a list of `function`, `input` and `outputs`")
+    capabilities, functions = [], set()
+    for entry in entries:
+        if not isinstance(entry, dict) or not {"function", "input"} <= set(entry) \
+                or set(entry) - {"function", "input", "outputs"}:
+            sys.exit(f"custom_capabilities entry {entry!r} names `function` and `input`, "
+                     "and optionally `outputs`")
+        outputs = entry.get("outputs") or []
+        if not isinstance(outputs, list):
+            sys.exit(f"custom_capabilities: the outputs of `{entry['function']}` are a list")
+        for name in (entry["function"], entry["input"], *outputs):
+            if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) \
+                    or name in RUST_KEYWORDS:
+                sys.exit(f"custom_capabilities: `{name}` is no Rust name")
+        if entry["function"] in functions:
+            sys.exit(f"custom_capabilities lists `{entry['function']}` twice")
+        functions.add(entry["function"])
+        capabilities.append({
+            "function": entry["function"],
+            "metaName": entry["function"].upper(),
+            "input": entry["input"],
+            "outputs": outputs,
+            # As `#[capability]` names it when the function sets no `id`.
+            "id": entry["function"].replace("_", "-"),
+        })
+    return capabilities
+
+
+def check_custom_ids(text: str, capabilities: list) -> None:
+    """A hand-written capability's id must not be a generated one's: the agent
+    would export two capabilities under one id. The generated ids are read from
+    the rendered file, as `#[capability(... id = "...")]` writes them."""
+    generated = set(re.findall(r'^\s+id = "([^"]+)",$', text, re.MULTILINE))
+    for capability in capabilities:
+        if capability["id"] in generated:
+            sys.exit(f"custom_capabilities: `{capability['function']}` is the capability "
+                     f"`{capability['id']}`, which a generated operation already is; rename it")
+
+
 def render(crate: Path) -> str:
     """Render `generated.rs` for `crate` and return its rustfmt-ed text."""
     config = load_config(crate)
     agent = config["agent"]
+    custom = custom_capabilities(config)
     sliced = json.loads((crate / "spec.slice.json").read_text())
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "out"
@@ -2024,6 +2072,8 @@ def render(crate: Path) -> str:
                 "integrationIds": integration_ids(agent),
                 "integrationIdList": ",".join(integration_ids(agent)),
                 "errorPrefix": agent["error_prefix"],
+                "customCapabilities": custom,
+                "customOutputs": list(dict.fromkeys(name for c in custom for name in c["outputs"])),
             },
             "typeMappings": TYPE_MAPPINGS,
             "parameterNameMappings": parameter_name_mappings(sliced),
@@ -2040,7 +2090,9 @@ def render(crate: Path) -> str:
         # Run from the repository so rust-toolchain.toml picks the rustfmt
         # that `cargo fmt --check` uses.
         subprocess.run(["rustfmt", "--edition", "2024", str(generated)], cwd=REPO_ROOT, check=True)
-        return generated.read_text()
+        text = generated.read_text()
+        check_custom_ids(text, custom)
+        return text
 
 
 def generate(crate: Path) -> None:

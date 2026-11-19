@@ -20,7 +20,8 @@ sent JSON), object query parameters without declared scalar fields (unless
 free-form: a `deepObject` with `additionalProperties`) or in a style other than
 `deepObject` or exploded `form`, array query parameters of
 objects or in a style other than `form`, and required cookie parameters. Such an operation
-needs a hand-written capability, or the generic `http` agent.
+needs a [hand-written capability](../scripts/connector_gen/README.md#hand-written-capabilities)
+in the generated agent, or the generic `http` agent.
 
 ## For coding assistants
 
@@ -33,9 +34,10 @@ needs a hand-written capability, or the generic `http` agent.
   the diff.
 - Do not update a `connector.yaml` sha256 pin without showing the user what
   changed in the vendor's spec (or GraphQL schema).
-- Do not add capabilities by hand to a generated agent: list the operation in
-  `connector.yaml`. The templates cannot yet include hand-written capabilities,
-  so a vendor quirk that needs one is a template change (see the rule above).
+- Add a capability to a generated agent by listing its operation in
+  `connector.yaml`. Only one that takes several API calls in one step is
+  written by hand, in the crate's `src/custom.rs` and listed under
+  `custom_capabilities` ([Hand-written capabilities](../scripts/connector_gen/README.md#hand-written-capabilities)).
 - When a vendor's spec does not fetch, generate or compile, fix
   `connector_gen.py` (or, with approval, the templates) so the spec works as
   published, add a test to `test_connector_gen.py`, and say so in the change's

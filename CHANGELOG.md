@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A generated agent can carry hand-written capabilities.** A generated
+  capability is one API call; one that takes several in one step (read every
+  page, look up and then change, send a file in parts) is written by hand in
+  the crate's `src/custom.rs` and listed under `custom_capabilities` in
+  `connector.yaml`. `generate` adds it to the agent's metadata and component
+  export beside the generated ones, and refuses one whose id a generated
+  operation already has. The existing generated agents are unchanged.
+
 - **With executors, a test of an agent's capability runs on one.** The
   call is compiled into a workflow of one step and run on an executor as a
   guest with no run behind it: no instance, nothing recorded. The server no
