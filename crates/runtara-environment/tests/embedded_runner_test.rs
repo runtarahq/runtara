@@ -1371,6 +1371,114 @@ mod workflow_api_connections {
         }
     }
 
+    /// An outbound host whose answers stream: three pieces, 300 ms apart.
+    struct Streaming;
+
+    #[async_trait::async_trait]
+    impl runtara_component_host::OutboundHttpHost for Streaming {
+        async fn request(
+            &self,
+            _: &OutboundContext,
+            _: RequestOptions,
+        ) -> Result<Response, OutboundError> {
+            unreachable!("asked to stream")
+        }
+
+        async fn request_streamed(
+            &self,
+            _: &OutboundContext,
+            _: RequestOptions,
+        ) -> Result<runtara_component_host::outbound_http::StreamedResponse, OutboundError>
+        {
+            let pieces = futures_util::stream::unfold(0, |n| async move {
+                if n == 3 {
+                    return None;
+                }
+                if n > 0 {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+                Some((
+                    Ok::<_, std::io::Error>(bytes::Bytes::from(format!("piece {n}"))),
+                    n + 1,
+                ))
+            });
+            Ok(runtara_component_host::outbound_http::StreamedResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: axum::body::Body::from_stream(pieces),
+            })
+        }
+    }
+
+    /// A run reads an outbound answer that streams a piece at a time, as the
+    /// host has them: through the workflow API, into the guest.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_api_hands_a_streamed_answer_to_the_run_as_it_arrives() {
+        let h = harness().await;
+        let runner = EmbeddedWasmRunner::new(
+            WorkflowRunnerConfig {
+                data_dir: h.dir.path().join("streaming"),
+                default_timeout: Duration::from_secs(30),
+                skip_cert_verification: false,
+            },
+            Arc::clone(&h.persistence),
+            artifacts().clone(),
+        )
+        .unwrap()
+        .with_in_process_precompiler_for_tests()
+        .with_outbound_http(Arc::new(Streaming))
+        .unwrap();
+        let probe = workflow_api_probe();
+        let inst_id = unique("inst-workflow-api-streaming");
+        let input =
+            serde_json::to_vec(&serde_json::json!({"data": {"mode": "stream"}, "variables": {}}))
+                .unwrap();
+        assert!(
+            h.persistence
+                .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+                .await
+                .expect("register instance")
+        );
+        let handle = runner
+            .try_launch_detached(&options(inst_id.as_str(), &probe))
+            .await
+            .expect("launch");
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            runner.wait_for_exit(&handle, Duration::from_millis(50)),
+        )
+        .await
+        .expect("wait_for_exit hung");
+        let instance = h
+            .persistence
+            .get_instance(inst_id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            instance.status,
+            runtara_core::domain::InstanceStatus::Completed,
+            "{instance:?}"
+        );
+        let output: serde_json::Value =
+            serde_json::from_slice(instance.output.as_deref().unwrap()).unwrap();
+        let pieces = output["pieces"].as_array().expect("pieces");
+        let texts: Vec<&str> = pieces
+            .iter()
+            .map(|piece| piece["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(texts, ["piece 0", "piece 1", "piece 2"], "{output}");
+        let at: Vec<u64> = pieces
+            .iter()
+            .map(|piece| piece["at"].as_u64().unwrap())
+            .collect();
+        eprintln!("the guest read the pieces at {at:?} (host ms)");
+        assert!(
+            at[2] - at[0] >= 450,
+            "the pieces reached the guest together: {at:?}"
+        );
+    }
+
     struct Resolver(Arc<Seen>);
 
     #[async_trait::async_trait]
