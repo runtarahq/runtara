@@ -30,6 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`runtara-validate-placed.wasm`; `RUNTARA_VALIDATE_GUEST_WASM` names
   another), and a server with executors does not start without it. Without
   executors nothing changes.
+- **A conversation is pushed, not polled.** A run says when it has
+  something new (a Postgres notice in the runtime database, in the
+  transaction that makes it so), its conversation is read then, and
+  whoever reads the conversation is answered then: a reply reaches an open
+  stream in tens of milliseconds, where it took up to a second. The stream
+  (`Accept: text/event-stream`) says when everything kept has been sent
+  (`caught_up`), tells the client when to connect again, and a tenant holds
+  a bounded number open (`RUNTARA_CONVERSATION_STREAMS`, 64; one past it
+  is `429 CONVERSATION_STREAMS_FULL`). For a client that makes one request
+  at a time, reading takes `wait=<seconds>` (25 at most), and sending
+  takes `wait=<seconds>` (120 at most) and answers with the message's
+  whole turn. Conversations are still looked at every five seconds, for a
+  notice that was missed.
 - **A conversation's events have a contract.** Each event is one envelope,
   `{seq, turn, kind, body, createdAt}`, and every kind's body is a type in
   `openapi.json` (`ConversationEventKind`), so a client's types are
