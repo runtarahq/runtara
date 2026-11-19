@@ -167,6 +167,11 @@ path = "tests/valkey_auth.rs"
 required-features = ["valkey-integration-tests"]
 
 [[test]]
+name = "admission_keeper"
+path = "tests/admission_keeper.rs"
+required-features = ["db-integration-tests", "valkey-integration-tests"]
+
+[[test]]
 name = "peers"
 path = "tests/peers.rs"
 required-features = ["db-integration-tests", "valkey-integration-tests"]

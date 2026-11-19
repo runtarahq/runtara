@@ -31,6 +31,8 @@ static MANAGER: OnceLock<ConnectionManager> = OnceLock::new();
 /// The tenants whose counters this process owns. One Valkey may hold other
 /// processes' tenants; their counters are never read or corrected here.
 static TENANTS: OnceLock<Vec<String>> = OnceLock::new();
+/// The tenants whose counters [`install`] seeded as their keeper.
+static SEEDED_AS_KEEPER: OnceLock<Vec<String>> = OnceLock::new();
 
 /// Whether Valkey-backed admission counting is active for this process.
 pub fn is_enabled() -> bool {
@@ -45,6 +47,15 @@ fn key(tenant_id: &str) -> String {
 fn legacy_key(tenant_id: &str) -> String {
     format!("runtara:admission:reserved:{tenant_id}")
 }
+
+/// The lease of a tenant's counter's keeper: the one engine that seeds it
+/// over and corrects it.
+fn keeper_lease(tenant_id: &str) -> String {
+    format!("admission-counter:{tenant_id}")
+}
+
+/// How long a keeper's lease stands unrenewed.
+const KEEPER_LEASE: Duration = Duration::from_secs(15);
 
 fn tenants() -> &'static [String] {
     TENANTS.get().map(Vec::as_slice).unwrap_or_default()
@@ -89,17 +100,37 @@ pub async fn install(
     // tenants that still hold reservations would leave a stale counter in
     // place for one that has since drained -- and a counter stuck above the
     // limit refuses that tenant's work indefinitely.
+    //
+    // Only the tenant's keeper writes it over (docs/multiple-engines-plan.md,
+    // E2): an engine that starts beside a live keeper would lose the
+    // keeper's reservations in flight, so it seeds only a counter that is
+    // not there.
+    let mut kept = Vec::new();
     for tenant_id in &tenants {
         let held = durable.get(tenant_id).copied().unwrap_or(0);
-        let _: () = conn.set(key(tenant_id), held).await?;
+        let keeper = crate::peers::singleton::take_or_renew(
+            &manager,
+            &keeper_lease(tenant_id),
+            crate::peers::engine_id(),
+            KEEPER_LEASE,
+        )
+        .await?;
+        if keeper {
+            let _: () = conn.set(key(tenant_id), held).await?;
+            kept.push(tenant_id.clone());
+        } else {
+            let _: bool = conn.set_nx(key(tenant_id), held).await?;
+        }
         if !crate::config::valkey_tenant_scoped() {
             let _: () = conn.del(legacy_key(tenant_id)).await?;
         }
     }
     info!(
         tenants = tenants.len(),
+        kept = kept.len(),
         "Valkey admission counter seeded from durable reservations"
     );
+    let _ = SEEDED_AS_KEEPER.set(kept);
     let _ = TENANTS.set(tenants);
 
     if MANAGER.set(manager).is_err() {
@@ -154,7 +185,7 @@ fn reconcile_interval() -> Duration {
 }
 
 /// Read each served tenant's counter, pairing it with its durable reservation count.
-async fn observed_drift(pool: &PgPool) -> anyhow::Result<HashMap<String, i64>> {
+async fn observed_drift(pool: &PgPool, kept: &[String]) -> anyhow::Result<HashMap<String, i64>> {
     let Some(manager) = MANAGER.get() else {
         return Ok(HashMap::new());
     };
@@ -173,7 +204,7 @@ async fn observed_drift(pool: &PgPool) -> anyhow::Result<HashMap<String, i64>> {
     let durable: HashMap<String, i64> = rows.into_iter().collect();
 
     let mut drift = HashMap::new();
-    for tenant_id in tenants() {
+    for tenant_id in kept {
         let held: Option<i64> = conn.get(key(tenant_id)).await?;
         let owed = durable.get(tenant_id).copied().unwrap_or(0);
         drift.insert(tenant_id.clone(), held.unwrap_or(0) - owed);
@@ -194,11 +225,15 @@ async fn observed_drift(pool: &PgPool) -> anyhow::Result<HashMap<String, i64>> {
 /// intake increments before its row commits, a release marks its row before
 /// decrementing — so only drift present in two consecutive passes is acted on,
 /// and only by the amount common to both. No in-flight window outlives that.
-async fn reconcile_once(pool: &PgPool, previous: &mut HashMap<String, i64>) -> anyhow::Result<()> {
+async fn reconcile_once(
+    pool: &PgPool,
+    kept: &[String],
+    previous: &mut HashMap<String, i64>,
+) -> anyhow::Result<()> {
     let Some(manager) = MANAGER.get() else {
         return Ok(());
     };
-    let current = observed_drift(pool).await?;
+    let current = observed_drift(pool, kept).await?;
     let mut conn = manager.clone();
 
     for (tenant_id, drift) in &current {
@@ -240,15 +275,86 @@ fn settled_drift(prior: i64, current: i64) -> i64 {
     }
 }
 
-/// Run [`reconcile_once`] on an interval until shutdown.
-pub async fn run_reconciler(pool: PgPool, shutdown: crate::shutdown::ShutdownSignal) {
-    if !is_enabled() {
-        return;
+/// Seeds `tenant_id`'s counter over from the durable reservations: done by
+/// an engine that has just become its keeper.
+async fn reseed(pool: &PgPool, tenant_id: &str) -> anyhow::Result<()> {
+    let Some(manager) = MANAGER.get() else {
+        return Ok(());
+    };
+    let held: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM execution_admission_reservations \
+         WHERE released_at IS NULL AND tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_one(pool)
+    .await?;
+    let mut conn = manager.clone();
+    let _: () = conn.set(key(tenant_id), held).await?;
+    info!(tenant_id = %tenant_id, held, "this engine keeps the tenant's admission counter now; reseeded it");
+    Ok(())
+}
+
+/// Which tenants' counters this engine keeps now, of `keepers`; reseeds a
+/// counter whose keeper it has just become, and forgets the drift of one
+/// it no longer keeps.
+async fn kept_now(
+    pool: &PgPool,
+    keepers: &[(String, crate::peers::singleton::Singleton)],
+    kept_before: &mut std::collections::HashSet<String>,
+    previous: &mut HashMap<String, i64>,
+) -> Vec<String> {
+    let mut kept = Vec::new();
+    for (tenant_id, lease) in keepers {
+        if lease.is_held() {
+            if !kept_before.contains(tenant_id) {
+                if let Err(error) = reseed(pool, tenant_id).await {
+                    warn!(tenant_id = %tenant_id, error = %error, "could not reseed the admission counter");
+                    continue;
+                }
+                kept_before.insert(tenant_id.clone());
+            }
+            kept.push(tenant_id.clone());
+        } else {
+            kept_before.remove(tenant_id);
+            previous.remove(tenant_id);
+        }
     }
+    kept
+}
+
+/// Run [`reconcile_once`] on an interval until shutdown, for the tenants
+/// whose counters this engine keeps (one engine per tenant: E2 of
+/// docs/multiple-engines-plan.md).
+pub async fn run_reconciler(pool: PgPool, shutdown: crate::shutdown::ShutdownSignal) {
+    let Some(manager) = MANAGER.get().cloned() else {
+        return;
+    };
     let interval = reconcile_interval();
     let mut previous: HashMap<String, i64> = HashMap::new();
+    let keepers: Vec<(String, crate::peers::singleton::Singleton)> = tenants()
+        .iter()
+        .map(|tenant_id| {
+            (
+                tenant_id.clone(),
+                crate::peers::singleton::Singleton::start(
+                    manager.clone(),
+                    keeper_lease(tenant_id),
+                    crate::peers::engine_id(),
+                    KEEPER_LEASE,
+                    shutdown.clone(),
+                ),
+            )
+        })
+        .collect();
+    // What `install` seeded as the keeper needs no reseeding when the lease
+    // it took is first seen held.
+    let mut kept_before: std::collections::HashSet<String> = SEEDED_AS_KEEPER
+        .get()
+        .map(|kept| kept.iter().cloned().collect())
+        .unwrap_or_default();
     info!(
         interval_ms = interval.as_millis() as u64,
+        kept = kept_before.len(),
         "Valkey admission counter reconciler started"
     );
 
@@ -266,7 +372,8 @@ pub async fn run_reconciler(pool: PgPool, shutdown: crate::shutdown::ShutdownSig
             info!("Valkey admission counter reconciler stopping on shutdown");
             return;
         }
-        if let Err(error) = reconcile_once(&pool, &mut previous).await {
+        let kept = kept_now(&pool, &keepers, &mut kept_before, &mut previous).await;
+        if let Err(error) = reconcile_once(&pool, &kept, &mut previous).await {
             warn!(error = %error, "Valkey admission counter reconcile pass failed");
         }
     }
