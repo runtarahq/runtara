@@ -254,7 +254,10 @@ What differs from the plan above:
 - **A reply said by a step that is retried may be said twice.** A step
   that ran is not run again on resume, so this is a step that failed after
   saying it.
-- **A conversation is read twice a second while it has something to do**
+- (Since changed: a run says when it has something new and its
+  conversation is read then. See
+  [native-chat-phase-4.md](native-chat-phase-4.md#as-built).)
+  **A conversation is read twice a second while it has something to do**
   (a run, a message waiting, a reply not yet routed), by one pass of the
   worker over all of them. Enough for now, and the first thing to change
   if conversations are many: the run's own events could wake it.

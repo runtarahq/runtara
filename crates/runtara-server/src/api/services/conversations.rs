@@ -45,6 +45,9 @@ pub fn queue_bound_from_env() -> usize {
 /// The kind of event a `conversation` agent's `reply` leaves on its run.
 pub const REPLY_EVENT: &str = "conversation_reply";
 
+/// The longest a sender waits for its message's turn in one request.
+pub const MAX_SEND_WAIT: Duration = Duration::from_secs(120);
+
 /// How long a run may take to appear after it was queued, before the
 /// conversation gives it up.
 const START_ALLOWED: Duration = Duration::from_secs(10 * 60);
@@ -140,6 +143,107 @@ pub struct Sent {
     pub detail: Option<String>,
     /// Whether this id had been sent before: nothing was done again.
     pub duplicate: bool,
+    /// What came of it, where the sender asked to wait for that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<TurnSoFar>,
+}
+
+/// A message's turn, as far as it had gone when its sender stopped waiting.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnSoFar {
+    /// The events of the turn, in order: the replies, and what ended it.
+    pub events: Vec<ConversationEvent>,
+    /// Whether the turn is over: the run waits to be told something, or
+    /// ended, or the message failed. `false` when the time ran out first.
+    pub settled: bool,
+    /// The last event read: read on from it.
+    pub last_seq: i64,
+}
+
+/// What is asked of a conversation's events.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadEvents {
+    /// Those after this one.
+    pub after: i64,
+    pub limit: u32,
+    /// How long to wait for one, in milliseconds, when there is none.
+    #[serde(default)]
+    pub wait_ms: u32,
+}
+
+/// The longest one ask waits for an event. A reader asks again.
+pub const MAX_WAIT: Duration = Duration::from_secs(25);
+
+/// Who is waiting for what a conversation says next, and which conversation
+/// each run carries: what lets a conversation be read when there is
+/// something to read, and not on a clock.
+///
+/// It is this process's alone. The engine is one process; conversations are
+/// carried and read in it.
+#[derive(Default)]
+struct Wakes {
+    readers: std::sync::Mutex<std::collections::HashMap<Uuid, Arc<tokio::sync::Notify>>>,
+    /// The run that carries each conversation, by the run's instance id.
+    runs: std::sync::Mutex<std::collections::HashMap<String, (Uuid, String)>>,
+}
+
+impl Wakes {
+    fn reader(&self, conversation: Uuid) -> Arc<tokio::sync::Notify> {
+        self.readers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(conversation)
+            .or_default()
+            .clone()
+    }
+
+    /// Forgets a conversation nobody is waiting on any more.
+    fn left(&self, conversation: Uuid, held: Arc<tokio::sync::Notify>) {
+        let mut readers = self
+            .readers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(held);
+        if readers
+            .get(&conversation)
+            .is_some_and(|notify| Arc::strong_count(notify) == 1)
+        {
+            readers.remove(&conversation);
+        }
+    }
+
+    /// The conversation said something: whoever waits on it reads.
+    fn said(&self, conversation: Uuid) {
+        let waiting = self
+            .readers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&conversation)
+            .cloned();
+        if let Some(waiting) = waiting {
+            waiting.notify_waiters();
+        }
+    }
+
+    fn carried_by(&self, conversation: Uuid, tenant: &str, instance: Option<&str>) {
+        let mut runs = self
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        runs.retain(|_, (carried, _)| *carried != conversation);
+        if let Some(instance) = instance {
+            runs.insert(instance.to_owned(), (conversation, tenant.to_owned()));
+        }
+    }
+
+    fn conversation_of(&self, instance: &str) -> Option<(Uuid, String)> {
+        self.runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(instance)
+            .cloned()
+    }
 }
 
 /// What is asked when a conversation is opened.
@@ -468,6 +572,7 @@ pub struct Conversations {
     pool: PgPool,
     runs: Arc<dyn Runs>,
     queue_bound: usize,
+    wakes: Arc<Wakes>,
 }
 
 struct Row_ {
@@ -529,6 +634,7 @@ impl Conversations {
             pool,
             runs,
             queue_bound: QUEUE_BOUND,
+            wakes: Arc::default(),
         }
     }
 
@@ -693,6 +799,7 @@ impl Conversations {
         .await
         .map_err(storage)?;
         tx.commit().await.map_err(storage)?;
+        self.wakes.said(conversation);
 
         // The sender is told what became of it, where that is known at once.
         if let Err(error) = self.advance(conversation).await {
@@ -746,6 +853,126 @@ impl Conversations {
         Ok(events)
     }
 
+    /// The events after `read.after`, waiting up to `read.wait_ms` for one
+    /// when there is none. It answers as soon as the conversation says
+    /// something, and empty when the time is up.
+    pub async fn read(
+        &self,
+        tenant: &str,
+        workflow: &str,
+        key: &str,
+        read: ReadEvents,
+    ) -> ConversationResult<Vec<ConversationEvent>> {
+        let wait = Duration::from_millis(u64::from(read.wait_ms)).min(MAX_WAIT);
+        if wait.is_zero() {
+            return self
+                .events(tenant, workflow, key, read.after, read.limit)
+                .await;
+        }
+        let conversation = self.find(tenant, workflow, key).await?.id;
+        let until = tokio::time::Instant::now() + wait;
+        let waiting = self.wakes.reader(conversation);
+        let answered = async {
+            loop {
+                // Listening before looking: what is said between the two is
+                // not missed.
+                let woken = waiting.notified();
+                tokio::pin!(woken);
+                woken.as_mut().enable();
+                let events = self
+                    .events(tenant, workflow, key, read.after, read.limit)
+                    .await?;
+                if !events.is_empty() {
+                    return Ok(events);
+                }
+                if tokio::time::timeout_at(until, woken).await.is_err() {
+                    return Ok(Vec::new());
+                }
+            }
+        }
+        .await;
+        self.wakes.left(conversation, waiting);
+        answered
+    }
+
+    /// Sends a message and waits up to `wait` for its turn to be over: for
+    /// the run to wait to be told something, or to end, or for the message
+    /// to fail. The answer carries the turn's events as far as they went.
+    pub async fn send_and_wait(
+        &self,
+        tenant: &str,
+        workflow: &str,
+        key: &str,
+        message: Message,
+        wait: Duration,
+    ) -> ConversationResult<Sent> {
+        let id = message.id.clone();
+        let mut sent = self.send(tenant, workflow, key, message).await?;
+        if wait.is_zero() {
+            return Ok(sent);
+        }
+        let conversation = self.find(tenant, workflow, key).await?.id;
+        // From the message itself: its turn is what follows it.
+        let said: Option<i64> = sqlx::query_scalar(
+            "SELECT min(seq) FROM conversation_events \
+             WHERE conversation_id = $1 AND kind = 'message' AND turn = $2",
+        )
+        .bind(conversation)
+        .bind(&id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage)?;
+        let mut after = said.map_or(0, |seq| seq - 1);
+        let until = tokio::time::Instant::now() + wait.min(MAX_SEND_WAIT);
+        let mut turn = TurnSoFar {
+            events: Vec::new(),
+            settled: false,
+            last_seq: after,
+        };
+        while !turn.settled {
+            let left = until.saturating_duration_since(tokio::time::Instant::now());
+            let read = ReadEvents {
+                after,
+                limit: EVENTS_PAGE,
+                wait_ms: left.min(MAX_WAIT).as_millis() as u32,
+            };
+            let events = self.read(tenant, workflow, key, read).await?;
+            if events.is_empty() && left.is_zero() {
+                break;
+            }
+            for event in events {
+                after = event.seq;
+                turn.last_seq = event.seq;
+                if event.turn.as_deref() != Some(id.as_str()) {
+                    continue;
+                }
+                turn.settled = matches!(
+                    event.said,
+                    ConversationEventKind::WaitingForInput(_)
+                        | ConversationEventKind::RunEnded(_)
+                        | ConversationEventKind::MessageFailed(_)
+                );
+                turn.events.push(event);
+                if turn.settled {
+                    break;
+                }
+            }
+        }
+        // What became of the message, now that it has had its turn.
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        if let Some(now) = self::sent(&mut tx, conversation, &id, sent.duplicate).await? {
+            sent = now;
+        }
+        sent.turn = Some(turn);
+        Ok(sent)
+    }
+
+    /// The conversation the run `instance` carries, and its tenant, if this
+    /// process knows it to carry one.
+    pub fn carried_by(&self, instance: &str) -> Option<(Uuid, String)> {
+        self.wakes.conversation_of(instance)
+    }
+
     /// Deletes a conversation and what was said in it. A run that carries it
     /// is left to end: nothing reads what it says afterwards.
     pub async fn delete(
@@ -771,7 +998,7 @@ impl Conversations {
     /// reply workflow.
     pub async fn unsettled(&self) -> ConversationResult<Vec<(Uuid, String)>> {
         let rows = sqlx::query(
-            "SELECT c.conversation_id, c.tenant_id FROM conversations c \
+            "SELECT c.conversation_id, c.tenant_id, c.instance_id FROM conversations c \
              WHERE c.instance_id IS NOT NULL \
                 OR EXISTS (SELECT 1 FROM conversation_messages m \
                            WHERE m.conversation_id = c.conversation_id AND m.state = 'queued') \
@@ -784,10 +1011,19 @@ impl Conversations {
         .fetch_all(&self.pool)
         .await
         .map_err(storage)?;
-        rows.iter()
-            .map(|row| Ok((row.try_get(0)?, row.try_get(1)?)))
-            .collect::<Result<_, sqlx::Error>>()
-            .map_err(storage)
+        let mut unsettled = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let conversation: Uuid = row.try_get(0).map_err(storage)?;
+            let tenant: String = row.try_get(1).map_err(storage)?;
+            let instance: Option<String> = row.try_get(2).map_err(storage)?;
+            // Which run carries it is kept in mind, for a run's notice to
+            // find its conversation by: here for one this process did not
+            // start itself (it was restarted since).
+            self.wakes
+                .carried_by(conversation, &tenant, instance.as_deref());
+            unsettled.push((conversation, tenant));
+        }
+        Ok(unsettled)
     }
 
     /// Carries the conversation as far as it goes now. Returns whether it
@@ -809,14 +1045,27 @@ impl Conversations {
             row: read(&row).map_err(storage)?,
             tx,
         };
+        let row_next_seq = at.row.next_seq;
         for _ in 0..ROUNDS {
             if !self.round(&mut at).await? {
                 break;
             }
         }
+        let said_before = row_next_seq;
         self.route(&mut at).await?;
         at.save().await?;
+        let (tenant, instance, said_now) = (
+            at.row.tenant_id.clone(),
+            at.row.instance_id.clone(),
+            at.row.next_seq,
+        );
         at.tx.commit().await.map_err(storage)?;
+        // Told once it can be read: after the commit, never before.
+        self.wakes
+            .carried_by(conversation, &tenant, instance.as_deref());
+        if said_now != said_before {
+            self.wakes.said(conversation);
+        }
         Ok(true)
     }
 
@@ -1300,6 +1549,7 @@ async fn sent(
         instance_id: row.try_get("instance_id").map_err(storage)?,
         detail: row.try_get("detail").map_err(storage)?,
         duplicate,
+        turn: None,
     }))
 }
 
@@ -1319,15 +1569,25 @@ pub fn answer_in(output: Option<&Value>) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// How often every conversation that has something to do is looked at,
+/// whether or not anything said so: what catches a notice that was missed.
+pub const LOOKED_AT_EVERY: Duration = Duration::from_secs(5);
+
 /// Carries every conversation that has something to do, until the server
 /// stops. The conversations are found across tenants; each is carried in
 /// its own tenant's scope.
+///
+/// A conversation is carried when its run says it has something new
+/// (`told`, the instance ids of such runs), and all of them are looked at
+/// every `every`, for what no notice said.
 pub async fn carry(
     conversations: Conversations,
     shutdown: crate::shutdown::ShutdownSignal,
     every: Duration,
+    mut told: tokio::sync::mpsc::UnboundedReceiver<String>,
 ) {
     use runtara_store_postgres::tenant_scope::{scoped, system};
+    let mut telling = true;
     loop {
         match system(conversations.unsettled()).await {
             Ok(unsettled) => {
@@ -1339,10 +1599,74 @@ pub async fn carry(
             }
             Err(error) => tracing::warn!(%error, "The conversations to advance were not read"),
         }
+        let look_again = tokio::time::sleep(every);
+        tokio::pin!(look_again);
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.clone().wait() => return,
+                instance = told.recv(), if telling => {
+                    let Some(instance) = instance else {
+                        // Nothing tells any more: the clock alone remains.
+                        telling = false;
+                        continue;
+                    };
+                    // Several notices of one run are one reading of it.
+                    let mut instances = std::collections::BTreeSet::from([instance]);
+                    while let Ok(more) = told.try_recv() {
+                        instances.insert(more);
+                    }
+                    for instance in instances {
+                        let Some((conversation, tenant)) = conversations.carried_by(&instance)
+                        else {
+                            continue;
+                        };
+                        if let Err(error) =
+                            scoped(tenant, conversations.advance(conversation)).await
+                        {
+                            tracing::warn!(%conversation, %error, "A conversation was not advanced");
+                        }
+                    }
+                }
+                _ = &mut look_again => break,
+            }
+        }
+    }
+}
+
+/// Listens for the runs of the runtime database that have something new,
+/// and hands each one's instance id on, until the server stops. A listener
+/// that loses its connection takes another; what was said meanwhile is
+/// found by the look every [`LOOKED_AT_EVERY`].
+pub async fn hear_runs(
+    runtime: PgPool,
+    shutdown: crate::shutdown::ShutdownSignal,
+    tell: tokio::sync::mpsc::UnboundedSender<String>,
+) {
+    loop {
+        let heard = async {
+            let mut listener = runtara_store_postgres::notices::listen(&runtime).await?;
+            loop {
+                let notice = listener.recv().await?;
+                if tell.send(notice.payload().to_owned()).is_err() {
+                    return Ok::<_, sqlx::Error>(());
+                }
+            }
+        };
         tokio::select! {
             biased;
             _ = shutdown.clone().wait() => return,
-            _ = tokio::time::sleep(every) => {}
+            heard = heard => match heard {
+                Ok(()) => return,
+                Err(error) => {
+                    tracing::warn!(%error, "The runs' notices are not heard; listening again");
+                }
+            },
+        }
+        tokio::select! {
+            biased;
+            _ = shutdown.clone().wait() => return,
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
         }
     }
 }

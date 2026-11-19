@@ -927,13 +927,20 @@ impl Engine for RemoteEngine {
         workflow_id: &str,
         key: &str,
         message: Message,
+        wait_ms: u32,
     ) -> ConversationResult<Sent> {
-        self.ask(wire::SendConversationMessage {
-            tenant_id: tenant_id.to_owned(),
-            workflow_id: workflow_id.to_owned(),
-            key: key.to_owned(),
-            message,
-        })
+        // An ask that waits is held open for as long as it may wait.
+        let within = if wait_ms == 0 { ORDINARY } else { HELD };
+        self.ask_within(
+            wire::SendConversationMessage {
+                tenant_id: tenant_id.to_owned(),
+                workflow_id: workflow_id.to_owned(),
+                key: key.to_owned(),
+                message,
+                wait_ms,
+            },
+            within,
+        )
         .await
     }
 
@@ -942,16 +949,18 @@ impl Engine for RemoteEngine {
         tenant_id: &str,
         workflow_id: &str,
         key: &str,
-        after: i64,
-        limit: u32,
+        read: ReadEvents,
     ) -> ConversationResult<Vec<ConversationEvent>> {
-        self.ask(wire::ConversationEvents {
-            tenant_id: tenant_id.to_owned(),
-            workflow_id: workflow_id.to_owned(),
-            key: key.to_owned(),
-            after,
-            limit,
-        })
+        let within = if read.wait_ms == 0 { ORDINARY } else { HELD };
+        self.ask_within(
+            wire::ConversationEvents {
+                tenant_id: tenant_id.to_owned(),
+                workflow_id: workflow_id.to_owned(),
+                key: key.to_owned(),
+                read,
+            },
+            within,
+        )
         .await
     }
 

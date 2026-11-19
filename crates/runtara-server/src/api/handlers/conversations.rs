@@ -19,7 +19,8 @@ use serde_json::{Value, json};
 
 use crate::api::dto::common::ApiResponse;
 use crate::api::services::conversations::{
-    ConversationError, ConversationEvent, ConversationState, Message, OpenConversation, Sent,
+    ConversationError, ConversationEvent, ConversationState, MAX_SEND_WAIT, MAX_WAIT, Message,
+    OpenConversation, ReadEvents, Sent,
 };
 use crate::engine::Engine;
 use crate::middleware::tenant_auth::OrgId;
@@ -27,7 +28,59 @@ use crate::middleware::tenant_auth::OrgId;
 /// How long one stream of a conversation's events is held open. A client
 /// reads on from the last event it saw.
 const STREAM_HELD: Duration = Duration::from_secs(10 * 60);
-const STREAM_EVERY: Duration = Duration::from_millis(500);
+/// How long a client waits before it connects again, as the stream tells it.
+const STREAM_RETRY: Duration = Duration::from_secs(2);
+/// How many streams one tenant holds open at once, unless set otherwise
+/// (`RUNTARA_CONVERSATION_STREAMS`).
+const STREAMS: usize = 64;
+
+/// The streams each tenant holds open in this process.
+static OPEN_STREAMS: std::sync::Mutex<Option<std::collections::HashMap<String, usize>>> =
+    std::sync::Mutex::new(None);
+
+fn streams_bound() -> usize {
+    std::env::var("RUNTARA_CONVERSATION_STREAMS")
+        .ok()
+        .and_then(|bound| bound.trim().parse().ok())
+        .unwrap_or(STREAMS)
+}
+
+/// One of a tenant's open streams, for as long as it is held.
+struct OpenStream(String);
+
+impl OpenStream {
+    /// Takes a place among the tenant's streams, if there is one.
+    fn open(tenant: &str, bound: usize) -> Option<Self> {
+        let mut open = OPEN_STREAMS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let count = open
+            .get_or_insert_with(Default::default)
+            .entry(tenant.to_owned())
+            .or_insert(0);
+        if *count >= bound {
+            return None;
+        }
+        *count += 1;
+        Some(Self(tenant.to_owned()))
+    }
+}
+
+impl Drop for OpenStream {
+    fn drop(&mut self) {
+        let mut open = OPEN_STREAMS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(open) = open.as_mut()
+            && let Some(count) = open.get_mut(&self.0)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                open.remove(&self.0);
+            }
+        }
+    }
+}
 
 fn refused(error: ConversationError) -> Response {
     let (status, code) = match &error {
@@ -157,12 +210,18 @@ pub async fn delete_conversation(
 /// a conversation holds a bounded number of them and refuses one past it
 /// with `429 CONVERSATION_QUEUE_FULL`. The same `id` again is the same
 /// message: nothing is done twice, and `duplicate` says so.
+///
+/// With `wait`, the answer waits that many seconds for the message's turn
+/// to be over (the run waits to be told something, or ended, or the message
+/// failed) and carries the turn's events in `turn`, with `settled` false if
+/// the time ran out first. One request is then a whole exchange.
 #[utoipa::path(
     post,
     path = "/api/runtime/workflows/{id}/conversations/{key}/messages",
     params(
         ("id" = String, Path, description = "Workflow ID"),
         ("key" = String, Path, description = "The client's name for the conversation"),
+        ("wait" = Option<u32>, Query, description = "Wait this many seconds for the message's turn, up to 120"),
     ),
     request_body = Message,
     responses(
@@ -176,10 +235,18 @@ pub async fn send_message(
     OrgId(tenant_id): OrgId,
     State(engine): State<Arc<dyn Engine>>,
     Path((workflow_id, key)): Path<(String, String)>,
+    Query(query): Query<SendQuery>,
     Json(message): Json<Message>,
 ) -> Response {
+    let wait = Duration::from_secs(u64::from(query.wait.unwrap_or(0))).min(MAX_SEND_WAIT);
     match engine
-        .send_conversation_message(&tenant_id, &workflow_id, &key, message)
+        .send_conversation_message(
+            &tenant_id,
+            &workflow_id,
+            &key,
+            message,
+            wait.as_millis() as u32,
+        )
         .await
     {
         Ok(sent) => answered(sent),
@@ -188,19 +255,40 @@ pub async fn send_message(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SendQuery {
+    /// Wait this many seconds for the message's turn.
+    pub wait: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct EventsQuery {
     /// Read on from this event.
     pub after: Option<i64>,
     pub limit: Option<u32>,
+    /// Wait this many seconds for an event, when there is none.
+    pub wait: Option<u32>,
 }
 
 /// What a conversation has for its user: replies, that it waits for input,
 /// what its run is doing, and when a run starts and ends.
 ///
-/// Events are numbered (`seq`) and kept: read on with `after`. With
-/// `Accept: text/event-stream` this is a stream of them as they come, each
-/// with its `seq` as the event id, so a client that reconnects with
-/// `Last-Event-ID` misses nothing.
+/// Events are numbered (`seq`) and kept: read on with `after`.
+///
+/// **As a stream.** With `Accept: text/event-stream` this is server-sent
+/// events, each `id: <seq>`, `event: <kind>`, `data: <the event>`. It sends
+/// what is kept after `after` (or `Last-Event-ID`), then `caught_up`, then
+/// each event as it is said: nothing is polled for. `caught_up` is not
+/// kept and has no id. The stream tells the client when to connect again
+/// (`retry`), sends a comment while nothing is said so that no proxy closes
+/// it, and ends after ten minutes: connect again with `Last-Event-ID` and
+/// nothing is missed. A browser's `EventSource` cannot send an
+/// `Authorization` header; read it with `fetch`. A tenant holds a bounded
+/// number of streams open (`429 CONVERSATION_STREAMS_FULL` past it).
+///
+/// **As one request.** Without that header, `wait` holds the request that
+/// many seconds (25 at most) for an event when there is none: answered at
+/// once if there is something, when there is, or empty when the time is up.
+/// For a client that makes one request at a time.
 #[utoipa::path(
     get,
     path = "/api/runtime/workflows/{id}/conversations/{key}/events",
@@ -209,6 +297,7 @@ pub struct EventsQuery {
         ("key" = String, Path, description = "The client's name for the conversation"),
         ("after" = Option<i64>, Query, description = "Read on from this event"),
         ("limit" = Option<u32>, Query, description = "At most this many, up to 500"),
+        ("wait" = Option<u32>, Query, description = "Without a stream: wait this many seconds for an event, up to 25"),
     ),
     responses(
         (status = 200, description = "The events, or a stream of them", body = ApiResponse<Vec<ConversationEvent>>),
@@ -229,48 +318,87 @@ pub async fn conversation_events(
         .and_then(|value| value.parse::<i64>().ok());
     let after = query.after.or(last_seen).unwrap_or(0);
     let limit = query.limit.unwrap_or(100);
-
+    let streamed = headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/event-stream"));
+    let wait = Duration::from_secs(u64::from(query.wait.unwrap_or(0))).min(MAX_WAIT);
+    let first = ReadEvents {
+        after,
+        limit,
+        // A stream sends what there is and then waits; one request waits
+        // as long as it asked to.
+        wait_ms: if streamed { 0 } else { wait.as_millis() as u32 },
+    };
     let first = match engine
-        .conversation_events(&tenant_id, &workflow_id, &key, after, limit)
+        .conversation_events(&tenant_id, &workflow_id, &key, first)
         .await
     {
         Ok(events) => events,
         Err(error) => return refused(error),
     };
-    let streamed = headers
-        .get(header::ACCEPT)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|accept| accept.contains("text/event-stream"));
     if !streamed {
         return answered(first);
     }
+    let Some(open) = OpenStream::open(&tenant_id, streams_bound()) else {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({
+                "success": false,
+                "code": "CONVERSATION_STREAMS_FULL",
+                "message": "This tenant holds as many conversation streams open as it may",
+            })),
+        )
+            .into_response();
+    };
 
     let stream = async_stream::stream! {
+        // Held for as long as the stream is.
+        let _open = open;
         let mut after = after;
         let mut events = first;
+        let mut caught_up = false;
         let started = std::time::Instant::now();
+        yield Ok::<_, Infallible>(Event::default().retry(STREAM_RETRY));
         loop {
+            let read = events.len();
             for event in events {
                 after = event.seq;
-                yield Ok::<_, Infallible>(
-                    Event::default()
-                        .id(event.seq.to_string())
-                        .event(event.kind())
-                        .data(serde_json::to_string(&event).unwrap_or_default()),
-                );
+                yield Ok(Event::default()
+                    .id(event.seq.to_string())
+                    .event(event.kind())
+                    .data(serde_json::to_string(&event).unwrap_or_default()));
+            }
+            // Everything kept has been sent: what follows is said now.
+            let behind = !caught_up && read >= limit.clamp(1, 500) as usize;
+            if !caught_up && !behind {
+                caught_up = true;
+                yield Ok(Event::default().event("caught_up").data(
+                    json!({"kind": "caught_up", "body": {"lastSeq": after}}).to_string(),
+                ));
             }
             if started.elapsed() > STREAM_HELD {
                 break;
             }
-            tokio::time::sleep(STREAM_EVERY).await;
+            let read = ReadEvents {
+                after,
+                limit,
+                // Held by the engine until the conversation says something.
+                wait_ms: if behind { 0 } else { MAX_WAIT.as_millis() as u32 },
+            };
             events = match engine
-                .conversation_events(&tenant_id, &workflow_id, &key, after, limit)
+                .conversation_events(&tenant_id, &workflow_id, &key, read)
                 .await
             {
                 Ok(events) => events,
                 // Deleted while it was read.
                 Err(ConversationError::NotFound) => break,
-                Err(_) => Vec::new(),
+                // The engine is away, or cannot read now: not asked again
+                // at once.
+                Err(_) => {
+                    tokio::time::sleep(STREAM_RETRY).await;
+                    Vec::new()
+                }
             };
         }
     };

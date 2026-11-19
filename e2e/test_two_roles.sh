@@ -592,6 +592,25 @@ echo "${RESP}" | jq -e '[.data[] | select(.kind == "run_ended")][0].body.status 
     || { print_error "a conversation's run was not carried to its end: ${RESP}"; exit 1; }
 [ "$(curl -sS "${CONVERSATION}" | jq -r '.data.key')" = "two-roles" ] \
     || { print_error "a conversation is not read through the API"; exit 1; }
+# What it says is pushed across the two processes: the API holds an ask of
+# the engine, and a stream on it is sent an event when it is said. One
+# request sends a message and is answered with its whole turn.
+STREAMED="${WORK_DIR}/conversation-stream.txt"
+LAST=$(curl -sS "${CONVERSATION}/events?limit=500" | jq -r '.data[-1].seq')
+(curl -sS -N --max-time 60 -H 'Accept: text/event-stream' -H "Last-Event-ID: ${LAST}" "${CONVERSATION}/events" > "${STREAMED}" 2>/dev/null) &
+STREAM_PID=$!
+sleep 1
+grep -q '^event: caught_up' "${STREAMED}" || { print_error "a stream through the API does not say it has caught up: $(cat "${STREAMED}")"; exit 1; }
+RESP=$(curl -sS --max-time 120 -X POST -H 'Content-Type: application/json' \
+    -d '{"id":"m-2","text":"again"}' "${CONVERSATION}/messages?wait=90")
+echo "${RESP}" | jq -e '.data.turn.settled == true and ([.data.turn.events[] | select(.kind == "run_ended")] | length == 1)' >/dev/null \
+    || { print_error "sending and waiting through the API did not answer with the turn: ${RESP}"; exit 1; }
+# The stream had the turn's end by the time the request that waited for it
+# was answered: nothing was waiting on a clock.
+sleep 0.3
+ENDED=$(grep -c '^event: run_ended' "${STREAMED}" || true)
+kill "${STREAM_PID}" 2>/dev/null || true; wait "${STREAM_PID}" 2>/dev/null || true
+[ "${ENDED}" = "1" ] || { print_error "the turn's end was not pushed to a stream through the API: $(cat "${STREAMED}")"; exit 1; }
 # Saving a workflow validates it, on an executor too: the API asks the
 # engine, which places the validator. What the validator finds is what the
 # save is refused for.

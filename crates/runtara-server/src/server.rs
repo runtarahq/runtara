@@ -3856,6 +3856,21 @@ async fn start_as_platform(
     // What carries conversations: reads what their runs said, hands them
     // their next message, and starts their reply workflows.
     if runtime_client.is_some() {
+        // A run says when it has something new, and its conversation is
+        // read then; all of them are looked at now and then besides.
+        let (tell, told) = tokio::sync::mpsc::unbounded_channel();
+        if let Some(runtara) = embedded_runtara.as_ref() {
+            workers.intake(
+                crate::roles::Role::Engine,
+                "conversation-run-notices",
+                &shutdown_coordinator,
+                crate::api::services::conversations::hear_runs(
+                    runtara.pool().clone(),
+                    shutdown_signal.clone(),
+                    tell,
+                ),
+            );
+        }
         workers.intake(
             crate::roles::Role::Engine,
             "conversations",
@@ -3863,7 +3878,8 @@ async fn start_as_platform(
             crate::api::services::conversations::carry(
                 local_engine.conversations(),
                 shutdown_signal.clone(),
-                std::time::Duration::from_millis(500),
+                crate::api::services::conversations::LOOKED_AT_EVERY,
+                told,
             ),
         );
     }

@@ -471,3 +471,48 @@ Departures:
   only "answers that request or fails as stale". With no run, the request
   it names is gone, so it fails and starts none: an answer is not a first
   message.
+
+### 4.2 Pushed
+
+Built: a run says when it has something new, and its conversation is read
+then; a reader's ask is held by the engine until the conversation says
+something; the stream is a loop of such asks, with `retry`, a comment
+while nothing is said, `caught_up`, and a bound on a tenant's open streams;
+`wait` on reading without a stream; `wait` on sending, answered with the
+message's turn. Measured on a running server: a reply reaches an open
+stream 8 to 17 ms after the run says it (before, up to a second, and five
+when a notice was missed).
+
+Departures:
+
+- **A conversation wakes its readers in memory, not through Postgres.** The
+  plan had a second notice, `runtara_conversation`, on the server
+  database. The engine is one process (`docs/roles.md`), and both the
+  conversation's loop and the asks that wait on it run in it, so a
+  `tokio::sync::Notify` for each conversation someone is waiting on is
+  enough, is told after the commit, and needs no connection. If the engine
+  is ever several processes on one database, this is where a notice goes.
+- **The run's notice is one channel on the runtime database** (`runtara_run`,
+  `runtara-store-postgres`' `notices`), said from the three places a run's
+  event or state is written: an event of the runtime's own, an event a
+  running guest leaves, and a change of state. The plan named one place;
+  the guest's is another statement, and missing it was found by the
+  latency test, which had two of three replies arrive by the slow pass.
+- **Every run is told of, not only those that carry a conversation.** The
+  runtime does not know which do. The engine drops a notice for a run no
+  conversation follows, from an index it keeps in memory. Recorded under
+  "What is not known yet" as the first thing to narrow if it shows.
+- **The bound on open streams is each API process's own.** A tenant holds
+  64 streams open in one API process, not across them: the API keeps no
+  count that is shared.
+- **`caught_up` is `{"kind": "caught_up", "body": {"lastSeq": n}}`**: the
+  envelope without a `seq`, a `turn` or a time, since it is not kept.
+- **Sending waits two minutes at most** (`wait` up to 120), reading
+  twenty-five seconds. The plan gave only the second.
+- **Two tests in the plan are covered another way.** "An idle stream makes
+  no query between heartbeats" is not measured: what is tested is that a
+  reader that waits is answered when something is said and otherwise when
+  its time is up (`tests/conversations.rs`), which is all a stream does
+  between events. "With notices turned off the slow pass still delivers"
+  is the loop as it was before, still run every five seconds; the latency
+  test showed it deliver when a notice was missing.

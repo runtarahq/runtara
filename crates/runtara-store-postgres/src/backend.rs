@@ -350,10 +350,18 @@ async fn insert_event<'e, E: sqlx::PgExecutor<'e>>(
     executor: E,
     event: &EventRecord,
 ) -> Result<(), CoreError> {
+    // Whoever follows the run is told it has something new
+    // (`crate::notices`), in the statement that makes it so: the notice is
+    // delivered when the event is readable and not before. A heartbeat is
+    // nothing to follow.
     sqlx::query(
         r#"
-        INSERT INTO instance_events (instance_id, event_type, checkpoint_id, payload, created_at, subtype)
-        VALUES ($1, $2::instance_event_type, $3, $4, $5, $6)
+        WITH written AS (
+            INSERT INTO instance_events (instance_id, event_type, checkpoint_id, payload, created_at, subtype)
+            VALUES ($1, $2::instance_event_type, $3, $4, $5, $6)
+            RETURNING instance_id, event_type
+        )
+        SELECT pg_notify('runtara_run', instance_id) FROM written WHERE event_type <> 'heartbeat'
         "#,
     )
     .bind(&event.instance_id)
@@ -902,10 +910,15 @@ impl Persistence for PostgresPersistence {
         owner: runtara_core::persistence::ExecutionWriter<'_>,
     ) -> Result<(), CoreError> {
         let sql = format!(
-            "WITH fence AS ({}) \
-             INSERT INTO instance_events (instance_id, event_type, checkpoint_id, payload, \
-                                          created_at, subtype) \
-             SELECT instance_id, $2::instance_event_type, $3, $4, $5, $6 FROM fence",
+            // What follows the run is told, as for any event of it
+            // (`insert_event`): this is the one a running guest leaves.
+            "WITH fence AS ({}), written AS ( \
+                 INSERT INTO instance_events (instance_id, event_type, checkpoint_id, payload, \
+                                              created_at, subtype) \
+                 SELECT instance_id, $2::instance_event_type, $3, $4, $5, $6 FROM fence \
+                 RETURNING instance_id, event_type) \
+             SELECT CASE WHEN event_type <> 'heartbeat' \
+                         THEN pg_notify('runtara_run', instance_id) END FROM written",
             crate::root_owner::fence(owner, 7, false)
         );
         let query = sqlx::query(&sql)
@@ -1635,6 +1648,71 @@ mod tests {
         );
 
         let _ = backend.delete_instances_batch(&ids).await;
+    }
+
+    /// What follows a run is told when the run leaves an event, and when it
+    /// ends: once it is committed, with the run's id. A heartbeat is nothing
+    /// to follow, and what is rolled back is not told of.
+    #[tokio::test]
+    async fn a_run_says_when_it_has_something_new() {
+        use runtara_core::persistence::CompleteInstanceParams;
+        let pool = test_pool().await;
+        let backend = PostgresPersistence::new(pool.clone());
+        let id = uuid::Uuid::new_v4().to_string();
+        backend.register_instance(&id, "notices").await.unwrap();
+        let mut listener = crate::notices::listen(&pool).await.unwrap();
+        // The notices about this run that arrive within a moment.
+        async fn heard(listener: &mut sqlx::postgres::PgListener, id: &str) -> usize {
+            let mut heard = 0;
+            while let Ok(Ok(notice)) =
+                tokio::time::timeout(std::time::Duration::from_millis(400), listener.recv()).await
+            {
+                assert_eq!(notice.channel(), crate::notices::RUN);
+                if notice.payload() == id {
+                    heard += 1;
+                }
+            }
+            heard
+        }
+        let event = |event_type| EventRecord {
+            id: None,
+            instance_id: id.clone(),
+            event_type,
+            checkpoint_id: None,
+            payload: None,
+            created_at: chrono::Utc::now(),
+            subtype: Some("conversation_reply".into()),
+        };
+
+        backend
+            .insert_event(&event(CoreEventType::Heartbeat))
+            .await
+            .unwrap();
+        assert_eq!(heard(&mut listener, &id).await, 0, "a heartbeat");
+
+        backend
+            .insert_event(&event(CoreEventType::Custom))
+            .await
+            .unwrap();
+        assert_eq!(heard(&mut listener, &id).await, 1, "an event");
+
+        // Rolled back: it never happened, and nobody is told it did.
+        let mut tx = pool.begin().await.unwrap();
+        insert_event(&mut *tx, &event(CoreEventType::Custom))
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+        assert_eq!(heard(&mut listener, &id).await, 0, "what was rolled back");
+
+        backend
+            .complete_instance(CompleteInstanceParams::new(
+                &id,
+                runtara_core::domain::InstanceStatus::Completed,
+            ))
+            .await
+            .unwrap();
+        assert!(heard(&mut listener, &id).await >= 1, "its end");
+        let _ = backend.delete_instances_batch(&[id]).await;
     }
 
     /// The paired-event sweep must remove the caller's paired payloads past
