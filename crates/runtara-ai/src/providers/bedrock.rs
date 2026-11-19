@@ -92,6 +92,162 @@ impl CompletionModel for BedrockCompletionModel {
             self.finish_http_response(response)
         })
     }
+
+    fn completion_streamed<'a>(
+        &'a self,
+        request: CompletionRequest,
+        pieces: &'a mut dyn crate::completion::Pieces,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<CompletionResponse, CompletionError>> + 'a>,
+    > {
+        Box::pin(async move {
+            let mut response = self
+                .http_request(self.build_request_body(request)?, "converse-stream")
+                .call_streamed_async()
+                .await
+                .map_err(|e| CompletionError::HttpError(e.to_string()))?;
+            let streams = response.headers.get("content-type").is_some_and(|kind| {
+                kind.to_ascii_lowercase()
+                    .starts_with("application/vnd.amazon.eventstream")
+            });
+            if response.status >= 400 || !streams {
+                return self.finish_http_response(super::sse::whole(response).await?);
+            }
+            let mut messages = super::eventstream::Messages::default();
+            let mut gathered = Gathered::default();
+            while let Some(piece) = response.next_piece().await {
+                let piece = piece.map_err(super::sse::cut)?;
+                for message in messages
+                    .push(&piece)
+                    .map_err(CompletionError::ResponseError)?
+                {
+                    if let Some(text) = gathered.take(&message)? {
+                        pieces.piece(&text).await;
+                    }
+                }
+            }
+            if messages.is_cut() {
+                return Err(CompletionError::HttpError(
+                    "the answer was cut: it ended inside an event".into(),
+                ));
+            }
+            self.parse_response(gathered.into_response())
+        })
+    }
+}
+
+/// A `ConverseStream` answer, gathered from its events into one `Converse`
+/// answer: each content block by its index, with its text or its tool use,
+/// and the stop reason and usage.
+#[derive(Default)]
+struct Gathered {
+    blocks: std::collections::BTreeMap<u64, Block>,
+    stop_reason: Option<Value>,
+    usage: Option<Value>,
+}
+
+#[derive(Default)]
+struct Block {
+    text: String,
+    /// The tool use's id and name, from the block's start.
+    tool: Option<(String, String)>,
+    /// The tool use's input, as JSON text in pieces.
+    input: String,
+}
+
+impl Gathered {
+    /// One message of the stream; the text it adds, if any.
+    fn take(
+        &mut self,
+        message: &super::eventstream::Message,
+    ) -> Result<Option<String>, CompletionError> {
+        let payload: Value = serde_json::from_slice(&message.payload).unwrap_or(Value::Null);
+        if message.header(":message-type") != Some("event") {
+            let kind = message
+                .header(":exception-type")
+                .or(message.header(":error-code"))
+                .unwrap_or("error");
+            let said = payload
+                .get("message")
+                .and_then(Value::as_str)
+                .or(message.header(":error-message"))
+                .unwrap_or_default();
+            let text = format!("Bedrock ConverseStream {kind}: {said}");
+            return Err(if kind == "throttlingException" {
+                CompletionError::RateLimited {
+                    message: text,
+                    status: 429,
+                    retry_after_ms: None,
+                }
+            } else {
+                CompletionError::ResponseError(text)
+            });
+        }
+        let index = payload
+            .get("contentBlockIndex")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        match message.header(":event-type") {
+            Some("contentBlockStart") => {
+                if let Some(tool) = payload.pointer("/start/toolUse") {
+                    let field = |name: &str| {
+                        tool.get(name)
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned()
+                    };
+                    self.blocks.entry(index).or_default().tool =
+                        Some((field("toolUseId"), field("name")));
+                }
+            }
+            Some("contentBlockDelta") => {
+                let block = self.blocks.entry(index).or_default();
+                if let Some(input) = payload
+                    .pointer("/delta/toolUse/input")
+                    .and_then(Value::as_str)
+                {
+                    block.input.push_str(input);
+                }
+                if let Some(text) = payload.pointer("/delta/text").and_then(Value::as_str)
+                    && !text.is_empty()
+                {
+                    block.text.push_str(text);
+                    return Ok(Some(text.to_owned()));
+                }
+            }
+            Some("messageStop") => self.stop_reason = payload.get("stopReason").cloned(),
+            Some("metadata") => self.usage = payload.get("usage").cloned(),
+            _ => {}
+        }
+        Ok(None)
+    }
+
+    fn into_response(self) -> Value {
+        let mut content = Vec::new();
+        for block in self.blocks.into_values() {
+            if !block.text.is_empty() {
+                content.push(json!({"text": block.text}));
+            }
+            if let Some((id, name)) = block.tool {
+                let input = if block.input.trim().is_empty() {
+                    json!({})
+                } else {
+                    serde_json::from_str(&block.input).unwrap_or(Value::String(block.input))
+                };
+                content.push(json!({"toolUse": {"toolUseId": id, "name": name, "input": input}}));
+            }
+        }
+        let mut response = json!({
+            "output": {"message": {"role": "assistant", "content": content}},
+        });
+        if let Some(stop_reason) = self.stop_reason {
+            response["stopReason"] = stop_reason;
+        }
+        if let Some(usage) = self.usage {
+            response["usage"] = usage;
+        }
+        response
+    }
 }
 
 impl BedrockCompletionModel {
@@ -99,8 +255,11 @@ impl BedrockCompletionModel {
         &self,
         request: CompletionRequest,
     ) -> Result<runtara_http::RequestBuilder, CompletionError> {
-        let body = self.build_request_body(request)?;
-        let path = format!("/model/{}/converse", self.model);
+        Ok(self.http_request(self.build_request_body(request)?, "converse"))
+    }
+
+    fn http_request(&self, body: Value, operation: &str) -> runtara_http::RequestBuilder {
+        let path = format!("/model/{}/{operation}", self.model);
 
         let mut req = self
             .client
@@ -113,7 +272,7 @@ impl BedrockCompletionModel {
         if let Some(ms) = self.timeout_ms {
             req = req.timeout(std::time::Duration::from_millis(ms));
         }
-        Ok(req)
+        req
     }
 
     fn finish_http_response(
@@ -356,6 +515,86 @@ fn message_to_bedrock(msg: &Message) -> Option<Value> {
 mod tests {
     use super::*;
     use crate::types::ToolDefinition;
+
+    fn event(kind: &str, payload: Value) -> super::super::eventstream::Message {
+        super::super::eventstream::Message {
+            headers: [(":message-type", "event"), (":event-type", kind)]
+                .into_iter()
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                .collect(),
+            payload: payload.to_string().into_bytes(),
+        }
+    }
+
+    #[test]
+    fn a_streamed_answer_is_gathered_from_its_events() {
+        let mut gathered = Gathered::default();
+        let events = [
+            event("messageStart", json!({"role": "assistant"})),
+            event(
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 0, "delta": {"text": "Let me"}}),
+            ),
+            event(
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 0, "delta": {"text": " check."}}),
+            ),
+            event("contentBlockStop", json!({"contentBlockIndex": 0})),
+            event(
+                "contentBlockStart",
+                json!({"contentBlockIndex": 1, "start": {"toolUse": {"toolUseId": "t1", "name": "lookup"}}}),
+            ),
+            event(
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 1, "delta": {"toolUse": {"input": "{\"sku\":"}}}),
+            ),
+            event(
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 1, "delta": {"toolUse": {"input": "\"A1\"}"}}}),
+            ),
+            event("contentBlockStop", json!({"contentBlockIndex": 1})),
+            event("messageStop", json!({"stopReason": "tool_use"})),
+            event(
+                "metadata",
+                json!({"usage": {"inputTokens": 5, "outputTokens": 7, "totalTokens": 12}}),
+            ),
+        ];
+        let mut said = Vec::new();
+        for event in &events {
+            said.extend(gathered.take(event).unwrap());
+        }
+        assert_eq!(said, ["Let me", " check."]);
+        let model = Client::from_connection_id("conn").completion_model(None);
+        let response = model.parse_response(gathered.into_response()).unwrap();
+        let choice: Vec<_> = response.choice.iter().cloned().collect();
+        assert_eq!(
+            message::assistant_text(choice.iter()).as_deref(),
+            Some("Let me check.")
+        );
+        let AssistantContent::ToolCall(call) = &choice[1] else {
+            panic!("{choice:?}")
+        };
+        assert_eq!(call.id, "t1");
+        assert_eq!(call.function.name, "lookup");
+        assert_eq!(call.function.arguments, json!({"sku": "A1"}));
+        assert_eq!(response.usage.unwrap().total_tokens, 12);
+    }
+
+    #[test]
+    fn an_exception_in_the_stream_fails_the_call() {
+        let mut exception = event("x", json!({"message": "slow down"}));
+        exception
+            .headers
+            .insert(":message-type".into(), "exception".into());
+        exception
+            .headers
+            .insert(":exception-type".into(), "throttlingException".into());
+        let error = Gathered::default().take(&exception).unwrap_err();
+        assert!(
+            matches!(&error, CompletionError::RateLimited { message, .. } if message.contains("slow down")),
+            "{error}"
+        );
+    }
 
     #[test]
     fn bedrock_request_includes_tools_and_output_config() {
