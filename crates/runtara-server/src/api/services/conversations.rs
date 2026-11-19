@@ -49,6 +49,9 @@ pub const REPLY_EVENT: &str = "conversation_reply";
 /// conversation gives it up.
 const START_ALLOWED: Duration = Duration::from_secs(10 * 60);
 
+/// Why a message that names what it answers fails when that is not open.
+const STALE: &str = "what this message answers is no longer waited for";
+
 const MAX_KEY: usize = 255;
 const MAX_MESSAGE_ID: usize = 128;
 const EVENTS_PAGE: u32 = 100;
@@ -90,6 +93,12 @@ pub struct Message {
     pub sender: Option<Sender>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
+    /// The request this message answers: the `requestId` of a
+    /// `waiting_for_input`. With it, the message answers that request or
+    /// fails as stale; without it, it answers what the run waits for when
+    /// its turn comes, or starts the next run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<String>,
 }
 
 /// What became of a message.
@@ -176,19 +185,189 @@ pub struct ConversationState {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Something a conversation has for its user.
+/// Something a conversation has for its user: one entry of its log.
+///
+/// Every event has the same envelope. `kind` says which it is and `body`
+/// what it carries; the two are one type, [`ConversationEventKind`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationEvent {
+    /// Its place in the log, and the stream's event id.
     pub seq: i64,
-    /// `reply`, `waiting_for_input`, `activity`, `run_started`,
-    /// `run_ended`, `message_delivered`, `message_failed` or
-    /// `reply_route_failed`. `run_started` and `message_delivered` carry
-    /// the message's text and sender, so the events alone are the
-    /// transcript.
-    pub kind: String,
-    pub body: Value,
+    /// The id of the message this event is for: the one that started the
+    /// run, or the one that answered what it waited for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<String>,
+    #[serde(flatten)]
+    pub said: ConversationEventKind,
     pub created_at: DateTime<Utc>,
+}
+
+impl ConversationEvent {
+    /// The event's kind, as it is written.
+    pub fn kind(&self) -> &'static str {
+        self.said.kind()
+    }
+
+    /// What the event carries, as JSON.
+    pub fn body(&self) -> Value {
+        self.said.body()
+    }
+}
+
+/// What a text is written in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TextFormat {
+    #[default]
+    Markdown,
+    Plain,
+}
+
+/// A run began to carry the conversation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunStarted {
+    pub instance_id: String,
+    /// The message that started it.
+    pub message_id: String,
+    /// The message's text. Read the `message` event for it: this is kept
+    /// for clients written before that event, and will go.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// The message's sender. As `text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender: Option<Sender>,
+}
+
+/// What a workflow told its user.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Reply {
+    /// The workflow's own id for it: a reply with an id is said once for
+    /// its run, however often the step that says it is run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// What `text` is written in.
+    #[serde(default)]
+    pub format: TextFormat,
+    /// Structured data beside the text, for a client that acts on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+    /// The run that said it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+}
+
+/// The run waits to be told something.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitingForInput {
+    /// Name it as a message's `inReplyTo` to answer this and no other.
+    pub request_id: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    /// The JSON Schema of the answer, where the run asks for a structured
+    /// one: send it as the message's `payload`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_schema: Option<Value>,
+    pub instance_id: String,
+}
+
+/// A message answered what the run waited for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageDelivered {
+    pub message_id: String,
+    pub request_id: String,
+    pub instance_id: String,
+    /// As [`RunStarted::text`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// As [`RunStarted::sender`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender: Option<Sender>,
+}
+
+/// No run would take a message.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageFailed {
+    pub message_id: String,
+    pub reason: String,
+}
+
+/// The run that carried the conversation ended.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunEnded {
+    pub instance_id: String,
+    /// `completed` or `failed`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// The reply workflow could not be started for an event, and never can be.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplyRouteFailed {
+    /// The event it was to be started for.
+    pub seq: i64,
+    pub reply_workflow_id: String,
+    pub reason: String,
+}
+
+/// What an event says: its `kind`, and the `body` that kind carries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", content = "body", rename_all = "snake_case")]
+pub enum ConversationEventKind {
+    /// Someone said this to the workflow.
+    Message(Message),
+    RunStarted(RunStarted),
+    Reply(Reply),
+    WaitingForInput(WaitingForInput),
+    MessageDelivered(MessageDelivered),
+    MessageFailed(MessageFailed),
+    RunEnded(RunEnded),
+    ReplyRouteFailed(ReplyRouteFailed),
+    /// What a run is doing: a model call, a tool call, a step. Its own
+    /// `type` says which.
+    Activity(Value),
+}
+
+impl ConversationEventKind {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Message(_) => "message",
+            Self::RunStarted(_) => "run_started",
+            Self::Reply(_) => "reply",
+            Self::WaitingForInput(_) => "waiting_for_input",
+            Self::MessageDelivered(_) => "message_delivered",
+            Self::MessageFailed(_) => "message_failed",
+            Self::RunEnded(_) => "run_ended",
+            Self::ReplyRouteFailed(_) => "reply_route_failed",
+            Self::Activity(_) => "activity",
+        }
+    }
+
+    pub fn body(&self) -> Value {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|said| said.get("body").cloned())
+            .unwrap_or(Value::Null)
+    }
+
+    /// The event a stored `kind` and `body` are. `None` for a kind this
+    /// build does not know, or a body that is not that kind's.
+    pub fn stored(kind: &str, body: Value) -> Option<Self> {
+        serde_json::from_value(json!({"kind": kind, "body": body})).ok()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
@@ -303,12 +482,15 @@ struct Row_ {
     run_replied: bool,
     waiting: Option<Value>,
     next_seq: i64,
+    /// The message the conversation's events are for now.
+    turn: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
 
 const COLUMNS: &str = "conversation_id, tenant_id, workflow_id, key, reply_workflow_id, \
-    instance_id, run_started_at, events_read, run_replied, waiting, next_seq, created_at, updated_at";
+    instance_id, run_started_at, events_read, run_replied, waiting, next_seq, turn, \
+    created_at, updated_at";
 
 fn read(row: &sqlx::postgres::PgRow) -> Result<Row_, sqlx::Error> {
     Ok(Row_ {
@@ -323,6 +505,7 @@ fn read(row: &sqlx::postgres::PgRow) -> Result<Row_, sqlx::Error> {
         run_replied: row.try_get("run_replied")?,
         waiting: row.try_get("waiting")?,
         next_seq: row.try_get("next_seq")?,
+        turn: row.try_get("turn")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -444,6 +627,9 @@ impl Conversations {
         message: Message,
     ) -> ConversationResult<Sent> {
         checked("the message's id", &message.id, MAX_MESSAGE_ID)?;
+        if let Some(request) = &message.in_reply_to {
+            checked("what the message answers", request, MAX_KEY)?;
+        }
         if message.text.is_none() && message.payload.is_none() && message.attachments.is_empty() {
             return Err(ConversationError::Invalid(
                 "a message carries text, a payload or an attachment".into(),
@@ -487,7 +673,22 @@ impl Conversations {
         .bind(conversation)
         .bind(tenant)
         .bind(&message.id)
-        .bind(body)
+        .bind(&body)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+        // It is in the log from when it was said, whenever its turn comes.
+        sqlx::query(
+            "WITH taken AS ( \
+                 UPDATE conversations SET next_seq = next_seq + 1, updated_at = now() \
+                 WHERE conversation_id = $1 RETURNING next_seq - 1 AS seq) \
+             INSERT INTO conversation_events (conversation_id, tenant_id, seq, kind, body, turn) \
+             SELECT $1, $2, seq, 'message', $3, $4 FROM taken",
+        )
+        .bind(conversation)
+        .bind(tenant)
+        .bind(&body)
+        .bind(&message.id)
         .execute(&mut *tx)
         .await
         .map_err(storage)?;
@@ -514,7 +715,7 @@ impl Conversations {
     ) -> ConversationResult<Vec<ConversationEvent>> {
         let row = self.find(tenant, workflow, key).await?;
         let rows = sqlx::query(
-            "SELECT seq, kind, body, created_at FROM conversation_events \
+            "SELECT seq, kind, body, turn, created_at FROM conversation_events \
              WHERE conversation_id = $1 AND seq > $2 ORDER BY seq LIMIT $3",
         )
         .bind(row.id)
@@ -523,17 +724,26 @@ impl Conversations {
         .fetch_all(&self.pool)
         .await
         .map_err(storage)?;
-        rows.iter()
-            .map(|row| {
-                Ok(ConversationEvent {
-                    seq: row.try_get("seq")?,
-                    kind: row.try_get("kind")?,
-                    body: row.try_get("body")?,
-                    created_at: row.try_get("created_at")?,
-                })
-            })
-            .collect::<Result<_, sqlx::Error>>()
-            .map_err(storage)
+        let mut events = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let seq: i64 = row.try_get("seq").map_err(storage)?;
+            let kind: String = row.try_get("kind").map_err(storage)?;
+            // A kind a later build wrote, read by this one after a rollback,
+            // is passed over and not an error.
+            let Some(said) =
+                ConversationEventKind::stored(&kind, row.try_get("body").map_err(storage)?)
+            else {
+                tracing::debug!(%seq, %kind, "A conversation's event is of no kind known here");
+                continue;
+            };
+            events.push(ConversationEvent {
+                seq,
+                turn: row.try_get("turn").map_err(storage)?,
+                said,
+                created_at: row.try_get("created_at").map_err(storage)?,
+            });
+        }
+        Ok(events)
     }
 
     /// Deletes a conversation and what was said in it. A run that carries it
@@ -655,11 +865,11 @@ impl Conversations {
                 at.row.events_read += 1;
                 if said.kind.as_deref() == Some(REPLY_EVENT) {
                     at.row.run_replied = true;
-                    let mut body = said.payload;
-                    if let Some(body) = body.as_object_mut() {
-                        body.insert("instanceId".into(), json!(instance));
-                    }
-                    at.say("reply", body).await?;
+                    // What a run says is its own to shape: what is not a
+                    // reply's is left out, not refused.
+                    let mut reply: Reply = serde_json::from_value(said.payload).unwrap_or_default();
+                    reply.instance_id = Some(instance.clone());
+                    at.say(ConversationEventKind::Reply(reply)).await?;
                     continue;
                 }
                 for activity in crate::api::services::run_activity::parse_debug_event(
@@ -675,7 +885,7 @@ impl Conversations {
                         continue;
                     }
                     if let Ok(body) = serde_json::to_value(&activity) {
-                        at.say("activity", body).await?;
+                        at.say(ConversationEventKind::Activity(body)).await?;
                     }
                 }
             }
@@ -695,8 +905,12 @@ impl Conversations {
                 && !at.row.run_replied
                 && let Some(text) = answer_in(output.as_ref())
             {
-                at.say("reply", json!({"text": text, "instanceId": instance}))
-                    .await?;
+                at.say(ConversationEventKind::Reply(Reply {
+                    text: Some(text),
+                    instance_id: Some(instance.clone()),
+                    ..Reply::default()
+                }))
+                .await?;
             }
             at.ended(&instance, completed, error).await?;
             return Ok(true);
@@ -709,7 +923,7 @@ impl Conversations {
                 return Ok(false);
             }
         };
-        let Some(wait) = waits.into_iter().next() else {
+        let Some(first) = waits.first().cloned() else {
             at.row.waiting = None;
             return Ok(false);
         };
@@ -719,21 +933,34 @@ impl Conversations {
             .as_ref()
             .and_then(|waiting| waiting.get("requestId"))
             .and_then(Value::as_str)
-            == Some(wait.request_id.as_str());
+            == Some(first.request_id.as_str());
         if !announced {
-            let waiting = json!({
-                "requestId": wait.request_id,
-                "message": wait.message,
-                "toolName": wait.tool_name,
-                "responseSchema": wait.response_schema,
-                "instanceId": instance,
-            });
-            at.say("waiting_for_input", waiting.clone()).await?;
-            at.row.waiting = Some(waiting);
+            let waiting = WaitingForInput {
+                request_id: first.request_id.clone(),
+                message: first.message.clone(),
+                tool_name: first.tool_name.clone(),
+                response_schema: first.response_schema.clone(),
+                instance_id: instance.clone(),
+            };
+            at.row.waiting = serde_json::to_value(&waiting).ok();
+            at.say(ConversationEventKind::WaitingForInput(waiting))
+                .await?;
         }
 
         let Some((message_id, message)) = at.next_message().await? else {
             return Ok(false);
+        };
+        // A message that names what it answers answers that, or nothing: an
+        // answer written for one question is not given to another.
+        let wait = match &message.in_reply_to {
+            None => first,
+            Some(request) => match waits.into_iter().find(|wait| wait.request_id == *request) {
+                Some(wait) => wait,
+                None => {
+                    at.fail(&message_id, Some(&instance), STALE).await?;
+                    return Ok(true);
+                }
+            },
         };
         let payload = match (&message.payload, &message.text) {
             (Some(payload), _) => payload.clone(),
@@ -747,28 +974,20 @@ impl Conversations {
             Ok(()) => {
                 at.settle(&message_id, "delivered", Some(&instance), None)
                     .await?;
-                at.say(
-                    "message_delivered",
-                    json!({
-                        "messageId": message_id,
-                        "requestId": wait.request_id,
-                        "instanceId": instance,
-                        "text": message.text,
-                        "sender": message.sender,
-                    }),
-                )
+                at.row.turn = Some(message_id.clone());
+                at.say(ConversationEventKind::MessageDelivered(MessageDelivered {
+                    message_id,
+                    request_id: wait.request_id,
+                    instance_id: instance,
+                    text: message.text,
+                    sender: message.sender,
+                }))
                 .await?;
                 at.row.waiting = None;
                 Ok(true)
             }
             Err(AnswerError::Invalid(reason)) => {
-                at.settle(&message_id, "failed", Some(&instance), Some(&reason))
-                    .await?;
-                at.say(
-                    "message_failed",
-                    json!({"messageId": message_id, "reason": reason}),
-                )
-                .await?;
+                at.fail(&message_id, Some(&instance), &reason).await?;
                 Ok(true)
             }
             // The request closed between being read and being answered:
@@ -787,10 +1006,14 @@ impl Conversations {
         let Some((message_id, message)) = at.next_message().await? else {
             return Ok(false);
         };
+        // What it answers was a run's that is gone.
+        if message.in_reply_to.is_some() {
+            at.fail(&message_id, None, STALE).await?;
+            return Ok(true);
+        }
         // The run's id is made from the message's, so starting it again
         // after a failure here starts the same run.
         let instance = Uuid::new_v5(&at.row.id, format!("message:{message_id}").as_bytes());
-        let said = json!({"text": message.text, "sender": message.sender});
         // What a message does not carry is left out, not sent as null: a
         // workflow's input schema that says `message` is a string would
         // refuse a null one.
@@ -822,26 +1045,18 @@ impl Conversations {
                 at.row.events_read = 0;
                 at.row.run_replied = false;
                 at.row.waiting = None;
-                at.say(
-                    "run_started",
-                    json!({
-                        "instanceId": instance,
-                        "messageId": message_id,
-                        "text": said["text"],
-                        "sender": said["sender"],
-                    }),
-                )
+                at.row.turn = Some(message_id.clone());
+                at.say(ConversationEventKind::RunStarted(RunStarted {
+                    instance_id: instance,
+                    message_id,
+                    text: message.text,
+                    sender: message.sender,
+                }))
                 .await?;
                 Ok(true)
             }
             Err(StartError::Refused(reason)) => {
-                at.settle(&message_id, "failed", None, Some(&reason))
-                    .await?;
-                at.say(
-                    "message_failed",
-                    json!({"messageId": message_id, "reason": reason}),
-                )
-                .await?;
+                at.fail(&message_id, None, &reason).await?;
                 Ok(true)
             }
             Err(StartError::Unavailable(error)) => {
@@ -884,10 +1099,11 @@ impl Conversations {
             {
                 Ok(()) => {}
                 Err(StartError::Refused(reason)) => {
-                    at.say(
-                        "reply_route_failed",
-                        json!({"seq": seq, "replyWorkflowId": route, "reason": reason}),
-                    )
+                    at.say(ConversationEventKind::ReplyRouteFailed(ReplyRouteFailed {
+                        seq,
+                        reply_workflow_id: route.clone(),
+                        reason,
+                    }))
                     .await?;
                 }
                 // In order, or not yet: what follows waits for this one.
@@ -922,21 +1138,54 @@ impl Carried {
         json!({"id": self.row.id, "workflowId": self.row.workflow_id, "key": self.row.key})
     }
 
-    async fn say(&mut self, kind: &str, body: Value) -> ConversationResult<()> {
-        sqlx::query(
-            "INSERT INTO conversation_events (conversation_id, tenant_id, seq, kind, body) \
-             VALUES ($1, $2, $3, $4, $5)",
+    /// Says `said` in the turn the conversation is in.
+    async fn say(&mut self, said: ConversationEventKind) -> ConversationResult<()> {
+        let turn = self.row.turn.clone();
+        self.say_for(turn.as_deref(), said).await
+    }
+
+    /// Says `said`, for the message `turn` names.
+    async fn say_for(
+        &mut self,
+        turn: Option<&str>,
+        said: ConversationEventKind,
+    ) -> ConversationResult<()> {
+        // A reply that carries an id is said once for its run: the same one
+        // again conflicts and is passed over.
+        let written = sqlx::query(
+            "INSERT INTO conversation_events (conversation_id, tenant_id, seq, kind, body, turn) \
+             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
         )
         .bind(self.row.id)
         .bind(&self.row.tenant_id)
         .bind(self.row.next_seq)
-        .bind(kind)
-        .bind(body)
+        .bind(said.kind())
+        .bind(said.body())
+        .bind(turn)
         .execute(&mut *self.tx)
         .await
         .map_err(storage)?;
-        self.row.next_seq += 1;
+        self.row.next_seq += written.rows_affected() as i64;
         Ok(())
+    }
+
+    /// No run takes `message`: it fails, and its sender is told why.
+    async fn fail(
+        &mut self,
+        message: &str,
+        instance: Option<&str>,
+        reason: &str,
+    ) -> ConversationResult<()> {
+        self.settle(message, "failed", instance, Some(reason))
+            .await?;
+        self.say_for(
+            Some(message),
+            ConversationEventKind::MessageFailed(MessageFailed {
+                message_id: message.to_owned(),
+                reason: reason.to_owned(),
+            }),
+        )
+        .await
     }
 
     /// The run ended: the conversation has none, until its next message.
@@ -946,20 +1195,18 @@ impl Carried {
         completed: bool,
         error: Option<String>,
     ) -> ConversationResult<()> {
-        self.say(
-            "run_ended",
-            json!({
-                "instanceId": instance,
-                "status": if completed { "completed" } else { "failed" },
-                "error": error,
-            }),
-        )
+        self.say(ConversationEventKind::RunEnded(RunEnded {
+            instance_id: instance.to_owned(),
+            status: if completed { "completed" } else { "failed" }.to_owned(),
+            error,
+        }))
         .await?;
         self.row.instance_id = None;
         self.row.run_started_at = None;
         self.row.events_read = 0;
         self.row.run_replied = false;
         self.row.waiting = None;
+        self.row.turn = None;
         Ok(())
     }
 
@@ -1007,7 +1254,7 @@ impl Carried {
     async fn save(&mut self) -> ConversationResult<()> {
         sqlx::query(
             "UPDATE conversations SET instance_id = $2, run_started_at = $3, events_read = $4, \
-                 run_replied = $5, waiting = $6, next_seq = $7, \
+                 run_replied = $5, waiting = $6, next_seq = $7, turn = $8, \
                  updated_at = CASE WHEN next_seq = $7 AND instance_id IS NOT DISTINCT FROM $2 \
                                    THEN updated_at ELSE now() END \
              WHERE conversation_id = $1",
@@ -1019,6 +1266,7 @@ impl Carried {
         .bind(self.row.run_replied)
         .bind(&self.row.waiting)
         .bind(self.row.next_seq)
+        .bind(&self.row.turn)
         .execute(&mut *self.tx)
         .await
         .map_err(storage)?;
@@ -1257,6 +1505,139 @@ impl Runs for EngineRuns {
                 | InputError::FenceRejected,
             ) => Err(AnswerError::Gone),
             Err(error) => Err(AnswerError::Unavailable(error.to_string())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every kind an event may be, with a body of that kind.
+    fn one_of_each() -> Vec<ConversationEventKind> {
+        vec![
+            ConversationEventKind::Message(Message {
+                id: "m-1".into(),
+                text: Some("hello".into()),
+                payload: None,
+                sender: None,
+                attachments: Vec::new(),
+                in_reply_to: None,
+            }),
+            ConversationEventKind::RunStarted(RunStarted {
+                instance_id: "i".into(),
+                message_id: "m-1".into(),
+                text: None,
+                sender: None,
+            }),
+            ConversationEventKind::Reply(Reply::default()),
+            ConversationEventKind::WaitingForInput(WaitingForInput {
+                request_id: "r".into(),
+                message: "?".into(),
+                tool_name: None,
+                response_schema: None,
+                instance_id: "i".into(),
+            }),
+            ConversationEventKind::MessageDelivered(MessageDelivered {
+                message_id: "m-2".into(),
+                request_id: "r".into(),
+                instance_id: "i".into(),
+                text: None,
+                sender: None,
+            }),
+            ConversationEventKind::MessageFailed(MessageFailed {
+                message_id: "m-3".into(),
+                reason: "no".into(),
+            }),
+            ConversationEventKind::RunEnded(RunEnded {
+                instance_id: "i".into(),
+                status: "completed".into(),
+                error: None,
+            }),
+            ConversationEventKind::ReplyRouteFailed(ReplyRouteFailed {
+                seq: 4,
+                reply_workflow_id: "out".into(),
+                reason: "gone".into(),
+            }),
+            ConversationEventKind::Activity(json!({"type": "tool_call", "tool_name": "t"})),
+        ]
+    }
+
+    /// An event is one envelope: its place, its turn, its kind and that
+    /// kind's body. What is stored is read back as what was said, and a kind
+    /// this build does not know is passed over.
+    #[test]
+    fn an_event_is_one_envelope_and_is_read_back_as_it_was_said() {
+        for said in one_of_each() {
+            let event = ConversationEvent {
+                seq: 7,
+                turn: Some("m-1".into()),
+                said: said.clone(),
+                created_at: Utc::now(),
+            };
+            let written = serde_json::to_value(&event).unwrap();
+            assert_eq!(written["seq"], 7);
+            assert_eq!(written["turn"], "m-1");
+            assert_eq!(written["kind"], said.kind());
+            assert_eq!(written["body"], said.body());
+            assert!(written.get("createdAt").is_some());
+            // As the engine's wire carries it, and as the table holds it.
+            assert_eq!(
+                serde_json::from_value::<ConversationEvent>(written).unwrap(),
+                event
+            );
+            assert_eq!(
+                ConversationEventKind::stored(said.kind(), said.body()),
+                Some(said)
+            );
+        }
+        assert_eq!(
+            ConversationEventKind::stored("of_a_later_build", json!({})),
+            None
+        );
+        assert_eq!(
+            ConversationEventKind::stored("run_ended", json!("not a body")),
+            None
+        );
+        // A reply a run shaped loosely is still a reply.
+        let reply: Reply = serde_json::from_value(json!({"text": "hi", "more": 1})).unwrap();
+        assert_eq!(reply.format, TextFormat::Markdown);
+    }
+
+    /// The API's document says each kind and its body, so a client's types
+    /// are generated and not written from this file.
+    #[test]
+    fn the_api_document_names_every_kind_of_event() {
+        use utoipa::OpenApi;
+        let document = serde_json::to_value(crate::server::ApiDoc::openapi()).unwrap();
+        let schemas = &document["components"]["schemas"];
+        let kinds = serde_json::to_string(&schemas["ConversationEventKind"]).unwrap();
+        for said in one_of_each() {
+            assert!(
+                kinds.contains(&format!("\"{}\"", said.kind())),
+                "{} is not in the document: {kinds}",
+                said.kind()
+            );
+        }
+        for body in [
+            "RunStarted",
+            "Reply",
+            "WaitingForInput",
+            "MessageDelivered",
+            "MessageFailed",
+            "RunEnded",
+            "ReplyRouteFailed",
+            "Message",
+            "TextFormat",
+        ] {
+            assert!(schemas.get(body).is_some(), "{body} is not in the document");
+        }
+        let event = serde_json::to_string(&schemas["ConversationEvent"]).unwrap();
+        for field in ["seq", "turn", "createdAt", "ConversationEventKind"] {
+            assert!(
+                event.contains(field),
+                "{field} is not in the event: {event}"
+            );
         }
     }
 }

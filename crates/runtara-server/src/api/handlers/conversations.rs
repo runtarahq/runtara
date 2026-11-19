@@ -255,7 +255,7 @@ pub async fn conversation_events(
                 yield Ok::<_, Infallible>(
                     Event::default()
                         .id(event.seq.to_string())
-                        .event(event.kind.clone())
+                        .event(event.kind())
                         .data(serde_json::to_string(&event).unwrap_or_default()),
                 );
             }
