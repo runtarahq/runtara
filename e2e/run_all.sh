@@ -66,6 +66,7 @@ run_test "Wake scheduler drains a backlog in batches (regression)" "${SCRIPT_DIR
 # A conversation with a workflow. Self-contained (own server + Valkey); needs
 # docker, jq and prebuilt components (scripts/build-agent-components.sh).
 run_test "A conversation with a workflow" "${SCRIPT_DIR}/test_conversations.sh"
+run_test "An AI Agent step's answer streamed to its conversation" "${SCRIPT_DIR}/test_ai_streaming.sh"
 
 # Microsoft Teams. These boot their OWN isolated runtara-server + Valkey (docker)
 # on dedicated high ports and mock the Bot Framework, so they are self-contained
