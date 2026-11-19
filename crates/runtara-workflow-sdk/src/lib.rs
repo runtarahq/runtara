@@ -937,6 +937,9 @@ pub async fn control(
         ControlCall::ConversationHistory(body) => {
             ("POST", "/v1/conversations/history".to_string(), Some(body))
         }
+        ControlCall::ConversationDelta(body) => {
+            ("POST", "/v1/conversations/delta".to_string(), Some(body))
+        }
     };
     let mut headers = vec![("content-type", "application/json")];
     if let Some(operation) = operation {

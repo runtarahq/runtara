@@ -31,6 +31,9 @@ pub enum ControlCall {
     /// `POST /v1/conversations/history`: what was said in the conversation
     /// the calling run carries.
     ConversationHistory(Value),
+    /// `POST /v1/conversations/delta`: a piece of a reply the calling run is
+    /// writing, for whoever reads its conversation now. Not kept.
+    ConversationDelta(Value),
 }
 
 impl ControlCall {
@@ -48,6 +51,7 @@ impl ControlCall {
             Self::Resume(_) => "resume",
             Self::ConversationSend(_) => "conversation-send",
             Self::ConversationHistory(_) => "conversation-history",
+            Self::ConversationDelta(_) => "conversation-delta",
         }
     }
 

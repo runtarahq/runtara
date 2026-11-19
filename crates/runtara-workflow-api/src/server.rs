@@ -870,6 +870,10 @@ pub fn router(state: WorkflowApiState) -> Router {
             post(control::post_conversation_history),
         )
         .route(
+            "/v1/conversations/delta",
+            post(control::post_conversation_delta),
+        )
+        .route(
             "/v1/trusted/{agent_id}/{capability_id}",
             post(control::post_trusted).route_layer(paced()),
         )
