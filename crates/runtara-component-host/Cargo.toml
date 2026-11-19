@@ -116,6 +116,7 @@ wasmtime-wasi-http = { version = "50", features = ["p3"] }
 runtara-workflow-api = { path = "../runtara-workflow-api", features = ["server"] }
 bytes = "1"
 http-body-util = "0.1"
+http-body = "1"
 axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
 

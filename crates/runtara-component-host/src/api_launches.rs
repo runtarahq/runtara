@@ -2049,6 +2049,67 @@ impl WorkflowApiBackend for Backend {
         })
     }
 
+    async fn http_streamed(
+        &self,
+        binding: &Binding,
+        meta: OutboundMeta,
+        body: Option<Vec<u8>>,
+    ) -> Result<
+        Result<runtara_workflow_api::server::StreamedReply, (OutboundFailure, Vec<u8>)>,
+        ApiError,
+    > {
+        self.0.slot(binding).ok_or_else(not_serving)?;
+        // A launch outside any run has no instance.
+        let host = crate::outbound_http::for_run(
+            self.0.outbound_http.get(),
+            Some(&binding.tenant_id),
+            Some(binding.instance_id.as_str()).filter(|instance| !instance.is_empty()),
+        )
+        .map_err(|e| ApiError::new(ErrorCode::Unavailable, e))?;
+        let destination = match meta.destination {
+            OutboundDestination::Connection(target) => {
+                Destination::Connection(ConnectionDestination {
+                    connection_id: target.connection_id,
+                    url: target.url,
+                    endpoint: target.endpoint,
+                    endpoint_ref: target.endpoint_ref,
+                    ai_provider: target.ai_provider,
+                    aws_service: target.aws_service,
+                })
+            }
+            OutboundDestination::Public(url) => Destination::Public(url),
+        };
+        let request = RequestOptions {
+            destination,
+            method: meta.method,
+            headers: meta.headers,
+            body,
+            timeout_ms: meta.timeout_ms,
+            max_response_bytes: meta.max_response_bytes,
+        };
+        // Judged by whether bytes keep coming, not by the request's bound
+        // on a whole answer.
+        let limits = crate::outbound_http::StreamLimits::from_env();
+        Ok(
+            match crate::outbound_http::send_streamed(&host, request, None, limits).await {
+                Ok(response) => Ok(runtara_workflow_api::server::StreamedReply {
+                    status: response.status,
+                    headers: response.headers,
+                    body: response.body,
+                }),
+                Err(error) => Err((
+                    OutboundFailure {
+                        code: error.code,
+                        message: error.message,
+                        status: error.status,
+                        retry_after_ms: error.retry_after_ms,
+                    },
+                    error.body,
+                )),
+            },
+        )
+    }
+
     async fn set_state(
         &self,
         binding: &Binding,
@@ -2363,12 +2424,17 @@ impl WorkflowApiTransport for RouterTransport {
                 Ok(response) => response,
                 Err(never) => match never {},
             };
-            let (parts, body) = response.into_parts();
-            // The router caps bodies itself; this bound only guards the copy.
-            let body = to_bytes(body, Caps::default().response_body_bytes)
-                .await
-                .unwrap_or_default();
-            http::Response::from_parts(parts, body)
+            // Handed on as it arrives: an answer that streams (an outbound
+            // call's, asked to) reaches the guest a piece at a time. The
+            // router caps bodies itself; this bound guards what passes.
+            response.map(|body| {
+                use http_body_util::BodyExt;
+                http_body_util::Limited::new(body, Caps::default().response_body_bytes)
+                    .map_err(|error| {
+                        wasmtime_wasi_http::Error::InternalError(Some(error.to_string()))
+                    })
+                    .boxed_unsync()
+            })
         })
     }
 }

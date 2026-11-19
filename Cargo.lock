@@ -5489,6 +5489,7 @@ dependencies = [
  "flate2",
  "getrandom 0.3.4",
  "http",
+ "http-body",
  "http-body-util",
  "reqwest 0.12.28",
  "runtara-agent-compression",
