@@ -319,6 +319,12 @@ The architecture first, then the adapters (decision 2).
 **Later: what adapters need, and the adapters.** Not started until the
 core above is settled.
 
+Phase 4 has since been planned again, in
+[native-chat-phase-4.md](native-chat-phase-4.md): it is the native chat
+made whole (a typed log, pushed and streamed, with what a person, an AI, an
+adapter and a UI each need), and keeps only `conversation.send` of the list
+below. The rest of that list moves to phase 5, with the adapters.
+
 4. `conversation.send`, headers in the trigger's input, declared webhook
    checks in intake, a workflow's own answer to the synchronous trigger.
 5. The adapters: each two workflows and its platform's agent.
