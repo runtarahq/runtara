@@ -502,22 +502,29 @@ operations! {
         workflow_id: String,
         key: String,
         message: Message,
+        // How long to wait for the message's turn, in milliseconds.
+        wait_ms: u32,
     } -> ConversationResult<Sent>,
     needs [WorkflowExecute],
     |engine, op| for Some(&op.tenant_id) => engine
-        .send_conversation_message(&op.tenant_id, &op.workflow_id, &op.key, op.message)
+        .send_conversation_message(
+            &op.tenant_id,
+            &op.workflow_id,
+            &op.key,
+            op.message,
+            op.wait_ms,
+        )
         .await;
 
     ConversationEvents {
         tenant_id: String,
         workflow_id: String,
         key: String,
-        after: i64,
-        limit: u32,
+        read: ReadEvents,
     } -> ConversationResult<Vec<ConversationEvent>>,
     needs [InvocationHistoryRead],
     |engine, op| for Some(&op.tenant_id) => engine
-        .conversation_events(&op.tenant_id, &op.workflow_id, &op.key, op.after, op.limit)
+        .conversation_events(&op.tenant_id, &op.workflow_id, &op.key, op.read)
         .await;
 
     DeleteConversation { tenant_id: String, workflow_id: String, key: String }

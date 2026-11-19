@@ -45,7 +45,7 @@ use crate::api::services::compilation::{
 };
 use crate::api::services::conversations::{
     ConversationEvent, ConversationResult, ConversationState, Conversations, EngineRuns, Message,
-    OpenConversation, Sent,
+    OpenConversation, ReadEvents, Sent,
 };
 use crate::api::services::operators::{AgentListing, AgentsService, ComponentsStatus};
 use crate::api::services::pending_inputs::PendingInputPage;
@@ -331,16 +331,18 @@ pub trait Engine: Send + Sync {
         workflow_id: &str,
         key: &str,
         message: Message,
+        wait_ms: u32,
     ) -> ConversationResult<Sent>;
 
-    /// What a conversation has for its user after event `after`.
+    /// What a conversation has for its user after event `read.after`. With
+    /// `read.wait_ms`, the answer waits that long for an event when there
+    /// is none, and comes as soon as there is one.
     async fn conversation_events(
         &self,
         tenant_id: &str,
         workflow_id: &str,
         key: &str,
-        after: i64,
-        limit: u32,
+        read: ReadEvents,
     ) -> ConversationResult<Vec<ConversationEvent>>;
 
     async fn delete_conversation(
@@ -1085,9 +1087,16 @@ impl Engine for LocalEngine {
         workflow_id: &str,
         key: &str,
         message: Message,
+        wait_ms: u32,
     ) -> ConversationResult<Sent> {
         self.conversations
-            .send(tenant_id, workflow_id, key, message)
+            .send_and_wait(
+                tenant_id,
+                workflow_id,
+                key,
+                message,
+                std::time::Duration::from_millis(u64::from(wait_ms)),
+            )
             .await
     }
 
@@ -1096,11 +1105,10 @@ impl Engine for LocalEngine {
         tenant_id: &str,
         workflow_id: &str,
         key: &str,
-        after: i64,
-        limit: u32,
+        read: ReadEvents,
     ) -> ConversationResult<Vec<ConversationEvent>> {
         self.conversations
-            .events(tenant_id, workflow_id, key, after, limit)
+            .read(tenant_id, workflow_id, key, read)
             .await
     }
 

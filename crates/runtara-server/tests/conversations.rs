@@ -944,3 +944,188 @@ async fn a_message_that_names_what_it_answers_answers_that_or_fails() {
         ]
     );
 }
+
+/// A reader that waits is answered when the conversation says something,
+/// and not on a clock; with nothing said, it is answered empty when its
+/// time is up.
+#[tokio::test]
+async fn a_reader_that_waits_is_answered_when_something_is_said() {
+    use runtara_server::api::services::conversations::ReadEvents;
+    use std::time::{Duration, Instant};
+    let talk = Talk::new().await;
+    talk.send("k", "m-1", "start").await;
+    let instance = talk.runs_of_workflow()[0].instance.clone();
+    let after = talk.events("k").await.last().unwrap().seq;
+    let read = |wait_ms: u32| {
+        let (conversations, tenant, workflow) = (
+            talk.conversations.clone(),
+            talk.tenant.clone(),
+            talk.workflow.clone(),
+        );
+        async move {
+            let asked = Instant::now();
+            let events = conversations
+                .read(
+                    &tenant,
+                    &workflow,
+                    "k",
+                    ReadEvents {
+                        after,
+                        limit: 100,
+                        wait_ms,
+                    },
+                )
+                .await
+                .expect("read");
+            (events, asked.elapsed())
+        }
+    };
+
+    // Nothing said: empty, when the time is up and not before.
+    let (events, took) = read(400).await;
+    assert!(events.is_empty());
+    assert!(took >= Duration::from_millis(350), "{took:?}");
+
+    // Something said while it waits: answered then, long before its time.
+    let waiting = tokio::spawn(read(20_000));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    talk.runs
+        .says(&instance, REPLY_EVENT, json!({"text": "Here."}));
+    talk.advance("k").await;
+    let (events, took) = waiting.await.unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].body()["text"], "Here.");
+    assert!(took < Duration::from_secs(5), "{took:?}");
+
+    // What is there already is answered at once, however long it may wait.
+    let (events, took) = read(20_000).await;
+    assert_eq!(events.len(), 1);
+    assert!(took < Duration::from_secs(2), "{took:?}");
+}
+
+/// Sending and waiting is a whole exchange in one request: the answer
+/// carries the message's turn, up to what ended it, or as far as it went
+/// when the time ran out.
+#[tokio::test]
+async fn sending_and_waiting_answers_with_the_messages_turn() {
+    use std::time::Duration;
+    let talk = Arc::new(Talk::new().await);
+    let send = |id: &'static str, wait: Duration| {
+        let talk = talk.clone();
+        async move {
+            talk.conversations
+                .send_and_wait(
+                    &talk.tenant,
+                    &talk.workflow,
+                    "k",
+                    text_message(id, "hello"),
+                    wait,
+                )
+                .await
+                .expect("sent")
+        }
+    };
+    let kinds = |events: &[ConversationEvent]| -> Vec<&'static str> {
+        events.iter().map(ConversationEvent::kind).collect()
+    };
+
+    // The run answers and ends while the sender waits.
+    let answering = {
+        let talk = talk.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                if let Some(run) = talk.runs_of_workflow().first() {
+                    talk.runs
+                        .says(&run.instance, REPLY_EVENT, json!({"text": "Hi."}));
+                    talk.runs.ends(&run.instance, json!({}));
+                    talk.advance("k").await;
+                    return;
+                }
+            }
+        })
+    };
+    let sent = send("m-1", Duration::from_secs(20)).await;
+    answering.await.unwrap();
+    assert_eq!(sent.state, MessageState::Started);
+    let turn = sent.turn.expect("the turn");
+    assert!(turn.settled);
+    assert_eq!(
+        kinds(&turn.events),
+        ["message", "run_started", "reply", "run_ended"]
+    );
+    assert_eq!(turn.last_seq, turn.events.last().unwrap().seq);
+
+    // Asked again, the same message answers with the same turn, and is not
+    // sent again.
+    let again = send("m-1", Duration::from_secs(20)).await;
+    assert!(again.duplicate);
+    assert_eq!(again.turn.unwrap().events, turn.events);
+    assert_eq!(talk.runs_of_workflow().len(), 1);
+
+    // A turn that is not over when the time is up says so, with what there
+    // is of it and where to read on from.
+    let unsettled = send("m-2", Duration::from_millis(300)).await;
+    let turn = unsettled.turn.unwrap();
+    assert!(!turn.settled);
+    assert_eq!(kinds(&turn.events), ["message", "run_started"]);
+    assert_eq!(turn.last_seq, turn.events.last().unwrap().seq);
+
+    // Without waiting there is no turn in the answer.
+    assert!(send("m-3", Duration::ZERO).await.turn.is_none());
+}
+
+/// A conversation is carried when its run says it has something new, and
+/// not only when the clock comes round: here the clock never does.
+#[tokio::test]
+async fn a_conversation_is_carried_when_its_run_says_so() {
+    use runtara_server::api::services::conversations::carry;
+    use std::time::Duration;
+    let talk = Talk::new().await;
+    talk.send("k", "m-1", "start").await;
+    let instance = talk.runs_of_workflow()[0].instance.clone();
+    assert_eq!(
+        talk.conversations
+            .carried_by(&instance)
+            .map(|(_, tenant)| tenant),
+        Some(talk.tenant.clone())
+    );
+
+    let shutdown = runtara_server::shutdown::ShutdownSignal::new();
+    let (tell, told) = tokio::sync::mpsc::unbounded_channel();
+    let carrying = tokio::spawn(carry(
+        talk.conversations.clone(),
+        shutdown.clone(),
+        Duration::from_secs(3600),
+        told,
+    ));
+    // The first look, at everything, is done before anything is said.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    talk.runs
+        .says(&instance, REPLY_EVENT, json!({"text": "Told."}));
+    // A run nobody follows is told of too, and is nothing to anyone.
+    tell.send("no-conversation-carries-this".into()).unwrap();
+    tell.send(instance.clone()).unwrap();
+    let mut said = Vec::new();
+    for _ in 0..100 {
+        said = talk.replies("k").await;
+        if !said.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(said, ["Told."]);
+
+    // When the run ends, the conversation no longer follows it.
+    talk.runs.ends(&instance, json!({}));
+    tell.send(instance.clone()).unwrap();
+    for _ in 0..100 {
+        if talk.conversations.carried_by(&instance).is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(talk.conversations.carried_by(&instance).is_none());
+    shutdown.trigger();
+    carrying.await.unwrap();
+}
