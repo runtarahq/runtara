@@ -193,7 +193,7 @@ pub async fn capture_http_event(
         }
 
         // Build inputs from HTTP request
-        let inputs = build_inputs_from_http_parsed(&method, &uri, &headers, parsed_body);
+        let inputs = build_inputs_from_http_parsed(&method, &uri, &headers, &[], parsed_body);
 
         // Extract headers for the event
         let header_pairs: Vec<(String, String)> = headers
@@ -397,6 +397,36 @@ fn parse_body_as_json(body: &Bytes) -> Value {
     })
 }
 
+/// Headers a webhook's run is never handed: the caller's own credentials.
+/// A run's input is kept with the run and shown with it.
+const WITHHELD_HEADERS: &[&str] = &["authorization", "cookie", "proxy-authorization"];
+
+/// A webhook's headers as its run reads them (`data.headers`): by name in
+/// lower case, a repeated header's values joined with `, `, without the
+/// caller's credentials and without `withheld` (a header a check found a
+/// secret in). A value that is not text is left out.
+fn webhook_headers(headers: &HeaderMap, withheld: &[String]) -> serde_json::Map<String, Value> {
+    let mut map = serde_json::Map::new();
+    for (name, value) in headers {
+        let name = name.as_str();
+        if WITHHELD_HEADERS.contains(&name) || withheld.iter().any(|w| w.eq_ignore_ascii_case(name))
+        {
+            continue;
+        }
+        let Ok(value) = value.to_str() else { continue };
+        match map.get_mut(name) {
+            Some(Value::String(joined)) => {
+                joined.push_str(", ");
+                joined.push_str(value);
+            }
+            _ => {
+                map.insert(name.to_owned(), Value::String(value.to_owned()));
+            }
+        }
+    }
+    map
+}
+
 /// Build workflow inputs from HTTP request data with pre-parsed body
 ///
 /// Returns the canonical Runtara format: `{"data": {...}, "variables": {}}`
@@ -404,6 +434,7 @@ fn build_inputs_from_http_parsed(
     method: &Method,
     uri: &Uri,
     headers: &HeaderMap,
+    withheld: &[String],
     parsed_body: Value,
 ) -> Value {
     // Extract query string
@@ -423,6 +454,7 @@ fn build_inputs_from_http_parsed(
             "path": uri.path(),
             "query": query,
             "content_type": content_type,
+            "headers": webhook_headers(headers, withheld),
             "body": parsed_body,
         },
         "variables": {}
@@ -432,6 +464,35 @@ fn build_inputs_from_http_parsed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_webhooks_run_reads_its_headers_but_not_its_callers_credentials() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Signature", "v0=abc".parse().unwrap());
+        headers.append("x-forwarded-for", "10.0.0.1".parse().unwrap());
+        headers.append("x-forwarded-for", "10.0.0.2".parse().unwrap());
+        headers.insert("authorization", "Bearer secret".parse().unwrap());
+        headers.insert("cookie", "session=secret".parse().unwrap());
+        headers.insert("x-token", "checked-secret".parse().unwrap());
+        headers.insert("content-type", "application/json".parse().unwrap());
+
+        let inputs = build_inputs_from_http_parsed(
+            &Method::POST,
+            &"/x?a=1".parse().unwrap(),
+            &headers,
+            &["X-Token".to_owned()],
+            json!({"k": 1}),
+        );
+        assert_eq!(
+            inputs["data"]["headers"],
+            json!({
+                "x-signature": "v0=abc",
+                "x-forwarded-for": "10.0.0.1, 10.0.0.2",
+                "content-type": "application/json",
+            })
+        );
+        assert_eq!(inputs["data"]["body"], json!({"k": 1}));
+    }
 
     #[test]
     fn env_parsing() {
