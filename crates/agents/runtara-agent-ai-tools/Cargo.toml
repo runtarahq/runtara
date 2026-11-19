@@ -28,6 +28,9 @@ runtara-http = { workspace = true, features = ["native"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 runtara-http = { workspace = true, features = ["wasi"] }
+# A streamed answer is said to the run's conversation as it is written.
+runtara-workflow-sdk = { path = "../../runtara-workflow-sdk" }
+runtara-workflow-api = { path = "../../runtara-workflow-api" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

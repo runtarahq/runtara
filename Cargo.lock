@@ -4796,6 +4796,8 @@ dependencies = [
  "runtara-ai",
  "runtara-dsl",
  "runtara-http",
+ "runtara-workflow-api",
+ "runtara-workflow-sdk",
  "serde",
  "serde_json",
  "tokio",
