@@ -22,6 +22,7 @@ pub mod trusted;
 
 pub mod connection_resolver;
 pub mod control;
+pub mod conversation_tokens;
 pub mod conversations;
 pub mod database;
 pub mod database_guard;
