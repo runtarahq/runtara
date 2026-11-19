@@ -415,6 +415,61 @@ impl ConnectionsFacade {
         params: &Value,
         headers: &mut HashMap<String, String>,
     ) -> Result<ResolvedConnectionAuth, ConnectionsError> {
+        // A refresh is due. Another engine may be making it now: a provider
+        // that rotates refresh tokens voids the one this process read when
+        // the other uses it. One engine at a time refreshes a connection,
+        // and each reads it again once it may: what the other stored is
+        // used, and no second refresh is made (docs/multiple-engines-plan.md,
+        // E7).
+        let refresh_due = crate::sealed::policy::sealed_authorized_tokens(integration_id, params)
+            .is_some()
+            && !(crate::sealed::is_sealed(&params[crate::sealed::policy::ACCESS_TOKEN_FIELD])
+                && crate::auth::token_cache::token_is_fresh(
+                    crate::auth::token_cache::parse_expiry(params["token_expires_at"].as_str()),
+                ));
+        let Some(valkey) = self.state.redis_manager.clone().filter(|_| refresh_due) else {
+            return self
+                .resolve_connection_auth_now(
+                    connection_id,
+                    tenant_id,
+                    integration_id,
+                    params,
+                    headers,
+                )
+                .await;
+        };
+        let lock = crate::auth::refresh_lock::take(&valkey, tenant_id, connection_id).await;
+        let current = match self
+            .repo()
+            .get_with_parameters(connection_id, tenant_id)
+            .await
+        {
+            Ok(Some(row)) => row.connection_parameters,
+            _ => None,
+        };
+        let resolved = self
+            .resolve_connection_auth_now(
+                connection_id,
+                tenant_id,
+                integration_id,
+                current.as_ref().unwrap_or(params),
+                headers,
+            )
+            .await;
+        if let Some(lock) = lock {
+            lock.release(&valkey).await;
+        }
+        resolved
+    }
+
+    async fn resolve_connection_auth_now(
+        &self,
+        connection_id: &str,
+        tenant_id: &str,
+        integration_id: &str,
+        params: &Value,
+        headers: &mut HashMap<String, String>,
+    ) -> Result<ResolvedConnectionAuth, ConnectionsError> {
         // A platform app's credentials go to the provider only: `params`, not
         // `effective`, is what a refresh writes back.
         let app = crate::oauth_apps::app_for(
