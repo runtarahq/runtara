@@ -562,6 +562,78 @@ pub trait Engine: Send + Sync {
         part: Served,
         request: axum::extract::Request,
     ) -> axum::response::Response;
+
+    /// Finishes an OAuth flow a provider sent a user back from: the redirect
+    /// is a `GET` of `path_and_query` (under `/api/oauth/`) that anyone may
+    /// send, with the `cookie` the browser sent, which binds the flow to the
+    /// browser that began it. Nothing else of the request is the sender's.
+    /// Intake receives it and asks this; the engine exchanges the code and
+    /// seals the tokens, and answers what the user's browser is to be told.
+    async fn finish_oauth_redirect(
+        &self,
+        path_and_query: String,
+        cookie: Option<String>,
+    ) -> Result<HandedBack, String>;
+}
+
+/// The longest redirect taken: a provider's answer is in its query.
+pub const MAX_OAUTH_REDIRECT: usize = 16 * 1024;
+/// The most of a browser's `Cookie` header taken with a redirect.
+pub const MAX_OAUTH_COOKIE: usize = 8 * 1024;
+/// The most of an answer handed back for a redirect: a page that says how
+/// the flow ended, or nothing with a `Location`.
+const MAX_HANDED_BACK: usize = 1024 * 1024;
+
+/// An answer to a request that was handed over as what it asked, not as it
+/// arrived: its status, where it sends the browser, and its page.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HandedBack {
+    pub status: u16,
+    pub location: Option<String>,
+    pub content_type: Option<String>,
+    /// The cookies the browser is told to keep or forget.
+    #[serde(default)]
+    pub set_cookies: Vec<String>,
+    pub body: Vec<u8>,
+}
+
+impl axum::response::IntoResponse for HandedBack {
+    fn into_response(self) -> axum::response::Response {
+        use axum::http::{StatusCode, header};
+        let mut response = axum::response::Response::new(axum::body::Body::from(self.body));
+        *response.status_mut() =
+            StatusCode::from_u16(self.status).unwrap_or(StatusCode::BAD_GATEWAY);
+        for (name, value) in [
+            (header::LOCATION, self.location),
+            (header::CONTENT_TYPE, self.content_type),
+        ] {
+            if let Some(value) = value.and_then(|value| value.parse().ok()) {
+                response.headers_mut().insert(name, value);
+            }
+        }
+        for cookie in self.set_cookies {
+            if let Ok(value) = cookie.parse() {
+                response.headers_mut().append(header::SET_COOKIE, value);
+            }
+        }
+        response
+    }
+}
+
+/// The browser's cookie as it may be handed on with a redirect: one line,
+/// of no more than [`MAX_OAUTH_COOKIE`].
+pub fn a_browsers_cookie(cookie: Option<&str>) -> Option<String> {
+    cookie
+        .filter(|cookie| cookie.len() <= MAX_OAUTH_COOKIE && !cookie.contains(['\r', '\n']))
+        .map(str::to_owned)
+}
+
+/// Whether `path_and_query` is a redirect an OAuth flow is finished with.
+pub fn is_an_oauth_redirect(path_and_query: &str) -> bool {
+    path_and_query.len() <= MAX_OAUTH_REDIRECT
+        && path_and_query.starts_with("/api/oauth/")
+        && !path_and_query.contains(['\r', '\n', ' '])
+        && path_and_query.parse::<axum::http::Uri>().is_ok()
 }
 
 /// The engine in this process.
@@ -1511,6 +1583,58 @@ impl Engine for LocalEngine {
             Some(tenant) => scoped(tenant, answered).await,
             None => answered.await,
         }
+    }
+
+    async fn finish_oauth_redirect(
+        &self,
+        path_and_query: String,
+        cookie: Option<String>,
+    ) -> Result<HandedBack, String> {
+        use axum::http::header;
+        if !is_an_oauth_redirect(&path_and_query) {
+            return Err("not a redirect an OAuth flow is finished with".to_owned());
+        }
+        let cookie = a_browsers_cookie(cookie.as_deref());
+        // Intake has no connection to finish a flow on: it asks the engine.
+        if let Some(engine) = &self.runs_elsewhere {
+            return engine
+                .oauth_redirect_for_anyone(path_and_query, cookie)
+                .await;
+        }
+        // Nothing of the sender's request but what it asked, a `GET` of this,
+        // and the cookie that says which browser asks.
+        let mut request = axum::http::Request::builder()
+            .method(axum::http::Method::GET)
+            .uri(&path_and_query)
+            .body(axum::body::Body::empty())
+            .map_err(|error| error.to_string())?;
+        if let Some(cookie) = cookie.and_then(|cookie| cookie.parse().ok()) {
+            request.headers_mut().insert(header::COOKIE, cookie);
+        }
+        let response = self.serve(Served::OAuthCallbacks, request).await;
+        let (parts, body) = response.into_parts();
+        let text = |name: header::HeaderName| {
+            parts
+                .headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        let body = axum::body::to_bytes(body, MAX_HANDED_BACK)
+            .await
+            .map_err(|_| "the answer to the redirect is too long".to_owned())?;
+        Ok(HandedBack {
+            status: parts.status.as_u16(),
+            location: text(header::LOCATION),
+            content_type: text(header::CONTENT_TYPE),
+            set_cookies: parts
+                .headers
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok().map(str::to_owned))
+                .collect(),
+            body: body.to_vec(),
+        })
     }
 }
 

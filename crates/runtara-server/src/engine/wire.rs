@@ -117,7 +117,7 @@ pub(crate) enum Peer {
 /// The operations intake asks, and nobody else. Each does for intake what
 /// the engine does for whoever sends the request intake received: there is
 /// no caller behind it, and it gives intake nothing a sender does not have.
-pub(crate) const ASKED_BY_INTAKE: &[&str] = &["RunSyncForAnyone"];
+pub(crate) const ASKED_BY_INTAKE: &[&str] = &["RunSyncForAnyone", "OAuthRedirectForAnyone"];
 
 macro_rules! operations {
     ($(
@@ -274,6 +274,17 @@ operations! {
         version: op.version,
         inputs: op.inputs,
     }).await;
+
+    // Finish an OAuth flow a provider sent a user back from: what the
+    // redirect does for whoever follows it. Intake asks it, having received
+    // one, and hands over what was asked (a `GET` of a path and its query)
+    // and the browser's cookie, and nothing else of the request. No tenant is named: the redirect
+    // names its own, and the engine answers it in that tenant's scope.
+    OAuthRedirectForAnyone { path_and_query: String, cookie: Option<String> }
+        -> Result<HandedBack, String>,
+    needs [],
+    |engine, op| for None =>
+        engine.finish_oauth_redirect(op.path_and_query, op.cookie).await;
 
     // Run a workflow and wait, for anyone: what the synchronous trigger does
     // for whoever calls it with a workflow's id. Intake asks it, having

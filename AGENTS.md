@@ -138,7 +138,12 @@ scoped README files, examples.
   (`api/services/webhook_verification.rs`); what it needs of the engine is
   an operation in `wire::ASKED_BY_INTAKE`, which does only what the engine
   does for whoever sent the request. A table or Valkey key it uses is
-  granted in `scripts/roles/intake-*`.
+  granted in `scripts/roles/intake-*`, and copied in
+  `docker-compose.roles.yml`.
+- An engine that is a process of its own receives nothing anyone may send:
+  its listener refuses a part that has no caller (`Served::has_a_caller`).
+  A new route anyone may send to is intake's to receive; do not forward one
+  to the engine as it arrived.
 - Never read, print, log, or commit credential values. Treat `.env*`, tokens,
   connection parameters, and database URLs as sensitive.
 - Do not hand-edit generated artifacts or ignored build outputs.

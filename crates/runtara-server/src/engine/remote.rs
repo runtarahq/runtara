@@ -326,6 +326,20 @@ impl RemoteEngine {
         .await
     }
 
+    /// Finishes an OAuth flow, for anyone: what intake asks, having received
+    /// a provider's redirect.
+    pub async fn oauth_redirect_for_anyone(
+        &self,
+        path_and_query: String,
+        cookie: Option<String>,
+    ) -> Result<HandedBack, String> {
+        self.ask(wire::OAuthRedirectForAnyone {
+            path_and_query,
+            cookie,
+        })
+        .await
+    }
+
     /// Asks the engine what it says of itself, now and then for as long as
     /// this process runs.
     pub fn keep_asking_what_it_is(self: &Arc<Self>) -> impl Future<Output = ()> + Send + 'static {
@@ -1293,6 +1307,14 @@ impl Engine for RemoteEngine {
         .await
     }
 
+    async fn finish_oauth_redirect(
+        &self,
+        path_and_query: String,
+        cookie: Option<String>,
+    ) -> Result<HandedBack, String> {
+        self.oauth_redirect_for_anyone(path_and_query, cookie).await
+    }
+
     async fn serve(&self, part: Served, request: axum::extract::Request) -> Response {
         let request = match handed_over(part, request).await {
             Ok(request) => request,
@@ -1542,38 +1564,41 @@ mod tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
-    /// A part anyone may send to is served without a caller, and what was
-    /// presented with it is not looked at.
+    /// The engine receives nothing anyone may send: a part with no caller
+    /// (a webhook, a provider's redirect) is not served by it as it arrived,
+    /// to the API or to anyone, whatever is presented with it. Intake
+    /// receives those.
     #[tokio::test]
-    async fn a_part_with_no_caller_is_served_to_whoever_sends() {
+    async fn a_part_with_no_caller_is_not_served_by_the_engine() {
         let local = local_without_runtime();
-        local.serves(
-            Served::Events,
-            axum::Router::new().fallback(|request: axum::extract::Request| async move {
-                format!(
-                    "caller={} header={}",
-                    request
-                        .extensions()
-                        .get::<crate::auth::AuthContext>()
-                        .is_some(),
-                    request.headers().contains_key(wire::PRESENTED),
-                )
-            }),
-        );
+        let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        for part in [Served::Events, Served::OAuthCallbacks] {
+            let reached = reached.clone();
+            local.serves(
+                part,
+                axum::Router::new().fallback(move || {
+                    reached.store(true, std::sync::atomic::Ordering::SeqCst);
+                    async { "served" }
+                }),
+            );
+        }
         let remote = api_side(local);
-        let ask = || async {
-            let request = http::Request::post("/api/runtime/events/webhook/t-1")
-                .body(Body::empty())
-                .unwrap();
-            text(remote.serve(Served::Events, request).await).await
-        };
-        assert_eq!(
-            ask().await,
-            (StatusCode::OK, "caller=false header=false".to_owned())
-        );
-        assert_eq!(
-            asked_by("not a token", ask()).await,
-            (StatusCode::OK, "caller=false header=false".to_owned())
+        for (part, path) in [
+            (Served::Events, "/api/runtime/events/webhook/t-1"),
+            (Served::OAuthCallbacks, "/api/oauth/acme/callback?code=c"),
+        ] {
+            let ask = || async {
+                let request = http::Request::post(path).body(Body::empty()).unwrap();
+                text(remote.serve(part, request).await).await
+            };
+            for (status, said) in [ask().await, asked_by("ann@acme", ask()).await] {
+                assert_eq!(status, StatusCode::FORBIDDEN, "{part:?}");
+                assert!(said.contains("NOT_FOR_THE_ENGINE"), "{said}");
+            }
+        }
+        assert!(
+            !reached.load(std::sync::atomic::Ordering::SeqCst),
+            "nothing of them reached what the engine serves"
         );
     }
 
@@ -1609,6 +1634,108 @@ mod tests {
         );
         // What the engine says of itself is no tenant's, and needs no caller.
         assert!(remote.learn().await);
+    }
+
+    /// A provider's redirect is finished by the engine when intake asks: with
+    /// what was asked (a path and its query), nothing of the sender's request,
+    /// and for intake alone.
+    #[tokio::test]
+    async fn a_redirect_is_finished_for_intake_from_what_was_asked_alone() {
+        let local = local_without_runtime();
+        local.serves(
+            Served::OAuthCallbacks,
+            axum::Router::new().fallback(|request: axum::extract::Request| async move {
+                let cookie = request
+                    .headers()
+                    .get(http::header::COOKIE)
+                    .and_then(|cookie| cookie.to_str().ok())
+                    .unwrap_or("none")
+                    .to_owned();
+                (
+                    StatusCode::FOUND,
+                    [
+                        (http::header::LOCATION, "https://console.example/done"),
+                        (http::header::SET_COOKIE, "flow=; Max-Age=0"),
+                    ],
+                    format!(
+                        "{} {} headers={} cookie={cookie}",
+                        request.method(),
+                        request.uri(),
+                        request.headers().len()
+                    ),
+                )
+            }),
+        );
+        let engine: Arc<dyn Engine> = local;
+        let back = engine
+            .finish_oauth_redirect(
+                "/api/oauth/acme/callback?code=c&state=s".to_owned(),
+                Some("flow=abc".to_owned()),
+            )
+            .await
+            .expect("finished");
+        assert_eq!(back.status, 302);
+        assert_eq!(
+            back.location.as_deref(),
+            Some("https://console.example/done")
+        );
+        assert_eq!(
+            String::from_utf8(back.body).unwrap(),
+            "GET /api/oauth/acme/callback?code=c&state=s headers=1 cookie=flow=abc"
+        );
+        // What the engine tells the browser to forget goes back with it.
+        assert_eq!(back.set_cookies, ["flow=; Max-Age=0"]);
+        // A cookie that is not one line of a header is not handed on.
+        let back = engine
+            .finish_oauth_redirect(
+                "/api/oauth/acme/callback?code=c".to_owned(),
+                Some("flow=abc\r\nX-Injected: 1".to_owned()),
+            )
+            .await
+            .expect("finished");
+        assert!(
+            String::from_utf8(back.body)
+                .unwrap()
+                .ends_with("headers=0 cookie=none")
+        );
+        // What is not a redirect of an OAuth flow is not handed to anything.
+        for asked in [
+            "/api/runtime/connections",
+            "/api/oauth/acme/callback?x=a b",
+            "/api/oauth/../runtime/connections\r\nHost: x",
+            "https://elsewhere.example/api/oauth/x",
+        ] {
+            assert!(
+                engine
+                    .finish_oauth_redirect(asked.to_owned(), None)
+                    .await
+                    .is_err(),
+                "{asked}"
+            );
+        }
+        let too_long = format!(
+            "/api/oauth/acme/callback?code={}",
+            "c".repeat(MAX_OAUTH_REDIRECT)
+        );
+        assert!(engine.finish_oauth_redirect(too_long, None).await.is_err());
+
+        // Over the wire it is intake's to ask, and nobody else's.
+        let ask = |peer: wire::Peer| {
+            let engine = engine.clone();
+            async move {
+                wire::answer(
+                    engine.as_ref(),
+                    "OAuthRedirectForAnyone",
+                    br#"{"path_and_query":"/api/oauth/acme/callback?code=c","cookie":null}"#,
+                    None,
+                    peer,
+                )
+                .await
+                .unwrap()
+            }
+        };
+        assert!(ask(wire::Peer::Intake).await.is_ok());
+        assert_eq!(ask(wire::Peer::Api).await, Err(wire::Refused::NotThePeers));
     }
 
     /// An operation is answered as far as the caller's credential allows,
@@ -1746,6 +1873,7 @@ mod tests {
             open,
             [
                 "Facts",
+                "OAuthRedirectForAnyone",
                 "RunSyncForAnyone",
                 "WorkflowAgents",
                 "ListAgents",

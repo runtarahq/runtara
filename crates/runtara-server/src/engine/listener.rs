@@ -188,24 +188,29 @@ async fn answer(engine: Arc<dyn Engine>, callers: Arc<dyn Callers>, request: Req
         let Some(part) = Served::named(part) else {
             return StatusCode::NOT_FOUND.into_response();
         };
+        // The engine receives nothing anyone may send. A part with no caller
+        // (a webhook, a provider's redirect) is intake's to receive, which
+        // asks the engine what it needs of it as an operation; handed over
+        // as it arrived, it is refused.
+        if !part.has_a_caller() {
+            return refused(
+                StatusCode::FORBIDDEN,
+                "NOT_FOR_THE_ENGINE",
+                "what anyone may send is received by intake, not by the engine",
+            );
+        }
         // A part that has a caller is served to the one the engine found, and
-        // to nobody if it found none. What was presented for a part that has
-        // none is not looked at.
-        let caller = if part.has_a_caller() {
-            match caller_of(callers.as_ref(), request.headers_mut()).await {
-                Ok(Some(caller)) => Some(caller),
-                Ok(None) => {
-                    return refused(
-                        StatusCode::UNAUTHORIZED,
-                        "NO_CALLER",
-                        "this part of the API is served to a caller",
-                    );
-                }
-                Err(response) => return response,
+        // to nobody if it found none.
+        let caller = match caller_of(callers.as_ref(), request.headers_mut()).await {
+            Ok(Some(caller)) => Some(caller),
+            Ok(None) => {
+                return refused(
+                    StatusCode::UNAUTHORIZED,
+                    "NO_CALLER",
+                    "this part of the API is served to a caller",
+                );
             }
-        } else {
-            request.headers_mut().remove(wire::PRESENTED);
-            None
+            Err(response) => return response,
         };
         let Some(request) = as_it_arrived(request, own, caller) else {
             return StatusCode::BAD_REQUEST.into_response();

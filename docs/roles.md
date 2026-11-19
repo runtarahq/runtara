@@ -90,7 +90,8 @@ descriptions and loads no component; the `.wasm` files need not be there.
 ## Trying it: the evaluation stack
 
 `docker-compose.roles.yml` is an overlay on the evaluation stack that runs
-the three processes: seal, the engine and the API.
+the processes apart: seal, the engine, the API, and intake with a seal of
+its own.
 
 ```sh
 docker compose -f docker-compose.yml -f docker-compose.seal.yml \
@@ -99,8 +100,8 @@ docker compose -f docker-compose.yml -f docker-compose.seal.yml \
 
 The stack's `runtara` service becomes the engine, and a new `api` service
 takes the requests on the same port as before. The overlay makes the
-certificates, the API's database role with its grants, and the two Valkey
-users, from the files under `scripts/roles/`. It needs
+certificates, the API's and intake's database roles with their grants, and
+the Valkey users, from the files under `scripts/roles/`. It needs
 `docker-compose.seal.yml` before it, because the engine starts only with a
 seal of its own, and combines with `docker-compose.executor.yml` (before it
 too). A stack that has already run without it is brought over as it is.
@@ -130,8 +131,12 @@ and wait.
 | `RUNTARA_DATABASE_URL`, `RUNTARA_CONNECTIONS_ENCRYPTION_KEY`, `RUNTARA_CONNECTIONS_RETIRED_KEYS`, `RUNTARA_SEAL_WRAPPING_KEY`, `RUNTARA_EXECUTOR_TLS_DIR`, `RUNTARA_ARTIFACT_STORE_URL`, `RUNTARA_ENGINE_LISTEN`, `RUNTARA_COMPILER_WASM` | **refused** |
 
 The API is given `RUNTARA_INTAKE_URL` (`https://host:port`) and calls
-intake with the certificate it calls the engine with. Without it, the API
-hands webhooks to the engine as before.
+intake with the certificate it calls the engine with. An engine that is a
+process of its own receives nothing anyone may send: handed a webhook or a
+provider's redirect as it arrived, it answers `403 NOT_FOR_THE_ENGINE`. So
+an API in front of one, given no `RUNTARA_INTAKE_URL`, has nowhere to hand
+those and answers them `503 NO_INTAKE`; everything else it does goes on. A
+single process (`RUNTARA_ROLE=all`) receives them itself, as before.
 
 **What it is granted.** `scripts/roles/intake-database-role.sql` gives its
 database role the triggers to read, the tables a queued run is written to,
@@ -148,17 +153,27 @@ seconds of a connection's secret being entered again. Intake asks seal
 whether the signature is that secret's. A trigger bound to a connection
 with nothing kept for it yet is refused, not let through.
 
-**What it may ask the engine.** One thing: to run a workflow and wait, for
-anyone, which is what the synchronous trigger does. The engine takes that
-from intake's certificate only, and nothing else from it.
+**What it may ask the engine.** Two things, each what the engine does for
+whoever sent the request: to run a workflow and wait, which is what the
+synchronous trigger does, and to finish an OAuth flow a provider sent a
+user back from. The engine takes those from intake's certificate only, and
+nothing else from it.
+
+**A provider's OAuth redirect.** Finishing a flow exchanges a code and
+seals tokens, which intake cannot do: it has no connection and no key that
+opens one. It receives the redirect, a `GET` under `/api/oauth/`, and hands
+the engine what was asked, the path and its query, and the browser's
+cookie, which binds the flow to the browser that began it. No other header
+and no body crosses. The engine answers the flow in the tenant the redirect
+names, as it does for anyone, and intake hands the browser the status, the
+`Location`, the cookies and the page it says.
 
 **When something is away.** With the engine away, a webhook is still
 accepted and queued, and runs when the engine is back; the synchronous
 trigger answers `503`. With intake away, webhooks answer `503` and
 everything else the API does goes on.
 
-**What it does not receive.** OAuth redirects still go to the engine. See
-[splitting-the-engine.md](splitting-the-engine.md).
+See [splitting-the-engine.md](splitting-the-engine.md).
 
 `e2e/test_intake.sh` runs seal, an engine, intake and an API as separate
 processes and checks all of the above.
@@ -254,7 +269,8 @@ does not read whom the API says it authenticated.
 - A part of the API the engine serves for callers (connections, the object
   model, triggers) is served to the caller the engine found, and
   to nobody without one. A webhook or an OAuth redirect has no caller, and
-  is checked by the engine as it is when anyone sends one.
+  the engine does not receive one: intake does, and asks the engine what
+  it needs of it as an operation that is intake's alone.
 - Whose an API key is, the engine finds. The API's database role cannot
   look across tenants.
 
