@@ -19,8 +19,8 @@ use serde_json::{Value, json};
 
 use crate::api::dto::common::ApiResponse;
 use crate::api::services::conversations::{
-    ConversationError, ConversationEvent, ConversationState, MAX_SEND_WAIT, MAX_WAIT, Message,
-    OpenConversation, ReadEvents, Sent,
+    ConversationError, ConversationEvent, ConversationList, ConversationState, ListConversations,
+    MAX_SEND_WAIT, MAX_WAIT, Message, OpenConversation, ReadEvents, Sent, Stopped,
 };
 use crate::engine::Engine;
 use crate::middleware::tenant_auth::OrgId;
@@ -174,6 +174,98 @@ pub async fn get_conversation(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ListQuery {
+    /// Only conversations whose key begins with this.
+    pub prefix: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<u32>,
+}
+
+/// A workflow's conversations, most recently active first.
+///
+/// Each with its title, what its client keeps about it, whether a run
+/// carries it, and the last thing said in it, shortened. A page says where
+/// the next begins (`next`): ask again with it as `cursor`.
+#[utoipa::path(
+    get,
+    path = "/api/runtime/workflows/{id}/conversations",
+    params(
+        ("id" = String, Path, description = "Workflow ID"),
+        ("prefix" = Option<String>, Query, description = "Only keys that begin with this"),
+        ("cursor" = Option<String>, Query, description = "A page's `next`"),
+        ("limit" = Option<u32>, Query, description = "At most this many, up to 200 (50 unless given)"),
+    ),
+    responses(
+        (status = 200, description = "A page of conversations", body = ApiResponse<ConversationList>),
+        (status = 400, description = "Not a cursor"),
+    ),
+    tag = "Conversations"
+)]
+pub async fn list_conversations(
+    OrgId(tenant_id): OrgId,
+    State(engine): State<Arc<dyn Engine>>,
+    Path(workflow_id): Path<String>,
+    Query(query): Query<ListQuery>,
+) -> Response {
+    let list = ListConversations {
+        prefix: query.prefix,
+        cursor: query.cursor,
+        limit: query.limit.unwrap_or(0),
+    };
+    match engine
+        .conversations_of(&tenant_id, &workflow_id, list)
+        .await
+    {
+        Ok(list) => answered(list),
+        Err(error) => refused(error),
+    }
+}
+
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StopConversation {
+    /// Fail the messages waiting their turn too. Left out, they keep it, and
+    /// the next one starts the next run.
+    #[serde(default)]
+    pub clear_queue: bool,
+}
+
+/// Stop the run that carries a conversation.
+///
+/// As stopping a run does: it ends when it has, and the conversation says
+/// so then (`run_ended`, with `status: stopped`). With no run, nothing is
+/// stopped and that is not an error.
+#[utoipa::path(
+    post,
+    path = "/api/runtime/workflows/{id}/conversations/{key}/stop",
+    params(
+        ("id" = String, Path, description = "Workflow ID"),
+        ("key" = String, Path, description = "The client's name for the conversation"),
+    ),
+    request_body(content = StopConversation, description = "Optional"),
+    responses(
+        (status = 200, description = "What was stopped", body = ApiResponse<Stopped>),
+        (status = 404, description = "No such conversation"),
+    ),
+    tag = "Conversations"
+)]
+pub async fn stop_conversation(
+    OrgId(tenant_id): OrgId,
+    State(engine): State<Arc<dyn Engine>>,
+    Path((workflow_id, key)): Path<(String, String)>,
+    stop: Option<Json<StopConversation>>,
+) -> Response {
+    let stop = stop.map(|Json(stop)| stop).unwrap_or_default();
+    match engine
+        .stop_conversation(&tenant_id, &workflow_id, &key, stop.clear_queue)
+        .await
+    {
+        Ok(stopped) => answered(stopped),
+        Err(error) => refused(error),
+    }
+}
+
 /// Delete a conversation and what was said in it.
 #[utoipa::path(
     delete,
@@ -267,6 +359,12 @@ pub struct EventsQuery {
     pub limit: Option<u32>,
     /// Wait this many seconds for an event, when there is none.
     pub wait: Option<u32>,
+    /// Read back: the events before this one, newest first.
+    pub before: Option<i64>,
+    /// `desc` for newest first, from the end or from `before`.
+    pub order: Option<String>,
+    /// Only these kinds, separated by commas.
+    pub kinds: Option<String>,
 }
 
 /// What a conversation has for its user: replies, that it waits for input,
@@ -285,6 +383,12 @@ pub struct EventsQuery {
 /// `Authorization` header; read it with `fetch`. A tenant holds a bounded
 /// number of streams open (`429 CONVERSATION_STREAMS_FULL` past it).
 ///
+/// **Reading back.** `order=desc` reads from the newest, and `before=<seq>`
+/// reads on from there, newest first: how a UI shows the last screen and
+/// loads more as its user scrolls up. `kinds` names the kinds wanted,
+/// separated by commas (`message,reply` for what was said and none of a
+/// run's working); it holds for a stream too.
+///
 /// **As one request.** Without that header, `wait` holds the request that
 /// many seconds (25 at most) for an event when there is none: answered at
 /// once if there is something, when there is, or empty when the time is up.
@@ -298,6 +402,9 @@ pub struct EventsQuery {
         ("after" = Option<i64>, Query, description = "Read on from this event"),
         ("limit" = Option<u32>, Query, description = "At most this many, up to 500"),
         ("wait" = Option<u32>, Query, description = "Without a stream: wait this many seconds for an event, up to 25"),
+        ("before" = Option<i64>, Query, description = "Read back: the events before this one, newest first"),
+        ("order" = Option<String>, Query, description = "`desc` for newest first"),
+        ("kinds" = Option<String>, Query, description = "Only these kinds, separated by commas"),
     ),
     responses(
         (status = 200, description = "The events, or a stream of them", body = ApiResponse<Vec<ConversationEvent>>),
@@ -323,12 +430,30 @@ pub async fn conversation_events(
         .and_then(|value| value.to_str().ok())
         .is_some_and(|accept| accept.contains("text/event-stream"));
     let wait = Duration::from_secs(u64::from(query.wait.unwrap_or(0))).min(MAX_WAIT);
+    let kinds: Vec<String> = query
+        .kinds
+        .as_deref()
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty())
+        .map(str::to_owned)
+        .collect();
+    // A stream reads forward, from where it is told to.
+    let back = !streamed && (query.before.is_some() || query.order.as_deref() == Some("desc"));
     let first = ReadEvents {
-        after,
+        after: if back {
+            query.after.unwrap_or(0)
+        } else {
+            after
+        },
         limit,
         // A stream sends what there is and then waits; one request waits
         // as long as it asked to.
         wait_ms: if streamed { 0 } else { wait.as_millis() as u32 },
+        before: query.before.filter(|_| back),
+        newest_first: back,
+        kinds: kinds.clone(),
     };
     let first = match engine
         .conversation_events(&tenant_id, &workflow_id, &key, first)
@@ -385,6 +510,8 @@ pub async fn conversation_events(
                 limit,
                 // Held by the engine until the conversation says something.
                 wait_ms: if behind { 0 } else { MAX_WAIT.as_millis() as u32 },
+                kinds: kinds.clone(),
+                ..ReadEvents::default()
             };
             events = match engine
                 .conversation_events(&tenant_id, &workflow_id, &key, read)

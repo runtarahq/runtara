@@ -356,6 +356,7 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         // into it and deleting it are the workflow's execution.
         ("PUT" | "DELETE", "/api/runtime/workflows/{id}/conversations/{key}") => WorkflowExecute,
         ("POST", "/api/runtime/workflows/{id}/conversations/{key}/messages") => WorkflowExecute,
+        ("POST", "/api/runtime/workflows/{id}/conversations/{key}/stop") => WorkflowExecute,
         ("POST", "/api/runtime/workflows/{id}/schedule") => WorkflowExecute,
         ("POST", "/api/runtime/workflows/instances/{instanceId}/stop") => WorkflowExecute,
         ("POST", "/api/runtime/workflows/instances/{instanceId}/pause") => WorkflowExecute,
@@ -386,6 +387,7 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         ("PUT" | "DELETE", "/api/runtime/operations/views/{id}") => WorkflowUpdate,
         ("POST", "/api/runtime/operations/requests/query") => InvocationHistoryRead,
         // What was said in a conversation is its runs' history.
+        ("GET", "/api/runtime/workflows/{id}/conversations") => InvocationHistoryRead,
         ("GET", "/api/runtime/workflows/{id}/conversations/{key}") => InvocationHistoryRead,
         ("GET", "/api/runtime/workflows/{id}/conversations/{key}/events") => InvocationHistoryRead,
         ("GET", "/api/runtime/workflows/{id}/instances") => InvocationHistoryRead,

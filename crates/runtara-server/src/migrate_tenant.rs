@@ -106,6 +106,15 @@ const fn serial(name: &'static str, of_tenant: &'static str) -> Table {
     }
 }
 
+/// As [`serial`], for a table whose serial column is not `id`.
+const fn serial_by(name: &'static str, of_tenant: &'static str, column: &'static str) -> Table {
+    Table {
+        name,
+        of_tenant,
+        serial: Some(column),
+    }
+}
+
 /// A row whose tenant column a later migration added may still be unset:
 /// it is the tenant's when its instance is.
 const INSTANCE_ROWS: &str = "tenant_id = $1 OR (tenant_id IS NULL AND instance_id IN (SELECT instance_id FROM instances WHERE tenant_id = $1))";
@@ -161,6 +170,12 @@ const SERVER_TABLES: &[Table] = &[
     ),
     by("execution_admission_reservations", "tenant_id = $1"),
     by("operations_views", "tenant_id = $1"),
+    // Conversations with the tenant's workflows, and what was said in them.
+    // A message's place in its conversation's queue is a serial of the
+    // table: given anew in the target, in the same order.
+    by("conversations", "tenant_id = $1"),
+    serial_by("conversation_messages", "tenant_id = $1", "position"),
+    by("conversation_events", "tenant_id = $1"),
 ];
 
 fn env(name: &str) -> Result<String, String> {

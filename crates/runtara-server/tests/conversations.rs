@@ -56,6 +56,7 @@ struct StandIn {
     answers: Mutex<Vec<(String, String, String, Value)>>,
     refused: Mutex<Vec<String>>,
     unavailable: Mutex<bool>,
+    stopped: Mutex<Vec<String>>,
 }
 
 impl StandIn {
@@ -87,6 +88,7 @@ impl StandIn {
             run.waits.clear();
             run.run = Run::Ended {
                 completed: true,
+                stopped: false,
                 output: Some(output),
                 error: None,
             }
@@ -171,6 +173,20 @@ impl Runs for StandIn {
             .get(instance)
             .map(|run| run.waits.clone())
             .unwrap_or_default())
+    }
+
+    async fn stop(&self, _: &str, instance: &str) -> Result<(), String> {
+        self.stopped.lock().unwrap().push(instance.to_owned());
+        self.with(instance, |run| {
+            run.waits.clear();
+            run.run = Run::Ended {
+                completed: false,
+                stopped: true,
+                output: None,
+                error: None,
+            }
+        });
+        Ok(())
     }
 
     async fn answer(
@@ -551,6 +567,7 @@ async fn the_reply_workflow_is_started_once_for_each_reply() {
             "telegram:42",
             OpenConversation {
                 reply_workflow_id: Some(Some(route.clone())),
+                ..Default::default()
             },
         )
         .await
@@ -625,6 +642,7 @@ async fn a_reply_waits_for_a_reply_workflow_that_cannot_be_started_now() {
             "k",
             OpenConversation {
                 reply_workflow_id: Some(Some(route.clone())),
+                ..Default::default()
             },
         )
         .await
@@ -973,6 +991,7 @@ async fn a_reader_that_waits_is_answered_when_something_is_said() {
                         after,
                         limit: 100,
                         wait_ms,
+                        ..Default::default()
                     },
                 )
                 .await
@@ -1098,6 +1117,7 @@ async fn a_conversation_is_carried_when_its_run_says_so() {
         shutdown.clone(),
         Duration::from_secs(3600),
         told,
+        runtara_server::api::services::conversations::Keeping::FOR_EVER,
     ));
     // The first look, at everything, is done before anything is said.
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1128,4 +1148,382 @@ async fn a_conversation_is_carried_when_its_run_says_so() {
     assert!(talk.conversations.carried_by(&instance).is_none());
     shutdown.trigger();
     carrying.await.unwrap();
+}
+
+/// Stopping a conversation stops the run that carries it, which ends as
+/// stopped. The messages waiting their turn keep it, unless the queue is
+/// cleared, which fails each of them.
+#[tokio::test]
+async fn stopping_ends_the_run_and_keeps_the_queue_unless_it_is_cleared() {
+    let talk = Talk::new().await;
+    let stop = |clear_queue: bool| {
+        let talk = &talk;
+        async move {
+            talk.conversations
+                .stop(&talk.tenant, &talk.workflow, "k", clear_queue)
+                .await
+                .expect("stopped")
+        }
+    };
+    talk.send("k", "m-1", "long").await;
+    talk.send("k", "m-2", "next").await;
+    let first = talk.runs_of_workflow()[0].instance.clone();
+
+    let stopped = stop(false).await;
+    assert_eq!(stopped.instance_id.as_deref(), Some(first.as_str()));
+    assert_eq!(stopped.cleared, 0);
+    assert_eq!(
+        *talk.runs.stopped.lock().unwrap(),
+        std::slice::from_ref(&first)
+    );
+    talk.advance("k").await;
+    let ended: Vec<_> = talk
+        .events("k")
+        .await
+        .into_iter()
+        .filter(|event| event.kind() == "run_ended")
+        .map(|event| event.body()["status"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ended, ["stopped"]);
+    // The message that waited has its turn: it starts the next run.
+    assert_eq!(talk.runs_of_workflow().len(), 2);
+
+    // Stopped again with the queue cleared: what waits never has its turn.
+    talk.send("k", "m-3", "waits").await;
+    talk.send("k", "m-4", "waits too").await;
+    let stopped = stop(true).await;
+    assert_eq!(stopped.cleared, 2);
+    talk.advance("k").await;
+    assert_eq!(
+        talk.runs_of_workflow().len(),
+        2,
+        "no run for what was cleared"
+    );
+    let failed: Vec<_> = talk
+        .events("k")
+        .await
+        .into_iter()
+        .filter(|event| event.kind() == "message_failed")
+        .map(|event| event.body()["messageId"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(failed, ["m-3", "m-4"]);
+
+    // With no run, nothing is stopped, and that is no error.
+    let stopped = stop(false).await;
+    assert_eq!(stopped.instance_id, None);
+    assert!(matches!(
+        talk.conversations
+            .stop(&talk.tenant, &talk.workflow, "never-opened", false)
+            .await,
+        Err(ConversationError::NotFound)
+    ));
+}
+
+/// A conversation has a title and what its client keeps about it. Each is
+/// kept when an opening leaves it out.
+#[tokio::test]
+async fn a_conversation_keeps_a_title_and_what_its_client_keeps_about_it() {
+    let talk = Talk::new().await;
+    let open = |open: Value| {
+        let talk = &talk;
+        async move {
+            talk.conversations
+                .open(
+                    &talk.tenant,
+                    &talk.workflow,
+                    "k",
+                    serde_json::from_value(open).unwrap(),
+                )
+                .await
+        }
+    };
+    let state = open(json!({"title": "Order 7", "metadata": {"chat": 42}}))
+        .await
+        .unwrap();
+    assert_eq!(state.title.as_deref(), Some("Order 7"));
+    assert_eq!(state.metadata, Some(json!({"chat": 42})));
+    // Left out: kept.
+    let state = open(json!({})).await.unwrap();
+    assert_eq!(state.title.as_deref(), Some("Order 7"));
+    assert_eq!(state.metadata, Some(json!({"chat": 42})));
+    // Given: replaced. A title of null is removed.
+    let state = open(json!({"title": null, "metadata": {"thread": "t"}}))
+        .await
+        .unwrap();
+    assert_eq!(state.title, None);
+    assert_eq!(state.metadata, Some(json!({"thread": "t"})));
+    for refused in [
+        json!({"metadata": "not an object"}),
+        json!({"metadata": {"big": "x".repeat(5000)}}),
+        json!({"title": "t".repeat(300)}),
+    ] {
+        assert!(matches!(
+            open(refused).await,
+            Err(ConversationError::Invalid(_))
+        ));
+    }
+}
+
+/// A workflow's conversations are listed most recently active first, a
+/// page at a time, each with the last thing said in it; and read back from
+/// the newest, of the kinds asked for.
+#[tokio::test]
+async fn conversations_are_listed_by_activity_and_read_back_from_the_newest() {
+    use runtara_server::api::services::conversations::{ListConversations, ReadEvents};
+    let talk = Talk::new().await;
+    for (key, text) in [
+        ("order_1", "first"),
+        ("order_2", "second"),
+        ("orderX3", "third"),
+    ] {
+        talk.send(key, "m-1", text).await;
+        let instance = talk.runs_of_workflow().last().unwrap().instance.clone();
+        talk.runs.says(
+            &instance,
+            REPLY_EVENT,
+            json!({"text": format!("re: {text}")}),
+        );
+        talk.runs.ends(&instance, json!({}));
+        talk.advance(key).await;
+    }
+    // The oldest is spoken in again: it is the most recently active now.
+    talk.send("order_1", "m-2", "once more").await;
+    talk.conversations
+        .open(
+            &talk.tenant,
+            &talk.workflow,
+            "order_2",
+            serde_json::from_value(json!({"title": "Second"})).unwrap(),
+        )
+        .await
+        .unwrap();
+    let list = |list: ListConversations| {
+        let talk = &talk;
+        async move {
+            talk.conversations
+                .list(&talk.tenant, &talk.workflow, list)
+                .await
+                .expect("listed")
+        }
+    };
+    let all = list(ListConversations::default()).await;
+    let keys: Vec<&str> = all.conversations.iter().map(|c| c.key.as_str()).collect();
+    assert_eq!(keys, ["order_2", "order_1", "orderX3"]);
+    assert_eq!(all.next, None);
+    let first = &all.conversations[1];
+    assert!(first.active, "a run carries it");
+    let said = first.last_said.as_ref().unwrap();
+    assert_eq!(
+        (said.kind.as_str(), said.text.as_deref()),
+        ("message", Some("once more"))
+    );
+    let third = &all.conversations[2];
+    assert!(!third.active);
+    assert_eq!(
+        third.last_said.as_ref().unwrap().text.as_deref(),
+        Some("re: third")
+    );
+    assert_eq!(all.conversations[0].title.as_deref(), Some("Second"));
+
+    // A page at a time, with no conversation twice and none missed.
+    let page = list(ListConversations {
+        limit: 2,
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(page.conversations.len(), 2);
+    let rest = list(ListConversations {
+        limit: 2,
+        cursor: page.next.clone(),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(rest.conversations.len(), 1);
+    assert_eq!(rest.conversations[0].key, "orderX3");
+    assert_eq!(rest.next, None);
+    // A prefix is the letters it is: `_` is not "any letter".
+    let prefixed = list(ListConversations {
+        prefix: Some("order_".into()),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(prefixed.conversations.len(), 2);
+    assert!(matches!(
+        talk.conversations
+            .list(
+                &talk.tenant,
+                &talk.workflow,
+                ListConversations {
+                    cursor: Some("not a cursor".into()),
+                    ..Default::default()
+                }
+            )
+            .await,
+        Err(ConversationError::Invalid(_))
+    ));
+    // Another tenant's list of the same workflow is empty.
+    let other = talk
+        .conversations
+        .list(
+            "another-tenant",
+            &talk.workflow,
+            ListConversations::default(),
+        )
+        .await
+        .unwrap();
+    assert!(other.conversations.is_empty());
+
+    // Read back: the newest first, then further back, of the kinds asked.
+    let read = |read: ReadEvents| {
+        let talk = &talk;
+        async move {
+            talk.conversations
+                .read(&talk.tenant, &talk.workflow, "order_1", read)
+                .await
+                .expect("read")
+        }
+    };
+    let said = || vec!["message".to_owned(), "reply".to_owned()];
+    let newest = read(ReadEvents {
+        limit: 2,
+        newest_first: true,
+        kinds: said(),
+        ..Default::default()
+    })
+    .await;
+    let texts = |events: &[ConversationEvent]| -> Vec<String> {
+        events
+            .iter()
+            .map(|event| event.body()["text"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(texts(&newest), ["once more", "re: first"]);
+    let older = read(ReadEvents {
+        limit: 10,
+        before: Some(newest.last().unwrap().seq),
+        kinds: said(),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(texts(&older), ["first"]);
+    // Forward, of one kind.
+    let replies = read(ReadEvents {
+        limit: 10,
+        kinds: vec!["reply".into()],
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(texts(&replies), ["re: first"]);
+}
+
+/// What is past keeping is removed: a conversation long untouched, one
+/// whose workflow is gone, and a run's working older than it is kept. What
+/// is recent, or carried by a run, stays.
+#[tokio::test]
+async fn what_is_past_keeping_is_removed() {
+    use std::time::Duration;
+    let talk = Talk::new().await;
+    let pool = pool().await;
+    let day = Duration::from_secs(24 * 60 * 60);
+    let settled = |key: &'static str| {
+        let talk = &talk;
+        async move {
+            talk.send(key, "m-1", "hello").await;
+            let instance = talk.runs_of_workflow().last().unwrap().instance.clone();
+            talk.runs.says(
+                &instance,
+                "step_debug_start",
+                json!({"step_id": "s", "step_type": "Agent"}),
+            );
+            talk.runs.ends(&instance, json!({"response": "hi"}));
+            talk.advance(key).await;
+        }
+    };
+    settled("old").await;
+    settled("recent").await;
+    talk.send("old-but-carried", "m-1", "still running").await;
+    let aged = |key: &'static str, days: i32| {
+        let (pool, tenant) = (pool.clone(), talk.tenant.clone());
+        async move {
+            sqlx::query(
+                "UPDATE conversations SET updated_at = now() - make_interval(days => $3) \
+                 WHERE tenant_id = $1 AND key = $2",
+            )
+            .bind(&tenant)
+            .bind(key)
+            .bind(days)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    };
+    aged("old", 100).await;
+    aged("old-but-carried", 100).await;
+    let exists = |key: &'static str| {
+        let talk = &talk;
+        async move {
+            talk.conversations
+                .state(&talk.tenant, &talk.workflow, key)
+                .await
+                .is_ok()
+        }
+    };
+    let activity = |key: &'static str| {
+        let talk = &talk;
+        async move {
+            talk.events(key)
+                .await
+                .iter()
+                .filter(|event| event.kind() == "activity")
+                .count()
+        }
+    };
+    assert!(activity("recent").await > 0);
+
+    // Kept for ever: nothing goes.
+    talk.conversations.sweep(None, None).await.unwrap();
+    assert!(exists("old").await);
+
+    talk.conversations
+        .sweep(Some(90 * day), Some(7 * day))
+        .await
+        .unwrap();
+    assert!(!exists("old").await, "untouched for longer than it is kept");
+    assert!(exists("recent").await);
+    assert!(exists("old-but-carried").await, "a run carries it");
+    assert!(activity("recent").await > 0, "its working is recent");
+
+    // A run's working is kept a shorter time than what was said.
+    sqlx::query(
+        "UPDATE conversation_events SET created_at = now() - interval '8 days' \
+         WHERE tenant_id = $1 AND kind = 'activity'",
+    )
+    .bind(&talk.tenant)
+    .execute(&pool)
+    .await
+    .unwrap();
+    talk.conversations
+        .sweep(Some(90 * day), Some(7 * day))
+        .await
+        .unwrap();
+    assert_eq!(activity("recent").await, 0);
+    assert_eq!(talk.replies("recent").await, ["hi"], "what was said stays");
+
+    // A conversation goes with its workflow.
+    sqlx::query(
+        "INSERT INTO workflows (tenant_id, workflow_id, deleted_at) VALUES ($1, $2, now())",
+    )
+    .bind(&talk.tenant)
+    .bind(&talk.workflow)
+    .execute(&pool)
+    .await
+    .unwrap();
+    talk.conversations.sweep(None, None).await.unwrap();
+    assert!(!exists("recent").await, "its workflow is gone");
+    assert!(exists("old-but-carried").await, "until its run ends");
+    sqlx::query("DELETE FROM workflows WHERE tenant_id = $1")
+        .bind(&talk.tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
 }

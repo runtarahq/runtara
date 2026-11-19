@@ -44,8 +44,8 @@ use crate::api::services::compilation::{
     CompilationResultDto, CompilationService, ServiceError as CompilationError,
 };
 use crate::api::services::conversations::{
-    ConversationEvent, ConversationResult, ConversationState, Conversations, EngineRuns, Message,
-    OpenConversation, ReadEvents, Sent,
+    ConversationEvent, ConversationList, ConversationResult, ConversationState, Conversations,
+    EngineRuns, ListConversations, Message, OpenConversation, ReadEvents, Sent, Stopped,
 };
 use crate::api::services::operators::{AgentListing, AgentsService, ComponentsStatus};
 use crate::api::services::pending_inputs::PendingInputPage;
@@ -344,6 +344,24 @@ pub trait Engine: Send + Sync {
         key: &str,
         read: ReadEvents,
     ) -> ConversationResult<Vec<ConversationEvent>>;
+
+    /// A workflow's conversations, most recently active first.
+    async fn conversations_of(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        list: ListConversations,
+    ) -> ConversationResult<ConversationList>;
+
+    /// Stops the run that carries a conversation; with `clear_queue`, fails
+    /// the messages waiting their turn too.
+    async fn stop_conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        clear_queue: bool,
+    ) -> ConversationResult<Stopped>;
 
     async fn delete_conversation(
         &self,
@@ -1109,6 +1127,27 @@ impl Engine for LocalEngine {
     ) -> ConversationResult<Vec<ConversationEvent>> {
         self.conversations
             .read(tenant_id, workflow_id, key, read)
+            .await
+    }
+
+    async fn conversations_of(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        list: ListConversations,
+    ) -> ConversationResult<ConversationList> {
+        self.conversations.list(tenant_id, workflow_id, list).await
+    }
+
+    async fn stop_conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        clear_queue: bool,
+    ) -> ConversationResult<Stopped> {
+        self.conversations
+            .stop(tenant_id, workflow_id, key, clear_queue)
             .await
     }
 

@@ -516,3 +516,35 @@ Departures:
   between events. "With notices turned off the slow pass still delivers"
   is the loop as it was before, still run every five seconds; the latency
   test showed it deliver when a notice was missing.
+
+### 4.3 For a person and a UI
+
+Built: `POST …/stop`, the list of a workflow's conversations, a title and
+`metadata`, reading back (`before`, `order=desc`, `kinds`), retention, and
+conversations in `migrate-tenant`. A forward migration adds `title` and
+`metadata`, and two indexes.
+
+Departures:
+
+- **No `last_active_at`.** The plan added a column to list by.
+  `updated_at` already is when a conversation was last active: it moves
+  when something is said in it. The list is ordered by it, with an index.
+- **A conversation goes with its workflow within the hour, not at once.**
+  The plan said "removed with its workflow". The API deletes a workflow by
+  marking it in a table of its own, and is granted nothing on a
+  conversation's. So what is past keeping is removed by the conversation
+  worker's sweep, hourly, and that sweep also removes the conversations of
+  a workflow that is marked deleted. One that a run still carries waits
+  for the run to end.
+- **A run's working has its own setting.** `activity` events are kept
+  `RUNTARA_CONVERSATION_ACTIVITY_DAYS` (7 unless set, `0` for ever), beside
+  `RUNTARA_CONVERSATION_RETENTION_DAYS`. The plan fixed it at seven.
+- **`kinds` holds for a stream too.** The plan named it for reading back. A
+  UI that shows only what was said asks for `kinds=message,reply,…` on its
+  stream and is sent none of a run's working.
+- **Stopping a conversation that no run carries is not an error.** It
+  answers that nothing was stopped (`instanceId` absent). The plan did not
+  say; a client that stops twice should not have to tell the cases apart.
+- **`migrate-tenant` gives a message's place in its queue anew**, in the
+  same order, as it does every serial column, since the target's own
+  sequence has gone its own way.
