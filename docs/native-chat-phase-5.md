@@ -1,5 +1,7 @@
 # The native chat, phase 5: what a platform needs, and the first adapter
 
+Status: built ([As built](#as-built)).
+
 Phase 4 ([native-chat-phase-4.md](native-chat-phase-4.md)) made the
 conversation whole without a platform. Phase 5 adds what a chat platform's
 webhook needs of the server, and then the first adapter on it. Nothing of
@@ -65,3 +67,43 @@ declared: its agent checks it, in the integration's inbound workflow.
    `RUNTARA_STAND_IN_API_BASES` (`slack_bot=http://127.0.0.1:18996`) points
    a connection type's API at a stand-in, in seal's policy and in the
    proxy. It is for tests, as `RUNTARA_PROXY_ALLOWED_HOSTS` is.
+
+## As built
+
+All four parts, each with its tests:
+
+| Part | Where | Tests |
+|---|---|---|
+| 5.1 Headers | `api/handlers/events.rs` (`webhook_headers`) | the handler's unit test; `e2e/test_intake.sh` 4b reads a header the run was handed |
+| 5.2 Declared checks | `runtara-connections`' `webhooks` (the declarations, `Request`, templates), `sealed::policy` (Telegram's `webhook_secret`, verify-only), `facade::check_webhook`, the server's `webhook_verification` (`verify_webhook` in the engine, `ByTrigger` in intake) | each declaration against its platform's signing and against its seal policy; the server's check for each kind; `e2e/test_intake.sh` 4 and 4b; `e2e/test_slack_adapter.sh` 2 |
+| 5.3 The workflow's answer | `api/handlers/workflows_sync.rs` (`answer`), `synchronous` in `capture_http_event` | the answer's unit tests; `e2e/test_slack_adapter.sh` 1; `e2e/test_intake.sh` 4b, through intake |
+| 5.4 Slack | `examples/integrations/slack` | `e2e/test_slack_adapter.sh` |
+
+Departures and details:
+
+- **What is kept with a trigger carries the declaration** (`check` in
+  `webhook_verification`). A row kept before is checked as its kind
+  declares, and the engine's pass that keeps rows current rewrites it.
+- **A form is checked by its fields.** A webhook sent as
+  `multipart/form-data` was not checked at all; it is now checked from the
+  fields read from it, so Mailgun's routes are checked too. A check that
+  signs the body refuses a form, whose bytes are not kept.
+- **Telegram's registration through seal is kept.** A secret token sealed
+  to register a webhook (`seal_webhook_secret`, whose marker names the
+  connection) is still presented beside the bot token. One entered with
+  the connection is only checked, and goes with no request.
+- **The synchronous trigger is not idempotent.** A platform that delivers
+  again when it is not answered in time starts another run; the Slack
+  adapter makes that harmless by keying each message by Slack's event id,
+  which `conversation.send` takes once.
+- **The adapter is installed by a script**, `install.sh`, which the
+  end-to-end test uses as it is. The trigger's `requestUrl` is printed for
+  Slack's Event Subscriptions.
+
+Measured locally: the Slack adapter's end-to-end test passes against a
+stand-in Slack, with seal attaching the bot token; `e2e/test_intake.sh`
+passes with the engine, intake and the API as processes of their own.
+
+Not built: a Telegram adapter (it needs a Telegram agent), and a declared
+check for a platform that signs with published keys (Teams, whose agent
+checks it).

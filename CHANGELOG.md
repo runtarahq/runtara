@@ -13,6 +13,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Chat platforms reach a workflow with no code of theirs in the server**
+  (`docs/native-chat-phase-5.md`). A webhook's run reads the request's
+  headers (`data.headers`), without the caller's `authorization`, `cookie`
+  and `proxy-authorization`. A connection type declares how its webhooks
+  are signed (`runtara_connections::webhooks`), and a trigger bound to a
+  connection checks every webhook that way with seal, in the engine and in
+  intake: Mailgun's signature as before, Slack's (signed timestamp and
+  body, refused after five minutes), and Telegram's secret token, which a
+  Telegram Bot connection now takes as `webhook_secret`, is only checked,
+  and is not handed to the run. An HTTP trigger with `synchronous: true`
+  runs its workflow and waits, and a run whose output has `httpResponse`
+  (`status`, `headers`, `body`) is answered with exactly that, there and
+  on `http-sync`. The first adapter, Slack's, is two workflows and an
+  install script in `examples/integrations/slack`. For end-to-end tests,
+  `RUNTARA_STAND_IN_API_BASES` points a connection type's fixed API at a
+  stand-in.
+
 - **An AI Agent step's answer reaches its conversation as it is written.**
   In a run that carries a conversation, an AI Agent step asks its model
   to stream (OpenAI and compatible APIs, Gemini, Bedrock) and says the

@@ -345,6 +345,10 @@ below. The rest of that list moves to phase 5, with the adapters.
    checks in intake, a workflow's own answer to the synchronous trigger.
 5. The adapters: each two workflows and its platform's agent.
 
+Phase 5 is built ([native-chat-phase-5.md](native-chat-phase-5.md)): the
+headers, the declared checks and the workflow's own answer, and the first
+adapter, Slack's (`examples/integrations/slack`).
+
 Deferring the adapters has one cost to keep in mind: the conversation is
 designed for them and proved without one. The reply route in particular is
 exercised only by tests until an adapter uses it. Phase 2's tests stand in
