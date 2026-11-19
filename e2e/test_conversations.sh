@@ -115,6 +115,7 @@ start_server() {
         RUNTARA_AGENT_COMPONENTS_DIR="${COMPONENTS_DIR}" \
         RUNTARA_CONVERSATION_QUEUE_BOUND=2 \
         RUNTARA_CONVERSATION_STREAMS=3 \
+        RUNTARA_MCP_SESSION_STORE=local \
         DATA_DIR="${TEST_DATA_DIR}" \
         RUNTARA_DEV_MODE=false \
         RUST_LOG="warn,runtara_server=info" \
@@ -243,6 +244,46 @@ PACED=$(workflow conv-paced "$(jq -n \
                      { fromStep: "two", toStep: "p2" }, { fromStep: "p2", toStep: "three" },
                      { fromStep: "three", toStep: "finish" } ],
     variables: {}, inputSchema: {}, outputSchema: {} }')")
+# Reads what was said in its conversation and hands it back as data.
+HISTORIAN=$(workflow conv-historian "$(jq -n '{
+    name: "conv-historian", entryPoint: "history",
+    steps: { history: { id: "history", stepType: "Agent", agentId: "conversation", capabilityId: "history",
+                        maxRetries: 0, inputMapping: { limit: { valueType: "immediate", value: 10 } } },
+             tell: { id: "tell", stepType: "Agent", agentId: "conversation", capabilityId: "reply",
+                     maxRetries: 0, inputMapping: {
+                         text: { valueType: "immediate", value: "remembered" },
+                         data: { valueType: "reference", value: "steps.history.outputs.said" } } },
+             finish: { id: "finish", stepType: "Finish", inputMapping: {} } },
+    executionPlan: [ { fromStep: "history", toStep: "tell" }, { fromStep: "tell", toStep: "finish" } ],
+    variables: {}, inputSchema: {}, outputSchema: {} }')")
+# An adapter's outbound half, as it would be: started with each reply, and
+# told what the inbound half kept about the chat.
+OUTBOUND=$(workflow conv-outbound "$(jq -n '{
+    name: "conv-outbound", entryPoint: "finish",
+    steps: { finish: { id: "finish", stepType: "Finish", inputMapping: {
+        outbound: { valueType: "immediate", value: true },
+        kind: { valueType: "reference", value: "data.event.kind" },
+        text: { valueType: "reference", value: "data.event.body.text" },
+        chat: { valueType: "reference", value: "data.conversation.metadata.chat" },
+        seq: { valueType: "reference", value: "data.event.seq" } } } },
+    executionPlan: [], variables: {}, inputSchema: { event: { type: "object" }, conversation: { type: "object" } }, outputSchema: {} }')")
+# An adapter's inbound half: a platform's webhook, handed to the workflow
+# that answers it, in the conversation the platform's chat is.
+INBOUND=$(workflow conv-inbound "$(jq -n --arg target "${HISTORIAN}" --arg out "${OUTBOUND}" '{
+    name: "conv-inbound", entryPoint: "send",
+    steps: { send: { id: "send", stepType: "Agent", agentId: "conversation", capabilityId: "send",
+                     maxRetries: 0, inputMapping: {
+                         workflowId: { valueType: "immediate", value: $target },
+                         key: { valueType: "reference", value: "data.body.key" },
+                         messageId: { valueType: "reference", value: "data.body.update" },
+                         text: { valueType: "reference", value: "data.body.text" },
+                         replyWorkflowId: { valueType: "immediate", value: $out },
+                         metadata: { valueType: "reference", value: "data.body.meta" } } },
+             finish: { id: "finish", stepType: "Finish", inputMapping: {
+                 state: { valueType: "reference", value: "steps.send.outputs.state" },
+                 duplicate: { valueType: "reference", value: "steps.send.outputs.duplicate" } } } },
+    executionPlan: [ { fromStep: "send", toStep: "finish" } ],
+    variables: {}, inputSchema: { body: { type: "object" } }, outputSchema: {} }')")
 # What an integration's outbound half would be: started with each reply.
 ROUTE=$(workflow conv-route "$(jq -n '{
     name: "conv-route", entryPoint: "finish",
@@ -481,6 +522,86 @@ BEFORE=$(echo "${BACK}" | jq -r '.[-1][0]')
 OLDER=$(curl -sS "${API}$(conversation "${SLOW}" stopped)/events?before=${BEFORE}&limit=10&kinds=message,reply" | jq -c '[.data[] | [.kind, .body.text]]')
 [ "${OLDER}" = '[["message","too long"]]' ] || { print_error "Reading further back gave ${OLDER}"; exit 1; }
 print_success "A conversation has a title and what its client keeps; they are listed by activity, a page at a time, and read back from the newest ✓"
+
+# ---------------------------------------------------------------------------
+print_step "4d. A run reads what was said in its conversation; an adapter hands a platform's messages over..."
+RESP=$(api_post /triggers "{\"workflow_id\": \"${INBOUND}\", \"trigger_type\": \"HTTP\", \"active\": true}")
+INBOUND_TRIGGER=$(echo "${RESP}" | jq -r '.data.id // .id // empty')
+[ -n "${INBOUND_TRIGGER}" ] || { print_error "The inbound trigger was not made: ${RESP}"; exit 1; }
+platform() { # update text: what the platform's webhook would send
+    curl -sS --max-time 60 -X POST -H 'Content-Type: application/json' \
+        -d "$(jq -nc --arg u "$1" --arg t "$2" '{key: "telegram:7", update: $u, text: $t, meta: {chat: 7}}')" \
+        "${API}/events/http/${INBOUND_TRIGGER}/run"
+}
+platform update-1 "first thing" >/dev/null
+# The platform delivers the same update again, as platforms do.
+platform update-1 "first thing" >/dev/null
+wait_events "${HISTORIAN}" "telegram:7" "$(ended 1)"
+platform update-2 "second thing" >/dev/null
+wait_events "${HISTORIAN}" "telegram:7" "$(ended 2)"
+[ "$(events "${HISTORIAN}" "telegram:7" | jq -c '[.[] | select(.kind == "message") | .body.id]')" = '["update-1","update-2"]' ] \
+    || { print_error "The platform's messages are not each in the conversation once: $(events "${HISTORIAN}" "telegram:7" | jq -c '[.[] | select(.kind == "message")]')"; exit 1; }
+# The second run read the whole conversation as a transcript.
+TRANSCRIPT=$(events "${HISTORIAN}" "telegram:7" | jq -c '[.[] | select(.kind == "reply")][1].body.data | [.[] | [.role, .text]]')
+[ "${TRANSCRIPT}" = '[["user","first thing"],["assistant","remembered"],["user","second thing"]]' ] \
+    || { print_error "The run did not read what was said in its conversation: ${TRANSCRIPT}"; exit 1; }
+print_success "A run reads what was said in its own conversation, as a transcript ✓"
+STATE=$(curl -sS "${API}$(conversation "${HISTORIAN}" "telegram:7")" | jq -c '[.data.replyWorkflowId, .data.metadata]')
+[ "${STATE}" = "[\"${OUTBOUND}\",{\"chat\":7}]" ] || { print_error "The inbound half did not open the conversation as asked: ${STATE}"; exit 1; }
+OUT=""
+for _ in {1..90}; do
+    OUT=$(psql_quiet -d "${TEST_DB_RUNTIME}" -c \
+        "SELECT COALESCE(json_agg(convert_from(output, 'UTF8')::json ORDER BY (convert_from(output, 'UTF8')::json->>'seq')::int), '[]') FROM instances \
+         WHERE output IS NOT NULL AND convert_from(output, 'UTF8')::json->>'outbound' = 'true'")
+    [ "$(echo "${OUT}" | jq 'length')" = "2" ] && break
+    sleep 1
+done
+[ "$(echo "${OUT}" | jq -c '[.[] | [.kind, .text, .chat]]')" = '[["reply","remembered",7],["reply","remembered",7]]' ] \
+    || { print_error "The outbound half was not started once for each reply, told the chat: ${OUT}"; exit 1; }
+print_success "A stand-in adapter: each platform message in once, each reply out once, in order, with the chat it kept ✓"
+
+# ---------------------------------------------------------------------------
+print_step "4e. A model talks to a workflow over MCP..."
+MCP_URL="http://127.0.0.1:${TEST_PORT_PUBLIC}/mcp"
+MCP_HEADERS="${TEST_DATA_DIR}/mcp_headers"
+MCP_SESSION=""
+mcp() { # body -> the answer's JSON-RPC message
+    curl -sS --max-time 150 -D "${MCP_HEADERS}" -X POST "${MCP_URL}" -H "Content-Type: application/json" \
+        -H "Accept: application/json, text/event-stream" ${MCP_SESSION:+-H "Mcp-Session-Id: ${MCP_SESSION}"} -d "$1" \
+        | python3 -c 'import sys, json
+body = sys.stdin.read()
+lines = [l[5:].strip() for l in body.splitlines() if l.startswith("data:")]
+print(lines[-1] if lines else body.strip())'
+}
+mcp '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"conversations-e2e","version":"1"}}}' >/dev/null
+MCP_SESSION=$(grep -i '^mcp-session-id:' "${MCP_HEADERS}" | head -1 | cut -d' ' -f2 | tr -d '\r\n' || true)
+mcp '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
+TOOLS=$(mcp '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq -c '[.result.tools[].name | select(startswith("conversation_"))] | sort')
+[ "${TOOLS}" = '["conversation_list","conversation_read","conversation_send","conversation_stop"]' ] \
+    || { print_error "The MCP conversation tools are not offered: ${TOOLS}"; exit 1; }
+tool() { # name arguments -> the tool's answer
+    mcp "$(jq -nc --arg n "$1" --argjson a "$2" '{jsonrpc: "2.0", id: 2, method: "tools/call", params: {name: $n, arguments: $a}}')" \
+        | jq -r '.result.content[0].text // .error.message // .'
+}
+ONE=$(tool conversation_send "$(jq -nc --arg w "${TALKER}" '{workflow_id: $w, key: "mcp", text: "start"}')")
+[ "$(echo "${ONE}" | jq -c '[.state, .turn.settled, [.turn.events[].kind]]')" = '["started",true,["message","run_started","reply","waiting_for_input"]]' ] \
+    || { print_error "The first turn over MCP is not what was said: ${ONE}"; exit 1; }
+REQUEST=$(echo "${ONE}" | jq -r '.turn.events[-1].body.requestId')
+# The second turn answers what the run asked, structured, naming the request.
+TWO=$(tool conversation_send "$(jq -nc --arg w "${TALKER}" --arg r "${REQUEST}" '{workflow_id: $w, key: "mcp", payload: {message: "structured"}, in_reply_to: $r}')")
+[ "$(echo "${TWO}" | jq -c '[.state, .turn.settled, [.turn.events[] | select(.kind == "reply") | .body.text], .turn.events[-1].kind]')" = '["delivered",true,["structured"],"run_ended"]' ] \
+    || { print_error "The second turn over MCP did not answer the run: ${TWO}"; exit 1; }
+THREE=$(tool conversation_send "$(jq -nc --arg w "${TALKER}" '{workflow_id: $w, key: "mcp", text: "again"}')")
+[ "$(echo "${THREE}" | jq -c '[.state, .turn.settled, .turn.events[-1].kind]')" = '["started",true,"waiting_for_input"]' ] \
+    || { print_error "The third turn over MCP did not start the next run: ${THREE}"; exit 1; }
+READ=$(tool conversation_read "$(jq -nc --arg w "${TALKER}" '{workflow_id: $w, key: "mcp", kinds: "message"}')")
+[ "$(echo "${READ}" | jq -c '[[.events[].body | .text // .payload.message], (.conversation.waitingFor != null)]')" = '[["start","structured","again"],true]' ] \
+    || { print_error "Reading the conversation over MCP gave ${READ}"; exit 1; }
+LISTED=$(tool conversation_list "$(jq -nc --arg w "${TALKER}" '{workflow_id: $w}')")
+echo "${LISTED}" | jq -e '[.conversations[].key] | index("mcp") != null' >/dev/null || { print_error "The MCP list does not have the conversation: ${LISTED}"; exit 1; }
+STOPPED=$(tool conversation_stop "$(jq -nc --arg w "${TALKER}" '{workflow_id: $w, key: "mcp"}')")
+[ -n "$(echo "${STOPPED}" | jq -r '.instanceId // empty')" ] || { print_error "Stopping over MCP gave ${STOPPED}"; exit 1; }
+print_success "Over MCP: three turns, one a structured answer to what the run asked, read back, listed and stopped ✓"
 
 # ---------------------------------------------------------------------------
 print_step "5. A deleted conversation is gone..."

@@ -611,6 +611,25 @@ sleep 0.3
 ENDED=$(grep -c '^event: run_ended' "${STREAMED}" || true)
 kill "${STREAM_PID}" 2>/dev/null || true; wait "${STREAM_PID}" 2>/dev/null || true
 [ "${ENDED}" = "1" ] || { print_error "the turn's end was not pushed to a stream through the API: $(cat "${STREAMED}")"; exit 1; }
+# A run on an executor reads its conversation from the host: the call goes
+# back over the run channel to the engine, which finds the conversation from
+# the run and not from anything the run says.
+HISTORIAN_GRAPH='{"name":"Historian","entryPoint":"history","steps":{"history":{"id":"history","stepType":"Agent","agentId":"conversation","capabilityId":"history","maxRetries":0,"inputMapping":{}},"tell":{"id":"tell","stepType":"Agent","agentId":"conversation","capabilityId":"reply","maxRetries":0,"inputMapping":{"text":{"valueType":"immediate","value":"remembered"},"data":{"valueType":"reference","value":"steps.history.outputs.said"}}},"finish":{"id":"finish","stepType":"Finish","inputMapping":{}}},"executionPlan":[{"fromStep":"history","toStep":"tell"},{"fromStep":"tell","toStep":"finish"}],"variables":{},"inputSchema":{},"outputSchema":{}}'
+HISTORIAN=$(api_post /workflows/create '{"name":"Historian","description":"two roles e2e"}' | jq -r '.data.id // empty')
+api_post "/workflows/${HISTORIAN}/update" "{\"executionGraph\": ${HISTORIAN_GRAPH}}" >/dev/null
+HISTORIAN_VERSION=$(curl -sS "${API}/workflows/${HISTORIAN}/versions" \
+    | jq -r '[.data[]?.version // .data[]?.versionNumber // empty] | max // 1')
+RESP=$(api_post "/workflows/${HISTORIAN}/versions/${HISTORIAN_VERSION}/compile" '{}' 900)
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "the historian did not compile: ${RESP}"; exit 1; }
+api_post "/workflows/${HISTORIAN}/versions/${HISTORIAN_VERSION}/set-current" '{}' >/dev/null
+for message in m-1 m-2; do
+    RESP=$(curl -sS --max-time 120 -X POST -H 'Content-Type: application/json' \
+        -d "{\"id\":\"${message}\",\"text\":\"said ${message}\"}" "${API}/workflows/${HISTORIAN}/conversations/remembers/messages?wait=90")
+    echo "${RESP}" | jq -e '.data.turn.settled == true' >/dev/null || { print_error "a historian's turn did not settle: ${RESP}"; exit 1; }
+done
+SAID=$(echo "${RESP}" | jq -c '[.data.turn.events[] | select(.kind == "reply")][0].body.data | [.[] | [.role, .text]]')
+[ "${SAID}" = '[["user","said m-1"],["assistant","remembered"],["user","said m-2"]]' ] \
+    || { print_error "a run on an executor did not read its conversation: ${SAID} (${RESP})"; exit 1; }
 # Saving a workflow validates it, on an executor too: the API asks the
 # engine, which places the validator. What the validator finds is what the
 # save is refused for.
