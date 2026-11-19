@@ -931,6 +931,12 @@ pub async fn control(
         ControlCall::Cancel(id, body) => ("POST", format!("{}/cancel", instance(id)), Some(body)),
         ControlCall::Pause(id) => ("POST", format!("{}/pause", instance(id)), None),
         ControlCall::Resume(id) => ("POST", format!("{}/resume", instance(id)), None),
+        ControlCall::ConversationSend(body) => {
+            ("POST", "/v1/conversations/send".to_string(), Some(body))
+        }
+        ControlCall::ConversationHistory(body) => {
+            ("POST", "/v1/conversations/history".to_string(), Some(body))
+        }
     };
     let mut headers = vec![("content-type", "application/json")];
     if let Some(operation) = operation {

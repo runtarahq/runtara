@@ -114,6 +114,20 @@ pub(super) async fn post_resume(
     call(state, request, |_| ControlCall::Resume(id)).await
 }
 
+pub(super) async fn post_conversation_send(
+    State(state): State<WorkflowApiState>,
+    request: Request,
+) -> Result<Response, Failure> {
+    call(state, request, ControlCall::ConversationSend).await
+}
+
+pub(super) async fn post_conversation_history(
+    State(state): State<WorkflowApiState>,
+    request: Request,
+) -> Result<Response, Failure> {
+    call(state, request, ControlCall::ConversationHistory).await
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TrustedBody {

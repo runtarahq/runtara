@@ -918,6 +918,48 @@ impl SmoMcpServer {
         tools::graph_mutations::apply_graph_mutations(self, params.0).await
     }
 
+    // ===== Conversations with a workflow =====
+
+    #[tool(
+        description = "Talk to a workflow: send a message into a conversation and wait for its turn. Returns what became of the message (state) and the turn's events: the workflow's replies (each with `text`, and `data` when it sends structured data), and what ended the turn: `waiting_for_input` (the run asks something; answer with another conversation_send, naming its requestId as in_reply_to, with a payload that conforms to its responseSchema), `run_ended`, or `message_failed`. `settled: false` means the time ran out first: read on with conversation_read from `lastSeq`. The key is yours: the same key continues the same conversation, a new key starts a new one."
+    )]
+    async fn conversation_send(
+        &self,
+        params: Parameters<tools::conversations::ConversationSendParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::conversations::conversation_send(self, params.0).await
+    }
+
+    #[tool(
+        description = "Read a conversation with a workflow: its state (the run that carries it, what it waits for, how many messages wait their turn) and its events after a seq. With wait_seconds it waits for the next event. With newest_first it reads the last things said."
+    )]
+    async fn conversation_read(
+        &self,
+        params: Parameters<tools::conversations::ConversationReadParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::conversations::conversation_read(self, params.0).await
+    }
+
+    #[tool(
+        description = "List a workflow's conversations, most recently active first, each with its key, title, whether a run carries it, and the last thing said."
+    )]
+    async fn conversation_list(
+        &self,
+        params: Parameters<tools::conversations::ConversationListParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::conversations::conversation_list(self, params.0).await
+    }
+
+    #[tool(
+        description = "Stop the run that carries a conversation. It ends as stopped; the messages waiting their turn keep it unless clear_queue."
+    )]
+    async fn conversation_stop(
+        &self,
+        params: Parameters<tools::conversations::ConversationStopParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::conversations::conversation_stop(self, params.0).await
+    }
+
     // ===== Signal / Human-in-the-Loop Tools =====
 
     #[tool(

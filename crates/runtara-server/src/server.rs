@@ -3854,6 +3854,7 @@ async fn start_as_platform(
     );
     let engine_api: Arc<dyn crate::engine::Engine> = local_engine.clone();
     native_control.install_engine(execution_engine.clone());
+    native_control.install_conversations(local_engine.conversations());
     {
         let limit = crate::middleware::entitlement::effective_limit(
             config::raw_max_concurrent_executions(),

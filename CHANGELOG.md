@@ -42,6 +42,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`runtara-validate-placed.wasm`; `RUNTARA_VALIDATE_GUEST_WASM` names
   another), and a server with executors does not start without it. Without
   executors nothing changes.
+- **A conversation for a model, and for an adapter.** Four MCP tools:
+  `conversation_send` (send a message and be answered with its turn, so
+  talking to a workflow is one tool call), `conversation_read`,
+  `conversation_list` and `conversation_stop`. The built-in `conversation`
+  agent gains `history`, what was said in the run's own conversation as a
+  transcript (`{role, text, data, sender, at}`), and `send`, a message into
+  a conversation with another workflow of the tenant, opening it with a
+  reply workflow and `metadata` as it goes: how an adapter's inbound
+  workflow hands a platform's message over. A conversation's `metadata` and
+  `title` reach every run it starts and its reply workflow, as
+  `data.conversation`, and `replyEvents` says what the reply workflow is
+  started for (`reply` and `waiting_for_input` unless set; `run_ended` and
+  `message_failed` may be added). An AI Agent step remembers by
+  conversation when its memory's `conversationId` is mapped to
+  `data.conversation.id`.
 - **What a person and a UI need of a conversation.** `POST
   …/conversations/{key}/stop` stops the run that carries it (`run_ended`
   with `status: stopped`); the messages waiting keep their turn unless

@@ -1,12 +1,17 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Conversation agent: a workflow says something to whoever it is talking
-//! with.
+//! with, reads what was said, and talks to another workflow.
 //!
 //! `reply` leaves one event on the calling run (`conversation_reply`), over
 //! the workflow API, and nothing else: the conversation that carries the
-//! run reads it and tells its user. The agent knows no conversation, key or
-//! chat platform. It holds no credential and reaches no network.
+//! run reads it and tells its user. `history` asks the host for what was
+//! said in the conversation the calling run carries, which the host finds
+//! from the run and not from anything the guest says. `send` asks the host
+//! to send a message into a conversation with a workflow of the run's
+//! tenant: how an adapter's inbound workflow hands a platform's message
+//! over. The agent knows no chat platform. It holds no credential and
+//! reaches no network.
 //!
 //! A step that ran is not run again when its run is resumed, so a reply is
 //! said once; a step retried after it failed part-way may say it again.
@@ -209,6 +214,24 @@ pub async fn reply(input: ReplyInput) -> Result<ReplyOutput, String> {
 mod host {
     use serde_json::Value;
 
+    pub(super) async fn control(call: super::Call) -> Result<Value, String> {
+        use runtara_workflow_api::ControlCall;
+        let call = match call {
+            super::Call::Send(body) => ControlCall::ConversationSend(body),
+            super::Call::History(body) => ControlCall::ConversationHistory(body),
+        };
+        runtara_workflow_sdk::control(&call, None)
+            .await
+            .map_err(|error| match error {
+                runtara_workflow_sdk::Error::Api(error) => {
+                    super::refused(error.code.as_str(), &error.message)
+                }
+                runtara_workflow_sdk::Error::Transport(message) => {
+                    super::refused("unavailable", &message)
+                }
+            })
+    }
+
     pub(super) async fn say(payload: Value) -> Result<(), String> {
         runtara_workflow_sdk::emit_events(&[runtara_workflow_api::Event {
             kind: super::REPLY_EVENT.to_owned(),
@@ -229,6 +252,14 @@ mod host {
 mod host {
     use serde_json::Value;
 
+    pub(super) async fn control(_: super::Call) -> Result<Value, String> {
+        Err(super::failed(
+            "CONVERSATION_REQUIRES_INSTANCE",
+            "permanent",
+            "a conversation is reached from a run",
+        ))
+    }
+
     pub(super) async fn say(_: Value) -> Result<(), String> {
         Err(super::failed(
             "CONVERSATION_REQUIRES_INSTANCE",
@@ -238,13 +269,277 @@ mod host {
     }
 }
 
+/// What a message into a conversation carries, as `send` is given it.
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[serde(rename_all = "camelCase")]
+#[capability_input(display_name = "Send Input")]
+pub struct SendInput {
+    #[field(
+        display_name = "Workflow ID",
+        description = "The workflow to talk to, in this run's tenant"
+    )]
+    pub workflow_id: String,
+    #[field(
+        display_name = "Key",
+        description = "The conversation's key: the same key always reaches the same conversation. An adapter uses the platform's own (telegram:<chat id>)",
+        example = "telegram:42"
+    )]
+    pub key: String,
+    #[field(
+        display_name = "Message ID",
+        description = "The sender's own id for the message, such as the platform's. The same id again is the same message, so a retried step sends it once. Left out, one is made, and a retry sends it again"
+    )]
+    #[serde(default)]
+    pub message_id: Option<String>,
+    #[field(display_name = "Text", description = "What is said")]
+    #[serde(default)]
+    pub text: Option<String>,
+    #[field(
+        display_name = "Payload",
+        description = "A structured message, for a run that waits for one"
+    )]
+    #[serde(default)]
+    pub payload: Option<Value>,
+    #[field(
+        display_name = "Sender",
+        description = "Who is speaking: {id, name?}, as the platform says"
+    )]
+    #[serde(default)]
+    pub sender: Option<Value>,
+    #[field(
+        display_name = "Attachments",
+        description = "Files sent with the message, each {name, contentType?, url}"
+    )]
+    #[serde(default)]
+    pub attachments: Option<Vec<Value>>,
+    #[field(
+        display_name = "In Reply To",
+        description = "The requestId of the waiting_for_input this message answers"
+    )]
+    #[serde(default)]
+    pub in_reply_to: Option<String>,
+    #[field(
+        display_name = "Reply Workflow ID",
+        description = "Set the workflow started with each reply as the conversation opens: an adapter's outbound workflow"
+    )]
+    #[serde(default)]
+    pub reply_workflow_id: Option<String>,
+    #[field(
+        display_name = "Metadata",
+        description = "Set what is kept about the conversation, an object handed to the reply workflow with each reply: the chat's id on the platform, a thread"
+    )]
+    #[serde(default)]
+    pub metadata: Option<Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[capability_output(display_name = "Send Output")]
+pub struct SendOutput {
+    #[field(display_name = "Message ID", description = "The message's id")]
+    pub message_id: String,
+    #[field(
+        display_name = "State",
+        description = "queued, started, delivered or failed"
+    )]
+    pub state: String,
+    #[field(
+        display_name = "Instance ID",
+        description = "The run it started or answered, if it did"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+    #[field(
+        display_name = "Duplicate",
+        description = "True if this id was sent before, and nothing was done again"
+    )]
+    pub duplicate: bool,
+}
+
+/// What `send` asks of the host, once its input is one a message may be.
+fn send_request(input: SendInput) -> Result<Value, String> {
+    let invalid = |message: String| failed("CONVERSATION_INVALID", "permanent", message);
+    if input.workflow_id.trim().is_empty() || input.key.trim().is_empty() {
+        return Err(invalid("a message is sent to a workflow and a key".into()));
+    }
+    let text = input.text.filter(|text| !text.trim().is_empty());
+    let payload = input.payload.filter(|payload| !payload.is_null());
+    let attachments = input.attachments.unwrap_or_default();
+    if text.is_none() && payload.is_none() && attachments.is_empty() {
+        return Err(invalid(
+            "a message carries text, a payload or an attachment".into(),
+        ));
+    }
+    let mut message = serde_json::Map::new();
+    message.insert(
+        "id".into(),
+        json!(
+            input
+                .message_id
+                .filter(|id| !id.trim().is_empty())
+                .unwrap_or_else(made_id)
+        ),
+    );
+    for (name, value) in [
+        ("text", json!(text)),
+        ("payload", json!(payload)),
+        ("sender", json!(input.sender)),
+        ("inReplyTo", json!(input.in_reply_to)),
+    ] {
+        if !value.is_null() {
+            message.insert(name.into(), value);
+        }
+    }
+    if !attachments.is_empty() {
+        message.insert("attachments".into(), json!(attachments));
+    }
+    let mut request = serde_json::Map::new();
+    request.insert("workflowId".into(), json!(input.workflow_id));
+    request.insert("key".into(), json!(input.key));
+    request.insert("message".into(), Value::Object(message));
+    if let Some(route) = input.reply_workflow_id.filter(|route| !route.is_empty()) {
+        request.insert("replyWorkflowId".into(), json!(route));
+    }
+    if let Some(metadata) = input.metadata.filter(|metadata| !metadata.is_null()) {
+        if !metadata.is_object() {
+            return Err(invalid("metadata is an object".into()));
+        }
+        request.insert("metadata".into(), metadata);
+    }
+    Ok(Value::Object(request))
+}
+
+/// An id for a message its sender gave none: unique, and so not the same
+/// message when the step is retried.
+fn made_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    format!("sent-{now:x}-{}", COUNT.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Send a message into a conversation with a workflow, at any time.
+#[capability(
+    module = "conversation",
+    id = "send",
+    display_name = "Send",
+    description = "Send a message into a conversation with a workflow of this tenant, opening it if it is new: how an adapter hands a platform's message to the workflow that answers it. Answers what became of the message; it does not wait for the reply, which goes to the conversation's reply workflow.",
+    module_display_name = "Conversation",
+    module_description = "Say something to whoever a workflow is talking with.",
+    module_has_side_effects = true,
+    module_supports_connections = false,
+    side_effects = true,
+    tags = "runtime:requires-run",
+    errors(
+        permanent("CONVERSATION_INVALID", "Not a message, or no such workflow"),
+        transient(
+            "CONVERSATION_QUEUE_FULL",
+            "The conversation holds as many messages as it may"
+        ),
+        transient("CONVERSATION_UNAVAILABLE", "The message could not be sent now"),
+    )
+)]
+pub async fn send(input: SendInput) -> Result<SendOutput, String> {
+    let request = send_request(input)?;
+    let answer = host::control(Call::Send(request)).await?;
+    serde_json::from_value(answer).map_err(|error| {
+        failed(
+            "CONVERSATION_UNAVAILABLE",
+            "transient",
+            format!("an unexpected answer: {error}"),
+        )
+    })
+}
+
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[serde(rename_all = "camelCase")]
+#[capability_input(display_name = "History Input")]
+pub struct HistoryInput {
+    #[field(
+        display_name = "Limit",
+        description = "The last this many things said, up to 100 (20 unless given)",
+        example = "20"
+    )]
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[capability_output(display_name = "History Output")]
+pub struct HistoryOutput {
+    #[field(
+        display_name = "Said",
+        description = "Oldest first, each {role: user or assistant, text?, data?, sender?, at}: a transcript to hand a model as it is"
+    )]
+    pub said: Vec<Value>,
+}
+
+/// What was said in this run's conversation.
+#[capability(
+    module = "conversation",
+    id = "history",
+    display_name = "History",
+    description = "What was said in the conversation this run carries: the last messages and replies, oldest first, each with a role (user or assistant), for a step that answers in context.",
+    module_display_name = "Conversation",
+    module_description = "Say something to whoever a workflow is talking with.",
+    module_has_side_effects = true,
+    module_supports_connections = false,
+    side_effects = false,
+    tags = "runtime:requires-run",
+    errors(
+        permanent("CONVERSATION_NOT_FOUND", "This run carries no conversation"),
+        permanent("CONVERSATION_REQUIRES_INSTANCE", "Only works inside a run"),
+        transient("CONVERSATION_UNAVAILABLE", "What was said could not be read now"),
+    )
+)]
+pub async fn history(input: HistoryInput) -> Result<HistoryOutput, String> {
+    let request = json!({"limit": input.limit.unwrap_or(20).clamp(1, 100)});
+    let answer = host::control(Call::History(request)).await?;
+    serde_json::from_value(answer).map_err(|error| {
+        failed(
+            "CONVERSATION_UNAVAILABLE",
+            "transient",
+            format!("an unexpected answer: {error}"),
+        )
+    })
+}
+
+/// What the agent asks of the host's conversations. Read only in a run:
+/// outside one the host is not asked.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+enum Call {
+    Send(Value),
+    History(Value),
+}
+
+/// A host refusal, as the agent's error: what the host's code means here.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn refused(code: &str, message: &str) -> String {
+    let (code, category) = match code {
+        "not-found" => ("CONVERSATION_NOT_FOUND", "permanent"),
+        "invalid" | "not-runnable" | "denied" => ("CONVERSATION_INVALID", "permanent"),
+        "requires-instance" => ("CONVERSATION_REQUIRES_INSTANCE", "permanent"),
+        "capacity" => ("CONVERSATION_QUEUE_FULL", "transient"),
+        _ => ("CONVERSATION_UNAVAILABLE", "transient"),
+    };
+    failed(code, category, message)
+}
+
 /// Canonical `AgentInfo` for the sidecar meta.json (host-only).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
     use runtara_dsl::agent_meta::{AgentInfo, capability_to_api_with_types};
     use std::collections::HashMap;
 
-    let output_types = HashMap::from([("ReplyOutput", &__OUTPUT_META_ReplyOutput)]);
+    let output_types = HashMap::from([
+        ("ReplyOutput", &__OUTPUT_META_ReplyOutput),
+        ("SendOutput", &__OUTPUT_META_SendOutput),
+        ("HistoryOutput", &__OUTPUT_META_HistoryOutput),
+    ]);
     AgentInfo {
         id: "conversation".into(),
         name: "Conversation".into(),
@@ -252,16 +547,33 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         has_side_effects: true,
         supports_connections: false,
         integration_ids: vec![],
-        capabilities: vec![capability_to_api_with_types(
-            &__CAPABILITY_META_REPLY,
-            Some(&__INPUT_META_ReplyInput),
-            Some(&__OUTPUT_META_ReplyOutput),
-            &output_types,
-        )],
+        capabilities: vec![
+            capability_to_api_with_types(
+                &__CAPABILITY_META_REPLY,
+                Some(&__INPUT_META_ReplyInput),
+                Some(&__OUTPUT_META_ReplyOutput),
+                &output_types,
+            ),
+            capability_to_api_with_types(
+                &__CAPABILITY_META_SEND,
+                Some(&__INPUT_META_SendInput),
+                Some(&__OUTPUT_META_SendOutput),
+                &output_types,
+            ),
+            capability_to_api_with_types(
+                &__CAPABILITY_META_HISTORY,
+                Some(&__INPUT_META_HistoryInput),
+                Some(&__OUTPUT_META_HistoryOutput),
+                &output_types,
+            ),
+        ],
     }
 }
 
-runtara_agent_macro::agent_component!(agent = "conversation", capabilities = [reply],);
+runtara_agent_macro::agent_component!(
+    agent = "conversation",
+    capabilities = [reply, send, history],
+);
 
 #[cfg(test)]
 mod tests {
@@ -357,11 +669,66 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_describes_its_one_capability() {
+    fn a_message_sent_is_what_the_host_takes_and_nothing_more() {
+        let input = |value: Value| -> SendInput { serde_json::from_value(value).unwrap() };
+        let request = send_request(input(json!({
+            "workflowId": "answer", "key": "telegram:42", "messageId": "update-7",
+            "text": "hi", "sender": {"id": "u1", "name": "Ann"},
+            "replyWorkflowId": "out", "metadata": {"chat": 42},
+        })))
+        .unwrap();
+        assert_eq!(
+            request,
+            json!({
+                "workflowId": "answer", "key": "telegram:42",
+                "message": {"id": "update-7", "text": "hi", "sender": {"id": "u1", "name": "Ann"}},
+                "replyWorkflowId": "out", "metadata": {"chat": 42},
+            })
+        );
+        // Without an id one is made, and two sends are two messages.
+        let made = |_| {
+            send_request(input(json!({"workflowId": "w", "key": "k", "text": "x"}))).unwrap()
+                ["message"]["id"]
+                .clone()
+        };
+        assert_ne!(made(1), made(2));
+        for refused in [
+            json!({"workflowId": "w", "key": "k"}),
+            json!({"workflowId": " ", "key": "k", "text": "x"}),
+            json!({"workflowId": "w", "key": "k", "text": "x", "metadata": [1]}),
+        ] {
+            let error: Value =
+                serde_json::from_str(&send_request(input(refused)).unwrap_err()).unwrap();
+            assert_eq!(error["code"], "CONVERSATION_INVALID");
+        }
+    }
+
+    #[test]
+    fn a_host_refusal_is_the_agents_own_error() {
+        for (host, code, category) in [
+            ("not-found", "CONVERSATION_NOT_FOUND", "permanent"),
+            ("capacity", "CONVERSATION_QUEUE_FULL", "transient"),
+            (
+                "requires-instance",
+                "CONVERSATION_REQUIRES_INSTANCE",
+                "permanent",
+            ),
+            ("timeout", "CONVERSATION_UNAVAILABLE", "transient"),
+        ] {
+            let error: Value = serde_json::from_str(&refused(host, "m")).unwrap();
+            assert_eq!(
+                (error["code"].as_str(), error["category"].as_str()),
+                (Some(code), Some(category))
+            );
+        }
+    }
+
+    #[test]
+    fn the_agent_describes_its_capabilities() {
         let info = agent_info();
         assert_eq!(info.id, "conversation");
-        assert_eq!(info.capabilities.len(), 1);
-        assert_eq!(info.capabilities[0].id, "reply");
+        let ids: Vec<&str> = info.capabilities.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["reply", "send", "history"]);
         assert!(!info.supports_connections);
     }
 }

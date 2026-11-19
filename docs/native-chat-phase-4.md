@@ -548,3 +548,56 @@ Departures:
 - **`migrate-tenant` gives a message's place in its queue anew**, in the
   same order, as it does every serial column, since the target's own
   sequence has gone its own way.
+
+### 4.4 For an AI, and 4.5 for an adapter
+
+Built together, since `conversation.send` and `conversation.history` share
+the way a run reaches its conversations. The four MCP tools
+(`conversation_send`, `conversation_read`, `conversation_list`,
+`conversation_stop`); `conversation.history` and `conversation.send` in the
+built-in agent; the conversation's `metadata` (and `title`) handed to every
+run it starts and to the reply workflow, as `data.conversation`; and
+`replyEvents`, the kinds the reply workflow is started for. A forward
+migration adds `reply_events`.
+
+Departures:
+
+- **A run reaches its conversations through the control host.**
+  `conversation.history` and `conversation.send` are two calls of the
+  workflow API's control family (`POST /v1/conversations/history`,
+  `POST /v1/conversations/send`), served by the engine's `NativeControl`,
+  as starting a child run is. The plan did not say how. This is the one
+  path a run has to the engine that works the same in the engine's process
+  and on an executor (`e2e/test_two_roles.sh` checks it there), that the
+  host and not the guest says who is calling, and that needs no WIT change.
+- **History is the calling run's conversation, found by the host.** A run
+  names none, so it cannot read another's.
+- **History is `{role, text, data, sender, at}`**, `role` being `user` or
+  `assistant`: a transcript a model takes as it is. The plan said "the last
+  messages and replies".
+- **The AI Agent step's memory is not keyed by the conversation by
+  itself.** The plan had the step use the conversation's id where its
+  author mapped none. That is a change to the workflow DSL (the memory
+  config's `conversationId` is required today), and so to its validation,
+  the compiler, the validation package the console builds against, and the
+  console's editor. Every run a conversation starts already has
+  `data.conversation.id`, so mapping memory's `conversationId` to it is one
+  reference; that is what is documented. Making it the default is left for
+  a change of the DSL of its own.
+- **Not tested with a model.** The plan's test of an AI Agent remembering
+  the first turn in the third needs a model, which the tests have none of.
+  What is tested is what such a step is given: `conversation.history` from
+  a real run, in one process and on an executor.
+- **A message `send` is given no id for gets a new one**, so a step that is
+  retried sends it again. The agent cannot make one that is the same on a
+  retry: a component is not told its step or its call. An adapter has the
+  platform's own id for each message and gives it. The MCP tool does the
+  same for a client that gives none.
+- **`metadata` is handed to every run the conversation starts**, not only
+  to the reply workflow: the answering workflow may want the chat's
+  language or locale as much as the outbound one does.
+- **The stand-in adapter's outbound half records what it is given and
+  sends nowhere.** The plan had it send to a fake platform. Sending is an
+  HTTP agent's work with a connection, and is the platform's adapter's to
+  test; what the conversation owes the adapter (each reply once, in order,
+  with the metadata) is what the stand-in checks.
