@@ -193,3 +193,63 @@ async fn a_singleton_job_runs_on_one_engine_and_moves_when_that_one_stops() {
         .await
         .unwrap();
 }
+
+/// A run waiting in process on one engine is shown so by every other, and
+/// no longer once that engine is gone (docs/multiple-engines-plan.md, E7).
+#[tokio::test]
+async fn a_wait_in_process_on_one_engine_is_seen_by_every_other() {
+    use runtara_environment::in_process_waits;
+    let pool = runtime_pool().await;
+    let (here, there) = (engine("r1"), engine("r1"));
+    members::join(&pool, &here).await.unwrap();
+    members::join(&pool, &there).await.unwrap();
+    let stop = std::sync::Arc::new(tokio::sync::Notify::new());
+    let sharing = tokio::spawn(in_process_waits::share(
+        pool.clone(),
+        here.id.clone(),
+        stop.clone(),
+    ));
+    let soon = || tokio::time::sleep(in_process_waits::READ_EVERY * 2);
+
+    // A wait here is written for the others.
+    let mine = format!("run-{}", uuid::Uuid::new_v4().simple());
+    let wait = in_process_waits::enter(&mine);
+    soon().await;
+    let owner: Option<String> =
+        sqlx::query_scalar("SELECT owner FROM in_process_waits WHERE instance_id = $1")
+            .bind(&mine)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+    assert_eq!(owner.as_deref(), Some(here.id.as_str()));
+    drop(wait);
+    assert!(!in_process_waits::is_waiting(&mine), "ended here at once");
+    soon().await;
+    let left: Option<String> =
+        sqlx::query_scalar("SELECT owner FROM in_process_waits WHERE instance_id = $1")
+            .bind(&mine)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+    assert_eq!(left, None);
+
+    // Another engine's wait is seen here.
+    let theirs = format!("run-{}", uuid::Uuid::new_v4().simple());
+    sqlx::query("INSERT INTO in_process_waits (instance_id, owner) VALUES ($1, $2)")
+        .bind(&theirs)
+        .bind(&there.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    soon().await;
+    assert!(in_process_waits::is_waiting(&theirs));
+
+    // That engine is gone: its waits are no run's.
+    members::leave(&pool, &there.id).await.unwrap();
+    soon().await;
+    assert!(!in_process_waits::is_waiting(&theirs));
+
+    stop.notify_one();
+    sharing.await.unwrap();
+    members::leave(&pool, &here.id).await.unwrap();
+}

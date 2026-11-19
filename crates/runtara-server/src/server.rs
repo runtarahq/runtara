@@ -3502,6 +3502,30 @@ async fn start_as_platform(
             &shutdown_coordinator,
             workflow_agents::keep_in_sync(pool.clone(), shutdown_signal.clone()),
         );
+        // A run waiting in process on this engine is shown so by every
+        // other, and theirs by this one.
+        let stop_sharing = Arc::new(tokio::sync::Notify::new());
+        let sharing_waits = runtara_environment::in_process_waits::share(
+            runtime_pool.clone(),
+            me.id.clone(),
+            stop_sharing.clone(),
+        );
+        let waits_shutdown = shutdown_signal.clone();
+        workers.intake(
+            crate::roles::Role::Engine,
+            "in-process waits",
+            &shutdown_coordinator,
+            async move {
+                tokio::pin!(sharing_waits);
+                tokio::select! {
+                    _ = &mut sharing_waits => {}
+                    _ = waits_shutdown.wait() => {
+                        stop_sharing.notify_one();
+                        sharing_waits.await;
+                    }
+                }
+            },
+        );
         let members_shutdown = shutdown_signal.clone();
         workers.intake(
             crate::roles::Role::Engine,
