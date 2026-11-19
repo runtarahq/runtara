@@ -169,6 +169,8 @@ use runtime_client::RuntimeClient;
         api::handlers::conversations::delete_conversation,
         api::handlers::conversations::send_message,
         api::handlers::conversations::conversation_events,
+        api::handlers::conversations::list_conversations,
+        api::handlers::conversations::stop_conversation,
         // API Key endpoints
         api::handlers::api_keys::create_api_key,
         api::handlers::api_keys::list_api_keys,
@@ -295,6 +297,12 @@ use runtime_client::RuntimeClient;
             api::services::conversations::ConversationState,
             api::services::conversations::ConversationEvent,
             api::services::conversations::ConversationEventKind,
+            api::services::conversations::ConversationList,
+            api::services::conversations::ConversationSummary,
+            api::services::conversations::LastSaid,
+            api::services::conversations::Stopped,
+            api::services::conversations::TurnSoFar,
+            api::handlers::conversations::StopConversation,
             api::services::conversations::RunStarted,
             api::services::conversations::Reply,
             api::services::conversations::TextFormat,
@@ -1027,6 +1035,14 @@ fn api_app(parts: ApiParts) -> Router {
             post(api::handlers::workflows::execute_workflow_handler),
         )
         // A conversation with a workflow, found by the client's key.
+        .route(
+            "/api/runtime/workflows/{id}/conversations",
+            get(api::handlers::conversations::list_conversations),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/conversations/{key}/stop",
+            post(api::handlers::conversations::stop_conversation),
+        )
         .route(
             "/api/runtime/workflows/{id}/conversations/{key}",
             put(api::handlers::conversations::open_conversation)
@@ -3880,6 +3896,7 @@ async fn start_as_platform(
                 shutdown_signal.clone(),
                 crate::api::services::conversations::LOOKED_AT_EVERY,
                 told,
+                crate::api::services::conversations::Keeping::from_env(),
             ),
         );
     }

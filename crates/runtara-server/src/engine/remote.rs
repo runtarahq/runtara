@@ -964,6 +964,36 @@ impl Engine for RemoteEngine {
         .await
     }
 
+    async fn conversations_of(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        list: ListConversations,
+    ) -> ConversationResult<ConversationList> {
+        self.ask(wire::ConversationsOf {
+            tenant_id: tenant_id.to_owned(),
+            workflow_id: workflow_id.to_owned(),
+            list,
+        })
+        .await
+    }
+
+    async fn stop_conversation(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        key: &str,
+        clear_queue: bool,
+    ) -> ConversationResult<Stopped> {
+        self.ask(wire::StopConversation {
+            tenant_id: tenant_id.to_owned(),
+            workflow_id: workflow_id.to_owned(),
+            key: key.to_owned(),
+            clear_queue,
+        })
+        .await
+    }
+
     async fn delete_conversation(
         &self,
         tenant_id: &str,

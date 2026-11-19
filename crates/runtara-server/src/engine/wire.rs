@@ -527,6 +527,23 @@ operations! {
         .conversation_events(&op.tenant_id, &op.workflow_id, &op.key, op.read)
         .await;
 
+    ConversationsOf { tenant_id: String, workflow_id: String, list: ListConversations }
+        -> ConversationResult<ConversationList>,
+    needs [InvocationHistoryRead],
+    |engine, op| for Some(&op.tenant_id) =>
+        engine.conversations_of(&op.tenant_id, &op.workflow_id, op.list).await;
+
+    StopConversation {
+        tenant_id: String,
+        workflow_id: String,
+        key: String,
+        clear_queue: bool,
+    } -> ConversationResult<Stopped>,
+    needs [WorkflowExecute],
+    |engine, op| for Some(&op.tenant_id) => engine
+        .stop_conversation(&op.tenant_id, &op.workflow_id, &op.key, op.clear_queue)
+        .await;
+
     DeleteConversation { tenant_id: String, workflow_id: String, key: String }
         -> ConversationResult<bool>,
     needs [WorkflowExecute],

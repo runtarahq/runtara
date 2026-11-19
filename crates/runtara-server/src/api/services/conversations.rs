@@ -52,6 +52,9 @@ pub const MAX_SEND_WAIT: Duration = Duration::from_secs(120);
 /// conversation gives it up.
 const START_ALLOWED: Duration = Duration::from_secs(10 * 60);
 
+/// Why a message waiting its turn fails when the queue is cleared.
+const STOPPED: &str = "the conversation was stopped before this message's turn";
+
 /// Why a message that names what it answers fails when that is not open.
 const STALE: &str = "what this message answers is no longer waited for";
 
@@ -162,7 +165,7 @@ pub struct TurnSoFar {
 }
 
 /// What is asked of a conversation's events.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadEvents {
     /// Those after this one.
     pub after: i64,
@@ -170,7 +173,90 @@ pub struct ReadEvents {
     /// How long to wait for one, in milliseconds, when there is none.
     #[serde(default)]
     pub wait_ms: u32,
+    /// Those before this one, newest first: for reading back from the end.
+    /// Nothing is waited for.
+    #[serde(default)]
+    pub before: Option<i64>,
+    /// Newest first, from the end or from `before`.
+    #[serde(default)]
+    pub newest_first: bool,
+    /// Only these kinds. Empty for all.
+    #[serde(default)]
+    pub kinds: Vec<String>,
 }
+
+/// One of a workflow's conversations, as a list shows it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationSummary {
+    pub id: Uuid,
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+    /// Whether a run carries it now.
+    pub active: bool,
+    /// Whether that run waits to be told something.
+    pub waiting: bool,
+    /// The last thing said in it, by either side, shortened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_said: Option<LastSaid>,
+    pub created_at: DateTime<Utc>,
+    /// When it was last active.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// The last thing said in a conversation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LastSaid {
+    /// `message` or `reply`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    pub at: DateTime<Utc>,
+}
+
+/// A page of a workflow's conversations, most recently active first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationList {
+    pub conversations: Vec<ConversationSummary>,
+    /// Ask again with this as `cursor` for the next page. Absent on the
+    /// last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+}
+
+/// What is asked of a workflow's conversations.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListConversations {
+    /// Only those whose key begins with this.
+    #[serde(default)]
+    pub prefix: Option<String>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default)]
+    pub limit: u32,
+}
+
+/// What stopping a conversation did.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Stopped {
+    /// The run that was asked to stop, if one carried the conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
+    /// The messages that were waiting their turn and now never have it.
+    pub cleared: i64,
+}
+
+/// The most a client keeps about a conversation.
+pub const MAX_METADATA_BYTES: usize = 4 * 1024;
+const MAX_TITLE: usize = 255;
+/// How much of the last thing said a list shows.
+const LAST_SAID_CHARS: i32 = 200;
 
 /// The longest one ask waits for an event. A reader asks again.
 pub const MAX_WAIT: Duration = Duration::from_secs(25);
@@ -259,6 +345,18 @@ pub struct OpenConversation {
     )]
     #[schema(value_type = Option<String>)]
     pub reply_workflow_id: Option<Option<String>>,
+    /// What a person calls it. Left out, it is kept; `null` removes it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    #[schema(value_type = Option<String>)]
+    pub title: Option<Option<String>>,
+    /// What the client keeps about it: an object of its own, up to 4 KB.
+    /// Left out, it is kept; given, it replaces what was there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
 }
 
 /// Tells a field given as `null` from one left out.
@@ -275,6 +373,11 @@ pub struct ConversationState {
     pub key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_workflow_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// What the client keeps about it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
     /// The run that carries it now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance_id: Option<String>,
@@ -411,7 +514,7 @@ pub struct MessageFailed {
 #[serde(rename_all = "camelCase")]
 pub struct RunEnded {
     pub instance_id: String,
-    /// `completed` or `failed`.
+    /// `completed`, `failed` or `stopped`.
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -501,6 +604,8 @@ pub enum Run {
     Active,
     Ended {
         completed: bool,
+        /// It was stopped, and neither completed nor failed.
+        stopped: bool,
         output: Option<Value>,
         error: Option<String>,
     },
@@ -555,6 +660,8 @@ pub trait Runs: Send + Sync {
     /// The events the run left, in order, from the `after`th.
     async fn said(&self, tenant: &str, instance: &str, after: u32) -> Result<Vec<Said>, String>;
     async fn waits_for(&self, tenant: &str, instance: &str) -> Result<Vec<Wait>, String>;
+    /// Asks the run to stop. It ends when it has, as any stopped run does.
+    async fn stop(&self, tenant: &str, instance: &str) -> Result<(), String>;
     /// Answers `request`, once for `operation`.
     async fn answer(
         &self,
@@ -589,13 +696,15 @@ struct Row_ {
     next_seq: i64,
     /// The message the conversation's events are for now.
     turn: Option<String>,
+    title: Option<String>,
+    metadata: Option<Value>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
 
 const COLUMNS: &str = "conversation_id, tenant_id, workflow_id, key, reply_workflow_id, \
-    instance_id, run_started_at, events_read, run_replied, waiting, next_seq, turn, \
-    created_at, updated_at";
+    instance_id, run_started_at, events_read, run_replied, waiting, next_seq, turn, title, \
+    metadata, created_at, updated_at";
 
 fn read(row: &sqlx::postgres::PgRow) -> Result<Row_, sqlx::Error> {
     Ok(Row_ {
@@ -611,6 +720,8 @@ fn read(row: &sqlx::postgres::PgRow) -> Result<Row_, sqlx::Error> {
         waiting: row.try_get("waiting")?,
         next_seq: row.try_get("next_seq")?,
         turn: row.try_get("turn")?,
+        title: row.try_get("title")?,
+        metadata: row.try_get("metadata")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -657,22 +768,46 @@ impl Conversations {
         if let Some(Some(route)) = &open.reply_workflow_id {
             checked("the reply workflow", route, MAX_KEY)?;
         }
-        let (sets, route) = match open.reply_workflow_id {
+        if let Some(Some(title)) = &open.title {
+            checked("the title", title, MAX_TITLE)?;
+        }
+        if let Some(metadata) = &open.metadata {
+            if !metadata.is_object() {
+                return Err(ConversationError::Invalid("metadata is an object".into()));
+            }
+            if metadata.to_string().len() > MAX_METADATA_BYTES {
+                return Err(ConversationError::Invalid(format!(
+                    "metadata is over {MAX_METADATA_BYTES} bytes"
+                )));
+            }
+        }
+        let (sets_route, route) = match open.reply_workflow_id {
             Some(route) => (true, route),
             None => (false, None),
         };
+        let (sets_title, title) = match open.title {
+            Some(title) => (true, title),
+            None => (false, None),
+        };
+        let changes = sets_route || sets_title || open.metadata.is_some();
         sqlx::query(
-            "INSERT INTO conversations (tenant_id, workflow_id, key, reply_workflow_id) \
-             VALUES ($1, $2, $3, $5) \
+            "INSERT INTO conversations (tenant_id, workflow_id, key, reply_workflow_id, title, metadata) \
+             VALUES ($1, $2, $3, $5, $7, $8) \
              ON CONFLICT (tenant_id, workflow_id, key) DO UPDATE SET \
                  reply_workflow_id = CASE WHEN $4 THEN $5 ELSE conversations.reply_workflow_id END, \
-                 updated_at = CASE WHEN $4 THEN now() ELSE conversations.updated_at END",
+                 title = CASE WHEN $6 THEN $7 ELSE conversations.title END, \
+                 metadata = COALESCE($8, conversations.metadata), \
+                 updated_at = CASE WHEN $9 THEN now() ELSE conversations.updated_at END",
         )
         .bind(tenant)
         .bind(workflow)
         .bind(key)
-        .bind(sets)
+        .bind(sets_route)
         .bind(route)
+        .bind(sets_title)
+        .bind(title)
+        .bind(open.metadata)
+        .bind(changes)
         .execute(&self.pool)
         .await
         .map_err(storage)?;
@@ -714,6 +849,8 @@ impl Conversations {
             workflow_id: row.workflow_id,
             key: row.key,
             reply_workflow_id: row.reply_workflow_id,
+            title: row.title,
+            metadata: row.metadata,
             instance_id: row.instance_id,
             waiting_for: row.waiting,
             queued,
@@ -820,17 +957,41 @@ impl Conversations {
         after: i64,
         limit: u32,
     ) -> ConversationResult<Vec<ConversationEvent>> {
+        let read = ReadEvents {
+            after,
+            limit,
+            ..ReadEvents::default()
+        };
+        self.events_of(tenant, workflow, key, &read).await
+    }
+
+    /// The events `read` asks for, as they stand: after `after` in order,
+    /// or newest first from the end or from `before`, of the kinds it names.
+    async fn events_of(
+        &self,
+        tenant: &str,
+        workflow: &str,
+        key: &str,
+        read: &ReadEvents,
+    ) -> ConversationResult<Vec<ConversationEvent>> {
         let row = self.find(tenant, workflow, key).await?;
-        let rows = sqlx::query(
+        let back = read.newest_first || read.before.is_some();
+        let sql = format!(
             "SELECT seq, kind, body, turn, created_at FROM conversation_events \
-             WHERE conversation_id = $1 AND seq > $2 ORDER BY seq LIMIT $3",
-        )
-        .bind(row.id)
-        .bind(after)
-        .bind(i64::from(limit.clamp(1, 500)))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(storage)?;
+             WHERE conversation_id = $1 AND seq > $2 AND ($3::bigint IS NULL OR seq < $3) \
+               AND (cardinality($4::text[]) = 0 OR kind = ANY($4)) \
+             ORDER BY seq {} LIMIT $5",
+            if back { "DESC" } else { "ASC" }
+        );
+        let rows = sqlx::query(&sql)
+            .bind(row.id)
+            .bind(read.after)
+            .bind(read.before)
+            .bind(&read.kinds)
+            .bind(i64::from(read.limit.clamp(1, 500)))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage)?;
         let mut events = Vec::with_capacity(rows.len());
         for row in &rows {
             let seq: i64 = row.try_get("seq").map_err(storage)?;
@@ -864,10 +1025,9 @@ impl Conversations {
         read: ReadEvents,
     ) -> ConversationResult<Vec<ConversationEvent>> {
         let wait = Duration::from_millis(u64::from(read.wait_ms)).min(MAX_WAIT);
-        if wait.is_zero() {
-            return self
-                .events(tenant, workflow, key, read.after, read.limit)
-                .await;
+        // What is read back is there already: nothing is waited for.
+        if wait.is_zero() || read.newest_first || read.before.is_some() {
+            return self.events_of(tenant, workflow, key, &read).await;
         }
         let conversation = self.find(tenant, workflow, key).await?.id;
         let until = tokio::time::Instant::now() + wait;
@@ -879,9 +1039,7 @@ impl Conversations {
                 let woken = waiting.notified();
                 tokio::pin!(woken);
                 woken.as_mut().enable();
-                let events = self
-                    .events(tenant, workflow, key, read.after, read.limit)
-                    .await?;
+                let events = self.events_of(tenant, workflow, key, &read).await?;
                 if !events.is_empty() {
                     return Ok(events);
                 }
@@ -935,6 +1093,7 @@ impl Conversations {
                 after,
                 limit: EVENTS_PAGE,
                 wait_ms: left.min(MAX_WAIT).as_millis() as u32,
+                ..ReadEvents::default()
             };
             let events = self.read(tenant, workflow, key, read).await?;
             if events.is_empty() && left.is_zero() {
@@ -971,6 +1130,208 @@ impl Conversations {
     /// process knows it to carry one.
     pub fn carried_by(&self, instance: &str) -> Option<(Uuid, String)> {
         self.wakes.conversation_of(instance)
+    }
+
+    /// A workflow's conversations, most recently active first.
+    pub async fn list(
+        &self,
+        tenant: &str,
+        workflow: &str,
+        list: ListConversations,
+    ) -> ConversationResult<ConversationList> {
+        checked("the workflow", workflow, MAX_KEY)?;
+        let limit = i64::from(match list.limit {
+            0 => 50,
+            limit => limit.min(200),
+        });
+        // A cursor is where the last page ended: when, and which.
+        let from = match list.cursor.as_deref() {
+            None => None,
+            Some(cursor) => Some(
+                cursor
+                    .split_once('_')
+                    .and_then(|(at, id)| {
+                        Some((
+                            DateTime::<Utc>::from_timestamp_micros(at.parse().ok()?)?,
+                            id.parse::<Uuid>().ok()?,
+                        ))
+                    })
+                    .ok_or_else(|| ConversationError::Invalid("not a cursor".into()))?,
+            ),
+        };
+        // `%` and `_` in a prefix are themselves, not wildcards.
+        let prefix = list
+            .prefix
+            .filter(|prefix| !prefix.is_empty())
+            .map(|prefix| {
+                format!(
+                    "{}%",
+                    prefix
+                        .replace('\\', "\\\\")
+                        .replace('%', "\\%")
+                        .replace('_', "\\_")
+                )
+            });
+        let rows = sqlx::query(
+            "SELECT c.conversation_id, c.key, c.title, c.metadata, c.instance_id, c.waiting, \
+                    c.created_at, c.updated_at, said.kind, said.text, said.created_at AS said_at \
+             FROM conversations c \
+             LEFT JOIN LATERAL ( \
+                 SELECT e.kind, left(e.body->>'text', $6) AS text, e.created_at \
+                 FROM conversation_events e \
+                 WHERE e.conversation_id = c.conversation_id AND e.kind IN ('message', 'reply') \
+                 ORDER BY e.seq DESC LIMIT 1) said ON true \
+             WHERE c.tenant_id = $1 AND c.workflow_id = $2 \
+               AND ($3::text IS NULL OR c.key LIKE $3) \
+               AND ($4::timestamptz IS NULL OR (c.updated_at, c.conversation_id) < ($4, $5)) \
+             ORDER BY c.updated_at DESC, c.conversation_id DESC LIMIT $7",
+        )
+        .bind(tenant)
+        .bind(workflow)
+        .bind(prefix)
+        .bind(from.map(|(at, _)| at))
+        .bind(from.map(|(_, id)| id))
+        .bind(LAST_SAID_CHARS)
+        .bind(limit + 1)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        let mut conversations = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let said_at: Option<DateTime<Utc>> = row.try_get("said_at").map_err(storage)?;
+            let last_said = match said_at {
+                None => None,
+                Some(at) => Some(LastSaid {
+                    kind: row.try_get("kind").map_err(storage)?,
+                    text: row.try_get("text").map_err(storage)?,
+                    at,
+                }),
+            };
+            let instance: Option<String> = row.try_get("instance_id").map_err(storage)?;
+            let waiting: Option<Value> = row.try_get("waiting").map_err(storage)?;
+            conversations.push(ConversationSummary {
+                id: row.try_get("conversation_id").map_err(storage)?,
+                key: row.try_get("key").map_err(storage)?,
+                title: row.try_get("title").map_err(storage)?,
+                metadata: row.try_get("metadata").map_err(storage)?,
+                active: instance.is_some(),
+                waiting: waiting.is_some(),
+                last_said,
+                created_at: row.try_get("created_at").map_err(storage)?,
+                updated_at: row.try_get("updated_at").map_err(storage)?,
+            });
+        }
+        let more = conversations.len() as i64 > limit;
+        conversations.truncate(limit as usize);
+        let next = conversations
+            .last()
+            .filter(|_| more)
+            .map(|last| format!("{}_{}", last.updated_at.timestamp_micros(), last.id));
+        Ok(ConversationList {
+            conversations,
+            next,
+        })
+    }
+
+    /// Stops the run that carries the conversation, as stopping an instance
+    /// does: it ends when it has, and the conversation says so then. The
+    /// messages waiting their turn keep it, and the next starts the next
+    /// run, unless `clear_queue`, which fails each of them now.
+    pub async fn stop(
+        &self,
+        tenant: &str,
+        workflow: &str,
+        key: &str,
+        clear_queue: bool,
+    ) -> ConversationResult<Stopped> {
+        let conversation = self.find(tenant, workflow, key).await?.id;
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let row = sqlx::query(&format!(
+            "SELECT {COLUMNS} FROM conversations WHERE conversation_id = $1 FOR UPDATE"
+        ))
+        .bind(conversation)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?
+        .ok_or(ConversationError::NotFound)?;
+        let mut at = Carried {
+            row: read(&row).map_err(storage)?,
+            tx,
+        };
+        let mut cleared = 0;
+        if clear_queue {
+            while let Some((message, _)) = at.next_message().await? {
+                at.fail(&message, None, STOPPED).await?;
+                cleared += 1;
+            }
+        }
+        let instance = at.row.instance_id.clone();
+        at.save().await?;
+        at.tx.commit().await.map_err(storage)?;
+        if cleared > 0 {
+            self.wakes.said(conversation);
+        }
+        if let Some(instance) = &instance {
+            self.runs
+                .stop(tenant, instance)
+                .await
+                .map_err(ConversationError::Storage)?;
+        }
+        Ok(Stopped {
+            instance_id: instance,
+            cleared,
+        })
+    }
+
+    /// Removes what is past keeping, across tenants: a conversation nothing
+    /// has touched for `kept` and that nothing carries, one whose workflow
+    /// is gone, and a run's working (`activity`) older than `activity_kept`.
+    /// `None` keeps for ever. Returns how many conversations and how many
+    /// events were removed.
+    pub async fn sweep(
+        &self,
+        kept: Option<Duration>,
+        activity_kept: Option<Duration>,
+    ) -> ConversationResult<(u64, u64)> {
+        let seconds = |kept: Duration| kept.as_secs() as f64;
+        let mut conversations = sqlx::query(
+            "DELETE FROM conversations c WHERE c.instance_id IS NULL AND EXISTS ( \
+                 SELECT 1 FROM workflows w \
+                 WHERE w.tenant_id = c.tenant_id AND w.workflow_id = c.workflow_id \
+                   AND w.deleted_at IS NOT NULL)",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?
+        .rows_affected();
+        if let Some(kept) = kept {
+            conversations += sqlx::query(
+                "DELETE FROM conversations c \
+                 WHERE c.instance_id IS NULL \
+                   AND c.updated_at < now() - make_interval(secs => $1) \
+                   AND NOT EXISTS (SELECT 1 FROM conversation_messages m \
+                                   WHERE m.conversation_id = c.conversation_id \
+                                     AND m.state = 'queued')",
+            )
+            .bind(seconds(kept))
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?
+            .rows_affected();
+        }
+        let mut events = 0;
+        if let Some(kept) = activity_kept {
+            events = sqlx::query(
+                "DELETE FROM conversation_events \
+                 WHERE kind = 'activity' AND created_at < now() - make_interval(secs => $1)",
+            )
+            .bind(seconds(kept))
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?
+            .rows_affected();
+        }
+        Ok((conversations, events))
     }
 
     /// Deletes a conversation and what was said in it. A run that carries it
@@ -1090,7 +1451,7 @@ impl Conversations {
             if !overdue {
                 return Ok(false);
             }
-            at.ended(&instance, false, Some("the run did not start".into()))
+            at.ended(&instance, "failed", Some("the run did not start".into()))
                 .await?;
             return Ok(true);
         }
@@ -1145,6 +1506,7 @@ impl Conversations {
 
         if let Run::Ended {
             completed,
+            stopped,
             output,
             error,
         } = run
@@ -1161,7 +1523,12 @@ impl Conversations {
                 }))
                 .await?;
             }
-            at.ended(&instance, completed, error).await?;
+            let status = match (completed, stopped) {
+                (true, _) => "completed",
+                (false, true) => "stopped",
+                (false, false) => "failed",
+            };
+            at.ended(&instance, status, error).await?;
             return Ok(true);
         }
 
@@ -1441,12 +1808,12 @@ impl Carried {
     async fn ended(
         &mut self,
         instance: &str,
-        completed: bool,
+        status: &str,
         error: Option<String>,
     ) -> ConversationResult<()> {
         self.say(ConversationEventKind::RunEnded(RunEnded {
             instance_id: instance.to_owned(),
-            status: if completed { "completed" } else { "failed" }.to_owned(),
+            status: status.to_owned(),
             error,
         }))
         .await?;
@@ -1569,6 +1936,42 @@ pub fn answer_in(output: Option<&Value>) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// How long what was said is kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Keeping {
+    /// A conversation, from when it was last active. `None` for ever.
+    pub conversations: Option<Duration>,
+    /// A run's working (`activity` events). `None` for ever.
+    pub activity: Option<Duration>,
+}
+
+impl Keeping {
+    /// For ever: nothing is removed for its age.
+    pub const FOR_EVER: Self = Self {
+        conversations: None,
+        activity: None,
+    };
+
+    /// As the deployment set it: `RUNTARA_CONVERSATION_RETENTION_DAYS` (90)
+    /// and `RUNTARA_CONVERSATION_ACTIVITY_DAYS` (7), each `0` for ever.
+    pub fn from_env() -> Self {
+        let days = |name: &str, unless_set: u64| {
+            let days = std::env::var(name)
+                .ok()
+                .and_then(|days| days.trim().parse::<u64>().ok())
+                .unwrap_or(unless_set);
+            (days > 0).then(|| Duration::from_secs(days * 24 * 60 * 60))
+        };
+        Self {
+            conversations: days("RUNTARA_CONVERSATION_RETENTION_DAYS", 90),
+            activity: days("RUNTARA_CONVERSATION_ACTIVITY_DAYS", 7),
+        }
+    }
+}
+
+/// How often what is past keeping is removed.
+const SWEPT_EVERY: Duration = Duration::from_secs(60 * 60);
+
 /// How often every conversation that has something to do is looked at,
 /// whether or not anything said so: what catches a notice that was missed.
 pub const LOOKED_AT_EVERY: Duration = Duration::from_secs(5);
@@ -1585,10 +1988,25 @@ pub async fn carry(
     shutdown: crate::shutdown::ShutdownSignal,
     every: Duration,
     mut told: tokio::sync::mpsc::UnboundedReceiver<String>,
+    keeping: Keeping,
 ) {
     use runtara_store_postgres::tenant_scope::{scoped, system};
     let mut telling = true;
+    let mut swept: Option<tokio::time::Instant> = None;
     loop {
+        // What is past keeping goes, now and then.
+        if swept.is_none_or(|swept| swept.elapsed() >= SWEPT_EVERY) {
+            swept = Some(tokio::time::Instant::now());
+            match system(conversations.sweep(keeping.conversations, keeping.activity)).await {
+                Ok((0, 0)) => {}
+                Ok((gone, events)) => tracing::info!(
+                    conversations = gone,
+                    activity_events = events,
+                    "Removed conversations past keeping"
+                ),
+                Err(error) => tracing::warn!(%error, "Conversations past keeping were not removed"),
+            }
+        }
         match system(conversations.unsettled()).await {
             Ok(unsettled) => {
                 for (conversation, tenant) in unsettled {
@@ -1745,6 +2163,7 @@ impl Runs for EngineRuns {
         match scoped(tenant, runtime.get_instance_info(instance)).await {
             Ok(info) if info.status.is_terminal() => Ok(Run::Ended {
                 completed: info.status == InstanceStatus::Completed,
+                stopped: info.status == InstanceStatus::Cancelled,
                 output: info.output,
                 error: info.error,
             }),
@@ -1801,6 +2220,14 @@ impl Runs for EngineRuns {
                 response_schema: input.response_schema,
             })
             .collect())
+    }
+
+    async fn stop(&self, tenant: &str, instance: &str) -> Result<(), String> {
+        self.executions
+            .stop(tenant, instance)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     async fn answer(
