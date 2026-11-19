@@ -181,6 +181,7 @@ async fn a_streamed_answer_reaches_this_process_a_piece_at_a_time_through_a_seal
     let sealed = SealedCredentials::remote(client, allowances(&host, port));
     measure(&sealed, &host, port, served).await;
     let _ = seal.kill();
+    let _ = seal.wait();
 }
 
 /// Sends a request through `sealed` to the stand-in, and holds the answer to
