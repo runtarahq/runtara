@@ -118,6 +118,8 @@ pub(crate) fn tool_authz(tool: &str) -> ToolAuthz {
         | "resume_execution"
         | "submit_signal_response"
         | "submit_action_response"
+        | "conversation_send"
+        | "conversation_stop"
         | "test_capability" => ToolAuthz::Needs(WorkflowExecute),
 
         // ── Invocation history reads (executions, steps, pending signals) ───────────────
@@ -128,6 +130,8 @@ pub(crate) fn tool_authz(tool: &str) -> ToolAuthz {
         | "inspect_step"
         | "why_execution_failed"
         | "trace_reference"
+        | "conversation_read"
+        | "conversation_list"
         | "list_pending_signals" => ToolAuthz::Needs(InvocationHistoryRead),
 
         // ── Object model / database ─────────────────────────────────────────────────────
@@ -200,6 +204,10 @@ mod tests {
         "bulk_update_instances",
         "compile_workflow",
         "connect_steps",
+        "conversation_list",
+        "conversation_read",
+        "conversation_send",
+        "conversation_stop",
         "create_object_instance",
         "create_object_schema",
         "create_trigger",
