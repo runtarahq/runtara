@@ -102,12 +102,48 @@ rejected proposal is unpublished.
    tenant may use any of its connections, which is why the policy check must
    refuse `mcp` connections by name. See `docs/workflow-authoring-gaps.md`.
 
-## Order
+Found while building it, and fixed:
 
-1. Unpublish.
-2. (Parking is read from publishing.)
-3. The draft tools, with the fixed `workflow_id`.
-4. The builder: draft, check, test, proposal, version pin; model and
-   connection as inputs.
-5. Gap 3 in `docs/workflow-authoring-gaps.md`.
-6. Tested through the chat: a two-step tool, a refused draft, "not possible".
+4. **seal cut a slow answer at 60 seconds.** In the server, seal now waits
+   as long as the host lets any outbound request wait (120 s); a seal of its
+   own is configured the same way (`docs/seal.md`).
+5. **OpenAI refused a strict schema with an open object.** An AI Agent's
+   output schema is sent strict only when OpenAI accepts it as such; it is
+   still checked when the answer comes back.
+
+## How it was built
+
+- The model and its connection are the builder's configuration (set when
+  the builder is saved), not an input of each run: a step's connection is
+  fixed in its graph.
+- The model is shown the agents a tool may use (one line per capability,
+  with the connections that fit) instead of listing them itself: a full
+  `list_agents` answer filled its context. Tools built earlier are among
+  them only once a chat uses them, that is, once approved.
+- `edit_draft` answers with the draft as it now is (inputs, steps, edges),
+  after an edit and after a refused one, so the model knows what exists.
+- A run that fails while drafting, compiling or publishing unpublishes and
+  deletes its draft.
+- The builder's run may take an hour (`executionTimeoutSeconds`), and has
+  1 GiB: a drafting conversation grows with every tool result.
+- `request_tool` waits up to about 105 seconds for a draft; one still
+  drafting is looked at again by its `proposal_id`.
+
+## Tested
+
+Through the chat, with `gpt-5.4` drafting:
+
+- "a tool that takes a web page URL and gives back the page's title": two
+  steps (`http`/`http-request`, then `text`/`regex-match`), tried on
+  example.com ("Example Domain"), proposed with its approve code, refused
+  when the chat model tried to approve it, approved with the code, and used
+  from the next message.
+- "send a fax": not possible, with the reason; the draft deleted.
+- a tool that must use a Delay step: not possible (the model keeps to the
+  rules).
+- The policy check itself, on a draft with a Delay step, an `mcp` agent on
+  an MCP connection and no `maxRetries`: all four refused, nothing run.
+
+A small local model could not draft reliably: it invented agents and lost
+track of the draft. The builder works with any model the connection serves;
+how well it drafts is the model's.
