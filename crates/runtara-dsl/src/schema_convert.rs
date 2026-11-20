@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::{SchemaField, SchemaFieldType};
 
 /// Convert a single `SchemaField` to a JSON Schema property object.
-fn schema_field_to_json_schema(field: &SchemaField) -> Value {
+pub fn schema_field_to_json_schema(field: &SchemaField) -> Value {
     let mut prop = serde_json::Map::new();
 
     let type_str = match field.field_type {

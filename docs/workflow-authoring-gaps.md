@@ -190,7 +190,10 @@ so set the input schema first.
 tool schema; see
 [ai-agent-tool-schemas.md](ai-agent-tool-schemas.md#to-check-first).
 
-Fix: fill `schema` from the field's properties when publishing.
+Fixed: a field with structure below it (an object's properties, an array's
+item properties) carries its whole JSON Schema in `schema`, from the same
+converter an AI Agent's `outputSchema` uses, and a model calling the agent as a
+tool is shown it. Published agents get it when they are next published.
 
 ### 8. A deleted workflow keeps its slug
 
