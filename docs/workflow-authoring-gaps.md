@@ -237,7 +237,10 @@ Fixed: `from_output` may be omitted (in `set_mapping` and in
 ### 11. Not tested
 
 An AI Agent step with both `outputSchema` and tools (a `chat-turn` with
-structured output). `tool-builder` uses two steps instead.
+structured output). Tested since: it works, the model calling its tools and then
+answering to the schema, and the step's response is the parsed object
+(`direct_wasm_execute_ai_agent_tool_loop_answers_to_its_output_schema`).
+`tool-builder` could use one step instead of two.
 
 ## What `tool-builder` cannot do yet
 

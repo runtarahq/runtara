@@ -4087,6 +4087,46 @@ fn llm_tool_call(tool_name: &str, arguments: &str) -> Value {
     })
 }
 
+/// An AI Agent with both tools and an output schema: the model calls a tool,
+/// then answers to the schema, and the step's response is the parsed object,
+/// as a single-shot step's is (docs/workflow-authoring-gaps.md, 11).
+#[test]
+fn direct_wasm_execute_ai_agent_tool_loop_answers_to_its_output_schema() {
+    let components_dir = direct_e2e_components_dir();
+    let mut graph: Value = serde_json::from_str(&ai_agent_tool_loop_graph_json()).unwrap();
+    graph["steps"]["ai"]
+        .as_object_mut()
+        .unwrap()
+        .remove("breakpoint");
+    graph["steps"]["ai"]["config"]["outputSchema"] = serde_json::json!({
+        "sentiment": {"type": "string", "required": true, "enum": ["positive", "negative"]},
+        "confidence": {"type": "number", "required": true}
+    });
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-tool-loop-structured",
+        &graph.to_string(),
+        b"{}",
+        vec![
+            llm_tool_call("echo", r#"{"value":"checked"}"#),
+            llm_ok(r#"{"sentiment": "positive", "confidence": 0.9}"#),
+        ],
+    );
+    assert!(
+        result.status_success,
+        "stderr: {} error: {:?}",
+        result.stderr, result.error_json
+    );
+    assert_eq!(
+        result.output_json.expect("workflow completes")["answer"],
+        serde_json::json!({"sentiment": "positive", "confidence": 0.9}),
+        "the structured answer is the parsed object"
+    );
+    // The schema reached the model on its turns.
+    let asked = result.llm_requests.last().unwrap()["body"].to_string();
+    assert!(asked.contains("sentiment"), "{asked}");
+}
+
 /// The content of each tool result the model was sent back, in order, from
 /// the recorded model requests.
 fn tool_results_sent_to_the_model(result: &CapturedRun) -> Vec<Value> {
