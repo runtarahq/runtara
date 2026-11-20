@@ -116,12 +116,20 @@ Agent steps retry by default, so almost every published workflow is unusable
 as a tool. `tool-builder` sets `maxRetries: 0` on its tools' one step to get
 round it.
 
-Fix, one of:
+Partly fixed: it is said where it can be acted on.
 
-- let an AI Agent call a child-run workflow-agent as a tool, the tool loop
-  waiting for the child as the WaitForSignal tool waits for its signal;
-- or run a workflow-agent's retries in the caller's place without parking
-  when it is called as a tool.
+- Publishing answers whether the agent parks, whether it can be an AI tool
+  (`usableAsAiTool`), and where it parks (`parkingSites`: step, type and
+  reason), so the publisher knows before a caller fails to compile.
+- The caller's compile error names that list and the two ways out:
+  `maxRetries: 0` on the Agent steps that retry, or a workflow that is not
+  durable and needs no runtime services (`needs_agent_runtime`), whose
+  retries are local waits that do not park.
+
+Still to do, a design of its own: let an AI Agent call a child-run
+workflow-agent as a tool, the tool loop parking on the child as the
+WaitForSignal tool parks on its signal. Until then a published workflow meant
+as a tool keeps to the two ways out above.
 
 ### 5. An Agent step's input resolves mapping objects inside data
 

@@ -323,7 +323,14 @@ fn check_graph(
         }
         let callers = graph.edges.iter().filter(|edge| edge.to_step == step);
         if callers.clone().any(|edge| is_ai_edge(graph, edge)) {
-            return refuse(step, kind, "cannot be an AiAgent tool or memory provider");
+            return refuse(
+                step,
+                kind,
+                "cannot be an AiAgent tool or memory provider. Its publication lists \
+                 where it parks (`parkingSites`); an Agent step's retries park unless \
+                 that step sets `maxRetries: 0`, or the workflow is not durable and \
+                 needs no runtime services. Republish it without them to use it as a tool",
+            );
         }
         if in_tool_workflow {
             return refuse(

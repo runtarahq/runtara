@@ -11071,6 +11071,62 @@ fn direct_compile_child_run_step_with_timeout_validates() {
         .expect("the artifact validates");
 }
 
+/// A workflow-agent that parks cannot be an AI Agent's tool, and the refusal
+/// says where to look and how to publish one that can be
+/// (docs/workflow-authoring-gaps.md, 4).
+#[test]
+fn a_parking_workflow_agent_as_an_ai_tool_is_refused_with_the_way_out() {
+    let info = runtara_dsl::agent_meta::with_workflow_run(
+        runtara_dsl::agent_meta::workflow_agent_info(
+            "retrying-tool",
+            "retrying-tool",
+            "fixture",
+            &HashMap::new(),
+            &HashMap::new(),
+        ),
+        runtara_dsl::agent_meta::WorkflowRunTarget {
+            workflow_id: "wf-retrying-tool".to_string(),
+            version: 1,
+            parks: true,
+        },
+    );
+    let catalog = runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![info]);
+    let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+        "durable": true,
+        "entryPoint": "ai",
+        "steps": {
+            "ai": {"id": "ai", "stepType": "AiAgent", "connectionId": "llm", "config": {
+                "systemPrompt": {"valueType": "immediate", "value": "s"},
+                "userPrompt": {"valueType": "immediate", "value": "u"}}},
+            "tool": {"id": "tool", "stepType": "Agent", "agentId": "retrying-tool",
+                     "capabilityId": "run"},
+            "finish": {"id": "finish", "stepType": "Finish"}
+        },
+        "executionPlan": [
+            {"fromStep": "ai", "toStep": "tool", "label": "retrying"},
+            {"fromStep": "ai", "toStep": "finish", "label": "next"}
+        ]
+    }))
+    .expect("graph");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let error = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "parking-tool".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: Some(std::sync::Arc::new(catalog)),
+        agent_slug: None,
+    })
+    .expect_err("a parking workflow-agent is not a tool")
+    .to_string();
+    assert!(error.contains("cannot be an AiAgent tool"), "{error}");
+    assert!(error.contains("parkingSites"), "{error}");
+    assert!(error.contains("maxRetries: 0"), "{error}");
+}
+
 /// Parallel branches headed by child runs start their children together:
 /// the fan-out lowers sequentially with a prestart of every head, and the
 /// artifact validates.
