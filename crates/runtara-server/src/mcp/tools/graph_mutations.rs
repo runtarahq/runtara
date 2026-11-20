@@ -317,6 +317,15 @@ async fn save_graph(
     }
 }
 
+/// The reference to `from_step`'s output: a field of it, or, with no field
+/// (or an empty one), the whole output.
+fn step_output_reference(from_step: &str, from_output: Option<&str>) -> String {
+    match from_output.filter(|output| !output.is_empty()) {
+        Some(output) => format!("steps.{from_step}.outputs.{output}"),
+        None => format!("steps.{from_step}.outputs"),
+    }
+}
+
 /// The `warnings` array of a workflow save response.
 fn response_warnings(response: &serde_json::Value) -> Vec<String> {
     response
@@ -523,7 +532,7 @@ pub struct SetMappingParams {
     )]
     pub from_step: Option<String>,
     #[schemars(
-        description = "Output field path from the referenced step (e.g., \"value\", \"items\", \"result.name\", \"data.orders\"). Supports dot-notation for nested object access. Required when from_step is set."
+        description = "Output field path from the referenced step (e.g., \"value\", \"items\", \"result.name\", \"data.orders\"). Supports dot-notation for nested object access. Omit it for the step's whole output (steps.<from_step>.outputs), as for a capability that returns a value rather than an object."
     )]
     pub from_output: Option<String>,
     #[schemars(
@@ -2191,13 +2200,9 @@ pub async fn set_mapping(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     // Build the mapping value from typed parameters
     let mapping_value = if let Some(ref from_step) = params.from_step {
-        let from_output = params
-            .from_output
-            .as_deref()
-            .ok_or_else(|| err("from_output is required when from_step is set"))?;
         serde_json::json!({
             "valueType": "reference",
-            "value": format!("steps.{}.outputs.{}", from_step, from_output)
+            "value": step_output_reference(from_step, params.from_output.as_deref())
         })
     } else if let Some(ref from_input) = params.from_input {
         serde_json::json!({
@@ -2216,7 +2221,7 @@ pub async fn set_mapping(
         })
     } else {
         return Err(err(
-            "Exactly one of from_step+from_output, from_input, from_variable, or immediate_value must be provided",
+            "Exactly one of from_step (with an optional from_output), from_input, from_variable, or immediate_value must be provided",
         ));
     };
 
@@ -2259,7 +2264,9 @@ pub async fn set_mapping(
                 ),
             )
             .await;
-            if let Ok(cap_data) = cap_result {
+            if let Ok(cap_data) = cap_result
+                && !from_output.is_empty()
+            {
                 validate_output_path(&cap_data, from_output, from_step, agent_id, capability_id)?;
             }
         }
@@ -3579,13 +3586,10 @@ pub async fn apply_graph_mutations(
                     .count();
                     if source_count != 1 {
                         return Err(err(
-                            "Operation 'set_mapping' requires exactly one of from_step+from_output, from_input, from_variable, or immediate_value",
+                            "Operation 'set_mapping' requires exactly one of from_step (with an optional from_output), from_input, from_variable, or immediate_value",
                         ));
                     }
                     let mapping_value = if let Some(from_step) = &operation.from_step {
-                        let from_output = operation.from_output.as_deref().ok_or_else(|| {
-                            err("Operation 'set_mapping' requires from_output when from_step is set")
-                        })?;
                         if !target
                             .get("steps")
                             .and_then(|steps| steps.as_object())
@@ -3598,7 +3602,7 @@ pub async fn apply_graph_mutations(
                         }
                         serde_json::json!({
                             "valueType": "reference",
-                            "value": format!("steps.{}.outputs.{}", from_step, from_output)
+                            "value": step_output_reference(from_step, operation.from_output.as_deref())
                         })
                     } else if let Some(from_input) = &operation.from_input {
                         let root_key = from_input.split('.').next().unwrap_or(from_input);
@@ -3639,7 +3643,7 @@ pub async fn apply_graph_mutations(
                         })
                     } else {
                         return Err(err(
-                            "Operation 'set_mapping' requires one of from_step+from_output, from_input, from_variable, or immediate_value",
+                            "Operation 'set_mapping' requires one of from_step (with an optional from_output), from_input, from_variable, or immediate_value",
                         ));
                     };
                     let step = target
@@ -4306,6 +4310,18 @@ mod state_schema_tests {
 #[cfg(test)]
 mod new_workflow_edit_tests {
     use super::*;
+
+    /// A mapping from a step's output names a field of it, or the whole output
+    /// when there is none (docs/workflow-authoring-gaps.md, 9).
+    #[test]
+    fn a_step_output_reference_may_be_the_whole_output() {
+        assert_eq!(
+            step_output_reference("run", Some("result.name")),
+            "steps.run.outputs.result.name"
+        );
+        assert_eq!(step_output_reference("run", None), "steps.run.outputs");
+        assert_eq!(step_output_reference("run", Some("")), "steps.run.outputs");
+    }
     use std::sync::{Arc, Mutex};
 
     use axum::Json;

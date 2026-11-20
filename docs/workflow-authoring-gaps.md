@@ -216,7 +216,8 @@ object, has no field. `tool-builder` maps its Finish with a template
 (`{{ steps.run.outputs | tojson }}`), so its tools return their result as a
 JSON string.
 
-Fix: let `from_output` be omitted for the whole output.
+Fixed: `from_output` may be omitted (in `set_mapping` and in
+`apply_graph_mutations`), for the step's whole output.
 
 ### 10. Smaller inconsistencies
 
