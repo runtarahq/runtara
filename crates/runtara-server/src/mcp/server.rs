@@ -315,7 +315,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Execute a workflow and wait for completion. Records execution in database (unlike execute_workflow_sync). Polls until done or timeout."
+        description = "Execute a workflow and wait for completion. Records execution in database (unlike execute_workflow_sync). Polls until done or timeout; with return_when_waiting, also returns when the run is suspended waiting for an answer."
     )]
     async fn execute_workflow_wait(
         &self,
