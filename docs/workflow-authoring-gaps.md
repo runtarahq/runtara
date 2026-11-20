@@ -58,10 +58,15 @@ until version 4 was set current by hand. A later save (version 7) then did
 not become current, because 4 had been set explicitly. Neither behavior is
 visible to whoever saves.
 
-Fix: a version becomes current when it compiles (a save that does not compile
-is a draft), and "follows the latest" is a stated property of the workflow,
-not a NULL column. `deploy_latest` and `set_current_version` set it; saving
-does not.
+Fixed: when no version was chosen, the current version is the latest that is
+not known to fail to compile: one that compiled, or one not compiled yet
+(compiled on demand, so save-then-run still runs what was saved), but never
+one whose compilation failed; the latest only if every version failed.
+`current_version_sql` in `api/repositories/workflows.rs` is the rule for what
+the API shows, and `get_latest_runnable_version` what a run that names no
+version runs when the engine has no choice of its own
+(`version_when_none_was_chosen`). A version chosen explicitly still stays
+current. Tests: `tests/current_version_rule.rs`.
 
 ### 2. Graph edits build on a failed draft
 

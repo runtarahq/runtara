@@ -11,6 +11,29 @@ use crate::api::dto::workflows::{
 };
 use crate::types::DEFAULT_MEMORY_MB;
 
+/// The newest version of the workflow `alias` names that is not known to fail
+/// to compile: one that compiled, or one not compiled yet (compiled on demand),
+/// but never one whose compilation failed. A failed save does not take a
+/// workflow over (docs/workflow-authoring-gaps.md, 1).
+fn latest_runnable_version_sql(alias: &str) -> String {
+    format!(
+        "(SELECT MAX(d.version) FROM workflow_definitions d \
+         LEFT JOIN workflow_compilations c \
+           ON c.tenant_id = d.tenant_id AND c.workflow_id = d.workflow_id AND c.version = d.version \
+         WHERE d.tenant_id = {alias}.tenant_id AND d.workflow_id = {alias}.workflow_id \
+           AND d.deleted_at IS NULL AND c.compilation_status IS DISTINCT FROM 'failed')"
+    )
+}
+
+/// The current version of the workflow `alias` names: the one chosen, else the
+/// latest that is not known to fail to compile, else the latest.
+fn current_version_sql(alias: &str) -> String {
+    format!(
+        "COALESCE({alias}.current_version, {}, {alias}.latest_version)",
+        latest_runnable_version_sql(alias)
+    )
+}
+
 #[derive(sqlx::FromRow)]
 struct WorkflowVersionRow {
     version: i32,
@@ -620,19 +643,20 @@ impl WorkflowRepository {
     pub async fn list_missing_slugs(
         &self,
     ) -> Result<Vec<(String, String, Option<String>)>, sqlx::Error> {
-        let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        let query = format!(
             r#"
             SELECT w.tenant_id, w.workflow_id, wd.definition->>'name'
             FROM workflows w
             LEFT JOIN workflow_definitions wd
               ON wd.tenant_id = w.tenant_id
              AND wd.workflow_id = w.workflow_id
-             AND wd.version = COALESCE(w.current_version, w.latest_version)
+             AND wd.version = {}
             WHERE w.slug IS NULL AND w.deleted_at IS NULL
             "#,
-        )
-        .fetch_all(&self.pool)
-        .await?;
+            current_version_sql("w")
+        );
+        let rows: Vec<(String, String, Option<String>)> =
+            sqlx::query_as(&query).fetch_all(&self.pool).await?;
         Ok(rows)
     }
 
@@ -731,26 +755,46 @@ impl WorkflowRepository {
         Ok(row.and_then(|r| r.latest_version))
     }
 
-    /// Get the current (active) version number for a workflow
-    /// Falls back to latest_version if current_version is not set
+    /// Get the current (active) version number for a workflow: the one
+    /// chosen, else the latest that is not known to fail to compile, else the
+    /// latest (see [`current_version_sql`]).
     pub async fn get_current_or_latest_version(
         &self,
         tenant_id: &str,
         workflow_id: &str,
     ) -> Result<Option<i32>, sqlx::Error> {
-        let row = sqlx::query!(
-            r#"
-            SELECT COALESCE(current_version, latest_version) as "version"
-            FROM workflows
-            WHERE tenant_id = $1 AND workflow_id = $2 AND deleted_at IS NULL
-            "#,
-            tenant_id,
-            workflow_id
-        )
-        .fetch_optional(&self.pool)
-        .await?;
+        let query = format!(
+            "SELECT {} FROM workflows w \
+             WHERE w.tenant_id = $1 AND w.workflow_id = $2 AND w.deleted_at IS NULL",
+            current_version_sql("w")
+        );
+        let version: Option<Option<i32>> = sqlx::query_scalar(&query)
+            .bind(tenant_id)
+            .bind(workflow_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(version.flatten())
+    }
 
-        Ok(row.and_then(|r| r.version))
+    /// The latest version of a workflow that is not known to fail to compile,
+    /// else the latest: what a run that names no version runs when none was
+    /// chosen through the engine.
+    pub async fn get_latest_runnable_version(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+    ) -> Result<Option<i32>, sqlx::Error> {
+        let query = format!(
+            "SELECT COALESCE({}, w.latest_version) FROM workflows w \
+             WHERE w.tenant_id = $1 AND w.workflow_id = $2 AND w.deleted_at IS NULL",
+            latest_runnable_version_sql("w")
+        );
+        let version: Option<Option<i32>> = sqlx::query_scalar(&query)
+            .bind(tenant_id)
+            .bind(workflow_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(version.flatten())
     }
 
     /// Check if a workflow exists (not soft-deleted)
@@ -820,9 +864,12 @@ impl WorkflowRepository {
 
         // Both queries need the definition join when search is used
         let count_join = if search_value.is_some() {
-            " LEFT JOIN workflow_definitions sd ON s.tenant_id = sd.tenant_id AND s.workflow_id = sd.workflow_id AND COALESCE(s.current_version, s.latest_version) = sd.version"
+            format!(
+                " LEFT JOIN workflow_definitions sd ON s.tenant_id = sd.tenant_id AND s.workflow_id = sd.workflow_id AND {} = sd.version",
+                current_version_sql("s")
+            )
         } else {
-            ""
+            String::new()
         };
 
         if path_value.is_some() {
@@ -885,19 +932,20 @@ impl WorkflowRepository {
 
         let main_query = format!(
             r#"
-            SELECT s.workflow_id, s.latest_version, s.current_version, s.created_at, s.updated_at,
+            SELECT s.workflow_id, s.latest_version, {current} AS current_version, s.created_at, s.updated_at,
                    sd.memory_mb, sd.track_events,
                    sd.definition,
                    s.path, s.slug
             FROM workflows s
             LEFT JOIN workflow_definitions sd ON s.tenant_id = sd.tenant_id
                 AND s.workflow_id = sd.workflow_id
-                AND COALESCE(s.current_version, s.latest_version) = sd.version
+                AND {current} = sd.version
             WHERE s.tenant_id = $1 AND s.deleted_at IS NULL{}
             ORDER BY s.updated_at DESC
             LIMIT $2 OFFSET $3
             "#,
-            main_conditions
+            main_conditions,
+            current = current_version_sql("s"),
         );
 
         let mut main_q = sqlx::query_as(&main_query)
@@ -1036,16 +1084,17 @@ impl WorkflowRepository {
             Option<i32>,    // current_version
             String,         // path
             Option<String>, // slug
-        )> = sqlx::query_as(
+        )> = sqlx::query_as(&format!(
             r#"
             SELECT sd.definition, sd.created_at, sd.updated_at, sd.memory_mb, sd.track_events,
-                   s.latest_version, s.current_version, s.path, s.slug
+                   s.latest_version, {} AS current_version, s.path, s.slug
             FROM workflow_definitions sd
             JOIN workflows s ON sd.tenant_id = s.tenant_id AND sd.workflow_id = s.workflow_id
             WHERE sd.tenant_id = $1 AND sd.workflow_id = $2 AND sd.version = $3
             AND sd.deleted_at IS NULL AND s.deleted_at IS NULL
             "#,
-        )
+            current_version_sql("s")
+        ))
         .bind(tenant_id)
         .bind(workflow_id)
         .bind(version_to_fetch)
@@ -1269,7 +1318,7 @@ impl WorkflowRepository {
         // the other hand, is an execution-facing promise and must only be set
         // for an image whose source and instrumentation mode still match the
         // definition shown on this row.
-        let rows: Vec<WorkflowVersionRow> = sqlx::query_as(
+        let rows: Vec<WorkflowVersionRow> = sqlx::query_as(&format!(
             r#"
             SELECT
                 sd.version,
@@ -1277,7 +1326,7 @@ impl WorkflowRepository {
                 sd.updated_at,
                 sd.track_events,
                 sc.compiled_at,
-                s.current_version,
+                {current} AS current_version,
                 s.latest_version,
                 sc.wasm_size,
                 sc.package_size,
@@ -1305,7 +1354,8 @@ impl WorkflowRepository {
                 AND sd.deleted_at IS NULL
             ORDER BY sd.version ASC
             "#,
-        )
+            current = current_version_sql("s")
+        ))
         .bind(tenant_id)
         .bind(workflow_id)
         .fetch_all(&self.pool)
@@ -1314,7 +1364,8 @@ impl WorkflowRepository {
         let versions = rows
             .iter()
             .map(|row| {
-                // Determine current version (current_version takes precedence, fallback to latest_version)
+                // The current version: the one chosen, else the latest not known
+                // to fail to compile (`current_version_sql`), else the latest.
                 let current_version = row
                     .current_version
                     .unwrap_or_else(|| row.latest_version.unwrap_or(0));
@@ -2625,21 +2676,23 @@ impl WorkflowRepository {
 
         // Query workflow names from the execution graph (definition)
         // Join with workflow_definitions to get the name from current/latest version
-        let rows: Vec<(String, Option<Value>, Option<i32>, Option<i32>)> = sqlx::query_as(
-            r#"
-            SELECT s.workflow_id, sd.definition, s.current_version, s.latest_version
+        let rows: Vec<(String, Option<Value>, Option<i32>, Option<i32>)> =
+            sqlx::query_as(&format!(
+                r#"
+            SELECT s.workflow_id, sd.definition, {current} AS current_version, s.latest_version
             FROM workflows s
             LEFT JOIN workflow_definitions sd ON s.tenant_id = sd.tenant_id
                 AND s.workflow_id = sd.workflow_id
-                AND COALESCE(s.current_version, s.latest_version) = sd.version
+                AND {current} = sd.version
                 AND sd.deleted_at IS NULL
             WHERE s.tenant_id = $1 AND s.workflow_id = ANY($2) AND s.deleted_at IS NULL
             "#,
-        )
-        .bind(tenant_id)
-        .bind(workflow_ids)
-        .fetch_all(&self.pool)
-        .await?;
+                current = current_version_sql("s")
+            ))
+            .bind(tenant_id)
+            .bind(workflow_ids)
+            .fetch_all(&self.pool)
+            .await?;
 
         let mut result = std::collections::HashMap::new();
         for (workflow_id, definition, current_version, latest_version) in rows {
@@ -2733,7 +2786,7 @@ impl WorkflowRepository {
         // this statement rather than by a separate read of `workflows` first.
         // The launch path wants both the version and this status, and they are
         // one join apart in the same database.
-        let compilation_record = sqlx::query(
+        let compilation_record = sqlx::query(&format!(
             r#"
             SELECT sc.compilation_status,
                    sc.translated_path,
@@ -2758,7 +2811,7 @@ impl WorkflowRepository {
               AND wd.workflow_id = $2
               AND wd.version = COALESCE(
                     $3,
-                    (SELECT COALESCE(w.current_version, w.latest_version)
+                    (SELECT {current}
                      FROM workflows w
                      WHERE w.tenant_id = wd.tenant_id
                        AND w.workflow_id = wd.workflow_id
@@ -2766,7 +2819,8 @@ impl WorkflowRepository {
                   )
               AND wd.deleted_at IS NULL
             "#,
-        )
+            current = current_version_sql("w")
+        ))
         .bind(tenant_id)
         .bind(workflow_id)
         .bind(version)

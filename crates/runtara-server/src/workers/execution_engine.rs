@@ -2543,16 +2543,19 @@ impl ExecutionEngine {
 
     /// Resolve an explicit or current/latest version for a workflow.
     /// The version that runs when none is named and none was chosen through
-    /// the engine: the latest. In a process that keeps no record of what was
-    /// chosen, the server database's choice stands.
+    /// the engine: the latest that is not known to fail to compile. In a
+    /// process that keeps no record of what was chosen, the server database's
+    /// choice stands, by the same rule when there is none.
     async fn version_when_none_was_chosen(
         &self,
         tenant_id: &str,
         workflow_id: &str,
     ) -> Result<Option<i32>, sqlx::Error> {
+        // The latest version not known to fail to compile: a save that does
+        // not compile does not take the workflow over.
         if crate::engine::approvals::installed().is_some() {
             self.workflow_repo
-                .get_latest_version(tenant_id, workflow_id)
+                .get_latest_runnable_version(tenant_id, workflow_id)
                 .await
         } else {
             self.workflow_repo

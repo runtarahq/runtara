@@ -112,6 +112,11 @@ path = "tests/wait_for_instances.rs"
 required-features = ["db-integration-tests", "component-integration-tests"]
 
 [[test]]
+name = "current_version_rule"
+path = "tests/current_version_rule.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
 name = "compilation_failure_terminality"
 path = "tests/compilation_failure_terminality.rs"
 required-features = ["db-integration-tests"]
