@@ -201,8 +201,12 @@ Creating a workflow with the slug of a deleted one fails with 409 ("A workflow
 with slug … already exists"), and nothing frees it. `tool-builder` suffixes
 its slugs with the run id.
 
-Fix: free a deleted workflow's slug, or say in the error that a deleted
-workflow holds it and offer to restore that workflow.
+Kept on purpose: a deleted workflow reserves its slug so a published
+capability id is never reused by another workflow (docs/workflow-slug-plan.md,
+decision 4). Fixed is the error: it names the deleted workflow that keeps the
+slug and says why, instead of that a workflow with it exists, which nothing
+listed shows. A builder that may ask for the same tool twice suffixes its
+slugs.
 
 ### 9. `set_mapping` cannot map a step's whole output
 

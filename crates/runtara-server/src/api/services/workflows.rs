@@ -468,15 +468,13 @@ impl WorkflowService {
                 "Slug '{slug}' collides with a native agent id"
             )));
         }
-        if self
+        if let Some((holder, deleted)) = self
             .repository
-            .slug_exists(tenant_id, slug)
+            .slug_holder(tenant_id, slug)
             .await
             .map_err(|e| ServiceError::DatabaseError(e.to_string()))?
         {
-            return Err(ServiceError::Conflict(format!(
-                "A workflow with slug '{slug}' already exists"
-            )));
+            return Err(slug_conflict(slug, &holder, deleted));
         }
         Ok(())
     }
@@ -1522,6 +1520,22 @@ impl WorkflowService {
 
 use crate::api::dto::workflows::ValidationErrorDto;
 
+/// The conflict for a slug a workflow holds. A deleted workflow keeps its
+/// slug, so a published capability id is never reused by another workflow
+/// (docs/workflow-slug-plan.md, decision 4); say so, rather than that a
+/// workflow exists, which nothing listed shows.
+fn slug_conflict(slug: &str, holder: &str, deleted: bool) -> ServiceError {
+    ServiceError::Conflict(if deleted {
+        format!(
+            "Slug '{slug}' is kept by deleted workflow '{holder}': a workflow's slug is \
+             its agent's capability id, which is never reused by another workflow. \
+             Choose another slug."
+        )
+    } else {
+        format!("A workflow with slug '{slug}' already exists ('{holder}')")
+    })
+}
+
 /// Map a workflows-table write error to a ServiceError, folding a violation of
 /// the `idx_workflows_tenant_slug` unique index into a 409-able Conflict (the
 /// pre-checks race with concurrent writers; the index is the authority).
@@ -1581,6 +1595,22 @@ impl std::error::Error for ServiceError {}
 
 #[cfg(test)]
 mod tests {
+    /// A slug kept by a deleted workflow says so, and that it is kept on
+    /// purpose; one held by a live workflow names it
+    /// (docs/workflow-authoring-gaps.md, 8).
+    #[test]
+    fn a_slug_conflict_names_who_keeps_it() {
+        let ServiceError::Conflict(kept) = slug_conflict("tool-x", "wf-1", true) else {
+            panic!("a conflict");
+        };
+        assert!(kept.contains("deleted workflow 'wf-1'"), "{kept}");
+        assert!(kept.contains("never reused"), "{kept}");
+        let ServiceError::Conflict(live) = slug_conflict("tool-x", "wf-2", false) else {
+            panic!("a conflict");
+        };
+        assert!(live.contains("already exists ('wf-2')"), "{live}");
+    }
+
     use super::*;
 
     #[test]

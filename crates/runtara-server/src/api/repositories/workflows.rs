@@ -555,6 +555,23 @@ impl WorkflowRepository {
     /// Whether `slug` is already taken by ANY workflow row in the tenant —
     /// including soft-deleted ones: a deleted workflow reserves its slug (a
     /// published capability id must not be silently reusable).
+    /// The workflow holding `slug` in the tenant, and whether it is deleted:
+    /// a deleted workflow keeps its slug (docs/workflow-slug-plan.md,
+    /// decision 4).
+    pub async fn slug_holder(
+        &self,
+        tenant_id: &str,
+        slug: &str,
+    ) -> Result<Option<(String, bool)>, sqlx::Error> {
+        sqlx::query_as(
+            "SELECT workflow_id, deleted_at IS NOT NULL FROM workflows WHERE tenant_id = $1 AND slug = $2",
+        )
+        .bind(tenant_id)
+        .bind(slug)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
     pub async fn slug_exists(&self, tenant_id: &str, slug: &str) -> Result<bool, sqlx::Error> {
         let row: (bool,) = sqlx::query_as(
             "SELECT EXISTS(SELECT 1 FROM workflows WHERE tenant_id = $1 AND slug = $2)",
