@@ -1376,3 +1376,20 @@ async fn a_webhooks_secret_token_registers_one_url_and_is_checked_without_being_
         .await;
     assert!(matches!(reply, Err(SendError::Seal(_))), "{reply:?}");
 }
+
+/// seal in this process gives an answer as long as the host gives the
+/// request: a model answering a long prompt is not cut off at seal's 60 s.
+#[test]
+fn seal_waits_as_long_as_the_host_lets_a_request_wait() {
+    let mut limits = seal_broker::broker::Limits::default();
+    super::allow_the_callers_deadline(&mut limits);
+    assert_eq!(limits.first_byte_timeout, super::REQUEST_DEADLINE);
+    assert_eq!(limits.buffered_total_timeout, super::REQUEST_DEADLINE);
+    // A longer one is kept.
+    limits.first_byte_timeout = std::time::Duration::from_secs(600);
+    super::allow_the_callers_deadline(&mut limits);
+    assert_eq!(
+        limits.first_byte_timeout,
+        std::time::Duration::from_secs(600)
+    );
+}

@@ -88,6 +88,13 @@ A server told of a seal of its own:
   then stops, saying whether seal could not be reached or does not know it;
 - **does not start on a seal that lacks its keys** (below).
 
+seal in the server waits up to 120 seconds for an answer to a request sent
+with a connection's credentials: as long as the host lets any outbound
+request wait, so the caller's own timeout applies. A seal of its own reads
+this from its configuration: set `limits.first_byte_timeout` and
+`limits.buffered_total_timeout` to `120s`, or a model that takes a minute to
+answer is cut off (`SEAL_UPSTREAM_TIMEOUT`).
+
 seal writes one audit record per use of a secret: who asked, for which
 keyset and item, where it went and how it ended. Never a value. That log is
 the record of what a broken server did with the credentials it could use.

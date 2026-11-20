@@ -114,6 +114,21 @@ impl AuditSink for LogAudit {
     }
 }
 
+/// How long a request sent with a connection's credentials may wait for its
+/// answer: the deadline the host already holds every outbound request to
+/// (`runtara-component-host`'s `MAX_TIMEOUT`), so the caller's own timeout
+/// (an HTTP step's `timeout_ms`, an AI Agent's `turnTimeoutMs`) is the one
+/// that applies. seal's defaults (60 s to the first byte, 60 s for a buffered
+/// answer) cut a model answering a long prompt short.
+pub const REQUEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Raises seal's first-byte and buffered-answer deadlines to
+/// [`REQUEST_DEADLINE`], never lowering one already longer.
+fn allow_the_callers_deadline(limits: &mut seal_broker::broker::Limits) {
+    limits.first_byte_timeout = limits.first_byte_timeout.max(REQUEST_DEADLINE);
+    limits.buffered_total_timeout = limits.buffered_total_timeout.max(REQUEST_DEADLINE);
+}
+
 impl SealedCredentials {
     /// seal in this process, with tenants' keys from `keys`, wrapped by
     /// `wrapping_key` (32 bytes). Needs a Tokio runtime.
@@ -127,6 +142,7 @@ impl SealedCredentials {
         let keyring = Keyring::new(source, wrap, KeyringConfig::default())
             .map_err(|error| error.to_string())?;
         let mut config = BrokerConfig::default();
+        allow_the_callers_deadline(&mut config.limits);
         for pem in &allowances.extra_roots {
             use rustls_pki_types::pem::PemObject;
             for certificate in rustls_pki_types::CertificateDer::pem_slice_iter(pem.as_bytes()) {
