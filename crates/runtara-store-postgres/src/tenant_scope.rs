@@ -28,7 +28,9 @@
 use sqlx::postgres::PgPoolOptions;
 
 use runtara_tenant_scope::Named;
-pub use runtara_tenant_scope::{current, inherit, is_system, locating, scoped, spawn, system};
+pub use runtara_tenant_scope::{
+    Held, current, held, inherit, is_system, locating, scoped, spawn, system,
+};
 
 /// Whether `pool`'s role escapes row level security (a superuser or a
 /// BYPASSRLS role), so a tenant's scope would not confine it.

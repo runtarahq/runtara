@@ -122,11 +122,13 @@ pub fn inherit<F: Future>(work: F) -> impl Future<Output = F::Output> {
     }
 }
 
-/// `stream` as asked by the current caller: for an answer that is streamed
-/// after the request that asked for it has returned.
+/// `stream` as asked by the current caller, in the current tenant's scope:
+/// for an answer that is streamed after the request that asked for it has
+/// returned, and with it both.
 pub fn kept<S: futures::Stream>(stream: S) -> Kept<S> {
     Kept {
         presented: presented(),
+        scope: runtara_store_postgres::tenant_scope::held(),
         stream: Box::pin(stream),
     }
 }
@@ -134,6 +136,7 @@ pub fn kept<S: futures::Stream>(stream: S) -> Kept<S> {
 /// See [`kept`].
 pub struct Kept<S> {
     presented: Option<Presented>,
+    scope: runtara_store_postgres::tenant_scope::Held,
     stream: Pin<Box<S>>,
 }
 
@@ -143,10 +146,11 @@ impl<S: futures::Stream> futures::Stream for Kept<S> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         let stream = this.stream.as_mut();
-        match &this.presented {
+        let presented = &this.presented;
+        this.scope.enter(|| match presented {
             Some(presented) => PRESENTED.sync_scope(presented.clone(), || stream.poll_next(cx)),
             None => stream.poll_next(cx),
-        }
+        })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -228,5 +232,22 @@ mod tests {
         .await;
         let seen: Vec<_> = stream.collect().await;
         assert_eq!(seen, vec![Some(bearer("abc")), Some(bearer("abc"))]);
+    }
+
+    /// A conversation's stream reads the engine again and again after the
+    /// request has returned; each read is the tenant's, not only the first.
+    #[tokio::test]
+    async fn a_stream_keeps_the_tenants_scope_after_the_request_is_over() {
+        use runtara_store_postgres::tenant_scope::{current, scoped};
+        let stream = scoped("acme", async {
+            kept(futures::stream::unfold(0, |n| async move {
+                tokio::task::yield_now().await;
+                (n < 3).then(|| (current(), n + 1))
+            }))
+        })
+        .await;
+        assert_eq!(current(), None);
+        let seen: Vec<_> = tokio::spawn(stream.collect::<Vec<_>>()).await.unwrap();
+        assert_eq!(seen, vec![Some("acme".to_owned()); 3]);
     }
 }

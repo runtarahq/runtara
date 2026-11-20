@@ -96,6 +96,27 @@ where
     tokio::spawn(inherit(work))
 }
 
+/// The current scope, held to be entered again by work that is polled
+/// outside it: a streamed answer, whose body is read after the request
+/// that made it has returned. [`inherit`] is the same for a future.
+#[derive(Clone, Debug)]
+pub struct Held(Option<Scope>);
+
+/// Holds the current scope; see [`Held`].
+pub fn held() -> Held {
+    Held(SCOPE.try_with(Clone::clone).ok())
+}
+
+impl Held {
+    /// Runs `work` in the held scope, or in none if none was held.
+    pub fn enter<R>(&self, work: impl FnOnce() -> R) -> R {
+        match &self.0 {
+            Some(scope) => SCOPE.sync_scope(scope.clone(), work),
+            None => work(),
+        }
+    }
+}
+
 /// The scope the current work is in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Named {
@@ -135,6 +156,15 @@ mod scope_tests {
             tokio::spawn(inherit(async { current() })).await.unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn a_held_scope_is_entered_again_outside_it() {
+        let held = scoped("acme", async { held() }).await;
+        assert_eq!(current(), None);
+        assert_eq!(held.enter(current).as_deref(), Some("acme"));
+        assert_eq!(current(), None, "only for the work it was entered for");
+        assert_eq!(super::held().enter(current), None);
     }
 
     #[tokio::test]
