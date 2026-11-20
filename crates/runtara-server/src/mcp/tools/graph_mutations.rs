@@ -932,7 +932,7 @@ pub struct AddAgentStepParams {
     #[schemars(description = "Agent ID (e.g., 'shopify', 'http'). Use list_agents to discover.")]
     pub agent_id: String,
     #[schemars(
-        description = "Capability ID (e.g., 'http-request', 'get-product-variant-by-sku'). Use get_agent to discover."
+        description = "Capability ID (e.g., 'http-request', 'get-variant-by-sku'). Use get_agent to discover."
     )]
     pub capability_id: String,
     #[schemars(

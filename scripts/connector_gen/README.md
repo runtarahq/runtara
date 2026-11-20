@@ -55,6 +55,8 @@ agent:
   description: Pipedrive CRM — deals.
   integration_id: pipedrive_api_token  # connection type the agent binds to (or a list)
   error_prefix: PIPEDRIVE            # error codes: PIPEDRIVE_RATE_LIMITED, …
+  rate_limited: true                 # optional: the vendor limits request rates, so a step
+                                     # of any capability is retried 5 times by default, not 3
 spec:
   url: https://developers.pipedrive.com/docs/api/v1/openapi-v2.yaml
   sha256: 2b0fb0de3cad7a37158528034f85942e6b22a0a0649d9c811e0676e7c040955d
@@ -410,7 +412,8 @@ agent:
 A GraphQL API (Shopify's Admin API, Braintree, Wave) publishes a schema, not
 operations: it has types and top-level fields, and what a request asks for is
 up to the caller. So each capability is an operation we write, one file per
-operation in `operations/`, named as the operation. For Shopify's Admin API:
+operation in `operations/`, named as the operation. For Shopify's Admin API
+(the whole agent is `crates/agents/runtara-agent-shopify`):
 
 ```yaml
 agent:
@@ -472,7 +475,11 @@ which is then sliced, labelled and rendered like any other:
   object's field of such a type and a list's item may also be set to `null`,
   which is sent as `null`: it overrides the default, or clears the value.
   These are `Option<Option<T>>` (`kit::nullable`), as a nullable body field
-  of an OpenAPI operation is.
+  of an OpenAPI operation is. A field the vendor wants sent even when it is
+  `null` cannot be guaranteed this way: an unset item field is left out.
+  Shopify's `changeFromQuantity`, in every inventory quantity it sets or
+  adjusts, is one; its agent sends those two mutations from hand-written
+  capabilities with documents of their own (see below).
 - **The output** is what the top-level field returns, built from the fields
   the operation selects; aliases, inline fragments and fragment spreads are
   merged, each fragment's fields read from its own type (an `owner` that is a
@@ -572,6 +579,14 @@ like a generated capability. In `custom.rs`:
 - Make calls through the generated operations' requests and the crate's
   `kit.rs`, so errors read the same as everywhere else in the agent:
   `ListProductsInput { first: Some(Some(250)), … }.request()?.send(connection, "SHOPIFY").await?`.
+  Where no generated request fits (a field the vendor wants sent even when
+  `null`), build one with `kit::Request::new(…).graphql(DOCUMENT, …)`; `fetch`
+  does not see that document, so check it against the schema yourself and
+  test the request it builds.
+- To name fields on the wire as the generated types do (a GraphQL API's
+  camelCase), use `#[serde(rename_all = "camelCase")]`, which the metadata
+  follows, and keep the connection's key with
+  `#[serde(rename = "_connection")]`: camelCase would make it `connection`.
 - Declare the module in `src/lib.rs`: `pub mod custom;` and `pub use custom::*;`.
 
 ## A generated agent crate

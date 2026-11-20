@@ -1,0 +1,38 @@
+query listOrders(
+  $first: Int = 50
+  $after: String
+  $query: String
+  $sortKey: OrderSortKeys
+  $reverse: Boolean
+) {
+  orders(first: $first, after: $after, query: $query, sortKey: $sortKey, reverse: $reverse) {
+    nodes {
+      id
+      name
+      createdAt
+      updatedAt
+      processedAt
+      cancelledAt
+      email
+      tags
+      test
+      currencyCode
+      displayFinancialStatus
+      displayFulfillmentStatus
+      totalPriceSet {
+        shopMoney {
+        amount
+        currencyCode
+      }
+      }
+      customer {
+        id
+        displayName
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}

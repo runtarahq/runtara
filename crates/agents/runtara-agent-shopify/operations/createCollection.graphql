@@ -1,0 +1,35 @@
+mutation createCollection(
+  $title: String!
+  $descriptionHtml: String
+  $handle: String
+  $sortOrder: CollectionSortOrder
+  $templateSuffix: String
+  $seo: SEOInput
+  $image: ImageInput
+  $metafields: [MetafieldInput!]
+) {
+  collectionCreate(
+    collection: {
+      title: $title
+      descriptionHtml: $descriptionHtml
+      handle: $handle
+      sortOrder: $sortOrder
+      templateSuffix: $templateSuffix
+      seo: $seo
+      image: $image
+      metafields: $metafields
+    }
+  ) {
+    collection {
+      id
+      title
+      handle
+      sortOrder
+      updatedAt
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}

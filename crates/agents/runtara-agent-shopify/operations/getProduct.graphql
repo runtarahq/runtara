@@ -1,0 +1,122 @@
+query getProduct(
+  $id: ID!
+  $metafieldNamespace: String
+  $metafieldsFirst: Int = 50
+  $mediaFirst: Int = 50
+  $barcodesFirst: Int = 1
+) {
+  product(id: $id) {
+    id
+    legacyResourceId
+    title
+    handle
+    status
+    vendor
+    productType
+    tags
+    descriptionHtml
+    createdAt
+    updatedAt
+    publishedAt
+    totalInventory
+    priceRangeV2 {
+      minVariantPrice {
+        amount
+        currencyCode
+      }
+      maxVariantPrice {
+        amount
+        currencyCode
+      }
+    }
+    hasOnlyDefaultVariant
+    onlineStoreUrl
+    category {
+      id
+      fullName
+    }
+    seo {
+      title
+      description
+    }
+    options {
+      id
+      name
+      position
+      optionValues {
+        id
+        name
+        hasVariants
+      }
+    }
+    variants(first: 100) {
+      nodes {
+        id
+        title
+        sku
+        price
+        compareAtPrice
+        inventoryQuantity
+        position
+        taxable
+        inventoryPolicy
+        barcodes(first: $barcodesFirst) {
+          nodes {
+            value
+            type
+          }
+        }
+        selectedOptions {
+          name
+          value
+        }
+        inventoryItem {
+          id
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+    media(first: $mediaFirst) {
+      nodes {
+        id
+        alt
+        mediaContentType
+        status
+        ... on MediaImage {
+          image {
+            url
+            width
+            height
+          }
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+    metafields(first: $metafieldsFirst, namespace: $metafieldNamespace) {
+      nodes {
+        id
+        namespace
+        key
+        type
+        value
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+    collections(first: 20) {
+      nodes {
+        id
+        title
+        handle
+      }
+    }
+  }
+}

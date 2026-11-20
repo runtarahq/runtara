@@ -1,0 +1,50 @@
+mutation updateInventoryItem(
+  $id: ID!
+  $cost: Decimal
+  $tracked: Boolean
+  $sku: String
+  $requiresShipping: Boolean
+  $harmonizedSystemCode: String
+  $countryCodeOfOrigin: CountryCode
+  $provinceCodeOfOrigin: String
+  $countryHarmonizedSystemCodes: [CountryHarmonizedSystemCodeInput!]
+  $measurement: InventoryItemMeasurementInput
+) {
+  inventoryItemUpdate(
+    id: $id
+    input: {
+      cost: $cost
+      tracked: $tracked
+      sku: $sku
+      requiresShipping: $requiresShipping
+      harmonizedSystemCode: $harmonizedSystemCode
+      countryCodeOfOrigin: $countryCodeOfOrigin
+      provinceCodeOfOrigin: $provinceCodeOfOrigin
+      countryHarmonizedSystemCodes: $countryHarmonizedSystemCodes
+      measurement: $measurement
+    }
+  ) {
+    inventoryItem {
+      id
+      sku
+      tracked
+      requiresShipping
+      harmonizedSystemCode
+      countryCodeOfOrigin
+      unitCost {
+        amount
+        currencyCode
+      }
+      measurement {
+        weight {
+          value
+          unit
+        }
+      }
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}

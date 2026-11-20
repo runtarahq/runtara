@@ -1,0 +1,36 @@
+query listProducts(
+  $first: Int = 50
+  $after: String
+  $query: String
+  $sortKey: ProductSortKeys
+  $reverse: Boolean
+) {
+  products(first: $first, after: $after, query: $query, sortKey: $sortKey, reverse: $reverse) {
+    nodes {
+      id
+      title
+      handle
+      status
+      vendor
+      productType
+      tags
+      createdAt
+      updatedAt
+      totalInventory
+      priceRangeV2 {
+        minVariantPrice {
+          amount
+          currencyCode
+        }
+        maxVariantPrice {
+          amount
+          currencyCode
+        }
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}

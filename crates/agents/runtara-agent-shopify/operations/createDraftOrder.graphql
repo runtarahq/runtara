@@ -1,0 +1,84 @@
+mutation createDraftOrder(
+  $lineItems: [DraftOrderLineItemInput!]
+  $email: String
+  $phone: String
+  $note: String
+  $tags: [String!]
+  $purchasingEntity: PurchasingEntityInput
+  $shippingAddress: MailingAddressInput
+  $billingAddress: MailingAddressInput
+  $useCustomerDefaultAddress: Boolean
+  $appliedDiscount: DraftOrderAppliedDiscountInput
+  $discountCodes: [String!]
+  $acceptAutomaticDiscounts: Boolean
+  $allowDiscountCodesInCheckout: Boolean
+  $shippingLine: ShippingLineInput
+  $customAttributes: [AttributeInput!]
+  $metafields: [MetafieldInput!]
+  $taxExempt: Boolean
+  $presentmentCurrencyCode: CurrencyCode
+  $poNumber: String
+  $paymentTerms: PaymentTermsInput
+  $reserveInventoryUntil: DateTime
+  $sourceName: String
+  $visibleToCustomer: Boolean
+) {
+  draftOrderCreate(
+    input: {
+      lineItems: $lineItems
+      email: $email
+      phone: $phone
+      note: $note
+      tags: $tags
+      purchasingEntity: $purchasingEntity
+      shippingAddress: $shippingAddress
+      billingAddress: $billingAddress
+      useCustomerDefaultAddress: $useCustomerDefaultAddress
+      appliedDiscount: $appliedDiscount
+      discountCodes: $discountCodes
+      acceptAutomaticDiscounts: $acceptAutomaticDiscounts
+      allowDiscountCodesInCheckout: $allowDiscountCodesInCheckout
+      shippingLine: $shippingLine
+      customAttributes: $customAttributes
+      metafields: $metafields
+      taxExempt: $taxExempt
+      presentmentCurrencyCode: $presentmentCurrencyCode
+      poNumber: $poNumber
+      paymentTerms: $paymentTerms
+      reserveInventoryUntil: $reserveInventoryUntil
+      sourceName: $sourceName
+      visibleToCustomer: $visibleToCustomer
+    }
+  ) {
+    draftOrder {
+      id
+      name
+      status
+      email
+      invoiceUrl
+      createdAt
+      currencyCode
+      totalPriceSet {
+        shopMoney {
+        amount
+        currencyCode
+      }
+      }
+      lineItems(first: 50) {
+        nodes {
+          id
+          name
+          sku
+          quantity
+          variant {
+            id
+          }
+        }
+      }
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}

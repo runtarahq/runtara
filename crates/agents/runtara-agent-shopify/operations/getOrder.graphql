@@ -1,0 +1,153 @@
+query getOrder($id: ID!) {
+  order(id: $id) {
+    id
+    legacyResourceId
+    name
+    createdAt
+    updatedAt
+    processedAt
+    cancelledAt
+    cancelReason
+    closedAt
+    email
+    phone
+    note
+    tags
+    test
+    confirmed
+    fullyPaid
+    currencyCode
+    displayFinancialStatus
+    displayFulfillmentStatus
+    poNumber
+    discountCodes
+    customAttributes {
+      key
+      value
+    }
+    totalPriceSet {
+      shopMoney {
+        amount
+        currencyCode
+      }
+    }
+    subtotalPriceSet {
+      shopMoney {
+        amount
+        currencyCode
+      }
+    }
+    totalShippingPriceSet {
+      shopMoney {
+        amount
+        currencyCode
+      }
+    }
+    totalTaxSet {
+      shopMoney {
+        amount
+        currencyCode
+      }
+    }
+    totalDiscountsSet {
+      shopMoney {
+        amount
+        currencyCode
+      }
+    }
+    customer {
+      id
+      displayName
+      firstName
+      lastName
+      defaultEmailAddress {
+        emailAddress
+      }
+    }
+    shippingAddress {
+      address1
+      address2
+      city
+      province
+      provinceCode
+      country
+      countryCodeV2
+      zip
+      phone
+      company
+      firstName
+      lastName
+      name
+    }
+    billingAddress {
+      address1
+      address2
+      city
+      province
+      provinceCode
+      country
+      countryCodeV2
+      zip
+      phone
+      company
+      firstName
+      lastName
+      name
+    }
+    lineItems(first: 100) {
+      nodes {
+        id
+        name
+        title
+        variantTitle
+        sku
+        quantity
+        currentQuantity
+        unfulfilledQuantity
+        requiresShipping
+        variant {
+          id
+          sku
+        }
+        product {
+          id
+        }
+        originalUnitPriceSet {
+          shopMoney {
+        amount
+        currencyCode
+      }
+        }
+        discountedUnitPriceSet {
+          shopMoney {
+        amount
+        currencyCode
+      }
+        }
+        discountedTotalSet {
+          shopMoney {
+        amount
+        currencyCode
+      }
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+    shippingLines(first: 10) {
+      nodes {
+        title
+        code
+        source
+        originalPriceSet {
+          shopMoney {
+        amount
+        currencyCode
+      }
+        }
+      }
+    }
+  }
+}

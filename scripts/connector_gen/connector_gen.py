@@ -1934,6 +1934,16 @@ def integration_ids(agent: dict) -> list:
     return [ids] if isinstance(ids, str) else list(ids)
 
 
+def rate_limited(agent: dict) -> bool:
+    """`rate_limited: true` says the vendor limits how fast requests may come.
+    Every generated capability is marked so, and a step of one is retried five
+    times by default instead of three."""
+    value = agent.get("rate_limited", False)
+    if not isinstance(value, bool):
+        sys.exit(f"agent.rate_limited in connector.yaml is true or false, not {value!r}")
+    return value
+
+
 def parameter_name_mappings(sliced: dict) -> dict:
     """`page[size]` would become the Rust field
     `page_left_square_bracket_size_right_square_bracket`; name it `page_size`.
@@ -2094,6 +2104,7 @@ def render(crate: Path) -> str:
                 "integrationIds": integration_ids(agent),
                 "integrationIdList": ",".join(integration_ids(agent)),
                 "errorPrefix": agent["error_prefix"],
+                "rateLimited": rate_limited(agent),
                 "customCapabilities": custom,
                 "customOutputs": list(dict.fromkeys(name for c in custom for name in c["outputs"])),
             },

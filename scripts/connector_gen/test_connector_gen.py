@@ -39,7 +39,8 @@ def generator_available() -> bool:
         return False
 
 
-def write_crate(crate: Path, spec: dict, operations: list, integration_id="sample_token", **config) -> dict:
+def write_crate(crate: Path, spec: dict, operations: list, integration_id="sample_token", agent=None,
+                **config) -> dict:
     (crate / "connector.yaml").write_text(yaml.safe_dump({
         "agent": {
             "id": "sample",
@@ -47,6 +48,7 @@ def write_crate(crate: Path, spec: dict, operations: list, integration_id="sampl
             "description": 'Sample "agent".',
             "integration_id": integration_id,
             "error_prefix": "SAMPLE",
+            **(agent or {}),
         },
         "spec": {"url": "unused", "sha256": "unused"},
         "operations": operations,
@@ -2225,6 +2227,30 @@ class CustomCapabilitiesTest(unittest.TestCase):
                 with self.assertRaises(SystemExit) as stop:
                     cg.custom_capabilities({"custom_capabilities": entries})
                 self.assertIn(expected, str(stop.exception.code))
+
+
+@unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
+class RateLimitedTest(unittest.TestCase):
+    def render(self, **agent):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_crate(Path(tmp), sample_spec(), OPERATIONS, agent=agent)
+            return cg.render(Path(tmp))
+
+    def test_every_generated_capability_is_marked(self):
+        text = self.render(rate_limited=True)
+        attributes = re.findall(r"#\[capability\((.*?)\)\]", text, re.S)
+        self.assertEqual(len(attributes), len(OPERATIONS))
+        for attribute in attributes:
+            self.assertIn("rate_limited = true", attribute)
+
+    def test_without_it_nothing_changes(self):
+        self.assertNotIn("rate_limited", self.render())
+        self.assertEqual(self.render(rate_limited=False), self.render())
+
+    def test_anything_but_a_boolean_is_refused(self):
+        with self.assertRaises(SystemExit) as stop:
+            self.render(rate_limited="yes")
+        self.assertIn("agent.rate_limited in connector.yaml is true or false", str(stop.exception.code))
 
 
 @unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")

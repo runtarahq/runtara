@@ -37,7 +37,7 @@ impl Request {
     fn graphql(query: &'static str, variables: Value, response: Value) -> Self {
         Self {
             method: "POST",
-            url: "/admin/api/2025-01/graphql.json".into(),
+            url: "/admin/api/2026-10/graphql.json".into(),
             connection: true,
             timeout: 60_000,
             body: Some(serde_json::to_vec(&variables).unwrap()),
@@ -135,14 +135,14 @@ fn fresh(agent: &'static str) -> Case {
     } else {
         case(
             agent,
-            "set-product-tags",
-            json!({"product_id":"fresh","tags":["fixture"]}),
+            "add-tags",
+            json!({"id":"fresh","tags":["fixture"]}),
             vec![Request::graphql(
-                "productUpdate",
-                json!({"input":{"id":"fresh","tags":["fixture"]}}),
-                json!({"data":{"productUpdate":{"product":{"id":"fresh"},"userErrors":[]}}}),
+                "tagsAdd",
+                json!({"id":"fresh","tags":["fixture"]}),
+                json!({"data":{"tagsAdd":{"node":{"id":"fresh"},"userErrors":[]}}}),
             )],
-            json!({"id":"fresh"}),
+            json!({"node":{"id":"fresh"}}),
         )
     }
 }
@@ -312,40 +312,42 @@ fn large_upload() -> Case {
     )
 }
 fn shopify_cases() -> Vec<Case> {
-    let update = Request::graphql(
-        "productUpdate",
-        json!({"product":{"id":"42"},"media":[{"originalSource":"https://image.invalid/new.png","mediaContentType":"IMAGE","alt":"new image"}]}),
-        json!({"data":{"productUpdate":{"product":{"id":"42"},"userErrors":[]}}}),
-    );
+    // Three requests in a row: the product's media, taking it off the product,
+    // then adding the new image.
     let images = case(
         "shopify",
         "replace-product-images",
-        json!({"product_id":"42","images":[{"url":"https://image.invalid/new.png","alt_text":"new image"}]}),
+        json!({"productId":"42","images":[{"url":"https://image.invalid/new.png","alt":"new image"}]}),
         vec![
             Request::graphql(
                 "product",
-                json!({"productId":"42"}),
-                json!({"data":{"product":{"media":{"edges":[{"node":{"id":"old-image"}}]}}}}),
+                json!({"id":"42","mediaFirst":250}),
+                json!({"data":{"product":{"id":"42","media":{"nodes":[{"id":"old-image"}],"pageInfo":{"hasNextPage":false}}}}}),
             ),
             Request::graphql(
-                "fileDelete",
-                json!({"fileIds":["old-image"]}),
-                json!({"data":{"fileDelete":{"userErrors":[]}}}),
+                "fileUpdate",
+                json!({"files":[{"id":"old-image","referencesToRemove":["42"]}]}),
+                json!({"data":{"fileUpdate":{"files":[{"id":"old-image"}],"userErrors":[]}}}),
             ),
-            update,
+            Request::graphql(
+                "productUpdate",
+                json!({"id":"42","media":[{"originalSource":"https://image.invalid/new.png","mediaContentType":"IMAGE","alt":"new image"}]}),
+                json!({"data":{"productUpdate":{"product":{"id":"42"},"userErrors":[]}}}),
+            ),
         ],
-        json!({"id":"42"}),
+        json!({"product":{"id":"42"},"removedMediaIds":["old-image"],"added":1}),
     );
+    // One request per product; a product Shopify refuses does not stop the rest.
     let bulk = |first_fails| {
-        let requests = (1..=3).map(|id| Request::graphql("productVariantsBulkUpdate", json!({"productId":"42","variants":[{"id":format!("variant-{id}"),"price":"12.5"}]}),
-            if first_fails && id==1 {json!({"data":{"productVariantsBulkUpdate":{"userErrors":[{"field":["price"],"message":"invalid"}]}}})}
+        let requests = (1..=3).map(|id| Request::graphql("productVariantsBulkUpdate", json!({"productId":format!("product-{id}"),"variants":[{"id":format!("variant-{id}"),"price":"12.5"}]}),
+            if first_fails && id==1 {json!({"data":{"productVariantsBulkUpdate":{"productVariants":null,"userErrors":[{"field":["price"],"message":"invalid"}]}}})}
             else {json!({"data":{"productVariantsBulkUpdate":{"productVariants":[{"id":format!("variant-{id}")}],"userErrors":[]}}})})).collect();
         case(
             "shopify",
-            "bulk-update-variant-prices",
-            json!({"variant_price_updates":(1..=3).map(|id| json!({"product_id":"42","variant_id":format!("variant-{id}"),"new_price":12.5})).collect::<Vec<_>>()}),
+            "bulk-update-variants",
+            json!({"products":(1..=3).map(|id| json!({"productId":format!("product-{id}"),"variants":[{"id":format!("variant-{id}"),"price":"12.5"}]})).collect::<Vec<_>>()}),
             requests,
-            json!({"updated":if first_fails {2} else {3},"failed":if first_fails {1} else {0}}),
+            json!({"succeeded":if first_fails {2} else {3},"failed":if first_fails {1} else {0}}),
         )
     };
     vec![fresh("shopify"), images, bulk(false), bulk(true)]
@@ -501,15 +503,29 @@ async fn shared_macro_preserves_successful_provider_behavior() -> anyhow::Result
 }
 #[tokio::test]
 async fn shared_macro_preserves_provider_errors() -> anyhow::Result<()> {
-    for agent in ["sharepoint", "shopify"] {
-        for status in [400, 401, 429, 503] {
-            let mut case = fresh(agent);
-            case.requests[0].response =
-                envelope(status, json!({"error":{"message":"fixture error"}}));
-            let error = normal(case).await?.unwrap_err();
-            assert_eq!(error.retryable, status == 429 || status == 503);
-            assert!(error.code.contains("HTTP_"));
-        }
+    for status in [400, 401, 429, 503] {
+        let mut case = fresh("sharepoint");
+        case.requests[0].response = envelope(status, json!({"error":{"message":"fixture error"}}));
+        let error = normal(case).await?.unwrap_err();
+        assert_eq!(error.retryable, status == 429 || status == 503);
+        assert!(error.code.contains("HTTP_"));
+    }
+    // Shopify's fresh case is a mutation: a 5xx may have come after Shopify
+    // carried it out, so it is not sent again.
+    for (status, code, retryable) in [
+        (400, "SHOPIFY_REQUEST_FAILED", false),
+        (401, "SHOPIFY_UNAUTHORIZED", false),
+        (429, "SHOPIFY_RATE_LIMITED", true),
+        (503, "SHOPIFY_OUTCOME_UNKNOWN", false),
+    ] {
+        let mut case = fresh("shopify");
+        case.requests[0].response = envelope(status, json!({"error":{"message":"fixture error"}}));
+        let error = normal(case).await?.unwrap_err();
+        assert_eq!(
+            (error.code.as_str(), error.retryable),
+            (code, retryable),
+            "{status}"
+        );
     }
     let mut case = fresh("shopify");
     case.requests[0].response = envelope(200, json!({"errors":[{"message":"fixture error"}]}));
@@ -517,6 +533,58 @@ async fn shared_macro_preserves_provider_errors() -> anyhow::Result<()> {
         normal(case).await?.unwrap_err().code,
         "SHOPIFY_GRAPHQL_ERROR"
     );
+    Ok(())
+}
+/// Fulfilling by SKU sends one fulfillment per location. Once one went
+/// through, a later failure must not leave the step to be retried: a retry
+/// would fulfill the first location's units again.
+#[tokio::test]
+async fn shopify_fulfill_by_sku_is_not_retried_after_a_location_was_fulfilled() -> anyhow::Result<()>
+{
+    let order = |id: &str, location: &str, line: &str, sku: &str| {
+        json!({"id":id,"status":"OPEN","assignedLocation":{"name":location,"location":{"id":location}},
+            "supportedActions":[{"action":"CREATE_FULFILLMENT"}],
+            "lineItems":{"nodes":[{"id":line,"sku":sku,"remainingQuantity":2,"totalQuantity":2}],"pageInfo":{"hasNextPage":false}}})
+    };
+    let fulfill = |order: &str, line: &str, quantity: i64, answer: Value| {
+        Request::graphql(
+            "fulfillmentCreate",
+            json!({"lineItemsByFulfillmentOrder":[{"fulfillmentOrderId":order,"fulfillmentOrderLineItems":[{"id":line,"quantity":quantity}]}]}),
+            json!({"data":{"fulfillmentCreate":answer}}),
+        )
+    };
+    let case = case(
+        "shopify",
+        "fulfill-by-sku",
+        json!({"orderId":"order-1","items":[{"sku":"HAT","quantity":2},{"sku":"SCARF","quantity":1}]}),
+        vec![
+            Request::graphql(
+                "fulfillmentOrders",
+                json!({"orderId":"order-1","first":4,"lineItemsFirst":100}),
+                json!({"data":{"order":{"id":"order-1","fulfillmentOrders":{"nodes":[
+                    order("fo-east","loc-east","east-1","HAT"),
+                    order("fo-west","loc-west","west-1","SCARF"),
+                ],"pageInfo":{"hasNextPage":false}}}}}),
+            ),
+            fulfill(
+                "fo-east",
+                "east-1",
+                2,
+                json!({"fulfillment":{"id":"fulfillment-east"},"userErrors":[]}),
+            ),
+            fulfill(
+                "fo-west",
+                "west-1",
+                1,
+                json!({"fulfillment":null,"userErrors":[{"field":["fulfillment"],"message":"refused"}]}),
+            ),
+        ],
+        Value::Null,
+    );
+    let error = normal(case).await?.unwrap_err();
+    assert_eq!(error.code, "SHOPIFY_PARTIALLY_FULFILLED");
+    assert!(!error.retryable);
+    assert!(error.message.contains("refused"), "{}", error.message);
     Ok(())
 }
 #[tokio::test]

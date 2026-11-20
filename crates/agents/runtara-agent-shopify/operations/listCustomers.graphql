@@ -1,0 +1,52 @@
+query listCustomers(
+  $first: Int = 50
+  $after: String
+  $query: String
+  $sortKey: CustomerSortKeys
+  $reverse: Boolean
+) {
+  customers(first: $first, after: $after, query: $query, sortKey: $sortKey, reverse: $reverse) {
+    nodes {
+      id
+    legacyResourceId
+    displayName
+    firstName
+    lastName
+    note
+    tags
+    state
+    numberOfOrders
+    createdAt
+    updatedAt
+    verifiedEmail
+    taxExempt
+    amountSpent {
+      amount
+      currencyCode
+    }
+    defaultEmailAddress {
+      emailAddress
+      marketingState
+    }
+    defaultPhoneNumber {
+      phoneNumber
+    }
+    defaultAddress {
+      address1
+      address2
+      city
+      province
+      provinceCode
+      country
+      countryCodeV2
+      zip
+      phone
+      company
+    }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}

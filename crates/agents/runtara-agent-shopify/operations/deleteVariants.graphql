@@ -1,0 +1,13 @@
+mutation deleteVariants($productId: ID!, $variantsIds: [ID!]!) {
+  productVariantsBulkDelete(productId: $productId, variantsIds: $variantsIds) {
+    product {
+      id
+      title
+    }
+    userErrors {
+      field
+      message
+      code
+    }
+  }
+}

@@ -1,0 +1,32 @@
+query getInventoryLevels($variantId: ID!, $first: Int = 100) {
+  productVariant(id: $variantId) {
+    id
+    sku
+    inventoryQuantity
+    product {
+      id
+    }
+    inventoryItem {
+      id
+      tracked
+      inventoryLevels(first: $first) {
+        nodes {
+          id
+          updatedAt
+          location {
+            id
+            name
+          }
+          quantities(names: ["available", "on_hand", "committed", "incoming", "reserved"]) {
+            name
+            quantity
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+}
