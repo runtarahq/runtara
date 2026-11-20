@@ -244,6 +244,19 @@ answering to the schema, and the step's response is the parsed object
 (`direct_wasm_execute_ai_agent_tool_loop_answers_to_its_output_schema`).
 `tool-builder` could use one step instead of two.
 
+### 12. An upgrade leaves every published agent stale (found while testing)
+
+A workflow-agent is linked against the workflow stdlib it was published
+with. A server whose stdlib differs (any release that changes it; here, the
+fixes to 3 and 5) refuses to compile a caller of an agent published before:
+"workflow-agent `runtara:agent-…` was linked against workflow stdlib …, not …;
+republish it". A chat with such a tool could not take a new tool until the old
+one was republished by hand; its current version kept running (1).
+
+To fix: republish a tenant's workflow-agents when the server's stdlib
+changes (at boot, or on first use), from the version each was published from,
+or link a caller against an agent's stdlib without refusing it.
+
 ## What `tool-builder` cannot do yet
 
 Not platform gaps, but what the version described here is limited to:
