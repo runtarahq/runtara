@@ -203,7 +203,7 @@ with engines:
 | E1 | `peers::members` (`engine_members`, runtime migration `20261119400000`), `peers::singleton` | `tests/peers.rs` |
 | E2 | `workers/admission_counter.rs`: a keeper per tenant (`admission-counter:<tenant>`) | `tests/admission_keeper.rs` |
 | E3 | `valkey/compilation_queue.rs` (`<tenant>:compilation:inflight`), the worker renews | `tests/shared_valkey.rs` |
-| E4 | `conversations.rs`: the `conversation_said` trigger (server migration `20261119400000`), `hear_conversations`, `hear_pieces`, pieces in Valkey | `tests/conversations.rs` |
+| E4 | `conversations.rs`: the `conversation_said` trigger (server migration `20261119600000`), `hear_conversations`, `hear_pieces`, pieces in Valkey | `tests/conversations.rs` |
 | E5 | `runtara-executor`'s `Registrars` | `runtara-executor/tests/executor.rs` |
 | E6 | `engine/remote.rs` (`Engines`), `release` in the engine's facts | `engine::remote` tests |
 | E7 | (a) `workflow_agents::keep_in_sync`; (b) `runtara-connections`' `auth::refresh_lock`; (c) `in_process_waits::share` (runtime migration `20261119500000`); (d) `trigger_worker::keep_consumers_tidy`; (e) `peers::singleton::Job` | `workflow_agents` tests, `tests/sealed_oauth_flow.rs`, `tests/peers.rs`, `tests/shared_valkey.rs` |
