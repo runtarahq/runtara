@@ -3572,6 +3572,39 @@ pub struct GetFulfillmentOrdersFulfillmentOrdersPageInfo {
 #[capability_output(display_name = "GetFulfillmentOrdersRequest")]
 pub struct GetFulfillmentOrdersRequest {
     #[field(
+        display_name = r##"After"##,
+        description = r##"The elements that come after the specified cursor."##
+    )]
+    #[serde(
+        rename = "after",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub after: Option<Option<String>>,
+    #[field(
+        display_name = r##"First"##,
+        description = r##"The first `n` elements from the paginated list."##
+    )]
+    #[serde(
+        rename = "first",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub first: Option<Option<i64>>,
+    #[field(
+        display_name = r##"Line Items First"##,
+        description = r##"The first `n` elements from the paginated list."##
+    )]
+    #[serde(
+        rename = "lineItemsFirst",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub line_items_first: Option<Option<i64>>,
+    #[field(
         display_name = r##"Order ID"##,
         description = r##"The ID of the `Order` to return."##
     )]
@@ -3771,6 +3804,17 @@ pub struct GetInventoryLevelsInventoryItemInventoryLevelsPageInfo {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "GetInventoryLevelsRequest")]
 pub struct GetInventoryLevelsRequest {
+    #[field(
+        display_name = r##"First"##,
+        description = r##"The first `n` elements from the paginated list."##
+    )]
+    #[serde(
+        rename = "first",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub first: Option<Option<i64>>,
     #[field(
         display_name = r##"Variant ID"##,
         description = r##"The ID of the `ProductVariant` to return."##
@@ -5265,6 +5309,17 @@ pub struct GetProductRequest {
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[field(
+        display_name = r##"Media First"##,
+        description = r##"The first `n` elements from the paginated list."##
+    )]
+    #[serde(
+        rename = "mediaFirst",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub media_first: Option<Option<i64>>,
+    #[field(
         display_name = r##"Metafield Namespace"##,
         description = r##"The metafield namespace to filter by. If omitted, all metafields are returned."##
     )]
@@ -5275,6 +5330,17 @@ pub struct GetProductRequest {
         deserialize_with = "kit::nullable"
     )]
     pub metafield_namespace: Option<Option<String>>,
+    #[field(
+        display_name = r##"Metafields First"##,
+        description = r##"The first `n` elements from the paginated list."##
+    )]
+    #[serde(
+        rename = "metafieldsFirst",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub metafields_first: Option<Option<i64>>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -11371,17 +11437,6 @@ pub struct UpdateVariantsProductVariantsSelectedOptions {
 #[capability_output(display_name = "UpdateVariantsRequest")]
 pub struct UpdateVariantsRequest {
     #[field(
-        display_name = r##"Allow Partial Updates"##,
-        description = r##"When partial updates are allowed, valid variant changes may be persisted even if some of the variants updated have invalid data and cannot be persisted. When partial updates are not allowed, any error will prevent all variants from updating."##
-    )]
-    #[serde(
-        rename = "allowPartialUpdates",
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "kit::nullable"
-    )]
-    pub allow_partial_updates: Option<Option<bool>>,
-    #[field(
         display_name = r##"Product ID"##,
         description = r##"The ID of the product associated with the variants to update."##
     )]
@@ -13172,6 +13227,41 @@ pub struct GetFulfillmentOrdersInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub _connection: Option<RawConnection>,
     #[field(
+        display_name = r##"After"##,
+        description = r##"The elements that come after the specified cursor."##
+    )]
+    #[serde(
+        rename = "after",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub after: Option<Option<String>>,
+    #[field(
+        display_name = r##"First"##,
+        description = r##"The first `n` elements from the paginated list."##,
+        default = r##"5"##
+    )]
+    #[serde(
+        rename = "first",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub first: Option<Option<i64>>,
+    #[field(
+        display_name = r##"Line Items First"##,
+        description = r##"The first `n` elements from the paginated list."##,
+        default = r##"50"##
+    )]
+    #[serde(
+        rename = "lineItemsFirst",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub line_items_first: Option<Option<i64>>,
+    #[field(
         display_name = r##"Order ID"##,
         description = r##"The ID of the `Order` to return."##
     )]
@@ -13207,12 +13297,12 @@ pub async fn get_fulfillment_orders(
 impl GetFulfillmentOrdersInput {
     /// The request this capability sends; the connection supplies host and credentials.
     pub fn request(&self) -> Result<kit::Request, AgentError> {
-        const DOCUMENT: &str = r##"query getFulfillmentOrders($orderId: ID!) {
+        const DOCUMENT: &str = r##"query getFulfillmentOrders($orderId: ID!, $first: Int = 5, $after: String, $lineItemsFirst: Int = 50) {
   order(id: $orderId) {
     id
     name
     displayFulfillmentStatus
-    fulfillmentOrders(first: 5) {
+    fulfillmentOrders(first: $first, after: $after) {
       nodes {
         id
         status
@@ -13228,7 +13318,7 @@ impl GetFulfillmentOrdersInput {
         supportedActions {
           action
         }
-        lineItems(first: 50) {
+        lineItems(first: $lineItemsFirst) {
           nodes {
             id
             sku
@@ -13254,7 +13344,11 @@ impl GetFulfillmentOrdersInput {
     }
   }
 }"##;
-        let variables = kit::Body::new().field("orderId", &self.order_id);
+        let variables = kit::Body::new()
+            .field_opt("after", &self.after)
+            .field_opt("first", &self.first)
+            .field_opt("lineItemsFirst", &self.line_items_first)
+            .field("orderId", &self.order_id);
         kit::Request::new("POST", String::from("/admin/api/2026-10/graphql.json"))
             .graphql(DOCUMENT, "order", true, variables, "SHOPIFY")
     }
@@ -13266,6 +13360,18 @@ pub struct GetInventoryLevelsInput {
     #[field(skip)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub _connection: Option<RawConnection>,
+    #[field(
+        display_name = r##"First"##,
+        description = r##"The first `n` elements from the paginated list."##,
+        default = r##"100"##
+    )]
+    #[serde(
+        rename = "first",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub first: Option<Option<i64>>,
     #[field(
         display_name = r##"Variant ID"##,
         description = r##"The ID of the `ProductVariant` to return."##
@@ -13302,7 +13408,7 @@ pub async fn get_inventory_levels(
 impl GetInventoryLevelsInput {
     /// The request this capability sends; the connection supplies host and credentials.
     pub fn request(&self) -> Result<kit::Request, AgentError> {
-        const DOCUMENT: &str = r##"query getInventoryLevels($variantId: ID!) {
+        const DOCUMENT: &str = r##"query getInventoryLevels($variantId: ID!, $first: Int = 100) {
   productVariant(id: $variantId) {
     id
     sku
@@ -13310,7 +13416,7 @@ impl GetInventoryLevelsInput {
     inventoryItem {
       id
       tracked
-      inventoryLevels(first: 50) {
+      inventoryLevels(first: $first) {
         nodes {
           id
           updatedAt
@@ -13331,7 +13437,9 @@ impl GetInventoryLevelsInput {
     }
   }
 }"##;
-        let variables = kit::Body::new().field("variantId", &self.variant_id);
+        let variables = kit::Body::new()
+            .field_opt("first", &self.first)
+            .field("variantId", &self.variant_id);
         kit::Request::new("POST", String::from("/admin/api/2026-10/graphql.json")).graphql(
             DOCUMENT,
             "productVariant",
@@ -13546,6 +13654,18 @@ pub struct GetProductInput {
     #[serde(rename = "id")]
     pub id: String,
     #[field(
+        display_name = r##"Media First"##,
+        description = r##"The first `n` elements from the paginated list."##,
+        default = r##"50"##
+    )]
+    #[serde(
+        rename = "mediaFirst",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub media_first: Option<Option<i64>>,
+    #[field(
         display_name = r##"Metafield Namespace"##,
         description = r##"The metafield namespace to filter by. If omitted, all metafields are returned."##
     )]
@@ -13556,6 +13676,18 @@ pub struct GetProductInput {
         deserialize_with = "kit::nullable"
     )]
     pub metafield_namespace: Option<Option<String>>,
+    #[field(
+        display_name = r##"Metafields First"##,
+        description = r##"The first `n` elements from the paginated list."##,
+        default = r##"50"##
+    )]
+    #[serde(
+        rename = "metafieldsFirst",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub metafields_first: Option<Option<i64>>,
 }
 
 #[capability(
@@ -13588,7 +13720,7 @@ pub async fn get_product(input: GetProductInput) -> Result<GetProductResult, Age
 impl GetProductInput {
     /// The request this capability sends; the connection supplies host and credentials.
     pub fn request(&self) -> Result<kit::Request, AgentError> {
-        const DOCUMENT: &str = r##"query getProduct($id: ID!, $metafieldNamespace: String) {
+        const DOCUMENT: &str = r##"query getProduct($id: ID!, $metafieldNamespace: String, $metafieldsFirst: Int = 50, $mediaFirst: Int = 50) {
   product(id: $id) {
     id
     legacyResourceId
@@ -13647,7 +13779,7 @@ impl GetProductInput {
         endCursor
       }
     }
-    media(first: 50) {
+    media(first: $mediaFirst) {
       nodes {
         id
         alt
@@ -13666,7 +13798,7 @@ impl GetProductInput {
         endCursor
       }
     }
-    metafields(first: 50, namespace: $metafieldNamespace) {
+    metafields(first: $metafieldsFirst, namespace: $metafieldNamespace) {
       nodes {
         id
         namespace
@@ -13690,7 +13822,9 @@ impl GetProductInput {
 }"##;
         let variables = kit::Body::new()
             .field("id", &self.id)
-            .field_opt("metafieldNamespace", &self.metafield_namespace);
+            .field_opt("mediaFirst", &self.media_first)
+            .field_opt("metafieldNamespace", &self.metafield_namespace)
+            .field_opt("metafieldsFirst", &self.metafields_first);
         kit::Request::new("POST", String::from("/admin/api/2026-10/graphql.json"))
             .graphql(DOCUMENT, "product", true, variables, "SHOPIFY")
     }
@@ -16150,17 +16284,6 @@ pub struct UpdateVariantsInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub _connection: Option<RawConnection>,
     #[field(
-        display_name = r##"Allow Partial Updates"##,
-        description = r##"When partial updates are allowed, valid variant changes may be persisted even if some of the variants updated have invalid data and cannot be persisted. When partial updates are not allowed, any error will prevent all variants from updating."##
-    )]
-    #[serde(
-        rename = "allowPartialUpdates",
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "kit::nullable"
-    )]
-    pub allow_partial_updates: Option<Option<bool>>,
-    #[field(
         display_name = r##"Product ID"##,
         description = r##"The ID of the product associated with the variants to update."##
     )]
@@ -16214,12 +16337,8 @@ pub async fn update_variants(
 impl UpdateVariantsInput {
     /// The request this capability sends; the connection supplies host and credentials.
     pub fn request(&self) -> Result<kit::Request, AgentError> {
-        const DOCUMENT: &str = r##"mutation updateVariants($productId: ID!, $variants: [ProductVariantsBulkInput!]!, $allowPartialUpdates: Boolean) {
-  productVariantsBulkUpdate(
-    productId: $productId
-    variants: $variants
-    allowPartialUpdates: $allowPartialUpdates
-  ) {
+        const DOCUMENT: &str = r##"mutation updateVariants($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+  productVariantsBulkUpdate(productId: $productId, variants: $variants) {
     productVariants {
       id
       title
@@ -16253,7 +16372,6 @@ impl UpdateVariantsInput {
   }
 }"##;
         let variables = kit::Body::new()
-            .field_opt("allowPartialUpdates", &self.allow_partial_updates)
             .field("productId", &self.product_id)
             .field("variants", &self.variants);
         kit::Request::new("POST", String::from("/admin/api/2026-10/graphql.json")).graphql(

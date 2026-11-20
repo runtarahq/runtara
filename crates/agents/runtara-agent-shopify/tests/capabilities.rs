@@ -217,7 +217,9 @@ fn variables_are_the_inputs() {
         inputs("get-product"),
         [
             ("id".to_string(), true),
-            ("metafieldNamespace".to_string(), false)
+            ("mediaFirst".to_string(), false),
+            ("metafieldNamespace".to_string(), false),
+            ("metafieldsFirst".to_string(), false)
         ]
     );
     // An input object's fields are inputs of their own, typed in the editor.
@@ -258,7 +260,7 @@ fn a_query_sends_its_operation_and_variables() {
         body["query"]
             .as_str()
             .unwrap()
-            .starts_with("query getProduct($id: ID!, $metafieldNamespace: String)"),
+            .starts_with("query getProduct($id: ID!, $metafieldNamespace: String, $metafieldsFirst: Int = 50, $mediaFirst: Int = 50)"),
         "{body}"
     );
     assert_eq!(

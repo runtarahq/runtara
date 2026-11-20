@@ -1318,9 +1318,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     times by default. A generated agent says so with `rate_limited: true`
     under `agent:` in its `connector.yaml`, which `connector_gen` now takes.
   - Fulfilling by SKU fails when a fulfillment fails, instead of reporting it
-    done, and fulfills each location separately. Replacing a product's
-    images takes the old ones off the product instead of deleting the files
-    from the store.
+    done, and fulfills each location separately. When a location was
+    fulfilled before another failed, the step fails with
+    `SHOPIFY_PARTIALLY_FULFILLED` and is not retried, since a retry would
+    fulfill the first location's units again. It reads every fulfillment
+    order, and refuses one with more lines than it reads instead of
+    reporting those SKUs missing. Replacing a product's images takes the old
+    ones off the product instead of deleting the files from the store.
   - The connections' `api_version` now defaults to 2026-10 (it was 2025-01,
     which Shopify no longer serves). The Shopify agent always sends the
     version it was built for.

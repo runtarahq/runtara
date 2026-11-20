@@ -8,9 +8,9 @@
 use std::collections::HashMap;
 
 use runtara_agent_shopify::{
-    AdjustInventoryInput, GRAPHQL_PATH, GetFulfillmentOrdersResult, GetProductInput,
-    ListVariantsNodes, SetInventoryInput, SkuQuantity, adjust_inventory_request, allocate, kit,
-    pick_variant, search_term, set_inventory_request,
+    AdjustInventoryInput, GRAPHQL_PATH, GetFulfillmentOrdersFulfillmentOrdersNodes,
+    GetProductInput, ListVariantsNodes, SetInventoryInput, SkuQuantity, adjust_inventory_request,
+    allocate, kit, pick_variant, search_term, set_inventory_request,
 };
 use serde_json::{Value, json};
 
@@ -53,11 +53,8 @@ fn fulfillment_order(
     })
 }
 
-fn orders(nodes: Vec<Value>) -> GetFulfillmentOrdersResult {
-    input(json!({
-        "id": "gid://shopify/Order/1",
-        "fulfillmentOrders": { "nodes": nodes, "pageInfo": { "hasNextPage": false } },
-    }))
+fn orders(nodes: Vec<Value>) -> Vec<GetFulfillmentOrdersFulfillmentOrdersNodes> {
+    input(json!(nodes))
 }
 
 const FULFILL: &[&str] = &["CREATE_FULFILLMENT", "HOLD"];

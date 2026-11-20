@@ -391,7 +391,9 @@ pub fn decode<T: DeserializeOwned>(
 
 /// Reads a GraphQL answer: the value of `data.<field>`.
 ///
-/// - `errors` fail the step: `THROTTLED` is transient, with the wait Shopify's
+/// - `errors` fail the step. With a mutation that answered its field as well,
+///   it ran, so the outcome is unknown ([`outcome_unknown`]). Otherwise
+///   Shopify did not run it: `THROTTLED` is transient, with the wait Shopify's
 ///   cost report gives (Shopify did not run the operation); `ACCESS_DENIED`
 ///   is `<PREFIX>_UNAUTHORIZED`; `INTERNAL_SERVER_ERROR` is transient for a
 ///   query and [`outcome_unknown`] for a mutation; the rest are
@@ -426,6 +428,24 @@ pub fn decode_graphql<T: DeserializeOwned>(
         Value::Null => false,
         _ => true,
     }) {
+        // A mutation that answered its field as well ran: the errors are of
+        // a part of the answer (a field the app may not read), not a refusal.
+        let ran = !graphql.read
+            && envelope
+                .get("data")
+                .and_then(|data| data.get(graphql.field))
+                .is_some_and(|value| !value.is_null());
+        if ran {
+            return Err(outcome_unknown(
+                prefix,
+                format!(
+                    "{prefix} `{}` answered with errors as well: {}",
+                    graphql.field,
+                    graphql_messages(errors)
+                ),
+            )
+            .with_attr("errors", errors.clone()));
+        }
         return Err(graphql_error(
             errors,
             envelope.get("extensions"),
@@ -491,6 +511,21 @@ fn refused_input(value: &Value) -> Option<&Vec<Value>> {
         .or_else(|| listed(&USER_ERRORS.to_string()))
 }
 
+/// The messages of a GraphQL `errors` list, joined; the list itself when it
+/// has none.
+fn graphql_messages(errors: &Value) -> String {
+    let list = errors.as_array().map(Vec::as_slice).unwrap_or_default();
+    let messages: Vec<&str> = list
+        .iter()
+        .filter_map(|error| error.get("message").and_then(Value::as_str))
+        .collect();
+    if messages.is_empty() {
+        errors.to_string()
+    } else {
+        messages.join("; ")
+    }
+}
+
 /// The error a GraphQL `errors` list means.
 fn graphql_error(
     errors: &Value,
@@ -503,15 +538,7 @@ fn graphql_error(
         .iter()
         .filter_map(|error| error.pointer("/extensions/code").and_then(Value::as_str))
         .collect();
-    let message = match list
-        .iter()
-        .filter_map(|error| error.get("message").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-    {
-        messages if !messages.is_empty() => messages.join("; "),
-        _ => errors.to_string(),
-    };
-    let message: String = format!("{prefix} GraphQL error: {message}")
+    let message: String = format!("{prefix} GraphQL error: {}", graphql_messages(errors))
         .chars()
         .take(ERROR_BODY_LIMIT)
         .collect();
@@ -555,13 +582,14 @@ fn header<'a>(headers: &'a HashMap<String, String>, name: &str) -> Option<&'a st
 }
 
 /// The host's `retry-after-ms` (set by its rate limiter) when present,
-/// otherwise `Retry-After` in whole seconds.
+/// otherwise `Retry-After` in seconds, which Shopify may send as `2.0`.
 fn retry_after_ms(headers: &HashMap<String, String>) -> Option<u64> {
     header(headers, "retry-after-ms")
         .and_then(|value| value.parse::<u64>().ok())
         .or_else(|| {
             header(headers, "retry-after")
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(|seconds| seconds * 1000)
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+                .map(|seconds| (seconds * 1000.0).ceil() as u64)
         })
 }

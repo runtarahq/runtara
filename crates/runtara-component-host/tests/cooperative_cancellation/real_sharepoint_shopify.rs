@@ -321,7 +321,7 @@ fn shopify_cases() -> Vec<Case> {
         vec![
             Request::graphql(
                 "product",
-                json!({"id":"42"}),
+                json!({"id":"42","mediaFirst":250}),
                 json!({"data":{"product":{"id":"42","media":{"nodes":[{"id":"old-image"}],"pageInfo":{"hasNextPage":false}}}}}),
             ),
             Request::graphql(
@@ -533,6 +533,58 @@ async fn shared_macro_preserves_provider_errors() -> anyhow::Result<()> {
         normal(case).await?.unwrap_err().code,
         "SHOPIFY_GRAPHQL_ERROR"
     );
+    Ok(())
+}
+/// Fulfilling by SKU sends one fulfillment per location. Once one went
+/// through, a later failure must not leave the step to be retried: a retry
+/// would fulfill the first location's units again.
+#[tokio::test]
+async fn shopify_fulfill_by_sku_is_not_retried_after_a_location_was_fulfilled() -> anyhow::Result<()>
+{
+    let order = |id: &str, location: &str, line: &str, sku: &str| {
+        json!({"id":id,"status":"OPEN","assignedLocation":{"name":location,"location":{"id":location}},
+            "supportedActions":[{"action":"CREATE_FULFILLMENT"}],
+            "lineItems":{"nodes":[{"id":line,"sku":sku,"remainingQuantity":2,"totalQuantity":2}],"pageInfo":{"hasNextPage":false}}})
+    };
+    let fulfill = |order: &str, line: &str, quantity: i64, answer: Value| {
+        Request::graphql(
+            "fulfillmentCreate",
+            json!({"lineItemsByFulfillmentOrder":[{"fulfillmentOrderId":order,"fulfillmentOrderLineItems":[{"id":line,"quantity":quantity}]}]}),
+            json!({"data":{"fulfillmentCreate":answer}}),
+        )
+    };
+    let case = case(
+        "shopify",
+        "fulfill-by-sku",
+        json!({"orderId":"order-1","items":[{"sku":"HAT","quantity":2},{"sku":"SCARF","quantity":1}]}),
+        vec![
+            Request::graphql(
+                "fulfillmentOrders",
+                json!({"orderId":"order-1","first":4,"lineItemsFirst":100}),
+                json!({"data":{"order":{"id":"order-1","fulfillmentOrders":{"nodes":[
+                    order("fo-east","loc-east","east-1","HAT"),
+                    order("fo-west","loc-west","west-1","SCARF"),
+                ],"pageInfo":{"hasNextPage":false}}}}}),
+            ),
+            fulfill(
+                "fo-east",
+                "east-1",
+                2,
+                json!({"fulfillment":{"id":"fulfillment-east"},"userErrors":[]}),
+            ),
+            fulfill(
+                "fo-west",
+                "west-1",
+                1,
+                json!({"fulfillment":null,"userErrors":[{"field":["fulfillment"],"message":"refused"}]}),
+            ),
+        ],
+        Value::Null,
+    );
+    let error = normal(case).await?.unwrap_err();
+    assert_eq!(error.code, "SHOPIFY_PARTIALLY_FULFILLED");
+    assert!(!error.retryable);
+    assert!(error.message.contains("refused"), "{}", error.message);
     Ok(())
 }
 #[tokio::test]

@@ -1,4 +1,4 @@
-query getInventoryLevels($variantId: ID!) {
+query getInventoryLevels($variantId: ID!, $first: Int = 100) {
   productVariant(id: $variantId) {
     id
     sku
@@ -6,7 +6,7 @@ query getInventoryLevels($variantId: ID!) {
     inventoryItem {
       id
       tracked
-      inventoryLevels(first: 50) {
+      inventoryLevels(first: $first) {
         nodes {
           id
           updatedAt

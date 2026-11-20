@@ -22,7 +22,8 @@ use crate::kit::{self, AgentError, RawConnection};
 use crate::{
     CreateFulfillmentFulfillment, CreateFulfillmentInput, CreateFulfillmentResult,
     CreateMediaInput, FileUpdateInput, FulfillmentOrderLineItemInput,
-    FulfillmentOrderLineItemsInput, FulfillmentTrackingInput, GetFulfillmentOrdersInput,
+    FulfillmentOrderLineItemsInput, FulfillmentTrackingInput,
+    GetFulfillmentOrdersFulfillmentOrdersNodes, GetFulfillmentOrdersInput,
     GetFulfillmentOrdersResult, GetProductInput, GetProductResult, ListLocationsInput,
     ListLocationsNodes, ListLocationsResult, ListOrdersInput, ListOrdersNodes, ListOrdersResult,
     ListProductsInput, ListProductsNodes, ListProductsResult, ListVariantsInput, ListVariantsNodes,
@@ -71,6 +72,20 @@ macro_rules! page {
 page!(ListProductsResult, ListProductsNodes);
 page!(ListOrdersResult, ListOrdersNodes);
 page!(ListLocationsResult, ListLocationsNodes);
+
+/// An order's fulfillment orders, a page at a time.
+impl Page for GetFulfillmentOrdersResult {
+    type Node = GetFulfillmentOrdersFulfillmentOrdersNodes;
+    fn into_page(self) -> (Vec<Self::Node>, bool, Option<String>) {
+        let orders = self.fulfillment_orders.unwrap_or_default();
+        let info = orders.page_info.unwrap_or_default();
+        (
+            orders.nodes.unwrap_or_default(),
+            info.has_next_page.unwrap_or(false),
+            info.end_cursor,
+        )
+    }
+}
 
 struct Pages<T> {
     items: Vec<T>,
@@ -467,6 +482,8 @@ pub async fn get_variant_by_sku(
                 _connection: None,
                 id,
                 metafield_namespace: None,
+                metafields_first: None,
+                media_first: None,
             }
             .request()?
             .send_paced(connection, PREFIX)
@@ -1062,6 +1079,8 @@ pub async fn replace_product_images(
         _connection: None,
         id: input.product_id.clone(),
         metafield_namespace: None,
+        metafields_first: None,
+        media_first: Some(Some(MAX_PAGE_SIZE)),
     }
     .request()?
     .send_paced(connection, PREFIX)
@@ -1312,7 +1331,7 @@ pub struct Allocation {
 /// fulfillment of it (`CREATE_FULFILLMENT`) and, with `location`, when it is
 /// assigned there (or to no location Shopify still knows).
 pub fn allocate(
-    orders: &GetFulfillmentOrdersResult,
+    nodes: &[GetFulfillmentOrdersFulfillmentOrdersNodes],
     items: &[SkuQuantity],
     location: Option<&str>,
 ) -> Allocation {
@@ -1324,12 +1343,6 @@ pub fn allocate(
         left: i64,
     }
 
-    let nodes = orders
-        .fulfillment_orders
-        .as_ref()
-        .and_then(|orders| orders.nodes.as_ref())
-        .map(Vec::as_slice)
-        .unwrap_or_default();
     let mut lines = Vec::new();
     for order in nodes {
         let fulfillable = order
@@ -1460,12 +1473,62 @@ fn position_or_push<T>(
     }
 }
 
+/// Fulfillment orders read per page: with [`MAX_FULFILLMENT_LINES`] lines
+/// each, one page stays within the query cost Shopify allows.
+const FULFILLMENT_ORDERS_PER_PAGE: i64 = 4;
+/// The most lines of one fulfillment order `fulfill-by-sku` reads.
+const MAX_FULFILLMENT_LINES: i64 = 100;
+
+/// Every fulfillment order of `order_id`, page by page. Refused when one has
+/// more lines than are read, so that a SKU beyond them is not reported as
+/// missing.
+async fn fulfillment_orders(
+    connection: &RawConnection,
+    order_id: &str,
+) -> Result<Vec<GetFulfillmentOrdersFulfillmentOrdersNodes>, AgentError> {
+    let pages = read_pages::<GetFulfillmentOrdersResult>(
+        connection,
+        MAX_LIMIT,
+        FULFILLMENT_ORDERS_PER_PAGE,
+        |first, after| {
+            GetFulfillmentOrdersInput {
+                _connection: None,
+                order_id: order_id.to_string(),
+                first: Some(Some(first)),
+                after: after.map(Some),
+                line_items_first: Some(Some(MAX_FULFILLMENT_LINES)),
+            }
+            .request()
+        },
+    )
+    .await?;
+    if let Some(order) = pages.items.iter().find(|order| {
+        order
+            .line_items
+            .as_ref()
+            .and_then(|lines| lines.page_info.as_ref())
+            .and_then(|info| info.has_next_page)
+            .unwrap_or(false)
+    }) {
+        return Err(AgentError::permanent(
+            format!("{PREFIX}_TOO_MANY_LINES"),
+            format!(
+                "fulfillment order {} of order {order_id} has more than {MAX_FULFILLMENT_LINES} lines, \
+                 more than fulfill-by-sku reads; nothing was fulfilled",
+                order.id.as_deref().unwrap_or("?"),
+            ),
+        )
+        .with_attr("order_id", order_id));
+    }
+    Ok(pages.items)
+}
+
 /// Fulfills SKUs of an order.
 #[capability(
     module = "shopify",
     rate_limited = true,
     display_name = "Fulfill Order by SKU",
-    description = "Fulfills quantities of SKUs of an order from its open fulfillment orders, one fulfillment per location. A SKU that cannot be fulfilled in full is listed in `unfulfilled`. If a fulfillment fails the step fails; running it again reads what is still open, so nothing is fulfilled twice.",
+    description = "Fulfills quantities of SKUs of an order from its open fulfillment orders, one fulfillment per location. A SKU that cannot be fulfilled in full is listed in `unfulfilled`. When the first fulfillment fails nothing was fulfilled, and the step can run again. When a later one fails, the step fails with SHOPIFY_PARTIALLY_FULFILLED, which lists what was fulfilled, and is not run again: that would fulfill those units twice.",
     side_effects = true
 )]
 pub async fn fulfill_by_sku(input: FulfillBySkuInput) -> Result<FulfillBySkuOutput, AgentError> {
@@ -1473,19 +1536,8 @@ pub async fn fulfill_by_sku(input: FulfillBySkuInput) -> Result<FulfillBySkuOutp
     if input.items.is_empty() {
         return Err(invalid_input("`items` lists nothing to fulfill"));
     }
-    let orders: GetFulfillmentOrdersResult = GetFulfillmentOrdersInput {
-        _connection: None,
-        order_id: input.order_id.clone(),
-    }
-    .request()?
-    .send_paced(connection, PREFIX)
-    .await?;
-    let has_orders = orders
-        .fulfillment_orders
-        .as_ref()
-        .and_then(|orders| orders.nodes.as_ref())
-        .is_some_and(|nodes| !nodes.is_empty());
-    if !has_orders {
+    let orders = fulfillment_orders(connection, &input.order_id).await?;
+    if orders.is_empty() {
         return Err(not_found(format!(
             "order {} has no fulfillment orders",
             input.order_id
@@ -1506,13 +1558,11 @@ pub async fn fulfill_by_sku(input: FulfillBySkuInput) -> Result<FulfillBySkuOutp
 
     let mut output = FulfillBySkuOutput {
         total_requested: input.items.iter().map(|item| item.quantity.max(0)).sum(),
-        total_fulfilled: allocation.fulfilled.iter().map(|line| line.quantity).sum(),
-        fulfilled: allocation.fulfilled,
-        unfulfilled: allocation.unfulfilled,
         ..Default::default()
     };
-    for (_, line_items_by_fulfillment_order) in allocation.by_location {
-        let created: CreateFulfillmentResult = CreateFulfillmentInput {
+    let mut done_locations: Vec<Option<String>> = Vec::new();
+    for (location, line_items_by_fulfillment_order) in allocation.by_location {
+        let created: Result<CreateFulfillmentResult, AgentError> = CreateFulfillmentInput {
             _connection: None,
             line_items_by_fulfillment_order,
             notify_customer: input.notify_customer.map(Some),
@@ -1522,9 +1572,49 @@ pub async fn fulfill_by_sku(input: FulfillBySkuInput) -> Result<FulfillBySkuOutp
         }
         .request()?
         .send_paced(connection, PREFIX)
-        .await?;
-        output.fulfillments.extend(created.fulfillment);
+        .await;
+        match created {
+            Ok(created) => {
+                output.fulfillments.extend(created.fulfillment);
+                done_locations.push(location);
+            }
+            // Nothing fulfilled yet: the step fails as the request did, and
+            // running it again is safe.
+            Err(error) if done_locations.is_empty() => return Err(error),
+            Err(error) => {
+                let fulfilled: Vec<&FulfilledSku> = allocation
+                    .fulfilled
+                    .iter()
+                    .filter(|line| done_locations.contains(&line.location_id))
+                    .collect();
+                let ids: Vec<&str> = output
+                    .fulfillments
+                    .iter()
+                    .filter_map(|fulfillment| fulfillment.id.as_deref())
+                    .collect();
+                return Err(AgentError::permanent(
+                    format!("{PREFIX}_PARTIALLY_FULFILLED"),
+                    format!(
+                        "{} of the order's locations were fulfilled before one failed ({}: {}); \
+                         running the step again would fulfill them twice",
+                        done_locations.len(),
+                        error.code,
+                        error.message
+                    ),
+                )
+                .with_attr("order_id", input.order_id.as_str())
+                .with_attr("fulfillment_ids", json!(ids))
+                .with_attr("fulfilled", json!(fulfilled))
+                .with_attr(
+                    "error",
+                    json!({ "code": error.code, "message": error.message }),
+                ));
+            }
+        }
     }
+    output.total_fulfilled = allocation.fulfilled.iter().map(|line| line.quantity).sum();
+    output.fulfilled = allocation.fulfilled;
+    output.unfulfilled = allocation.unfulfilled;
     Ok(output)
 }
 

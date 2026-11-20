@@ -1,4 +1,9 @@
-query getProduct($id: ID!, $metafieldNamespace: String) {
+query getProduct(
+  $id: ID!
+  $metafieldNamespace: String
+  $metafieldsFirst: Int = 50
+  $mediaFirst: Int = 50
+) {
   product(id: $id) {
     id
     legacyResourceId
@@ -57,7 +62,7 @@ query getProduct($id: ID!, $metafieldNamespace: String) {
         endCursor
       }
     }
-    media(first: 50) {
+    media(first: $mediaFirst) {
       nodes {
         id
         alt
@@ -76,7 +81,7 @@ query getProduct($id: ID!, $metafieldNamespace: String) {
         endCursor
       }
     }
-    metafields(first: 50, namespace: $metafieldNamespace) {
+    metafields(first: $metafieldsFirst, namespace: $metafieldNamespace) {
       nodes {
         id
         namespace

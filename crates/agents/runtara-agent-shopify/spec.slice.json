@@ -14288,6 +14288,30 @@
             "application/json": {
               "schema": {
                 "properties": {
+                  "after": {
+                    "description": "The elements that come after the specified cursor.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "After"
+                  },
+                  "first": {
+                    "default": 5,
+                    "description": "The first `n` elements from the paginated list.",
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer",
+                    "x-runtara-default": "5",
+                    "x-runtara-label": "First"
+                  },
+                  "lineItemsFirst": {
+                    "default": 50,
+                    "description": "The first `n` elements from the paginated list.",
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer",
+                    "x-runtara-default": "50",
+                    "x-runtara-label": "Line Items First"
+                  },
                   "orderId": {
                     "description": "The ID of the `Order` to return.",
                     "type": "string",
@@ -14318,7 +14342,7 @@
         "tags": [
           "graphql"
         ],
-        "x-runtara-graphql-document": "query getFulfillmentOrders($orderId: ID!) {\n  order(id: $orderId) {\n    id\n    name\n    displayFulfillmentStatus\n    fulfillmentOrders(first: 5) {\n      nodes {\n        id\n        status\n        requestStatus\n        createdAt\n        fulfillAt\n        assignedLocation {\n          name\n          location {\n            id\n          }\n        }\n        supportedActions {\n          action\n        }\n        lineItems(first: 50) {\n          nodes {\n            id\n            sku\n            productTitle\n            variantTitle\n            totalQuantity\n            remainingQuantity\n            lineItem {\n              id\n              sku\n            }\n          }\n          pageInfo {\n            hasNextPage\n            endCursor\n          }\n        }\n      }\n      pageInfo {\n        hasNextPage\n        endCursor\n      }\n    }\n  }\n}",
+        "x-runtara-graphql-document": "query getFulfillmentOrders($orderId: ID!, $first: Int = 5, $after: String, $lineItemsFirst: Int = 50) {\n  order(id: $orderId) {\n    id\n    name\n    displayFulfillmentStatus\n    fulfillmentOrders(first: $first, after: $after) {\n      nodes {\n        id\n        status\n        requestStatus\n        createdAt\n        fulfillAt\n        assignedLocation {\n          name\n          location {\n            id\n          }\n        }\n        supportedActions {\n          action\n        }\n        lineItems(first: $lineItemsFirst) {\n          nodes {\n            id\n            sku\n            productTitle\n            variantTitle\n            totalQuantity\n            remainingQuantity\n            lineItem {\n              id\n              sku\n            }\n          }\n          pageInfo {\n            hasNextPage\n            endCursor\n          }\n        }\n      }\n      pageInfo {\n        hasNextPage\n        endCursor\n      }\n    }\n  }\n}",
         "x-runtara-graphql-field": "order",
         "x-runtara-graphql-path": "/admin/api/2026-10/graphql.json",
         "x-runtara-summary": "Get Fulfillment Orders"
@@ -14333,6 +14357,15 @@
             "application/json": {
               "schema": {
                 "properties": {
+                  "first": {
+                    "default": 100,
+                    "description": "The first `n` elements from the paginated list.",
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer",
+                    "x-runtara-default": "100",
+                    "x-runtara-label": "First"
+                  },
                   "variantId": {
                     "description": "The ID of the `ProductVariant` to return.",
                     "type": "string",
@@ -14363,7 +14396,7 @@
         "tags": [
           "graphql"
         ],
-        "x-runtara-graphql-document": "query getInventoryLevels($variantId: ID!) {\n  productVariant(id: $variantId) {\n    id\n    sku\n    inventoryQuantity\n    inventoryItem {\n      id\n      tracked\n      inventoryLevels(first: 50) {\n        nodes {\n          id\n          updatedAt\n          location {\n            id\n            name\n          }\n          quantities(names: [\"available\", \"on_hand\", \"committed\", \"incoming\", \"reserved\"]) {\n            name\n            quantity\n          }\n        }\n        pageInfo {\n          hasNextPage\n          endCursor\n        }\n      }\n    }\n  }\n}",
+        "x-runtara-graphql-document": "query getInventoryLevels($variantId: ID!, $first: Int = 100) {\n  productVariant(id: $variantId) {\n    id\n    sku\n    inventoryQuantity\n    inventoryItem {\n      id\n      tracked\n      inventoryLevels(first: $first) {\n        nodes {\n          id\n          updatedAt\n          location {\n            id\n            name\n          }\n          quantities(names: [\"available\", \"on_hand\", \"committed\", \"incoming\", \"reserved\"]) {\n            name\n            quantity\n          }\n        }\n        pageInfo {\n          hasNextPage\n          endCursor\n        }\n      }\n    }\n  }\n}",
         "x-runtara-graphql-field": "productVariant",
         "x-runtara-graphql-path": "/admin/api/2026-10/graphql.json",
         "x-runtara-summary": "Get Inventory Levels"
@@ -14428,11 +14461,29 @@
                     "type": "string",
                     "x-runtara-label": "ID"
                   },
+                  "mediaFirst": {
+                    "default": 50,
+                    "description": "The first `n` elements from the paginated list.",
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer",
+                    "x-runtara-default": "50",
+                    "x-runtara-label": "Media First"
+                  },
                   "metafieldNamespace": {
                     "description": "The metafield namespace to filter by. If omitted, all metafields are returned.",
                     "nullable": true,
                     "type": "string",
                     "x-runtara-label": "Metafield Namespace"
+                  },
+                  "metafieldsFirst": {
+                    "default": 50,
+                    "description": "The first `n` elements from the paginated list.",
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer",
+                    "x-runtara-default": "50",
+                    "x-runtara-label": "Metafields First"
                   }
                 },
                 "required": [
@@ -14460,7 +14511,7 @@
           "graphql"
         ],
         "x-runtara-first": true,
-        "x-runtara-graphql-document": "query getProduct($id: ID!, $metafieldNamespace: String) {\n  product(id: $id) {\n    id\n    legacyResourceId\n    title\n    handle\n    status\n    vendor\n    productType\n    tags\n    descriptionHtml\n    createdAt\n    updatedAt\n    publishedAt\n    totalInventory\n    hasOnlyDefaultVariant\n    onlineStoreUrl\n    category {\n      id\n      fullName\n    }\n    seo {\n      title\n      description\n    }\n    options {\n      id\n      name\n      position\n      optionValues {\n        id\n        name\n        hasVariants\n      }\n    }\n    variants(first: 100) {\n      nodes {\n        id\n        title\n        sku\n        price\n        compareAtPrice\n        inventoryQuantity\n        position\n        taxable\n        inventoryPolicy\n        selectedOptions {\n          name\n          value\n        }\n        inventoryItem {\n          id\n        }\n      }\n      pageInfo {\n        hasNextPage\n        endCursor\n      }\n    }\n    media(first: 50) {\n      nodes {\n        id\n        alt\n        mediaContentType\n        status\n        ... on MediaImage {\n          image {\n            url\n            width\n            height\n          }\n        }\n      }\n      pageInfo {\n        hasNextPage\n        endCursor\n      }\n    }\n    metafields(first: 50, namespace: $metafieldNamespace) {\n      nodes {\n        id\n        namespace\n        key\n        type\n        value\n      }\n      pageInfo {\n        hasNextPage\n        endCursor\n      }\n    }\n    collections(first: 20) {\n      nodes {\n        id\n        title\n        handle\n      }\n    }\n  }\n}",
+        "x-runtara-graphql-document": "query getProduct($id: ID!, $metafieldNamespace: String, $metafieldsFirst: Int = 50, $mediaFirst: Int = 50) {\n  product(id: $id) {\n    id\n    legacyResourceId\n    title\n    handle\n    status\n    vendor\n    productType\n    tags\n    descriptionHtml\n    createdAt\n    updatedAt\n    publishedAt\n    totalInventory\n    hasOnlyDefaultVariant\n    onlineStoreUrl\n    category {\n      id\n      fullName\n    }\n    seo {\n      title\n      description\n    }\n    options {\n      id\n      name\n      position\n      optionValues {\n        id\n        name\n        hasVariants\n      }\n    }\n    variants(first: 100) {\n      nodes {\n        id\n        title\n        sku\n        price\n        compareAtPrice\n        inventoryQuantity\n        position\n        taxable\n        inventoryPolicy\n        selectedOptions {\n          name\n          value\n        }\n        inventoryItem {\n          id\n        }\n      }\n      pageInfo {\n        hasNextPage\n        endCursor\n      }\n    }\n    media(first: $mediaFirst) {\n      nodes {\n        id\n        alt\n        mediaContentType\n        status\n        ... on MediaImage {\n          image {\n            url\n            width\n            height\n          }\n        }\n      }\n      pageInfo {\n        hasNextPage\n        endCursor\n      }\n    }\n    metafields(first: $metafieldsFirst, namespace: $metafieldNamespace) {\n      nodes {\n        id\n        namespace\n        key\n        type\n        value\n      }\n      pageInfo {\n        hasNextPage\n        endCursor\n      }\n    }\n    collections(first: 20) {\n      nodes {\n        id\n        title\n        handle\n      }\n    }\n  }\n}",
         "x-runtara-graphql-field": "product",
         "x-runtara-graphql-path": "/admin/api/2026-10/graphql.json",
         "x-runtara-summary": "Get Product"
@@ -16053,12 +16104,6 @@
             "application/json": {
               "schema": {
                 "properties": {
-                  "allowPartialUpdates": {
-                    "description": "When partial updates are allowed, valid variant changes may be persisted even if some of the variants updated have invalid data and cannot be persisted. When partial updates are not allowed, any error will prevent all variants from updating.",
-                    "nullable": true,
-                    "type": "boolean",
-                    "x-runtara-label": "Allow Partial Updates"
-                  },
                   "productId": {
                     "description": "The ID of the product associated with the variants to update.",
                     "type": "string",
@@ -16098,7 +16143,7 @@
         "tags": [
           "graphql"
         ],
-        "x-runtara-graphql-document": "mutation updateVariants($productId: ID!, $variants: [ProductVariantsBulkInput!]!, $allowPartialUpdates: Boolean) {\n  productVariantsBulkUpdate(\n    productId: $productId\n    variants: $variants\n    allowPartialUpdates: $allowPartialUpdates\n  ) {\n    productVariants {\n      id\n      title\n      sku\n      price\n      compareAtPrice\n      inventoryQuantity\n      selectedOptions {\n        name\n        value\n      }\n      inventoryItem {\n        id\n        unitCost {\n          amount\n          currencyCode\n        }\n        measurement {\n          weight {\n            value\n            unit\n          }\n        }\n      }\n    }\n    userErrors {\n      field\n      message\n      code\n    }\n  }\n}",
+        "x-runtara-graphql-document": "mutation updateVariants($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {\n  productVariantsBulkUpdate(productId: $productId, variants: $variants) {\n    productVariants {\n      id\n      title\n      sku\n      price\n      compareAtPrice\n      inventoryQuantity\n      selectedOptions {\n        name\n        value\n      }\n      inventoryItem {\n        id\n        unitCost {\n          amount\n          currencyCode\n        }\n        measurement {\n          weight {\n            value\n            unit\n          }\n        }\n      }\n    }\n    userErrors {\n      field\n      message\n      code\n    }\n  }\n}",
         "x-runtara-graphql-field": "productVariantsBulkUpdate",
         "x-runtara-graphql-path": "/admin/api/2026-10/graphql.json",
         "x-runtara-side-effects": true,

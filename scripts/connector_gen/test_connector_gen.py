@@ -2253,6 +2253,7 @@ class RateLimitedTest(unittest.TestCase):
         self.assertIn("agent.rate_limited in connector.yaml is true or false", str(stop.exception.code))
 
 
+@unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
 class CustomCapabilitiesRenderTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

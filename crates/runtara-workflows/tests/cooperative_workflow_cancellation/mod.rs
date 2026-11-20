@@ -934,7 +934,7 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                                         assert_eq!(body["timeout_ms"],60_000);
                                         let payload = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body["body_raw"].as_str().unwrap())?;
                                         let payload:Value = serde_json::from_slice(&payload)?;
-                                        assert_eq!(payload["variables"], if server_host.requests.load(Ordering::SeqCst)==0 {serde_json::json!({"id":"42"})} else {serde_json::json!({"files":[{"id":"old-image","referencesToRemove":["42"]}]})});
+                                        assert_eq!(payload["variables"], if server_host.requests.load(Ordering::SeqCst)==0 {serde_json::json!({"id":"42","mediaFirst":250})} else {serde_json::json!({"files":[{"id":"old-image","referencesToRemove":["42"]}]})});
                                     },
                                     Scenario::HubspotRead | Scenario::HubspotReadBody | Scenario::HubspotUpdateAfterRead => {
                                         assert_eq!(body["timeout_ms"],30_000);

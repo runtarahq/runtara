@@ -188,6 +188,15 @@ fn http_statuses_keep_their_meaning() {
     .unwrap_err();
     assert_eq!(kind(&err), ("SHOPIFY_RATE_LIMITED", "transient"));
     assert_eq!(err.retry_after_ms, Some(2000));
+    // Shopify may send seconds with a fraction.
+    let err = kit::decode_graphql::<Value>(
+        &response(429, "", &[("Retry-After", "1.5")]),
+        QUERY,
+        ENDPOINT,
+        "SHOPIFY",
+    )
+    .unwrap_err();
+    assert_eq!(err.retry_after_ms, Some(1500));
 
     assert_eq!(
         kind(&error(QUERY, 503, json!("busy"))),
@@ -261,4 +270,37 @@ fn a_lost_query_is_retried_and_a_lost_mutation_is_not() {
         "{}",
         err.message
     );
+}
+
+#[test]
+fn a_mutation_that_answered_with_errors_too_has_an_unknown_outcome() {
+    // The mutation ran; one of the fields asked for could not be read.
+    let body = json!({
+        "data": { "productCreate": { "product": { "id": "gid://shopify/Product/1" }, "userErrors": [] } },
+        "errors": [{ "message": "Access denied for collections field.", "extensions": { "code": "ACCESS_DENIED" } }],
+    });
+    let answer = response(200, &body.to_string(), &[]);
+    let err = kit::decode_graphql::<Value>(&answer, MUTATION, ENDPOINT, "SHOPIFY").unwrap_err();
+    assert_eq!(kind(&err), ("SHOPIFY_OUTCOME_UNKNOWN", "permanent"));
+    assert!(
+        err.message.contains("Access denied for collections field"),
+        "{}",
+        err.message
+    );
+
+    // A query, or a mutation Shopify did not run, keeps its error.
+    let err = kit::decode_graphql::<Value>(&answer, QUERY, ENDPOINT, "SHOPIFY").unwrap_err();
+    assert_eq!(kind(&err).0, "SHOPIFY_UNAUTHORIZED");
+    let refused = json!({
+        "data": { "productCreate": null },
+        "errors": [{ "message": "Access denied", "extensions": { "code": "ACCESS_DENIED" } }],
+    });
+    let err = kit::decode_graphql::<Value>(
+        &response(200, &refused.to_string(), &[]),
+        MUTATION,
+        ENDPOINT,
+        "SHOPIFY",
+    )
+    .unwrap_err();
+    assert_eq!(kind(&err).0, "SHOPIFY_UNAUTHORIZED");
 }
