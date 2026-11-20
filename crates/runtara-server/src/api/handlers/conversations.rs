@@ -601,7 +601,7 @@ pub async fn conversation_events(
         }
     };
     // The stream asks the engine after this request has returned, for the
-    // caller who asked for it.
+    // caller who asked for it and in its tenant's scope.
     let sse = Sse::new(crate::auth::presented::kept(stream)).keep_alive(KeepAlive::default());
     let headers = [
         (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),

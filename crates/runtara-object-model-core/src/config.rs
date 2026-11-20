@@ -38,6 +38,12 @@ pub const DEFAULT_POOL_MAX_LIFETIME_SECS: u64 = 1800;
 /// pay an extra round-trip on a high-latency link; dead connections are bounded
 /// by `idle_timeout`/`max_lifetime` staying under the server's idle cutoff.
 pub const DEFAULT_POOL_TEST_BEFORE_ACQUIRE: bool = false;
+/// Default for pinging a connection that has sat idle this long (seconds)
+/// before handing it out. A tenant's database is reached through seal, which
+/// ends a relayed session after a minute with nothing moving (less where a
+/// policy says so), and an idle connection's end is not seen until it is
+/// used. A connection in steady use is not pinged.
+pub const DEFAULT_POOL_PING_IDLE_AFTER_SECS: u64 = 10;
 /// Default prepared-statement cache capacity per connection (sqlx default).
 pub const DEFAULT_POOL_STATEMENT_CACHE_CAPACITY: usize = 100;
 
@@ -62,6 +68,9 @@ pub struct PoolConfig {
     pub max_lifetime: Option<std::time::Duration>,
     /// Ping a connection before handing it out. Off by default (see above).
     pub test_before_acquire: bool,
+    /// Ping a connection before handing it out if it has been idle at least
+    /// this long, and replace it if it does not answer (`None` = never).
+    pub ping_idle_after: Option<std::time::Duration>,
     /// Per-connection prepared-statement cache capacity.
     pub statement_cache_capacity: usize,
 }
@@ -79,6 +88,9 @@ impl Default for PoolConfig {
                 DEFAULT_POOL_MAX_LIFETIME_SECS,
             )),
             test_before_acquire: DEFAULT_POOL_TEST_BEFORE_ACQUIRE,
+            ping_idle_after: Some(std::time::Duration::from_secs(
+                DEFAULT_POOL_PING_IDLE_AFTER_SECS,
+            )),
             statement_cache_capacity: DEFAULT_POOL_STATEMENT_CACHE_CAPACITY,
         }
     }
@@ -507,6 +519,14 @@ mod tests {
         // Warm spare kept, per-acquire ping disabled — the cross-cloud tuning.
         assert!(pool.min_connections >= 1);
         assert!(!pool.test_before_acquire);
+        // ...but a connection idle long enough for seal to have ended its
+        // session is pinged before it is used.
+        assert_eq!(
+            pool.ping_idle_after,
+            Some(std::time::Duration::from_secs(
+                DEFAULT_POOL_PING_IDLE_AFTER_SECS
+            ))
+        );
         assert_eq!(
             pool.idle_timeout,
             Some(std::time::Duration::from_secs(
