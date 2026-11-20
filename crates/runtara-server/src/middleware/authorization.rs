@@ -347,6 +347,11 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         ("PUT", "/api/runtime/workflows/folders/rename") => WorkflowFolderRename,
         // Move is single-workflow authoring → gated like update (tenant-wide Allow for Member).
         ("PUT", "/api/runtime/workflows/{id}/move") => WorkflowUpdate,
+        // A workflow's slug and its publication as an agent are authoring too; their
+        // handlers check ownership against WorkflowUpdate. Unmapped, a scoped key was
+        // refused them on the method alone, whatever it was granted.
+        ("PUT", "/api/runtime/workflows/{id}/slug") => WorkflowUpdate,
+        ("POST", "/api/runtime/workflows/{id}/publish-agent") => WorkflowUpdate,
         // ── Workflows: delete ────────────────────────────────────────────
         ("POST", "/api/runtime/workflows/{id}/delete") => WorkflowDelete,
         // ── Workflows: execute / run control ─────────────────────────────
@@ -1124,6 +1129,16 @@ mod tests {
             (
                 Method::POST,
                 "/api/runtime/workflows/{id}/update",
+                Permission::WorkflowUpdate,
+            ),
+            (
+                Method::PUT,
+                "/api/runtime/workflows/{id}/slug",
+                Permission::WorkflowUpdate,
+            ),
+            (
+                Method::POST,
+                "/api/runtime/workflows/{id}/publish-agent",
                 Permission::WorkflowUpdate,
             ),
             (
