@@ -130,7 +130,7 @@ pub fn get_dsl_changelog() -> Value {
                     {
                         "type": "changed",
                         "component": "validation",
-                        "description": "E022 and E055 no longer ask an AiAgent tool step to map its required inputs, which the model gives, except a connection, which it cannot."
+                        "description": "E022 and E055 no longer ask an AiAgent tool step to map its required inputs, which the model gives, except a connection, which it cannot. E022 no longer asks an mcp.<toolset> provider step to map its query, tool or arguments, which the model's search and invoke calls give."
                     },
                     {
                         "type": "added",

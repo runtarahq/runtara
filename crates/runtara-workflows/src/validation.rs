@@ -5787,8 +5787,10 @@ fn validate_agents(
     let available_agents: Vec<String> = catalog.agents().iter().map(|a| a.id.clone()).collect();
 
     // An AiAgent tool's inputs are the model's arguments: its required inputs
-    // need no mapping, except one the model cannot give (a connection).
+    // need no mapping, except one the model cannot give (a connection). An
+    // MCP provider's are the model's search and invoke calls.
     let tool_targets = ai_agent_tool_targets(graph);
+    let mcp_providers = ai_agent_mcp_providers(graph);
     for (step_id, step) in &graph.steps {
         if let Step::Agent(agent_step) = step {
             // Agent ids are canonically kebab (e.g. `object-model`), but a
@@ -5880,6 +5882,9 @@ fn validate_agents(
                         if tool_targets.contains(step_id.as_str())
                             && input.type_name != "connection"
                         {
+                            continue;
+                        }
+                        if mcp_providers.contains(step_id.as_str()) {
                             continue;
                         }
                         result.errors.push(ValidationError::MissingRequiredInput {
@@ -8639,6 +8644,23 @@ fn ai_agent_tool_targets(graph: &ExecutionGraph) -> HashSet<&str> {
             edge.label.as_deref().is_some_and(|label| {
                 !matches!(label, "next" | "onError" | "memory") && !label.starts_with("mcp.")
             })
+        })
+        .map(|edge| edge.to_step.as_str())
+        .collect()
+}
+
+/// The steps an AiAgent step's `mcp.<toolset>` edges lead to in `graph`: MCP
+/// providers, whose inputs (a search query, a tool and its arguments) are the
+/// model's search and invoke calls, and whose mapping is not used.
+fn ai_agent_mcp_providers(graph: &ExecutionGraph) -> HashSet<&str> {
+    graph
+        .execution_plan
+        .iter()
+        .filter(|edge| matches!(graph.steps.get(&edge.from_step), Some(Step::AiAgent(_))))
+        .filter(|edge| {
+            edge.label
+                .as_deref()
+                .is_some_and(|label| label.starts_with("mcp."))
         })
         .map(|edge| edge.to_step.as_str())
         .collect()
@@ -20188,6 +20210,16 @@ mod ai_agent_tool_input_tests {
             json!({}),
         );
         assert!(missing_inputs(&validate_workflow(&mapped, &catalog())).is_empty());
+    }
+
+    #[test]
+    fn an_mcp_providers_inputs_are_the_models_search_and_invoke() {
+        let mut provider = graph(
+            json!({"id": "target", "stepType": "Agent", "agentId": "kit", "capabilityId": "send"}),
+            json!({}),
+        );
+        provider.execution_plan[0].label = Some("mcp.kit".to_string());
+        assert!(missing_inputs(&validate_workflow(&provider, &catalog())).is_empty());
     }
 
     #[test]
