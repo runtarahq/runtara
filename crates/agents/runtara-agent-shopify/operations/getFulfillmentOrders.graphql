@@ -1,0 +1,47 @@
+query getFulfillmentOrders($orderId: ID!) {
+  order(id: $orderId) {
+    id
+    name
+    displayFulfillmentStatus
+    fulfillmentOrders(first: 5) {
+      nodes {
+        id
+        status
+        requestStatus
+        createdAt
+        fulfillAt
+        assignedLocation {
+          name
+          location {
+            id
+          }
+        }
+        supportedActions {
+          action
+        }
+        lineItems(first: 50) {
+          nodes {
+            id
+            sku
+            productTitle
+            variantTitle
+            totalQuantity
+            remainingQuantity
+            lineItem {
+              id
+              sku
+            }
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+}

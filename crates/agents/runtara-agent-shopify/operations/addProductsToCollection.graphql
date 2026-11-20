@@ -1,0 +1,15 @@
+mutation addProductsToCollection($id: ID!, $productIds: [ID!]!) {
+  collectionAddProducts(id: $id, productIds: $productIds) {
+    collection {
+      id
+      title
+      productsCount {
+        count
+      }
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}

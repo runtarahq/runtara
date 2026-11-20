@@ -1,0 +1,52 @@
+query getVariant($id: ID!) {
+  productVariant(id: $id) {
+    id
+    legacyResourceId
+    title
+    displayName
+    sku
+    price
+    compareAtPrice
+    inventoryQuantity
+    inventoryPolicy
+    position
+    taxable
+    availableForSale
+    createdAt
+    updatedAt
+    barcodes(first: 10) {
+      nodes {
+        value
+        type
+      }
+    }
+    selectedOptions {
+      name
+      value
+    }
+    product {
+      id
+      title
+      handle
+      status
+    }
+    inventoryItem {
+      id
+      sku
+      tracked
+      requiresShipping
+      harmonizedSystemCode
+      countryCodeOfOrigin
+      unitCost {
+        amount
+        currencyCode
+      }
+      measurement {
+        weight {
+          value
+          unit
+        }
+      }
+    }
+  }
+}

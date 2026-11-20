@@ -1291,6 +1291,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: the Shopify agent is generated from Shopify's Admin GraphQL
+  schema, version 2026-10.** It keeps its id (`shopify`) and both connection
+  types and replaces the hand-written agent: whatever that one did, this one
+  does, under new capability ids and inputs. **Workflows with Shopify steps
+  need those steps updated.**
+  - 32 capabilities are one GraphQL operation each, named and shaped as
+    Shopify's own fields and GIDs: products, variants, inventory items and
+    levels, locations, orders, fulfillment, draft orders, customers,
+    collections, metafields, tags and files.
+  - 11 more are written by hand: every product or order page after page, a
+    variant by SKU and a location by name, setting and adjusting inventory,
+    replacing a product's images, fulfilling an order by SKU, and three bulk
+    capabilities that report each item.
+  - The ten `commerce-*` capabilities are removed; the ones above do what
+    they did.
+  - Six capabilities that failed on every call work again: creating and
+    deleting variants, cancelling an order, adding and removing a
+    collection's products, and renaming an option. Inventory updates send
+    `changeFromQuantity` and an idempotency key (one of the workflow's, or a
+    new one per call), both of which Shopify requires from 2026-04.
+  - Shopify's `THROTTLED` answers are retried after the wait Shopify gives.
+    A write that gets a 5xx or no answer is not sent again
+    (`SHOPIFY_OUTCOME_UNKNOWN`): it may have been carried out.
+  - Every capability is rate limited, as before, so a step is retried 5
+    times by default. A generated agent says so with `rate_limited: true`
+    under `agent:` in its `connector.yaml`, which `connector_gen` now takes.
+  - Fulfilling by SKU fails when a fulfillment fails, instead of reporting it
+    done, and fulfills each location separately. Replacing a product's
+    images takes the old ones off the product instead of deleting the files
+    from the store.
+  - The connections' `api_version` now defaults to 2026-10 (it was 2025-01,
+    which Shopify no longer serves). The Shopify agent always sends the
+    version it was built for.
+
 - **seal 0.2.0, and what a deployment names for it.** Three things change
   with it.
   - **Private destinations are named by range.** seal no longer honours a

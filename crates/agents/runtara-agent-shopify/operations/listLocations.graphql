@@ -1,0 +1,34 @@
+query listLocations(
+  $first: Int = 50
+  $after: String
+  $query: String
+  $includeInactive: Boolean
+  $includeLegacy: Boolean
+) {
+  locations(first: $first, after: $after, query: $query, includeInactive: $includeInactive, includeLegacy: $includeLegacy) {
+    nodes {
+      id
+      legacyResourceId
+      name
+      isActive
+      fulfillsOnlineOrders
+      hasActiveInventory
+      shipsInventory
+      address {
+        address1
+        address2
+        city
+        province
+        provinceCode
+        country
+        countryCode
+        zip
+        phone
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}

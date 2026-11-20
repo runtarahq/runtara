@@ -1,0 +1,15 @@
+mutation updateFiles($files: [FileUpdateInput!]!) {
+  fileUpdate(files: $files) {
+    files {
+      id
+      alt
+      fileStatus
+      updatedAt
+    }
+    userErrors {
+      field
+      message
+      code
+    }
+  }
+}

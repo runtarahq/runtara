@@ -1,0 +1,40 @@
+mutation updateOrder(
+  $id: ID!
+  $note: String
+  $tags: [String!]
+  $email: String
+  $phone: String
+  $poNumber: String
+  $shippingAddress: MailingAddressInput
+  $customAttributes: [AttributeInput!]
+  $metafields: [MetafieldInput!]
+) {
+  orderUpdate(
+    input: {
+      id: $id
+      note: $note
+      tags: $tags
+      email: $email
+      phone: $phone
+      poNumber: $poNumber
+      shippingAddress: $shippingAddress
+      customAttributes: $customAttributes
+      metafields: $metafields
+    }
+  ) {
+    order {
+      id
+      name
+      note
+      tags
+      email
+      phone
+      poNumber
+      updatedAt
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}

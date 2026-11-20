@@ -1,0 +1,40 @@
+query getCustomerByEmail($email: String!) {
+  customerByIdentifier(identifier: {emailAddress: $email}) {
+    id
+    legacyResourceId
+    displayName
+    firstName
+    lastName
+    note
+    tags
+    state
+    numberOfOrders
+    createdAt
+    updatedAt
+    verifiedEmail
+    taxExempt
+    amountSpent {
+      amount
+      currencyCode
+    }
+    defaultEmailAddress {
+      emailAddress
+      marketingState
+    }
+    defaultPhoneNumber {
+      phoneNumber
+    }
+    defaultAddress {
+      address1
+      address2
+      city
+      province
+      provinceCode
+      country
+      countryCodeV2
+      zip
+      phone
+      company
+    }
+  }
+}

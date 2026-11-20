@@ -1,0 +1,12 @@
+mutation removeProductsFromCollection($id: ID!, $productIds: [ID!]!) {
+  collectionRemoveProducts(id: $id, productIds: $productIds) {
+    job {
+      id
+      done
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}

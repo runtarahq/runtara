@@ -1,0 +1,100 @@
+query getProduct($id: ID!, $metafieldNamespace: String) {
+  product(id: $id) {
+    id
+    legacyResourceId
+    title
+    handle
+    status
+    vendor
+    productType
+    tags
+    descriptionHtml
+    createdAt
+    updatedAt
+    publishedAt
+    totalInventory
+    hasOnlyDefaultVariant
+    onlineStoreUrl
+    category {
+      id
+      fullName
+    }
+    seo {
+      title
+      description
+    }
+    options {
+      id
+      name
+      position
+      optionValues {
+        id
+        name
+        hasVariants
+      }
+    }
+    variants(first: 100) {
+      nodes {
+        id
+        title
+        sku
+        price
+        compareAtPrice
+        inventoryQuantity
+        position
+        taxable
+        inventoryPolicy
+        selectedOptions {
+          name
+          value
+        }
+        inventoryItem {
+          id
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+    media(first: 50) {
+      nodes {
+        id
+        alt
+        mediaContentType
+        status
+        ... on MediaImage {
+          image {
+            url
+            width
+            height
+          }
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+    metafields(first: 50, namespace: $metafieldNamespace) {
+      nodes {
+        id
+        namespace
+        key
+        type
+        value
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+    collections(first: 20) {
+      nodes {
+        id
+        title
+        handle
+      }
+    }
+  }
+}

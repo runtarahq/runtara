@@ -146,14 +146,14 @@
   {
     "integrationId": "shopify_access_token",
     "fieldCount": 3,
-    "serializedBytes": 1129,
-    "fnv1a64": "d5bf1544e1fecaa8"
+    "serializedBytes": 1262,
+    "fnv1a64": "e1b94c518e88faec"
   },
   {
     "integrationId": "shopify_client_credentials",
     "fieldCount": 15,
-    "serializedBytes": 4273,
-    "fnv1a64": "ab5b79d7c4ffd48a"
+    "serializedBytes": 4406,
+    "fnv1a64": "14e3971ebb0f2e8e"
   },
   {
     "integrationId": "slack_bot",

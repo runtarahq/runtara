@@ -618,7 +618,7 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
             (
                 "shopify",
                 "replace-product-images",
-                serde_json::json!({"product_id":"42","images":[{"url":"https://image.invalid/new.png"}]}),
+                serde_json::json!({"productId":"42","images":[{"url":"https://image.invalid/new.png"}]}),
                 "shopify",
             )
         };
@@ -930,11 +930,11 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                                     },
                                     Scenario::ShopifyImages | Scenario::ShopifyImagesBody | Scenario::ShopifyDeleteAfterRead => {
                                         assert_eq!(body["method"],"POST");
-                                        assert_eq!(body["url"],"/admin/api/2025-01/graphql.json");
+                                        assert_eq!(body["url"],"/admin/api/2026-10/graphql.json");
                                         assert_eq!(body["timeout_ms"],60_000);
                                         let payload = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body["body_raw"].as_str().unwrap())?;
                                         let payload:Value = serde_json::from_slice(&payload)?;
-                                        assert_eq!(payload["variables"], if server_host.requests.load(Ordering::SeqCst)==0 {serde_json::json!({"productId":"42"})} else {serde_json::json!({"fileIds":["old-image"]})});
+                                        assert_eq!(payload["variables"], if server_host.requests.load(Ordering::SeqCst)==0 {serde_json::json!({"id":"42"})} else {serde_json::json!({"files":[{"id":"old-image","referencesToRemove":["42"]}]})});
                                     },
                                     Scenario::HubspotRead | Scenario::HubspotReadBody | Scenario::HubspotUpdateAfterRead => {
                                         assert_eq!(body["timeout_ms"],30_000);
@@ -1011,7 +1011,7 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                         }
                         let started = server_host.requests.fetch_add(1, Ordering::SeqCst) + 1;
                         if matches!(scenario, Scenario::SharepointContentAfterMetadata | Scenario::ShopifyDeleteAfterRead) && started == 1 {
-                            let body = if scenario.is_sharepoint() { serde_json::json!({"id":"42","name":"fixture.txt"}) } else { serde_json::json!({"data":{"product":{"media":{"edges":[{"node":{"id":"old-image"}}]}}}}) };
+                            let body = if scenario.is_sharepoint() { serde_json::json!({"id":"42","name":"fixture.txt"}) } else { serde_json::json!({"data":{"product":{"id":"42","media":{"nodes":[{"id":"old-image"}],"pageInfo":{"hasNextPage":false}}}}}) };
                             let bytes=outbound_fixture::response_bytes(&serde_json::json!({"status":200,"headers":{},"body":body}));
                             stream.write_all(&bytes).await?;
                             server_host.closed_count.fetch_add(1,Ordering::SeqCst);

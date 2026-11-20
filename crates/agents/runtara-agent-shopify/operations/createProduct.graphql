@@ -1,0 +1,36 @@
+mutation createProduct(
+  $title: String!
+  $descriptionHtml: String
+  $handle: String
+  $vendor: String
+  $productType: String
+  $tags: [String!]
+  $status: ProductStatus
+) {
+  productCreate(
+    product: {
+      title: $title
+      descriptionHtml: $descriptionHtml
+      handle: $handle
+      vendor: $vendor
+      productType: $productType
+      tags: $tags
+      status: $status
+    }
+  ) {
+    product {
+      id
+      title
+      handle
+      status
+      vendor
+      productType
+      tags
+      createdAt
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}

@@ -1,0 +1,94 @@
+mutation setProduct(
+  $identifier: ProductSetIdentifiers
+  $title: String
+  $descriptionHtml: String
+  $handle: String
+  $vendor: String
+  $productType: String
+  $tags: [String!]
+  $status: ProductStatus
+  $category: ID
+  $seo: SEOInput
+  $templateSuffix: String
+  $giftCard: Boolean
+  $giftCardTemplateSuffix: String
+  $requiresSellingPlan: Boolean
+  $redirectNewHandle: Boolean
+  $combinedListingRole: CombinedListingsRole
+  $collections: [ID!]
+  $metafields: [MetafieldInput!]
+  $productOptions: [OptionSetInput!]
+  $variants: [ProductVariantSetInput!]
+  $files: [FileSetInput!]
+  $claimOwnership: ProductClaimOwnershipInput
+) {
+  productSet(
+    synchronous: true
+    identifier: $identifier
+    input: {
+      title: $title
+      descriptionHtml: $descriptionHtml
+      handle: $handle
+      vendor: $vendor
+      productType: $productType
+      tags: $tags
+      status: $status
+      category: $category
+      seo: $seo
+      templateSuffix: $templateSuffix
+      giftCard: $giftCard
+      giftCardTemplateSuffix: $giftCardTemplateSuffix
+      requiresSellingPlan: $requiresSellingPlan
+      redirectNewHandle: $redirectNewHandle
+      combinedListingRole: $combinedListingRole
+      collections: $collections
+      metafields: $metafields
+      productOptions: $productOptions
+      variants: $variants
+      files: $files
+      claimOwnership: $claimOwnership
+    }
+  ) {
+    product {
+      id
+      title
+      handle
+      status
+      vendor
+      productType
+      tags
+      updatedAt
+      options {
+        id
+        name
+        position
+        optionValues {
+          id
+          name
+        }
+      }
+      variants(first: 100) {
+        nodes {
+          id
+          title
+          sku
+          price
+          compareAtPrice
+          inventoryQuantity
+          selectedOptions {
+            name
+            value
+          }
+          inventoryItem {
+            id
+          }
+        }
+      }
+    }
+    userErrors {
+      field
+      message
+      code
+    }
+  }
+}

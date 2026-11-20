@@ -1,0 +1,36 @@
+query listVariants(
+  $first: Int = 50
+  $after: String
+  $query: String
+  $sortKey: ProductVariantSortKeys
+  $reverse: Boolean
+) {
+  productVariants(first: $first, after: $after, query: $query, sortKey: $sortKey, reverse: $reverse) {
+    nodes {
+      id
+      title
+      displayName
+      sku
+      price
+      compareAtPrice
+      inventoryQuantity
+      selectedOptions {
+        name
+        value
+      }
+      product {
+        id
+        title
+        handle
+        status
+      }
+      inventoryItem {
+        id
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}

@@ -1,0 +1,18 @@
+mutation completeDraftOrder($id: ID!, $paymentGatewayId: ID, $sourceName: String) {
+  draftOrderComplete(id: $id, paymentGatewayId: $paymentGatewayId, sourceName: $sourceName) {
+    draftOrder {
+      id
+      name
+      status
+      completedAt
+      order {
+        id
+        name
+      }
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}

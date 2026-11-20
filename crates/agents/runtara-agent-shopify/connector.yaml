@@ -1,0 +1,109 @@
+# Input to scripts/connector_gen/connector_gen.py; see its README.md.
+agent:
+  id: shopify
+  name: Shopify
+  description: >-
+    Shopify Admin GraphQL API: products, variants, inventory, orders,
+    fulfillment, draft orders, customers, collections and metafields.
+  integration_id:
+    - shopify_access_token
+    - shopify_client_credentials
+  error_prefix: SHOPIFY
+  # Shopify meters requests (a cost bucket per store), as the hand-written agent
+  # declared: a step is retried 5 times by default rather than 3.
+  rate_limited: true
+# Shopify's Admin API is GraphQL only. The schema of API version 2026-10 is read
+# by introspection from the endpoint Shopify's own docs and codegen use, which
+# needs no store or token; the pin is the sha256 of its sorted SDL.
+graphql:
+  schema:
+    introspect: https://shopify.dev/admin-graphql-direct-proxy/2026-10
+    sha256: 39fb501bec66324774a5129db1afe7a4131a6572a1a67d2eb4e019ca0a9fb50d
+  # Relative to the connection's https://<shop>.myshopify.com. The agent sends
+  # the version its types describe, whatever the connection's `api_version` says.
+  path: /admin/api/2026-10/graphql.json
+  # A mutation reports what it refused here, in an HTTP 200 answer.
+  user_errors: userErrors
+  # Shopify's own scalars, as its reference describes them: money and decimals
+  # are strings ("19.99"), as are unsigned 64-bit integers.
+  scalars:
+    DateTime: {type: string, format: date-time}
+    Decimal: string
+    HTML: string
+    Money: string
+    UnsignedInt64: string
+    URL: {type: string, format: uri}
+operations:
+  # Products
+  - getProduct
+  - listProducts
+  - createProduct
+  - setProduct
+  - updateProduct
+  - deleteProduct
+  - updateProductOption
+  - setMetafields
+  - addTags
+  - removeTags
+  - updateFiles
+  # Variants and inventory
+  - getVariant
+  - listVariants
+  - createVariants
+  - updateVariants
+  - deleteVariants
+  - updateInventoryItem
+  - getInventoryLevels
+  - listLocations
+  # Orders and fulfillment
+  - getOrder
+  - listOrders
+  - updateOrder
+  - cancelOrder
+  - getFulfillmentOrders
+  - createFulfillment
+  - createDraftOrder
+  - completeDraftOrder
+  # Customers
+  - getCustomerByEmail
+  - listCustomers
+  # Collections. Shopify deprecates adding and removing products in 2026-10 in
+  # favour of collection sources on collectionUpdate; both mutations still
+  # work on the version this agent sends.
+  - createCollection
+  - addProductsToCollection
+  - removeProductsFromCollection
+# Written by hand in src/custom.rs: work one generated operation cannot do.
+custom_capabilities:
+  - function: list_all_products
+    input: ListAllProductsInput
+    outputs: [ListAllProductsOutput]
+  - function: list_all_orders
+    input: ListAllOrdersInput
+    outputs: [ListAllOrdersOutput]
+  - function: get_variant_by_sku
+    input: GetVariantBySkuInput
+    outputs: [GetVariantBySkuOutput]
+  - function: get_location_by_name
+    input: GetLocationByNameInput
+  - function: set_inventory
+    input: SetInventoryInput
+    outputs: [InventoryUpdateOutput, InventoryUpdateGroup, InventoryUpdateChange, InventoryUpdateItem, InventoryUpdateLocation]
+  - function: adjust_inventory
+    input: AdjustInventoryInput
+    outputs: [InventoryUpdateOutput, InventoryUpdateGroup, InventoryUpdateChange, InventoryUpdateItem, InventoryUpdateLocation]
+  - function: replace_product_images
+    input: ReplaceProductImagesInput
+    outputs: [ReplaceProductImagesOutput]
+  - function: fulfill_by_sku
+    input: FulfillBySkuInput
+    outputs: [FulfillBySkuOutput, FulfilledSku, UnfulfilledSku]
+  - function: bulk_set_products
+    input: BulkSetProductsInput
+    outputs: [BulkSetProductsOutput, BulkSetProductsResult, BulkError]
+  - function: bulk_update_products
+    input: BulkUpdateProductsInput
+    outputs: [BulkUpdateProductsOutput, BulkUpdateProductsResult, BulkError]
+  - function: bulk_update_variants
+    input: BulkUpdateVariantsInput
+    outputs: [BulkUpdateVariantsOutput, BulkUpdateVariantsResult, BulkError]

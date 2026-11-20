@@ -45,18 +45,20 @@ pub struct ShopifyAccessTokenParams {
     )]
     pub shop_domain: String,
 
-    /// API version (optional, defaults to latest stable)
+    /// API version (optional). The Shopify agent sends the version it was
+    /// built for whatever this says; this one is for requests made through
+    /// the connection by other agents, such as HTTP.
     #[serde(default = "default_shopify_api_version")]
     #[field(
         display_name = "API Version",
-        description = "Shopify Admin API version (e.g., 2025-01)",
-        default = "2025-01"
+        description = "Shopify Admin API version for requests made through this connection by other agents, such as HTTP (e.g., 2026-10). The Shopify agent always uses the version it was built for.",
+        default = "2026-10"
     )]
     pub api_version: String,
 }
 
 fn default_shopify_api_version() -> String {
-    "2025-01".to_string()
+    "2026-10".to_string()
 }
 
 /// HTTP extractor for Shopify connections
@@ -131,12 +133,14 @@ pub struct ShopifyClientCredentialsParams {
     )]
     pub shop_domain: String,
 
-    /// API version (optional, defaults to latest stable)
+    /// API version (optional). The Shopify agent sends the version it was
+    /// built for whatever this says; this one is for requests made through
+    /// the connection by other agents, such as HTTP.
     #[serde(default = "default_shopify_api_version")]
     #[field(
         display_name = "API Version",
-        description = "Shopify Admin API version (e.g., 2025-01)",
-        default = "2025-01"
+        description = "Shopify Admin API version for requests made through this connection by other agents, such as HTTP (e.g., 2026-10). The Shopify agent always uses the version it was built for.",
+        default = "2026-10"
     )]
     pub api_version: String,
 

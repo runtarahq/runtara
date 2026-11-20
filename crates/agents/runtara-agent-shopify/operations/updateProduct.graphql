@@ -1,0 +1,54 @@
+mutation updateProduct(
+  $id: ID!
+  $title: String
+  $descriptionHtml: String
+  $handle: String
+  $vendor: String
+  $productType: String
+  $tags: [String!]
+  $status: ProductStatus
+  $category: ID
+  $seo: SEOInput
+  $templateSuffix: String
+  $collectionsToJoin: [ID!]
+  $collectionsToLeave: [ID!]
+  $metafields: [MetafieldInput!]
+  $redirectNewHandle: Boolean
+  $media: [CreateMediaInput!]
+) {
+  productUpdate(
+    product: {
+      id: $id
+      title: $title
+      descriptionHtml: $descriptionHtml
+      handle: $handle
+      vendor: $vendor
+      productType: $productType
+      tags: $tags
+      status: $status
+      category: $category
+      seo: $seo
+      templateSuffix: $templateSuffix
+      collectionsToJoin: $collectionsToJoin
+      collectionsToLeave: $collectionsToLeave
+      metafields: $metafields
+      redirectNewHandle: $redirectNewHandle
+    }
+    media: $media
+  ) {
+    product {
+      id
+      title
+      handle
+      status
+      vendor
+      productType
+      tags
+      updatedAt
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}
