@@ -257,6 +257,19 @@ To fix: republish a tenant's workflow-agents when the server's stdlib
 changes (at boot, or on first use), from the version each was published from,
 or link a caller against an agent's stdlib without refusing it.
 
+### 13. "Optional connection" is one agent's name in validation
+
+An agent that takes connections must be given one on every step, except
+`http`, whose connection is optional (public requests need none): validation
+says so by name (`validation.rs`, `agent.supports_connections &&
+!agent_id.eq_ignore_ascii_case("http")`). Another agent with an optional
+connection cannot say so.
+
+To fix: a `connectionOptional` flag on the agent's catalog entry (from its
+module attributes, as `supportsConnections` is), read by validation and by
+tooling instead of the name. Left for now: `AgentInfo` is built literally in
+about a hundred places, and `http` is still the only such agent.
+
 ## What `tool-builder` cannot do yet
 
 Not platform gaps, but what the version described here is limited to:
