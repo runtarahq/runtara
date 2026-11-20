@@ -333,6 +333,15 @@ pub struct McpToolInvokeInput {
     )]
     #[serde(default)]
     pub fail_on_tool_error: bool,
+
+    #[field(
+        display_name = "Timeout (ms)",
+        description = "How long to wait for the tool's answer. Raise it for a tool that waits, such as one that runs a workflow until it finishes; the host allows at most 120000.",
+        example = "90000",
+        default = "30000"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
@@ -393,6 +402,7 @@ pub async fn mcp_tool_invoke(input: McpToolInvokeInput) -> Result<McpToolInvokeO
         &extra_headers,
         &input.tool_name,
         &input.args,
+        input.timeout_ms,
     )
     .await?;
     let text = result.to_text();
@@ -551,6 +561,12 @@ mod tests {
         let input: McpToolInvokeInput =
             serde_json::from_value(json!({"tool_name": "get_workflow"})).unwrap();
         assert!(!input.fail_on_tool_error);
+        assert_eq!(input.timeout_ms, None, "the client's default applies");
+        let input: McpToolInvokeInput = serde_json::from_value(
+            json!({"tool_name": "execute_workflow_wait", "timeout_ms": 90000}),
+        )
+        .unwrap();
+        assert_eq!(input.timeout_ms, Some(90000));
     }
 
     #[test]
