@@ -1781,8 +1781,24 @@ fn ai_agent_mcp_prompt_addition(toolsets: &[String]) -> String {
         "\n\nExternal toolsets are available: {names}. To use one, first call \
          `<toolset>_search` with a description of what you need to find available \
          tools, then call `<toolset>_invoke` with the exact tool name and args \
-         from the search result. Do not guess tool names."
+         from the search result. Do not guess tool names. The search matches the \
+         toolset's tools by their names and descriptions (an action, such as \
+         \"list agents\"), not the data they return: to find data, search for \
+         the tool that lists or reads it, then invoke that tool."
     )
+}
+
+#[cfg(test)]
+mod mcp_prompt_tests {
+    /// The model is told what a toolset's search finds, so it searches for a
+    /// tool rather than for the data a tool returns
+    /// (docs/workflow-authoring-gaps.md, 10).
+    #[test]
+    fn the_prompt_says_search_finds_tools_not_data() {
+        let prompt = super::ai_agent_mcp_prompt_addition(&["runtara".to_string()]);
+        assert!(prompt.contains("`runtara`"), "{prompt}");
+        assert!(prompt.contains("not the data they return"), "{prompt}");
+    }
 }
 
 /// The AiAgent's tool edges as `(label, target_step_id)` pairs: labelled

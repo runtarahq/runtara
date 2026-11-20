@@ -221,13 +221,18 @@ Fixed: `from_output` may be omitted (in `set_mapping` and in
 
 ### 10. Smaller inconsistencies
 
-- `POST /api-keys` answers with the key at the top level; other routes wrap
-  their answer in `data`.
-- Templates have no `startswith` (slicing does the same).
 - An AI Agent's `mcp.<toolset>` search finds the server's MCP tools
   (`list_agents`, `get_capability`), not agent capabilities: a model asked to
-  find a capability searched for it there and found nothing. The toolset's
-  description to the model could say what it searches.
+  find a capability searched for it there and found nothing. Fixed: the
+  toolset's guidance to the model says the search matches tools by their names
+  and descriptions, not the data they return, and to search for the tool that
+  lists or reads the data.
+- `POST /api-keys` answers with the key at the top level; other routes wrap
+  their answer in `data`. Left: the console's generated client reads it as it
+  is, so changing it is a change to the console too.
+- Templates have no `startswith`; slicing (`name[:1] != "_"`) does the same.
+  Left: adding Python-style string methods would add a dependency
+  (`minijinja-contrib`) for little.
 
 ### 11. Not tested
 
