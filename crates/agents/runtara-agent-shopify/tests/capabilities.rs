@@ -10,8 +10,10 @@
 use std::collections::HashMap;
 
 use runtara_agent_shopify::{
-    CreateProductInput, CreateProductResult, GetProductInput, GetProductResult, ListProductsInput,
-    ListProductsResult, kit,
+    CreateProductInput, CreateProductResult, GetFulfillmentOrdersInput, GetFulfillmentOrdersResult,
+    GetInventoryLevelsInput, GetInventoryLevelsResult, GetOrderInput, GetOrderResult,
+    GetProductInput, GetProductResult, ListProductsInput, ListProductsResult, ListVariantsInput,
+    ListVariantsResult, kit,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -67,6 +69,13 @@ fn round_trip<T: DeserializeOwned + Serialize>(request: kit::Request, field: &st
 
 fn input<T: DeserializeOwned>(value: Value) -> T {
     serde_json::from_value(value).unwrap()
+}
+
+/// `data.<field>` of `body`, read into `T` through the capability's request.
+fn read<T: DeserializeOwned>(request: kit::Request, body: Value) -> T {
+    let call = request.graphql_call().unwrap();
+    kit::decode_graphql(&answer(body), call, ENDPOINT, "SHOPIFY")
+        .unwrap_or_else(|e| panic!("the answer does not read: {}", e.message))
 }
 
 #[test]
@@ -216,6 +225,7 @@ fn variables_are_the_inputs() {
     assert_eq!(
         inputs("get-product"),
         [
+            ("barcodesFirst".to_string(), false),
             ("id".to_string(), true),
             ("mediaFirst".to_string(), false),
             ("metafieldNamespace".to_string(), false),
@@ -260,7 +270,7 @@ fn a_query_sends_its_operation_and_variables() {
         body["query"]
             .as_str()
             .unwrap()
-            .starts_with("query getProduct($id: ID!, $metafieldNamespace: String, $metafieldsFirst: Int = 50, $mediaFirst: Int = 50)"),
+            .starts_with("query getProduct($id: ID!, $metafieldNamespace: String, $metafieldsFirst: Int = 50, $mediaFirst: Int = 50, $barcodesFirst: Int = 1)"),
         "{body}"
     );
     assert_eq!(
@@ -430,4 +440,206 @@ fn output_metadata_describes_the_selected_fields() {
         );
     }
     assert!(!output.contains("__extra"), "{output}");
+}
+
+// The fields below were returned by the hand-written agent this one replaced,
+// and workflows moved to it rely on them. Each is read through its typed field:
+// a field left out of its operation would still round-trip through `__extra`,
+// but here it stops the file compiling.
+
+#[test]
+fn get_order_reads_the_shipping_source_and_discounted_unit_price() {
+    let request = input::<GetOrderInput>(json!({ "id": "gid://shopify/Order/1" }))
+        .request()
+        .unwrap();
+    let order: GetOrderResult = read(
+        request,
+        json!({ "data": { "order": {
+            "id": "gid://shopify/Order/1",
+            "lineItems": {
+                "nodes": [{
+                    "id": "gid://shopify/LineItem/1",
+                    "sku": "HAT-1",
+                    "variant": { "id": "gid://shopify/ProductVariant/11", "sku": "HAT-1" },
+                    "discountedUnitPriceSet": {
+                        "shopMoney": { "amount": "17.99", "currencyCode": "EUR" }
+                    }
+                }],
+                "pageInfo": { "hasNextPage": false, "endCursor": null }
+            },
+            "shippingLines": {
+                "nodes": [{ "title": "Standard", "code": "STANDARD", "source": "shopify" }]
+            }
+        } } }),
+    );
+    let lines = order.line_items.unwrap().nodes.unwrap();
+    let unit_price = lines[0]
+        .discounted_unit_price_set
+        .as_ref()
+        .and_then(|price| price.shop_money.as_ref())
+        .and_then(|money| money.amount.as_deref());
+    assert_eq!(unit_price, Some("17.99"));
+    let variant_sku = lines[0].variant.as_ref().and_then(|v| v.sku.as_deref());
+    assert_eq!(variant_sku, Some("HAT-1"));
+    let shipping = order.shipping_lines.unwrap().nodes.unwrap();
+    assert_eq!(shipping[0].source.as_deref(), Some("shopify"));
+}
+
+#[test]
+fn products_read_their_price_range_and_variant_barcodes() {
+    let price_range = json!({
+        "minVariantPrice": { "amount": "9.99", "currencyCode": "EUR" },
+        "maxVariantPrice": { "amount": "19.99", "currencyCode": "EUR" }
+    });
+
+    let listed: ListProductsResult = read(
+        input::<ListProductsInput>(json!({})).request().unwrap(),
+        json!({ "data": { "products": {
+            "nodes": [{ "id": "gid://shopify/Product/1", "priceRangeV2": price_range }]
+        } } }),
+    );
+    let nodes = listed.nodes.unwrap();
+    let range = nodes[0].price_range_v2.as_ref().unwrap();
+    let min = range
+        .min_variant_price
+        .as_ref()
+        .and_then(|p| p.amount.as_deref());
+    let max = range
+        .max_variant_price
+        .as_ref()
+        .and_then(|p| p.amount.as_deref());
+    assert_eq!((min, max), (Some("9.99"), Some("19.99")));
+
+    let request = input::<GetProductInput>(json!({ "id": "gid://shopify/Product/1" }))
+        .request()
+        .unwrap();
+    let product: GetProductResult = read(
+        request,
+        json!({ "data": { "product": {
+            "id": "gid://shopify/Product/1",
+            "priceRangeV2": price_range,
+            "variants": { "nodes": [{
+                "id": "gid://shopify/ProductVariant/11",
+                "barcodes": { "nodes": [{ "value": "4006381333931", "type": "EAN" }] }
+            }] }
+        } } }),
+    );
+    let range = product.price_range_v2.unwrap();
+    let min = range.min_variant_price.and_then(|p| p.amount);
+    assert_eq!(min.as_deref(), Some("9.99"));
+    let variants = product.variants.unwrap().nodes.unwrap();
+    let barcodes = variants[0]
+        .barcodes
+        .as_ref()
+        .unwrap()
+        .nodes
+        .as_ref()
+        .unwrap();
+    assert_eq!(barcodes[0].value.as_deref(), Some("4006381333931"));
+    assert_eq!(barcodes[0].r#type.as_deref(), Some("EAN"));
+}
+
+#[test]
+fn variants_read_their_barcodes_and_product_details() {
+    let found: ListVariantsResult = read(
+        input::<ListVariantsInput>(json!({ "query": "sku:HAT-1" }))
+            .request()
+            .unwrap(),
+        json!({ "data": { "productVariants": {
+            "nodes": [{
+                "id": "gid://shopify/ProductVariant/11",
+                "sku": "HAT-1",
+                "barcodes": { "nodes": [{ "value": "4006381333931", "type": "EAN" }] },
+                "product": {
+                    "id": "gid://shopify/Product/1",
+                    "vendor": "Acme",
+                    "productType": "Accessories",
+                    "tags": ["winter"],
+                    "descriptionHtml": "<p>Warm.</p>"
+                }
+            }]
+        } } }),
+    );
+    let variants = found.nodes.unwrap();
+    let barcodes = variants[0]
+        .barcodes
+        .as_ref()
+        .unwrap()
+        .nodes
+        .as_ref()
+        .unwrap();
+    assert_eq!(barcodes[0].value.as_deref(), Some("4006381333931"));
+    let product = variants[0].product.as_ref().unwrap();
+    assert_eq!(product.vendor.as_deref(), Some("Acme"));
+    assert_eq!(product.product_type.as_deref(), Some("Accessories"));
+    assert_eq!(product.tags.as_deref(), Some(&["winter".to_string()][..]));
+    assert_eq!(product.description_html.as_deref(), Some("<p>Warm.</p>"));
+}
+
+#[test]
+fn barcodes_default_to_the_first_of_each_variant() {
+    for request in [
+        input::<GetProductInput>(json!({ "id": "gid://shopify/Product/1" }))
+            .request()
+            .unwrap(),
+        input::<ListVariantsInput>(json!({})).request().unwrap(),
+    ] {
+        let body = request.body_json().unwrap();
+        let query = body["query"].as_str().unwrap();
+        assert!(query.contains("$barcodesFirst: Int = 1"), "{query}");
+        assert!(query.contains("barcodes(first: $barcodesFirst)"), "{query}");
+        assert_eq!(body["variables"].get("barcodesFirst"), None, "{body}");
+    }
+}
+
+#[test]
+fn fulfillment_lines_and_inventory_levels_read_their_variant_and_product() {
+    let request = input::<GetFulfillmentOrdersInput>(json!({ "orderId": "gid://shopify/Order/1" }))
+        .request()
+        .unwrap();
+    let order: GetFulfillmentOrdersResult = read(
+        request,
+        json!({ "data": { "order": {
+            "id": "gid://shopify/Order/1",
+            "fulfillmentOrders": { "nodes": [{
+                "id": "gid://shopify/FulfillmentOrder/1",
+                "lineItems": { "nodes": [{
+                    "id": "gid://shopify/FulfillmentOrderLineItem/1",
+                    "lineItem": {
+                        "id": "gid://shopify/LineItem/1",
+                        "sku": "HAT-1",
+                        "variant": { "id": "gid://shopify/ProductVariant/11" }
+                    }
+                }] }
+            }] }
+        } } }),
+    );
+    let orders = order.fulfillment_orders.unwrap().nodes.unwrap();
+    let lines = orders[0]
+        .line_items
+        .as_ref()
+        .unwrap()
+        .nodes
+        .as_ref()
+        .unwrap();
+    let variant = lines[0]
+        .line_item
+        .as_ref()
+        .and_then(|line| line.variant.as_ref())
+        .and_then(|variant| variant.id.as_deref());
+    assert_eq!(variant, Some("gid://shopify/ProductVariant/11"));
+
+    let request =
+        input::<GetInventoryLevelsInput>(json!({ "variantId": "gid://shopify/ProductVariant/11" }))
+            .request()
+            .unwrap();
+    let levels: GetInventoryLevelsResult = read(
+        request,
+        json!({ "data": { "productVariant": {
+            "id": "gid://shopify/ProductVariant/11",
+            "product": { "id": "gid://shopify/Product/1" }
+        } } }),
+    );
+    let product = levels.product.and_then(|product| product.id);
+    assert_eq!(product.as_deref(), Some("gid://shopify/Product/1"));
 }

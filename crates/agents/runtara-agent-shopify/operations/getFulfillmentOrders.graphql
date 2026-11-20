@@ -35,6 +35,9 @@ query getFulfillmentOrders(
             lineItem {
               id
               sku
+              variant {
+                id
+              }
             }
           }
           pageInfo {

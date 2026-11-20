@@ -3497,6 +3497,26 @@ pub struct GetFulfillmentOrdersFulfillmentOrdersNodesLineItemsNodesLineItem {
     )]
     #[serde(rename = "sku", default, skip_serializing_if = "Option::is_none")]
     pub sku: Option<String>,
+    #[field(
+        display_name = r##"Variant"##,
+        description = r##"The Variant object associated with this line item."##
+    )]
+    #[serde(rename = "variant", default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<GetFulfillmentOrdersFulfillmentOrdersNodesLineItemsNodesLineItemVariant>,
+    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
+    #[field(skip)]
+    #[serde(flatten)]
+    pub __extra: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(
+    display_name = "GetFulfillmentOrdersFulfillmentOrdersNodesLineItemsNodesLineItemVariant"
+)]
+pub struct GetFulfillmentOrdersFulfillmentOrdersNodesLineItemsNodesLineItemVariant {
+    #[field(display_name = r##"ID"##, description = r##"A globally-unique ID."##)]
+    #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -3802,6 +3822,18 @@ pub struct GetInventoryLevelsInventoryItemInventoryLevelsPageInfo {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "GetInventoryLevelsProduct")]
+pub struct GetInventoryLevelsProduct {
+    #[field(display_name = r##"ID"##, description = r##"A globally-unique ID."##)]
+    #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
+    #[field(skip)]
+    #[serde(flatten)]
+    pub __extra: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "GetInventoryLevelsRequest")]
 pub struct GetInventoryLevelsRequest {
     #[field(
@@ -3853,6 +3885,12 @@ pub struct GetInventoryLevelsResult {
         skip_serializing_if = "Option::is_none"
     )]
     pub inventory_quantity: Option<i64>,
+    #[field(
+        display_name = r##"Product"##,
+        description = r##"The product that this variant belongs to."##
+    )]
+    #[serde(rename = "product", default, skip_serializing_if = "Option::is_none")]
+    pub product: Option<GetInventoryLevelsProduct>,
     #[field(
         display_name = r##"SKU"##,
         description = r##"A case-sensitive identifier for the product variant in the shop. Required in order to connect to a fulfillment service."##
@@ -4092,6 +4130,16 @@ pub struct GetOrderLineItemsNodes {
         skip_serializing_if = "Option::is_none"
     )]
     pub discounted_total_set: Option<GetOrderLineItemsNodesDiscountedTotalSet>,
+    #[field(
+        display_name = r##"Discounted Unit Price Set"##,
+        description = r##"The approximate unit price of the line item in shop and presentment currencies. This value includes line-level discounts and discounts applied to refunded and removed quantities. It doesn't include order-level or code-based discounts."##
+    )]
+    #[serde(
+        rename = "discountedUnitPriceSet",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub discounted_unit_price_set: Option<GetOrderLineItemsNodesDiscountedUnitPriceSet>,
     #[field(display_name = r##"ID"##, description = r##"A globally-unique ID."##)]
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -4218,6 +4266,46 @@ pub struct GetOrderLineItemsNodesDiscountedTotalSetShopMoney {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "GetOrderLineItemsNodesDiscountedUnitPriceSet")]
+pub struct GetOrderLineItemsNodesDiscountedUnitPriceSet {
+    #[field(
+        display_name = r##"Shop Money"##,
+        description = r##"Amount in shop currency."##
+    )]
+    #[serde(rename = "shopMoney", default, skip_serializing_if = "Option::is_none")]
+    pub shop_money: Option<GetOrderLineItemsNodesDiscountedUnitPriceSetShopMoney>,
+    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
+    #[field(skip)]
+    #[serde(flatten)]
+    pub __extra: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "GetOrderLineItemsNodesDiscountedUnitPriceSetShopMoney")]
+pub struct GetOrderLineItemsNodesDiscountedUnitPriceSetShopMoney {
+    #[field(
+        display_name = r##"Amount"##,
+        description = r##"A monetary value in decimal format, allowing for precise representation of cents or fractional currency. For example, 12.99."##
+    )]
+    #[serde(rename = "amount", default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<String>,
+    #[field(
+        display_name = r##"Currency Code"##,
+        description = r##"The three-letter currency code that represents a world currency used in a store. Currency codes include standard standard ISO 4217 codes, legacy codes, and non-standard codes. For example, USD. One of: AED, AFN, ALL, AMD, ANG, AOA, ARS, AUD, AWG, AZN, BAM, BBD, BDT, BGN, BHD, BIF, BMD, BND, BOB, BRL, BSD, BTN, BWP, BYN, BYR, BZD, CAD, CDF, CHF, CLP, CNY, COP, CRC, CVE, CZK, DJF, DKK, DOP, DZD, EGP, ERN, ETB, EUR, FJD, FKP, GBP, GEL, GHS, GIP, GMD, GNF, GTQ, GYD, HKD, HNL, HRK, HTG, HUF, IDR, ILS, INR, IQD, IRR, ISK, JEP, JMD, JOD, JPY, KES, KGS, KHR, KID, KMF, KRW, KWD, KYD, KZT, LAK, LBP, LKR, LRD, LSL, LTL, LVL, LYD, MAD, MDL, MGA, MKD, MMK, MNT, MOP, MRU, MUR, MVR, MWK, MXN, MYR, MZN, NAD, NGN, NIO, NOK, NPR, NZD, OMR, PAB, PEN, PGK, PHP, PKR, PLN, PYG, QAR, RON, RSD, RUB, RWF, SAR, SBD, SCR, SDG, SEK, SGD, SHP, SLL, SOS, SRD, SSP, STD, STN, SYP, SZL, THB, TJS, TMT, TND, TOP, TRY, TTD, TWD, TZS, UAH, UGX, USD, USDC, UYU, UZS, VED, VEF, VES, VND, VUV, WST, XAF, XCD, XCG, XOF, XPF, XXX, YER, ZAR, ZMW."##
+    )]
+    #[serde(
+        rename = "currencyCode",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub currency_code: Option<String>,
+    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
+    #[field(skip)]
+    #[serde(flatten)]
+    pub __extra: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "GetOrderLineItemsNodesOriginalUnitPriceSet")]
 pub struct GetOrderLineItemsNodesOriginalUnitPriceSet {
     #[field(
@@ -4275,6 +4363,12 @@ pub struct GetOrderLineItemsNodesVariant {
     #[field(display_name = r##"ID"##, description = r##"A globally-unique ID."##)]
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    #[field(
+        display_name = r##"SKU"##,
+        description = r##"A case-sensitive identifier for the product variant in the shop. Required in order to connect to a fulfillment service."##
+    )]
+    #[serde(rename = "sku", default, skip_serializing_if = "Option::is_none")]
+    pub sku: Option<String>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -4720,6 +4814,12 @@ pub struct GetOrderShippingLinesNodes {
         skip_serializing_if = "Option::is_none"
     )]
     pub original_price_set: Option<GetOrderShippingLinesNodesOriginalPriceSet>,
+    #[field(
+        display_name = r##"Source"##,
+        description = r##"Returns the rate source for the shipping line."##
+    )]
+    #[serde(rename = "source", default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     #[field(
         display_name = r##"Title"##,
         description = r##"Returns the title of the shipping line."##
@@ -5300,8 +5400,98 @@ pub struct GetProductOptionsOptionValues {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "GetProductPriceRangeV2")]
+pub struct GetProductPriceRangeV2 {
+    #[field(
+        display_name = r##"Max Variant Price"##,
+        description = r##"The highest variant's price."##
+    )]
+    #[serde(
+        rename = "maxVariantPrice",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_variant_price: Option<GetProductPriceRangeV2MaxVariantPrice>,
+    #[field(
+        display_name = r##"Min Variant Price"##,
+        description = r##"The lowest variant's price."##
+    )]
+    #[serde(
+        rename = "minVariantPrice",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub min_variant_price: Option<GetProductPriceRangeV2MinVariantPrice>,
+    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
+    #[field(skip)]
+    #[serde(flatten)]
+    pub __extra: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "GetProductPriceRangeV2MaxVariantPrice")]
+pub struct GetProductPriceRangeV2MaxVariantPrice {
+    #[field(
+        display_name = r##"Amount"##,
+        description = r##"A monetary value in decimal format, allowing for precise representation of cents or fractional currency. For example, 12.99."##
+    )]
+    #[serde(rename = "amount", default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<String>,
+    #[field(
+        display_name = r##"Currency Code"##,
+        description = r##"The three-letter currency code that represents a world currency used in a store. Currency codes include standard standard ISO 4217 codes, legacy codes, and non-standard codes. For example, USD. One of: AED, AFN, ALL, AMD, ANG, AOA, ARS, AUD, AWG, AZN, BAM, BBD, BDT, BGN, BHD, BIF, BMD, BND, BOB, BRL, BSD, BTN, BWP, BYN, BYR, BZD, CAD, CDF, CHF, CLP, CNY, COP, CRC, CVE, CZK, DJF, DKK, DOP, DZD, EGP, ERN, ETB, EUR, FJD, FKP, GBP, GEL, GHS, GIP, GMD, GNF, GTQ, GYD, HKD, HNL, HRK, HTG, HUF, IDR, ILS, INR, IQD, IRR, ISK, JEP, JMD, JOD, JPY, KES, KGS, KHR, KID, KMF, KRW, KWD, KYD, KZT, LAK, LBP, LKR, LRD, LSL, LTL, LVL, LYD, MAD, MDL, MGA, MKD, MMK, MNT, MOP, MRU, MUR, MVR, MWK, MXN, MYR, MZN, NAD, NGN, NIO, NOK, NPR, NZD, OMR, PAB, PEN, PGK, PHP, PKR, PLN, PYG, QAR, RON, RSD, RUB, RWF, SAR, SBD, SCR, SDG, SEK, SGD, SHP, SLL, SOS, SRD, SSP, STD, STN, SYP, SZL, THB, TJS, TMT, TND, TOP, TRY, TTD, TWD, TZS, UAH, UGX, USD, USDC, UYU, UZS, VED, VEF, VES, VND, VUV, WST, XAF, XCD, XCG, XOF, XPF, XXX, YER, ZAR, ZMW."##
+    )]
+    #[serde(
+        rename = "currencyCode",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub currency_code: Option<String>,
+    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
+    #[field(skip)]
+    #[serde(flatten)]
+    pub __extra: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "GetProductPriceRangeV2MinVariantPrice")]
+pub struct GetProductPriceRangeV2MinVariantPrice {
+    #[field(
+        display_name = r##"Amount"##,
+        description = r##"A monetary value in decimal format, allowing for precise representation of cents or fractional currency. For example, 12.99."##
+    )]
+    #[serde(rename = "amount", default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<String>,
+    #[field(
+        display_name = r##"Currency Code"##,
+        description = r##"The three-letter currency code that represents a world currency used in a store. Currency codes include standard standard ISO 4217 codes, legacy codes, and non-standard codes. For example, USD. One of: AED, AFN, ALL, AMD, ANG, AOA, ARS, AUD, AWG, AZN, BAM, BBD, BDT, BGN, BHD, BIF, BMD, BND, BOB, BRL, BSD, BTN, BWP, BYN, BYR, BZD, CAD, CDF, CHF, CLP, CNY, COP, CRC, CVE, CZK, DJF, DKK, DOP, DZD, EGP, ERN, ETB, EUR, FJD, FKP, GBP, GEL, GHS, GIP, GMD, GNF, GTQ, GYD, HKD, HNL, HRK, HTG, HUF, IDR, ILS, INR, IQD, IRR, ISK, JEP, JMD, JOD, JPY, KES, KGS, KHR, KID, KMF, KRW, KWD, KYD, KZT, LAK, LBP, LKR, LRD, LSL, LTL, LVL, LYD, MAD, MDL, MGA, MKD, MMK, MNT, MOP, MRU, MUR, MVR, MWK, MXN, MYR, MZN, NAD, NGN, NIO, NOK, NPR, NZD, OMR, PAB, PEN, PGK, PHP, PKR, PLN, PYG, QAR, RON, RSD, RUB, RWF, SAR, SBD, SCR, SDG, SEK, SGD, SHP, SLL, SOS, SRD, SSP, STD, STN, SYP, SZL, THB, TJS, TMT, TND, TOP, TRY, TTD, TWD, TZS, UAH, UGX, USD, USDC, UYU, UZS, VED, VEF, VES, VND, VUV, WST, XAF, XCD, XCG, XOF, XPF, XXX, YER, ZAR, ZMW."##
+    )]
+    #[serde(
+        rename = "currencyCode",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub currency_code: Option<String>,
+    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
+    #[field(skip)]
+    #[serde(flatten)]
+    pub __extra: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "GetProductRequest")]
 pub struct GetProductRequest {
+    #[field(
+        display_name = r##"Barcodes First"##,
+        description = r##"The first `n` elements from the paginated list."##
+    )]
+    #[serde(
+        rename = "barcodesFirst",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub barcodes_first: Option<Option<i64>>,
     #[field(
         display_name = r##"ID"##,
         description = r##"The ID of the `Product` to return."##
@@ -5444,6 +5634,16 @@ pub struct GetProductResult {
     #[serde(rename = "options", default, skip_serializing_if = "Option::is_none")]
     pub options: Option<Vec<GetProductOptions>>,
     #[field(
+        display_name = r##"Price Range V2"##,
+        description = r##"The minimum and maximum prices of a product, expressed in decimal numbers. For example, if the product is priced between $10.00 and $50.00, then the price range is $10.00 - $50.00."##
+    )]
+    #[serde(
+        rename = "priceRangeV2",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub price_range_v2: Option<GetProductPriceRangeV2>,
+    #[field(
         display_name = r##"Product Type"##,
         description = r##"The product type that merchants define."##
     )]
@@ -5570,6 +5770,14 @@ pub struct GetProductVariants {
 #[capability_output(display_name = "GetProductVariantsNodes")]
 pub struct GetProductVariantsNodes {
     #[field(
+        display_name = r##"Barcodes"##,
+        description = r##"The barcodes associated with the product variant.
+
+A variant supports up to 20 barcodes, each of which can have a type. Barcode types are validated against their respective format standards."##
+    )]
+    #[serde(rename = "barcodes", default, skip_serializing_if = "Option::is_none")]
+    pub barcodes: Option<GetProductVariantsNodesBarcodes>,
+    #[field(
         display_name = r##"Compare At Price"##,
         description = r##"The compare-at price of the variant in the default shop currency."##
     )]
@@ -5652,6 +5860,42 @@ pub struct GetProductVariantsNodes {
     )]
     #[serde(rename = "title", default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
+    #[field(skip)]
+    #[serde(flatten)]
+    pub __extra: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "GetProductVariantsNodesBarcodes")]
+pub struct GetProductVariantsNodesBarcodes {
+    #[field(
+        display_name = r##"Nodes"##,
+        description = r##"A list of nodes that are contained in ProductVariantBarcodeEdge. You can fetch data about an individual node, or you can follow the edges to fetch data about a collection of related nodes. At each node, you specify the fields that you want to retrieve."##
+    )]
+    #[serde(rename = "nodes", default, skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<Vec<GetProductVariantsNodesBarcodesNodes>>,
+    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
+    #[field(skip)]
+    #[serde(flatten)]
+    pub __extra: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "GetProductVariantsNodesBarcodesNodes")]
+pub struct GetProductVariantsNodesBarcodesNodes {
+    #[field(
+        display_name = r##"Type"##,
+        description = r##"The associated standard that the barcode conforms to. Barcode types are validated against their respective format standards. A `null` format denotes no type provided on write and the value is stored as entered. One of: ASIN, EAN, GTIN, ISBN, NS_PID, UPC."##
+    )]
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
+    #[field(
+        display_name = r##"Value"##,
+        description = r##"The value of the barcode. For example, `9780262033848`. Maximum length: 255 characters."##
+    )]
+    #[serde(rename = "value", default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -7443,6 +7687,16 @@ pub struct ListProductsNodes {
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[field(
+        display_name = r##"Price Range V2"##,
+        description = r##"The minimum and maximum prices of a product, expressed in decimal numbers. For example, if the product is priced between $10.00 and $50.00, then the price range is $10.00 - $50.00."##
+    )]
+    #[serde(
+        rename = "priceRangeV2",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub price_range_v2: Option<ListProductsNodesPriceRangeV2>,
+    #[field(
         display_name = r##"Product Type"##,
         description = r##"The product type that merchants define."##
     )]
@@ -7494,6 +7748,85 @@ Updating `tags` overwrites any existing tags that were previously added to the p
     )]
     #[serde(rename = "vendor", default, skip_serializing_if = "Option::is_none")]
     pub vendor: Option<String>,
+    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
+    #[field(skip)]
+    #[serde(flatten)]
+    pub __extra: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "ListProductsNodesPriceRangeV2")]
+pub struct ListProductsNodesPriceRangeV2 {
+    #[field(
+        display_name = r##"Max Variant Price"##,
+        description = r##"The highest variant's price."##
+    )]
+    #[serde(
+        rename = "maxVariantPrice",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_variant_price: Option<ListProductsNodesPriceRangeV2MaxVariantPrice>,
+    #[field(
+        display_name = r##"Min Variant Price"##,
+        description = r##"The lowest variant's price."##
+    )]
+    #[serde(
+        rename = "minVariantPrice",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub min_variant_price: Option<ListProductsNodesPriceRangeV2MinVariantPrice>,
+    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
+    #[field(skip)]
+    #[serde(flatten)]
+    pub __extra: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "ListProductsNodesPriceRangeV2MaxVariantPrice")]
+pub struct ListProductsNodesPriceRangeV2MaxVariantPrice {
+    #[field(
+        display_name = r##"Amount"##,
+        description = r##"A monetary value in decimal format, allowing for precise representation of cents or fractional currency. For example, 12.99."##
+    )]
+    #[serde(rename = "amount", default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<String>,
+    #[field(
+        display_name = r##"Currency Code"##,
+        description = r##"The three-letter currency code that represents a world currency used in a store. Currency codes include standard standard ISO 4217 codes, legacy codes, and non-standard codes. For example, USD. One of: AED, AFN, ALL, AMD, ANG, AOA, ARS, AUD, AWG, AZN, BAM, BBD, BDT, BGN, BHD, BIF, BMD, BND, BOB, BRL, BSD, BTN, BWP, BYN, BYR, BZD, CAD, CDF, CHF, CLP, CNY, COP, CRC, CVE, CZK, DJF, DKK, DOP, DZD, EGP, ERN, ETB, EUR, FJD, FKP, GBP, GEL, GHS, GIP, GMD, GNF, GTQ, GYD, HKD, HNL, HRK, HTG, HUF, IDR, ILS, INR, IQD, IRR, ISK, JEP, JMD, JOD, JPY, KES, KGS, KHR, KID, KMF, KRW, KWD, KYD, KZT, LAK, LBP, LKR, LRD, LSL, LTL, LVL, LYD, MAD, MDL, MGA, MKD, MMK, MNT, MOP, MRU, MUR, MVR, MWK, MXN, MYR, MZN, NAD, NGN, NIO, NOK, NPR, NZD, OMR, PAB, PEN, PGK, PHP, PKR, PLN, PYG, QAR, RON, RSD, RUB, RWF, SAR, SBD, SCR, SDG, SEK, SGD, SHP, SLL, SOS, SRD, SSP, STD, STN, SYP, SZL, THB, TJS, TMT, TND, TOP, TRY, TTD, TWD, TZS, UAH, UGX, USD, USDC, UYU, UZS, VED, VEF, VES, VND, VUV, WST, XAF, XCD, XCG, XOF, XPF, XXX, YER, ZAR, ZMW."##
+    )]
+    #[serde(
+        rename = "currencyCode",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub currency_code: Option<String>,
+    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
+    #[field(skip)]
+    #[serde(flatten)]
+    pub __extra: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "ListProductsNodesPriceRangeV2MinVariantPrice")]
+pub struct ListProductsNodesPriceRangeV2MinVariantPrice {
+    #[field(
+        display_name = r##"Amount"##,
+        description = r##"A monetary value in decimal format, allowing for precise representation of cents or fractional currency. For example, 12.99."##
+    )]
+    #[serde(rename = "amount", default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<String>,
+    #[field(
+        display_name = r##"Currency Code"##,
+        description = r##"The three-letter currency code that represents a world currency used in a store. Currency codes include standard standard ISO 4217 codes, legacy codes, and non-standard codes. For example, USD. One of: AED, AFN, ALL, AMD, ANG, AOA, ARS, AUD, AWG, AZN, BAM, BBD, BDT, BGN, BHD, BIF, BMD, BND, BOB, BRL, BSD, BTN, BWP, BYN, BYR, BZD, CAD, CDF, CHF, CLP, CNY, COP, CRC, CVE, CZK, DJF, DKK, DOP, DZD, EGP, ERN, ETB, EUR, FJD, FKP, GBP, GEL, GHS, GIP, GMD, GNF, GTQ, GYD, HKD, HNL, HRK, HTG, HUF, IDR, ILS, INR, IQD, IRR, ISK, JEP, JMD, JOD, JPY, KES, KGS, KHR, KID, KMF, KRW, KWD, KYD, KZT, LAK, LBP, LKR, LRD, LSL, LTL, LVL, LYD, MAD, MDL, MGA, MKD, MMK, MNT, MOP, MRU, MUR, MVR, MWK, MXN, MYR, MZN, NAD, NGN, NIO, NOK, NPR, NZD, OMR, PAB, PEN, PGK, PHP, PKR, PLN, PYG, QAR, RON, RSD, RUB, RWF, SAR, SBD, SCR, SDG, SEK, SGD, SHP, SLL, SOS, SRD, SSP, STD, STN, SYP, SZL, THB, TJS, TMT, TND, TOP, TRY, TTD, TWD, TZS, UAH, UGX, USD, USDC, UYU, UZS, VED, VEF, VES, VND, VUV, WST, XAF, XCD, XCG, XOF, XPF, XXX, YER, ZAR, ZMW."##
+    )]
+    #[serde(
+        rename = "currencyCode",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub currency_code: Option<String>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -7654,6 +7987,14 @@ pub struct ListProductsResult {
 #[capability_output(display_name = "ListVariantsNodes")]
 pub struct ListVariantsNodes {
     #[field(
+        display_name = r##"Barcodes"##,
+        description = r##"The barcodes associated with the product variant.
+
+A variant supports up to 20 barcodes, each of which can have a type. Barcode types are validated against their respective format standards."##
+    )]
+    #[serde(rename = "barcodes", default, skip_serializing_if = "Option::is_none")]
+    pub barcodes: Option<ListVariantsNodesBarcodes>,
+    #[field(
         display_name = r##"Compare At Price"##,
         description = r##"The compare-at price of the variant in the default shop currency."##
     )]
@@ -7737,6 +8078,42 @@ pub struct ListVariantsNodes {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "ListVariantsNodesBarcodes")]
+pub struct ListVariantsNodesBarcodes {
+    #[field(
+        display_name = r##"Nodes"##,
+        description = r##"A list of nodes that are contained in ProductVariantBarcodeEdge. You can fetch data about an individual node, or you can follow the edges to fetch data about a collection of related nodes. At each node, you specify the fields that you want to retrieve."##
+    )]
+    #[serde(rename = "nodes", default, skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<Vec<ListVariantsNodesBarcodesNodes>>,
+    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
+    #[field(skip)]
+    #[serde(flatten)]
+    pub __extra: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "ListVariantsNodesBarcodesNodes")]
+pub struct ListVariantsNodesBarcodesNodes {
+    #[field(
+        display_name = r##"Type"##,
+        description = r##"The associated standard that the barcode conforms to. Barcode types are validated against their respective format standards. A `null` format denotes no type provided on write and the value is stored as entered. One of: ASIN, EAN, GTIN, ISBN, NS_PID, UPC."##
+    )]
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
+    #[field(
+        display_name = r##"Value"##,
+        description = r##"The value of the barcode. For example, `9780262033848`. Maximum length: 255 characters."##
+    )]
+    #[serde(rename = "value", default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
+    #[field(skip)]
+    #[serde(flatten)]
+    pub __extra: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ListVariantsNodesInventoryItem")]
 pub struct ListVariantsNodesInventoryItem {
     #[field(display_name = r##"ID"##, description = r##"A globally-unique ID."##)]
@@ -7752,6 +8129,16 @@ pub struct ListVariantsNodesInventoryItem {
 #[capability_output(display_name = "ListVariantsNodesProduct")]
 pub struct ListVariantsNodesProduct {
     #[field(
+        display_name = r##"Description HTML"##,
+        description = r##"The description of the product, with HTML tags. For example, the description might include bold `<strong></strong>` and italic `<i></i>` text."##
+    )]
+    #[serde(
+        rename = "descriptionHtml",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub description_html: Option<String>,
+    #[field(
         display_name = r##"Handle"##,
         description = r##"A unique, human-readable string of the product's title. A handle can contain letters, hyphens (`-`), and numbers, but no spaces. The handle is used in the online store URL for the product."##
     )]
@@ -7761,17 +8148,41 @@ pub struct ListVariantsNodesProduct {
     #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[field(
+        display_name = r##"Product Type"##,
+        description = r##"The product type that merchants define."##
+    )]
+    #[serde(
+        rename = "productType",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub product_type: Option<String>,
+    #[field(
         display_name = r##"Status"##,
         description = r##"The product status, which controls visibility across all sales channels. One of: ACTIVE, ARCHIVED, DRAFT, UNLISTED."##
     )]
     #[serde(rename = "status", default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     #[field(
+        display_name = r##"Tags"##,
+        description = r##"A comma-separated list of searchable keywords that are associated with the product. For example, a merchant might apply the `sports` and `summer` tags to products that are associated with sportwear for summer.
+
+Updating `tags` overwrites any existing tags that were previously added to the product. To add new tags without overwriting existing tags, use the `tagsAdd` mutation."##
+    )]
+    #[serde(rename = "tags", default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[field(
         display_name = r##"Title"##,
         description = r##"The name for the product that displays to customers. The title is used to construct the product's handle. For example, if a product is titled "Black Sunglasses", then the handle is `black-sunglasses`."##
     )]
     #[serde(rename = "title", default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[field(
+        display_name = r##"Vendor"##,
+        description = r##"The name of the product's vendor."##
+    )]
+    #[serde(rename = "vendor", default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -7838,6 +8249,17 @@ pub struct ListVariantsRequest {
         deserialize_with = "kit::nullable"
     )]
     pub after: Option<Option<String>>,
+    #[field(
+        display_name = r##"Barcodes First"##,
+        description = r##"The first `n` elements from the paginated list."##
+    )]
+    #[serde(
+        rename = "barcodesFirst",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub barcodes_first: Option<Option<i64>>,
     #[field(
         display_name = r##"First"##,
         description = r##"The first `n` elements from the paginated list."##
@@ -13329,6 +13751,9 @@ impl GetFulfillmentOrdersInput {
             lineItem {
               id
               sku
+              variant {
+                id
+              }
             }
           }
           pageInfo {
@@ -13413,6 +13838,9 @@ impl GetInventoryLevelsInput {
     id
     sku
     inventoryQuantity
+    product {
+      id
+    }
     inventoryItem {
       id
       tracked
@@ -13599,11 +14027,18 @@ impl GetOrderInput {
         requiresShipping
         variant {
           id
+          sku
         }
         product {
           id
         }
         originalUnitPriceSet {
+          shopMoney {
+            amount
+            currencyCode
+          }
+        }
+        discountedUnitPriceSet {
           shopMoney {
             amount
             currencyCode
@@ -13625,6 +14060,7 @@ impl GetOrderInput {
       nodes {
         title
         code
+        source
         originalPriceSet {
           shopMoney {
             amount
@@ -13647,6 +14083,18 @@ pub struct GetProductInput {
     #[field(skip)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub _connection: Option<RawConnection>,
+    #[field(
+        display_name = r##"Barcodes First"##,
+        description = r##"The first `n` elements from the paginated list."##,
+        default = r##"1"##
+    )]
+    #[serde(
+        rename = "barcodesFirst",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub barcodes_first: Option<Option<i64>>,
     #[field(
         display_name = r##"ID"##,
         description = r##"The ID of the `Product` to return."##
@@ -13720,7 +14168,7 @@ pub async fn get_product(input: GetProductInput) -> Result<GetProductResult, Age
 impl GetProductInput {
     /// The request this capability sends; the connection supplies host and credentials.
     pub fn request(&self) -> Result<kit::Request, AgentError> {
-        const DOCUMENT: &str = r##"query getProduct($id: ID!, $metafieldNamespace: String, $metafieldsFirst: Int = 50, $mediaFirst: Int = 50) {
+        const DOCUMENT: &str = r##"query getProduct($id: ID!, $metafieldNamespace: String, $metafieldsFirst: Int = 50, $mediaFirst: Int = 50, $barcodesFirst: Int = 1) {
   product(id: $id) {
     id
     legacyResourceId
@@ -13735,6 +14183,16 @@ impl GetProductInput {
     updatedAt
     publishedAt
     totalInventory
+    priceRangeV2 {
+      minVariantPrice {
+        amount
+        currencyCode
+      }
+      maxVariantPrice {
+        amount
+        currencyCode
+      }
+    }
     hasOnlyDefaultVariant
     onlineStoreUrl
     category {
@@ -13766,6 +14224,12 @@ impl GetProductInput {
         position
         taxable
         inventoryPolicy
+        barcodes(first: $barcodesFirst) {
+          nodes {
+            value
+            type
+          }
+        }
         selectedOptions {
           name
           value
@@ -13821,6 +14285,7 @@ impl GetProductInput {
   }
 }"##;
         let variables = kit::Body::new()
+            .field_opt("barcodesFirst", &self.barcodes_first)
             .field("id", &self.id)
             .field_opt("mediaFirst", &self.media_first)
             .field_opt("metafieldNamespace", &self.metafield_namespace)
@@ -14580,6 +15045,16 @@ impl ListProductsInput {
       createdAt
       updatedAt
       totalInventory
+      priceRangeV2 {
+        minVariantPrice {
+          amount
+          currencyCode
+        }
+        maxVariantPrice {
+          amount
+          currencyCode
+        }
+      }
     }
     pageInfo {
       hasNextPage
@@ -14615,6 +15090,18 @@ pub struct ListVariantsInput {
         deserialize_with = "kit::nullable"
     )]
     pub after: Option<Option<String>>,
+    #[field(
+        display_name = r##"Barcodes First"##,
+        description = r##"The first `n` elements from the paginated list."##,
+        default = r##"1"##
+    )]
+    #[serde(
+        rename = "barcodesFirst",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub barcodes_first: Option<Option<i64>>,
     #[field(
         display_name = r##"First"##,
         description = r##"The first `n` elements from the paginated list."##,
@@ -14730,7 +15217,7 @@ pub async fn list_variants(input: ListVariantsInput) -> Result<ListVariantsResul
 impl ListVariantsInput {
     /// The request this capability sends; the connection supplies host and credentials.
     pub fn request(&self) -> Result<kit::Request, AgentError> {
-        const DOCUMENT: &str = r##"query listVariants($first: Int = 50, $after: String, $query: String, $sortKey: ProductVariantSortKeys, $reverse: Boolean) {
+        const DOCUMENT: &str = r##"query listVariants($first: Int = 50, $after: String, $query: String, $sortKey: ProductVariantSortKeys, $reverse: Boolean, $barcodesFirst: Int = 1) {
   productVariants(
     first: $first
     after: $after
@@ -14746,6 +15233,12 @@ impl ListVariantsInput {
       price
       compareAtPrice
       inventoryQuantity
+      barcodes(first: $barcodesFirst) {
+        nodes {
+          value
+          type
+        }
+      }
       selectedOptions {
         name
         value
@@ -14755,6 +15248,10 @@ impl ListVariantsInput {
         title
         handle
         status
+        vendor
+        productType
+        tags
+        descriptionHtml
       }
       inventoryItem {
         id
@@ -14768,6 +15265,7 @@ impl ListVariantsInput {
 }"##;
         let variables = kit::Body::new()
             .field_opt("after", &self.after)
+            .field_opt("barcodesFirst", &self.barcodes_first)
             .field_opt("first", &self.first)
             .field_opt("query", &self.query)
             .field_opt("reverse", &self.reverse)
@@ -16953,6 +17451,11 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
                 as &OutputTypeMeta,
         ),
         (
+            "GetFulfillmentOrdersFulfillmentOrdersNodesLineItemsNodesLineItemVariant",
+            &__OUTPUT_META_GetFulfillmentOrdersFulfillmentOrdersNodesLineItemsNodesLineItemVariant
+                as &OutputTypeMeta,
+        ),
+        (
             "GetFulfillmentOrdersFulfillmentOrdersNodesLineItemsPageInfo",
             &__OUTPUT_META_GetFulfillmentOrdersFulfillmentOrdersNodesLineItemsPageInfo
                 as &OutputTypeMeta,
@@ -17002,6 +17505,10 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
                 as &OutputTypeMeta,
         ),
         (
+            "GetInventoryLevelsProduct",
+            &__OUTPUT_META_GetInventoryLevelsProduct as &OutputTypeMeta,
+        ),
+        (
             "GetInventoryLevelsRequest",
             &__OUTPUT_META_GetInventoryLevelsRequest as &OutputTypeMeta,
         ),
@@ -17040,6 +17547,14 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         (
             "GetOrderLineItemsNodesDiscountedTotalSetShopMoney",
             &__OUTPUT_META_GetOrderLineItemsNodesDiscountedTotalSetShopMoney as &OutputTypeMeta,
+        ),
+        (
+            "GetOrderLineItemsNodesDiscountedUnitPriceSet",
+            &__OUTPUT_META_GetOrderLineItemsNodesDiscountedUnitPriceSet as &OutputTypeMeta,
+        ),
+        (
+            "GetOrderLineItemsNodesDiscountedUnitPriceSetShopMoney",
+            &__OUTPUT_META_GetOrderLineItemsNodesDiscountedUnitPriceSetShopMoney as &OutputTypeMeta,
         ),
         (
             "GetOrderLineItemsNodesOriginalUnitPriceSet",
@@ -17178,6 +17693,18 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
             &__OUTPUT_META_GetProductOptionsOptionValues as &OutputTypeMeta,
         ),
         (
+            "GetProductPriceRangeV2",
+            &__OUTPUT_META_GetProductPriceRangeV2 as &OutputTypeMeta,
+        ),
+        (
+            "GetProductPriceRangeV2MaxVariantPrice",
+            &__OUTPUT_META_GetProductPriceRangeV2MaxVariantPrice as &OutputTypeMeta,
+        ),
+        (
+            "GetProductPriceRangeV2MinVariantPrice",
+            &__OUTPUT_META_GetProductPriceRangeV2MinVariantPrice as &OutputTypeMeta,
+        ),
+        (
             "GetProductRequest",
             &__OUTPUT_META_GetProductRequest as &OutputTypeMeta,
         ),
@@ -17196,6 +17723,14 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         (
             "GetProductVariantsNodes",
             &__OUTPUT_META_GetProductVariantsNodes as &OutputTypeMeta,
+        ),
+        (
+            "GetProductVariantsNodesBarcodes",
+            &__OUTPUT_META_GetProductVariantsNodesBarcodes as &OutputTypeMeta,
+        ),
+        (
+            "GetProductVariantsNodesBarcodesNodes",
+            &__OUTPUT_META_GetProductVariantsNodesBarcodesNodes as &OutputTypeMeta,
         ),
         (
             "GetProductVariantsNodesInventoryItem",
@@ -17359,6 +17894,18 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
             &__OUTPUT_META_ListProductsNodes as &OutputTypeMeta,
         ),
         (
+            "ListProductsNodesPriceRangeV2",
+            &__OUTPUT_META_ListProductsNodesPriceRangeV2 as &OutputTypeMeta,
+        ),
+        (
+            "ListProductsNodesPriceRangeV2MaxVariantPrice",
+            &__OUTPUT_META_ListProductsNodesPriceRangeV2MaxVariantPrice as &OutputTypeMeta,
+        ),
+        (
+            "ListProductsNodesPriceRangeV2MinVariantPrice",
+            &__OUTPUT_META_ListProductsNodesPriceRangeV2MinVariantPrice as &OutputTypeMeta,
+        ),
+        (
             "ListProductsPageInfo",
             &__OUTPUT_META_ListProductsPageInfo as &OutputTypeMeta,
         ),
@@ -17373,6 +17920,14 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         (
             "ListVariantsNodes",
             &__OUTPUT_META_ListVariantsNodes as &OutputTypeMeta,
+        ),
+        (
+            "ListVariantsNodesBarcodes",
+            &__OUTPUT_META_ListVariantsNodesBarcodes as &OutputTypeMeta,
+        ),
+        (
+            "ListVariantsNodesBarcodesNodes",
+            &__OUTPUT_META_ListVariantsNodesBarcodesNodes as &OutputTypeMeta,
         ),
         (
             "ListVariantsNodesInventoryItem",

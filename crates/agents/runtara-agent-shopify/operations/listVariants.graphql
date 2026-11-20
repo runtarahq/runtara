@@ -4,6 +4,7 @@ query listVariants(
   $query: String
   $sortKey: ProductVariantSortKeys
   $reverse: Boolean
+  $barcodesFirst: Int = 1
 ) {
   productVariants(first: $first, after: $after, query: $query, sortKey: $sortKey, reverse: $reverse) {
     nodes {
@@ -14,6 +15,12 @@ query listVariants(
       price
       compareAtPrice
       inventoryQuantity
+      barcodes(first: $barcodesFirst) {
+        nodes {
+          value
+          type
+        }
+      }
       selectedOptions {
         name
         value
@@ -23,6 +30,10 @@ query listVariants(
         title
         handle
         status
+        vendor
+        productType
+        tags
+        descriptionHtml
       }
       inventoryItem {
         id

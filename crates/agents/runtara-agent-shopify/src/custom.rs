@@ -462,6 +462,7 @@ pub async fn get_variant_by_sku(
         query: Some(Some(search_term("sku", &input.sku))),
         sort_key: None,
         reverse: None,
+        barcodes_first: None,
     }
     .request()?
     .send_paced(connection, PREFIX)
@@ -484,6 +485,7 @@ pub async fn get_variant_by_sku(
                 metafield_namespace: None,
                 metafields_first: None,
                 media_first: None,
+                barcodes_first: None,
             }
             .request()?
             .send_paced(connection, PREFIX)
@@ -1081,6 +1083,7 @@ pub async fn replace_product_images(
         metafield_namespace: None,
         metafields_first: None,
         media_first: Some(Some(MAX_PAGE_SIZE)),
+        barcodes_first: None,
     }
     .request()?
     .send_paced(connection, PREFIX)

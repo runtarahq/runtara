@@ -17,6 +17,16 @@ query listProducts(
       createdAt
       updatedAt
       totalInventory
+      priceRangeV2 {
+        minVariantPrice {
+          amount
+          currencyCode
+        }
+        maxVariantPrice {
+          amount
+          currencyCode
+        }
+      }
     }
     pageInfo {
       hasNextPage

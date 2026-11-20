@@ -3,6 +3,7 @@ query getProduct(
   $metafieldNamespace: String
   $metafieldsFirst: Int = 50
   $mediaFirst: Int = 50
+  $barcodesFirst: Int = 1
 ) {
   product(id: $id) {
     id
@@ -18,6 +19,16 @@ query getProduct(
     updatedAt
     publishedAt
     totalInventory
+    priceRangeV2 {
+      minVariantPrice {
+        amount
+        currencyCode
+      }
+      maxVariantPrice {
+        amount
+        currencyCode
+      }
+    }
     hasOnlyDefaultVariant
     onlineStoreUrl
     category {
@@ -49,6 +60,12 @@ query getProduct(
         position
         taxable
         inventoryPolicy
+        barcodes(first: $barcodesFirst) {
+          nodes {
+            value
+            type
+          }
+        }
         selectedOptions {
           name
           value

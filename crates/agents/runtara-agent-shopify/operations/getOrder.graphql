@@ -107,11 +107,18 @@ query getOrder($id: ID!) {
         requiresShipping
         variant {
           id
+          sku
         }
         product {
           id
         }
         originalUnitPriceSet {
+          shopMoney {
+        amount
+        currencyCode
+      }
+        }
+        discountedUnitPriceSet {
           shopMoney {
         amount
         currencyCode
@@ -133,6 +140,7 @@ query getOrder($id: ID!) {
       nodes {
         title
         code
+        source
         originalPriceSet {
           shopMoney {
         amount

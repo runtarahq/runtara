@@ -3,6 +3,9 @@ query getInventoryLevels($variantId: ID!, $first: Int = 100) {
     id
     sku
     inventoryQuantity
+    product {
+      id
+    }
     inventoryItem {
       id
       tracked

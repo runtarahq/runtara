@@ -3168,6 +3168,26 @@
             "description": "The variant SKU number.",
             "type": "string",
             "x-runtara-label": "SKU"
+          },
+          "variant": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GetFulfillmentOrdersFulfillmentOrdersNodesLineItemsNodesLineItemVariant"
+              }
+            ],
+            "description": "The Variant object associated with this line item.",
+            "x-runtara-label": "Variant"
+          }
+        },
+        "type": "object"
+      },
+      "GetFulfillmentOrdersFulfillmentOrdersNodesLineItemsNodesLineItemVariant": {
+        "description": "The `ProductVariant` object represents a version of a product that comes in more than one option, such as size or color. For example, if a merchant sells t-shirts with options for size and color, then a small, blue t-shirt would be one product variant and a large, blue t-shirt would be another.\n\nUse the `ProductVariant` object to manage the full lifecycle and configuration of a product's variants. Common use cases for using the `ProductVariant` object include:\n\n- Tracking inventory for each variant\n- Setting unique prices for each variant\n- Assigning barcodes and SKUs to connect variants to fulfillment services\n- Attaching variant-specific images and media\n- Setting delivery and tax requirements\n- Supporting product bundles, subscriptions, and selling plans\n\nA `ProductVariant` is associated with a parent `Product` object. `ProductVariant` serves as the central link between a product's merchandising configuration, inventory, pricing, fulfillment, and sales channels within the GraphQL Admin API schema. Each variant can reference other GraphQL types such as:\n\n- `InventoryItem`: Used for inventory tracking\n- `Image`: Used for variant-specific images\n- `SellingPlanGroup`: Used for subscriptions and selling plans\n\nLearn more about Shopify's product model.",
+        "properties": {
+          "id": {
+            "description": "A globally-unique ID.",
+            "type": "string",
+            "x-runtara-label": "ID"
           }
         },
         "type": "object"
@@ -3403,6 +3423,17 @@
         },
         "type": "object"
       },
+      "GetInventoryLevelsProduct": {
+        "description": "The `Product` object lets you manage products in a merchant’s store.\n\nProducts are the goods and services that merchants offer to customers. They can include various details such as title, description, price, images, and options such as size or color. You can use product variants to create or update different versions of the same product. You can also add or update product media. Products can be organized by grouping them into a collection.\n\nLearn more about working with Shopify's product model, including limitations and considerations.",
+        "properties": {
+          "id": {
+            "description": "A globally-unique ID.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          }
+        },
+        "type": "object"
+      },
       "GetInventoryLevelsResult": {
         "description": "The `ProductVariant` object represents a version of a product that comes in more than one option, such as size or color. For example, if a merchant sells t-shirts with options for size and color, then a small, blue t-shirt would be one product variant and a large, blue t-shirt would be another.\n\nUse the `ProductVariant` object to manage the full lifecycle and configuration of a product's variants. Common use cases for using the `ProductVariant` object include:\n\n- Tracking inventory for each variant\n- Setting unique prices for each variant\n- Assigning barcodes and SKUs to connect variants to fulfillment services\n- Attaching variant-specific images and media\n- Setting delivery and tax requirements\n- Supporting product bundles, subscriptions, and selling plans\n\nA `ProductVariant` is associated with a parent `Product` object. `ProductVariant` serves as the central link between a product's merchandising configuration, inventory, pricing, fulfillment, and sales channels within the GraphQL Admin API schema. Each variant can reference other GraphQL types such as:\n\n- `InventoryItem`: Used for inventory tracking\n- `Image`: Used for variant-specific images\n- `SellingPlanGroup`: Used for subscriptions and selling plans\n\nLearn more about Shopify's product model.",
         "properties": {
@@ -3425,6 +3456,15 @@
             "format": "int64",
             "type": "integer",
             "x-runtara-label": "Inventory Quantity"
+          },
+          "product": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GetInventoryLevelsProduct"
+              }
+            ],
+            "description": "The product that this variant belongs to.",
+            "x-runtara-label": "Product"
           },
           "sku": {
             "description": "A case-sensitive identifier for the product variant in the shop. Required in order to connect to a fulfillment service.",
@@ -3855,6 +3895,15 @@
             "description": "The total discounted price of the line item in shop and presentment currencies, including refunded and removed quantities. This value doesn't include order-level discounts. Code-based discounts aren't included by default.",
             "x-runtara-label": "Discounted Total Set"
           },
+          "discountedUnitPriceSet": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GetOrderLineItemsNodesDiscountedUnitPriceSet"
+              }
+            ],
+            "description": "The approximate unit price of the line item in shop and presentment currencies. This value includes line-level discounts and discounts applied to refunded and removed quantities. It doesn't include order-level or code-based discounts.",
+            "x-runtara-label": "Discounted Unit Price Set"
+          },
           "id": {
             "description": "A globally-unique ID.",
             "type": "string",
@@ -3943,6 +3992,202 @@
         "type": "object"
       },
       "GetOrderLineItemsNodesDiscountedTotalSetShopMoney": {
+        "description": "A precise monetary value and its associated currency. Combines a decimal amount with a three-letter currency code to express prices, costs, and other financial values throughout the API. For example, 12.99 USD.",
+        "properties": {
+          "amount": {
+            "description": "A monetary value in decimal format, allowing for precise representation of cents or fractional currency. For example, 12.99.",
+            "type": "string",
+            "x-runtara-label": "Amount"
+          },
+          "currencyCode": {
+            "description": "The three-letter currency code that represents a world currency used in a store. Currency codes include standard standard ISO 4217 codes, legacy codes, and non-standard codes. For example, USD.",
+            "enum": [
+              "AED",
+              "AFN",
+              "ALL",
+              "AMD",
+              "ANG",
+              "AOA",
+              "ARS",
+              "AUD",
+              "AWG",
+              "AZN",
+              "BAM",
+              "BBD",
+              "BDT",
+              "BGN",
+              "BHD",
+              "BIF",
+              "BMD",
+              "BND",
+              "BOB",
+              "BRL",
+              "BSD",
+              "BTN",
+              "BWP",
+              "BYN",
+              "BYR",
+              "BZD",
+              "CAD",
+              "CDF",
+              "CHF",
+              "CLP",
+              "CNY",
+              "COP",
+              "CRC",
+              "CVE",
+              "CZK",
+              "DJF",
+              "DKK",
+              "DOP",
+              "DZD",
+              "EGP",
+              "ERN",
+              "ETB",
+              "EUR",
+              "FJD",
+              "FKP",
+              "GBP",
+              "GEL",
+              "GHS",
+              "GIP",
+              "GMD",
+              "GNF",
+              "GTQ",
+              "GYD",
+              "HKD",
+              "HNL",
+              "HRK",
+              "HTG",
+              "HUF",
+              "IDR",
+              "ILS",
+              "INR",
+              "IQD",
+              "IRR",
+              "ISK",
+              "JEP",
+              "JMD",
+              "JOD",
+              "JPY",
+              "KES",
+              "KGS",
+              "KHR",
+              "KID",
+              "KMF",
+              "KRW",
+              "KWD",
+              "KYD",
+              "KZT",
+              "LAK",
+              "LBP",
+              "LKR",
+              "LRD",
+              "LSL",
+              "LTL",
+              "LVL",
+              "LYD",
+              "MAD",
+              "MDL",
+              "MGA",
+              "MKD",
+              "MMK",
+              "MNT",
+              "MOP",
+              "MRU",
+              "MUR",
+              "MVR",
+              "MWK",
+              "MXN",
+              "MYR",
+              "MZN",
+              "NAD",
+              "NGN",
+              "NIO",
+              "NOK",
+              "NPR",
+              "NZD",
+              "OMR",
+              "PAB",
+              "PEN",
+              "PGK",
+              "PHP",
+              "PKR",
+              "PLN",
+              "PYG",
+              "QAR",
+              "RON",
+              "RSD",
+              "RUB",
+              "RWF",
+              "SAR",
+              "SBD",
+              "SCR",
+              "SDG",
+              "SEK",
+              "SGD",
+              "SHP",
+              "SLL",
+              "SOS",
+              "SRD",
+              "SSP",
+              "STD",
+              "STN",
+              "SYP",
+              "SZL",
+              "THB",
+              "TJS",
+              "TMT",
+              "TND",
+              "TOP",
+              "TRY",
+              "TTD",
+              "TWD",
+              "TZS",
+              "UAH",
+              "UGX",
+              "USD",
+              "USDC",
+              "UYU",
+              "UZS",
+              "VED",
+              "VEF",
+              "VES",
+              "VND",
+              "VUV",
+              "WST",
+              "XAF",
+              "XCD",
+              "XCG",
+              "XOF",
+              "XPF",
+              "XXX",
+              "YER",
+              "ZAR",
+              "ZMW"
+            ],
+            "type": "string",
+            "x-runtara-label": "Currency Code"
+          }
+        },
+        "type": "object"
+      },
+      "GetOrderLineItemsNodesDiscountedUnitPriceSet": {
+        "description": "A collection of monetary values in their respective currencies. Used throughout the API for multi-currency pricing and transactions, when an amount in the shop's currency is converted to the customer's currency of choice. The `presentmentMoney` field contains the amount in the customer's selected currency. The `shopMoney` field contains the equivalent in the shop's base currency.",
+        "properties": {
+          "shopMoney": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GetOrderLineItemsNodesDiscountedUnitPriceSetShopMoney"
+              }
+            ],
+            "description": "Amount in shop currency.",
+            "x-runtara-label": "Shop Money"
+          }
+        },
+        "type": "object"
+      },
+      "GetOrderLineItemsNodesDiscountedUnitPriceSetShopMoney": {
         "description": "A precise monetary value and its associated currency. Combines a decimal amount with a three-letter currency code to express prices, costs, and other financial values throughout the API. For example, 12.99 USD.",
         "properties": {
           "amount": {
@@ -4337,6 +4582,11 @@
             "description": "A globally-unique ID.",
             "type": "string",
             "x-runtara-label": "ID"
+          },
+          "sku": {
+            "description": "A case-sensitive identifier for the product variant in the shop. Required in order to connect to a fulfillment service.",
+            "type": "string",
+            "x-runtara-label": "SKU"
           }
         },
         "type": "object"
@@ -5121,6 +5371,11 @@
             ],
             "description": "The shipping price without any discounts applied. If the parent order.taxesIncluded field is true, then this price includes taxes. Otherwise, this field is the pre-tax price.",
             "x-runtara-label": "Original Price Set"
+          },
+          "source": {
+            "description": "Returns the rate source for the shipping line.",
+            "type": "string",
+            "x-runtara-label": "Source"
           },
           "title": {
             "description": "Returns the title of the shipping line.",
@@ -6588,6 +6843,392 @@
         },
         "type": "object"
       },
+      "GetProductPriceRangeV2": {
+        "description": "The price range of the product.",
+        "properties": {
+          "maxVariantPrice": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GetProductPriceRangeV2MaxVariantPrice"
+              }
+            ],
+            "description": "The highest variant's price.",
+            "x-runtara-label": "Max Variant Price"
+          },
+          "minVariantPrice": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GetProductPriceRangeV2MinVariantPrice"
+              }
+            ],
+            "description": "The lowest variant's price.",
+            "x-runtara-label": "Min Variant Price"
+          }
+        },
+        "type": "object"
+      },
+      "GetProductPriceRangeV2MaxVariantPrice": {
+        "description": "A precise monetary value and its associated currency. Combines a decimal amount with a three-letter currency code to express prices, costs, and other financial values throughout the API. For example, 12.99 USD.",
+        "properties": {
+          "amount": {
+            "description": "A monetary value in decimal format, allowing for precise representation of cents or fractional currency. For example, 12.99.",
+            "type": "string",
+            "x-runtara-label": "Amount"
+          },
+          "currencyCode": {
+            "description": "The three-letter currency code that represents a world currency used in a store. Currency codes include standard standard ISO 4217 codes, legacy codes, and non-standard codes. For example, USD.",
+            "enum": [
+              "AED",
+              "AFN",
+              "ALL",
+              "AMD",
+              "ANG",
+              "AOA",
+              "ARS",
+              "AUD",
+              "AWG",
+              "AZN",
+              "BAM",
+              "BBD",
+              "BDT",
+              "BGN",
+              "BHD",
+              "BIF",
+              "BMD",
+              "BND",
+              "BOB",
+              "BRL",
+              "BSD",
+              "BTN",
+              "BWP",
+              "BYN",
+              "BYR",
+              "BZD",
+              "CAD",
+              "CDF",
+              "CHF",
+              "CLP",
+              "CNY",
+              "COP",
+              "CRC",
+              "CVE",
+              "CZK",
+              "DJF",
+              "DKK",
+              "DOP",
+              "DZD",
+              "EGP",
+              "ERN",
+              "ETB",
+              "EUR",
+              "FJD",
+              "FKP",
+              "GBP",
+              "GEL",
+              "GHS",
+              "GIP",
+              "GMD",
+              "GNF",
+              "GTQ",
+              "GYD",
+              "HKD",
+              "HNL",
+              "HRK",
+              "HTG",
+              "HUF",
+              "IDR",
+              "ILS",
+              "INR",
+              "IQD",
+              "IRR",
+              "ISK",
+              "JEP",
+              "JMD",
+              "JOD",
+              "JPY",
+              "KES",
+              "KGS",
+              "KHR",
+              "KID",
+              "KMF",
+              "KRW",
+              "KWD",
+              "KYD",
+              "KZT",
+              "LAK",
+              "LBP",
+              "LKR",
+              "LRD",
+              "LSL",
+              "LTL",
+              "LVL",
+              "LYD",
+              "MAD",
+              "MDL",
+              "MGA",
+              "MKD",
+              "MMK",
+              "MNT",
+              "MOP",
+              "MRU",
+              "MUR",
+              "MVR",
+              "MWK",
+              "MXN",
+              "MYR",
+              "MZN",
+              "NAD",
+              "NGN",
+              "NIO",
+              "NOK",
+              "NPR",
+              "NZD",
+              "OMR",
+              "PAB",
+              "PEN",
+              "PGK",
+              "PHP",
+              "PKR",
+              "PLN",
+              "PYG",
+              "QAR",
+              "RON",
+              "RSD",
+              "RUB",
+              "RWF",
+              "SAR",
+              "SBD",
+              "SCR",
+              "SDG",
+              "SEK",
+              "SGD",
+              "SHP",
+              "SLL",
+              "SOS",
+              "SRD",
+              "SSP",
+              "STD",
+              "STN",
+              "SYP",
+              "SZL",
+              "THB",
+              "TJS",
+              "TMT",
+              "TND",
+              "TOP",
+              "TRY",
+              "TTD",
+              "TWD",
+              "TZS",
+              "UAH",
+              "UGX",
+              "USD",
+              "USDC",
+              "UYU",
+              "UZS",
+              "VED",
+              "VEF",
+              "VES",
+              "VND",
+              "VUV",
+              "WST",
+              "XAF",
+              "XCD",
+              "XCG",
+              "XOF",
+              "XPF",
+              "XXX",
+              "YER",
+              "ZAR",
+              "ZMW"
+            ],
+            "type": "string",
+            "x-runtara-label": "Currency Code"
+          }
+        },
+        "type": "object"
+      },
+      "GetProductPriceRangeV2MinVariantPrice": {
+        "description": "A precise monetary value and its associated currency. Combines a decimal amount with a three-letter currency code to express prices, costs, and other financial values throughout the API. For example, 12.99 USD.",
+        "properties": {
+          "amount": {
+            "description": "A monetary value in decimal format, allowing for precise representation of cents or fractional currency. For example, 12.99.",
+            "type": "string",
+            "x-runtara-label": "Amount"
+          },
+          "currencyCode": {
+            "description": "The three-letter currency code that represents a world currency used in a store. Currency codes include standard standard ISO 4217 codes, legacy codes, and non-standard codes. For example, USD.",
+            "enum": [
+              "AED",
+              "AFN",
+              "ALL",
+              "AMD",
+              "ANG",
+              "AOA",
+              "ARS",
+              "AUD",
+              "AWG",
+              "AZN",
+              "BAM",
+              "BBD",
+              "BDT",
+              "BGN",
+              "BHD",
+              "BIF",
+              "BMD",
+              "BND",
+              "BOB",
+              "BRL",
+              "BSD",
+              "BTN",
+              "BWP",
+              "BYN",
+              "BYR",
+              "BZD",
+              "CAD",
+              "CDF",
+              "CHF",
+              "CLP",
+              "CNY",
+              "COP",
+              "CRC",
+              "CVE",
+              "CZK",
+              "DJF",
+              "DKK",
+              "DOP",
+              "DZD",
+              "EGP",
+              "ERN",
+              "ETB",
+              "EUR",
+              "FJD",
+              "FKP",
+              "GBP",
+              "GEL",
+              "GHS",
+              "GIP",
+              "GMD",
+              "GNF",
+              "GTQ",
+              "GYD",
+              "HKD",
+              "HNL",
+              "HRK",
+              "HTG",
+              "HUF",
+              "IDR",
+              "ILS",
+              "INR",
+              "IQD",
+              "IRR",
+              "ISK",
+              "JEP",
+              "JMD",
+              "JOD",
+              "JPY",
+              "KES",
+              "KGS",
+              "KHR",
+              "KID",
+              "KMF",
+              "KRW",
+              "KWD",
+              "KYD",
+              "KZT",
+              "LAK",
+              "LBP",
+              "LKR",
+              "LRD",
+              "LSL",
+              "LTL",
+              "LVL",
+              "LYD",
+              "MAD",
+              "MDL",
+              "MGA",
+              "MKD",
+              "MMK",
+              "MNT",
+              "MOP",
+              "MRU",
+              "MUR",
+              "MVR",
+              "MWK",
+              "MXN",
+              "MYR",
+              "MZN",
+              "NAD",
+              "NGN",
+              "NIO",
+              "NOK",
+              "NPR",
+              "NZD",
+              "OMR",
+              "PAB",
+              "PEN",
+              "PGK",
+              "PHP",
+              "PKR",
+              "PLN",
+              "PYG",
+              "QAR",
+              "RON",
+              "RSD",
+              "RUB",
+              "RWF",
+              "SAR",
+              "SBD",
+              "SCR",
+              "SDG",
+              "SEK",
+              "SGD",
+              "SHP",
+              "SLL",
+              "SOS",
+              "SRD",
+              "SSP",
+              "STD",
+              "STN",
+              "SYP",
+              "SZL",
+              "THB",
+              "TJS",
+              "TMT",
+              "TND",
+              "TOP",
+              "TRY",
+              "TTD",
+              "TWD",
+              "TZS",
+              "UAH",
+              "UGX",
+              "USD",
+              "USDC",
+              "UYU",
+              "UZS",
+              "VED",
+              "VEF",
+              "VES",
+              "VND",
+              "VUV",
+              "WST",
+              "XAF",
+              "XCD",
+              "XCG",
+              "XOF",
+              "XPF",
+              "XXX",
+              "YER",
+              "ZAR",
+              "ZMW"
+            ],
+            "type": "string",
+            "x-runtara-label": "Currency Code"
+          }
+        },
+        "type": "object"
+      },
       "GetProductResult": {
         "description": "The `Product` object lets you manage products in a merchant’s store.\n\nProducts are the goods and services that merchants offer to customers. They can include various details such as title, description, price, images, and options such as size or color. You can use product variants to create or update different versions of the same product. You can also add or update product media. Products can be organized by grouping them into a collection.\n\nLearn more about working with Shopify's product model, including limitations and considerations.",
         "properties": {
@@ -6671,6 +7312,15 @@
             },
             "type": "array",
             "x-runtara-label": "Options"
+          },
+          "priceRangeV2": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GetProductPriceRangeV2"
+              }
+            ],
+            "description": "The minimum and maximum prices of a product, expressed in decimal numbers. For example, if the product is priced between $10.00 and $50.00, then the price range is $10.00 - $50.00.",
+            "x-runtara-label": "Price Range V2"
           },
           "productType": {
             "description": "The product type that merchants define.",
@@ -6787,6 +7437,15 @@
       "GetProductVariantsNodes": {
         "description": "The `ProductVariant` object represents a version of a product that comes in more than one option, such as size or color. For example, if a merchant sells t-shirts with options for size and color, then a small, blue t-shirt would be one product variant and a large, blue t-shirt would be another.\n\nUse the `ProductVariant` object to manage the full lifecycle and configuration of a product's variants. Common use cases for using the `ProductVariant` object include:\n\n- Tracking inventory for each variant\n- Setting unique prices for each variant\n- Assigning barcodes and SKUs to connect variants to fulfillment services\n- Attaching variant-specific images and media\n- Setting delivery and tax requirements\n- Supporting product bundles, subscriptions, and selling plans\n\nA `ProductVariant` is associated with a parent `Product` object. `ProductVariant` serves as the central link between a product's merchandising configuration, inventory, pricing, fulfillment, and sales channels within the GraphQL Admin API schema. Each variant can reference other GraphQL types such as:\n\n- `InventoryItem`: Used for inventory tracking\n- `Image`: Used for variant-specific images\n- `SellingPlanGroup`: Used for subscriptions and selling plans\n\nLearn more about Shopify's product model.",
         "properties": {
+          "barcodes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GetProductVariantsNodesBarcodes"
+              }
+            ],
+            "description": "The barcodes associated with the product variant.\n\nA variant supports up to 20 barcodes, each of which can have a type. Barcode types are validated against their respective format standards.",
+            "x-runtara-label": "Barcodes"
+          },
           "compareAtPrice": {
             "description": "The compare-at price of the variant in the default shop currency.",
             "type": "string",
@@ -6854,6 +7513,44 @@
             "description": "The title of the product variant.",
             "type": "string",
             "x-runtara-label": "Title"
+          }
+        },
+        "type": "object"
+      },
+      "GetProductVariantsNodesBarcodes": {
+        "description": "An auto-generated type for paginating through multiple ProductVariantBarcodes.",
+        "properties": {
+          "nodes": {
+            "description": "A list of nodes that are contained in ProductVariantBarcodeEdge. You can fetch data about an individual node, or you can follow the edges to fetch data about a collection of related nodes. At each node, you specify the fields that you want to retrieve.",
+            "items": {
+              "$ref": "#/components/schemas/GetProductVariantsNodesBarcodesNodes"
+            },
+            "type": "array",
+            "x-runtara-label": "Nodes"
+          }
+        },
+        "type": "object"
+      },
+      "GetProductVariantsNodesBarcodesNodes": {
+        "description": "A barcode associated with a product variant.\n\nA variant supports up to 20 barcodes, each of which can have a type. Barcode types are validated against their respective format standards.",
+        "properties": {
+          "type": {
+            "description": "The associated standard that the barcode conforms to. Barcode types are validated against their respective format standards. A `null` format denotes no type provided on write and the value is stored as entered.",
+            "enum": [
+              "ASIN",
+              "EAN",
+              "GTIN",
+              "ISBN",
+              "NS_PID",
+              "UPC"
+            ],
+            "type": "string",
+            "x-runtara-label": "Type"
+          },
+          "value": {
+            "description": "The value of the barcode. For example, `9780262033848`. Maximum length: 255 characters.",
+            "type": "string",
+            "x-runtara-label": "Value"
           }
         },
         "type": "object"
@@ -9448,6 +10145,15 @@
             "type": "string",
             "x-runtara-label": "ID"
           },
+          "priceRangeV2": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ListProductsNodesPriceRangeV2"
+              }
+            ],
+            "description": "The minimum and maximum prices of a product, expressed in decimal numbers. For example, if the product is priced between $10.00 and $50.00, then the price range is $10.00 - $50.00.",
+            "x-runtara-label": "Price Range V2"
+          },
           "productType": {
             "description": "The product type that merchants define.",
             "type": "string",
@@ -9497,6 +10203,392 @@
         },
         "type": "object"
       },
+      "ListProductsNodesPriceRangeV2": {
+        "description": "The price range of the product.",
+        "properties": {
+          "maxVariantPrice": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ListProductsNodesPriceRangeV2MaxVariantPrice"
+              }
+            ],
+            "description": "The highest variant's price.",
+            "x-runtara-label": "Max Variant Price"
+          },
+          "minVariantPrice": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ListProductsNodesPriceRangeV2MinVariantPrice"
+              }
+            ],
+            "description": "The lowest variant's price.",
+            "x-runtara-label": "Min Variant Price"
+          }
+        },
+        "type": "object"
+      },
+      "ListProductsNodesPriceRangeV2MaxVariantPrice": {
+        "description": "A precise monetary value and its associated currency. Combines a decimal amount with a three-letter currency code to express prices, costs, and other financial values throughout the API. For example, 12.99 USD.",
+        "properties": {
+          "amount": {
+            "description": "A monetary value in decimal format, allowing for precise representation of cents or fractional currency. For example, 12.99.",
+            "type": "string",
+            "x-runtara-label": "Amount"
+          },
+          "currencyCode": {
+            "description": "The three-letter currency code that represents a world currency used in a store. Currency codes include standard standard ISO 4217 codes, legacy codes, and non-standard codes. For example, USD.",
+            "enum": [
+              "AED",
+              "AFN",
+              "ALL",
+              "AMD",
+              "ANG",
+              "AOA",
+              "ARS",
+              "AUD",
+              "AWG",
+              "AZN",
+              "BAM",
+              "BBD",
+              "BDT",
+              "BGN",
+              "BHD",
+              "BIF",
+              "BMD",
+              "BND",
+              "BOB",
+              "BRL",
+              "BSD",
+              "BTN",
+              "BWP",
+              "BYN",
+              "BYR",
+              "BZD",
+              "CAD",
+              "CDF",
+              "CHF",
+              "CLP",
+              "CNY",
+              "COP",
+              "CRC",
+              "CVE",
+              "CZK",
+              "DJF",
+              "DKK",
+              "DOP",
+              "DZD",
+              "EGP",
+              "ERN",
+              "ETB",
+              "EUR",
+              "FJD",
+              "FKP",
+              "GBP",
+              "GEL",
+              "GHS",
+              "GIP",
+              "GMD",
+              "GNF",
+              "GTQ",
+              "GYD",
+              "HKD",
+              "HNL",
+              "HRK",
+              "HTG",
+              "HUF",
+              "IDR",
+              "ILS",
+              "INR",
+              "IQD",
+              "IRR",
+              "ISK",
+              "JEP",
+              "JMD",
+              "JOD",
+              "JPY",
+              "KES",
+              "KGS",
+              "KHR",
+              "KID",
+              "KMF",
+              "KRW",
+              "KWD",
+              "KYD",
+              "KZT",
+              "LAK",
+              "LBP",
+              "LKR",
+              "LRD",
+              "LSL",
+              "LTL",
+              "LVL",
+              "LYD",
+              "MAD",
+              "MDL",
+              "MGA",
+              "MKD",
+              "MMK",
+              "MNT",
+              "MOP",
+              "MRU",
+              "MUR",
+              "MVR",
+              "MWK",
+              "MXN",
+              "MYR",
+              "MZN",
+              "NAD",
+              "NGN",
+              "NIO",
+              "NOK",
+              "NPR",
+              "NZD",
+              "OMR",
+              "PAB",
+              "PEN",
+              "PGK",
+              "PHP",
+              "PKR",
+              "PLN",
+              "PYG",
+              "QAR",
+              "RON",
+              "RSD",
+              "RUB",
+              "RWF",
+              "SAR",
+              "SBD",
+              "SCR",
+              "SDG",
+              "SEK",
+              "SGD",
+              "SHP",
+              "SLL",
+              "SOS",
+              "SRD",
+              "SSP",
+              "STD",
+              "STN",
+              "SYP",
+              "SZL",
+              "THB",
+              "TJS",
+              "TMT",
+              "TND",
+              "TOP",
+              "TRY",
+              "TTD",
+              "TWD",
+              "TZS",
+              "UAH",
+              "UGX",
+              "USD",
+              "USDC",
+              "UYU",
+              "UZS",
+              "VED",
+              "VEF",
+              "VES",
+              "VND",
+              "VUV",
+              "WST",
+              "XAF",
+              "XCD",
+              "XCG",
+              "XOF",
+              "XPF",
+              "XXX",
+              "YER",
+              "ZAR",
+              "ZMW"
+            ],
+            "type": "string",
+            "x-runtara-label": "Currency Code"
+          }
+        },
+        "type": "object"
+      },
+      "ListProductsNodesPriceRangeV2MinVariantPrice": {
+        "description": "A precise monetary value and its associated currency. Combines a decimal amount with a three-letter currency code to express prices, costs, and other financial values throughout the API. For example, 12.99 USD.",
+        "properties": {
+          "amount": {
+            "description": "A monetary value in decimal format, allowing for precise representation of cents or fractional currency. For example, 12.99.",
+            "type": "string",
+            "x-runtara-label": "Amount"
+          },
+          "currencyCode": {
+            "description": "The three-letter currency code that represents a world currency used in a store. Currency codes include standard standard ISO 4217 codes, legacy codes, and non-standard codes. For example, USD.",
+            "enum": [
+              "AED",
+              "AFN",
+              "ALL",
+              "AMD",
+              "ANG",
+              "AOA",
+              "ARS",
+              "AUD",
+              "AWG",
+              "AZN",
+              "BAM",
+              "BBD",
+              "BDT",
+              "BGN",
+              "BHD",
+              "BIF",
+              "BMD",
+              "BND",
+              "BOB",
+              "BRL",
+              "BSD",
+              "BTN",
+              "BWP",
+              "BYN",
+              "BYR",
+              "BZD",
+              "CAD",
+              "CDF",
+              "CHF",
+              "CLP",
+              "CNY",
+              "COP",
+              "CRC",
+              "CVE",
+              "CZK",
+              "DJF",
+              "DKK",
+              "DOP",
+              "DZD",
+              "EGP",
+              "ERN",
+              "ETB",
+              "EUR",
+              "FJD",
+              "FKP",
+              "GBP",
+              "GEL",
+              "GHS",
+              "GIP",
+              "GMD",
+              "GNF",
+              "GTQ",
+              "GYD",
+              "HKD",
+              "HNL",
+              "HRK",
+              "HTG",
+              "HUF",
+              "IDR",
+              "ILS",
+              "INR",
+              "IQD",
+              "IRR",
+              "ISK",
+              "JEP",
+              "JMD",
+              "JOD",
+              "JPY",
+              "KES",
+              "KGS",
+              "KHR",
+              "KID",
+              "KMF",
+              "KRW",
+              "KWD",
+              "KYD",
+              "KZT",
+              "LAK",
+              "LBP",
+              "LKR",
+              "LRD",
+              "LSL",
+              "LTL",
+              "LVL",
+              "LYD",
+              "MAD",
+              "MDL",
+              "MGA",
+              "MKD",
+              "MMK",
+              "MNT",
+              "MOP",
+              "MRU",
+              "MUR",
+              "MVR",
+              "MWK",
+              "MXN",
+              "MYR",
+              "MZN",
+              "NAD",
+              "NGN",
+              "NIO",
+              "NOK",
+              "NPR",
+              "NZD",
+              "OMR",
+              "PAB",
+              "PEN",
+              "PGK",
+              "PHP",
+              "PKR",
+              "PLN",
+              "PYG",
+              "QAR",
+              "RON",
+              "RSD",
+              "RUB",
+              "RWF",
+              "SAR",
+              "SBD",
+              "SCR",
+              "SDG",
+              "SEK",
+              "SGD",
+              "SHP",
+              "SLL",
+              "SOS",
+              "SRD",
+              "SSP",
+              "STD",
+              "STN",
+              "SYP",
+              "SZL",
+              "THB",
+              "TJS",
+              "TMT",
+              "TND",
+              "TOP",
+              "TRY",
+              "TTD",
+              "TWD",
+              "TZS",
+              "UAH",
+              "UGX",
+              "USD",
+              "USDC",
+              "UYU",
+              "UZS",
+              "VED",
+              "VEF",
+              "VES",
+              "VND",
+              "VUV",
+              "WST",
+              "XAF",
+              "XCD",
+              "XCG",
+              "XOF",
+              "XPF",
+              "XXX",
+              "YER",
+              "ZAR",
+              "ZMW"
+            ],
+            "type": "string",
+            "x-runtara-label": "Currency Code"
+          }
+        },
+        "type": "object"
+      },
       "ListProductsPageInfo": {
         "description": "Returns information about pagination in a connection, in accordance with the Relay specification. For more information, please read our GraphQL Pagination Usage Guide.",
         "properties": {
@@ -9539,6 +10631,15 @@
       "ListVariantsNodes": {
         "description": "The `ProductVariant` object represents a version of a product that comes in more than one option, such as size or color. For example, if a merchant sells t-shirts with options for size and color, then a small, blue t-shirt would be one product variant and a large, blue t-shirt would be another.\n\nUse the `ProductVariant` object to manage the full lifecycle and configuration of a product's variants. Common use cases for using the `ProductVariant` object include:\n\n- Tracking inventory for each variant\n- Setting unique prices for each variant\n- Assigning barcodes and SKUs to connect variants to fulfillment services\n- Attaching variant-specific images and media\n- Setting delivery and tax requirements\n- Supporting product bundles, subscriptions, and selling plans\n\nA `ProductVariant` is associated with a parent `Product` object. `ProductVariant` serves as the central link between a product's merchandising configuration, inventory, pricing, fulfillment, and sales channels within the GraphQL Admin API schema. Each variant can reference other GraphQL types such as:\n\n- `InventoryItem`: Used for inventory tracking\n- `Image`: Used for variant-specific images\n- `SellingPlanGroup`: Used for subscriptions and selling plans\n\nLearn more about Shopify's product model.",
         "properties": {
+          "barcodes": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ListVariantsNodesBarcodes"
+              }
+            ],
+            "description": "The barcodes associated with the product variant.\n\nA variant supports up to 20 barcodes, each of which can have a type. Barcode types are validated against their respective format standards.",
+            "x-runtara-label": "Barcodes"
+          },
           "compareAtPrice": {
             "description": "The compare-at price of the variant in the default shop currency.",
             "type": "string",
@@ -9604,6 +10705,44 @@
         },
         "type": "object"
       },
+      "ListVariantsNodesBarcodes": {
+        "description": "An auto-generated type for paginating through multiple ProductVariantBarcodes.",
+        "properties": {
+          "nodes": {
+            "description": "A list of nodes that are contained in ProductVariantBarcodeEdge. You can fetch data about an individual node, or you can follow the edges to fetch data about a collection of related nodes. At each node, you specify the fields that you want to retrieve.",
+            "items": {
+              "$ref": "#/components/schemas/ListVariantsNodesBarcodesNodes"
+            },
+            "type": "array",
+            "x-runtara-label": "Nodes"
+          }
+        },
+        "type": "object"
+      },
+      "ListVariantsNodesBarcodesNodes": {
+        "description": "A barcode associated with a product variant.\n\nA variant supports up to 20 barcodes, each of which can have a type. Barcode types are validated against their respective format standards.",
+        "properties": {
+          "type": {
+            "description": "The associated standard that the barcode conforms to. Barcode types are validated against their respective format standards. A `null` format denotes no type provided on write and the value is stored as entered.",
+            "enum": [
+              "ASIN",
+              "EAN",
+              "GTIN",
+              "ISBN",
+              "NS_PID",
+              "UPC"
+            ],
+            "type": "string",
+            "x-runtara-label": "Type"
+          },
+          "value": {
+            "description": "The value of the barcode. For example, `9780262033848`. Maximum length: 255 characters.",
+            "type": "string",
+            "x-runtara-label": "Value"
+          }
+        },
+        "type": "object"
+      },
       "ListVariantsNodesInventoryItem": {
         "description": "An inventory item represents the inventory for a product variant. It holds the stock keeping unit (SKU), whether quantities are tracked, shipping requirements, and customs information.\n\nUse the `inventoryLevels` field to get the inventory level for each location that stocks the item, and the level's `quantities` field to read its inventory quantities by name. Quantity names represent the inventory states that merchants use to track inventory.\n\nLearn more about inventory object relationships.",
         "properties": {
@@ -9618,6 +10757,11 @@
       "ListVariantsNodesProduct": {
         "description": "The `Product` object lets you manage products in a merchant’s store.\n\nProducts are the goods and services that merchants offer to customers. They can include various details such as title, description, price, images, and options such as size or color. You can use product variants to create or update different versions of the same product. You can also add or update product media. Products can be organized by grouping them into a collection.\n\nLearn more about working with Shopify's product model, including limitations and considerations.",
         "properties": {
+          "descriptionHtml": {
+            "description": "The description of the product, with HTML tags. For example, the description might include bold `<strong></strong>` and italic `<i></i>` text.",
+            "type": "string",
+            "x-runtara-label": "Description HTML"
+          },
           "handle": {
             "description": "A unique, human-readable string of the product's title. A handle can contain letters, hyphens (`-`), and numbers, but no spaces. The handle is used in the online store URL for the product.",
             "type": "string",
@@ -9627,6 +10771,11 @@
             "description": "A globally-unique ID.",
             "type": "string",
             "x-runtara-label": "ID"
+          },
+          "productType": {
+            "description": "The product type that merchants define.",
+            "type": "string",
+            "x-runtara-label": "Product Type"
           },
           "status": {
             "description": "The product status, which controls visibility across all sales channels.",
@@ -9639,10 +10788,23 @@
             "type": "string",
             "x-runtara-label": "Status"
           },
+          "tags": {
+            "description": "A comma-separated list of searchable keywords that are associated with the product. For example, a merchant might apply the `sports` and `summer` tags to products that are associated with sportwear for summer.\n\nUpdating `tags` overwrites any existing tags that were previously added to the product. To add new tags without overwriting existing tags, use the `tagsAdd` mutation.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "x-runtara-label": "Tags"
+          },
           "title": {
             "description": "The name for the product that displays to customers. The title is used to construct the product's handle. For example, if a product is titled \"Black Sunglasses\", then the handle is `black-sunglasses`.",
             "type": "string",
             "x-runtara-label": "Title"
+          },
+          "vendor": {
+            "description": "The name of the product's vendor.",
+            "type": "string",
+            "x-runtara-label": "Vendor"
           }
         },
         "type": "object"
@@ -14342,7 +15504,7 @@
         "tags": [
           "graphql"
         ],
-        "x-runtara-graphql-document": "query getFulfillmentOrders($orderId: ID!, $first: Int = 5, $after: String, $lineItemsFirst: Int = 50) {\n  order(id: $orderId) {\n    id\n    name\n    displayFulfillmentStatus\n    fulfillmentOrders(first: $first, after: $after) {\n      nodes {\n        id\n        status\n        requestStatus\n        createdAt\n        fulfillAt\n        assignedLocation {\n          name\n          location {\n            id\n          }\n        }\n        supportedActions {\n          action\n        }\n        lineItems(first: $lineItemsFirst) {\n          nodes {\n            id\n            sku\n            productTitle\n            variantTitle\n            totalQuantity\n            remainingQuantity\n            lineItem {\n              id\n              sku\n            }\n          }\n          pageInfo {\n            hasNextPage\n            endCursor\n          }\n        }\n      }\n      pageInfo {\n        hasNextPage\n        endCursor\n      }\n    }\n  }\n}",
+        "x-runtara-graphql-document": "query getFulfillmentOrders($orderId: ID!, $first: Int = 5, $after: String, $lineItemsFirst: Int = 50) {\n  order(id: $orderId) {\n    id\n    name\n    displayFulfillmentStatus\n    fulfillmentOrders(first: $first, after: $after) {\n      nodes {\n        id\n        status\n        requestStatus\n        createdAt\n        fulfillAt\n        assignedLocation {\n          name\n          location {\n            id\n          }\n        }\n        supportedActions {\n          action\n        }\n        lineItems(first: $lineItemsFirst) {\n          nodes {\n            id\n            sku\n            productTitle\n            variantTitle\n            totalQuantity\n            remainingQuantity\n            lineItem {\n              id\n              sku\n              variant {\n                id\n              }\n            }\n          }\n          pageInfo {\n            hasNextPage\n            endCursor\n          }\n        }\n      }\n      pageInfo {\n        hasNextPage\n        endCursor\n      }\n    }\n  }\n}",
         "x-runtara-graphql-field": "order",
         "x-runtara-graphql-path": "/admin/api/2026-10/graphql.json",
         "x-runtara-summary": "Get Fulfillment Orders"
@@ -14396,7 +15558,7 @@
         "tags": [
           "graphql"
         ],
-        "x-runtara-graphql-document": "query getInventoryLevels($variantId: ID!, $first: Int = 100) {\n  productVariant(id: $variantId) {\n    id\n    sku\n    inventoryQuantity\n    inventoryItem {\n      id\n      tracked\n      inventoryLevels(first: $first) {\n        nodes {\n          id\n          updatedAt\n          location {\n            id\n            name\n          }\n          quantities(names: [\"available\", \"on_hand\", \"committed\", \"incoming\", \"reserved\"]) {\n            name\n            quantity\n          }\n        }\n        pageInfo {\n          hasNextPage\n          endCursor\n        }\n      }\n    }\n  }\n}",
+        "x-runtara-graphql-document": "query getInventoryLevels($variantId: ID!, $first: Int = 100) {\n  productVariant(id: $variantId) {\n    id\n    sku\n    inventoryQuantity\n    product {\n      id\n    }\n    inventoryItem {\n      id\n      tracked\n      inventoryLevels(first: $first) {\n        nodes {\n          id\n          updatedAt\n          location {\n            id\n            name\n          }\n          quantities(names: [\"available\", \"on_hand\", \"committed\", \"incoming\", \"reserved\"]) {\n            name\n            quantity\n          }\n        }\n        pageInfo {\n          hasNextPage\n          endCursor\n        }\n      }\n    }\n  }\n}",
         "x-runtara-graphql-field": "productVariant",
         "x-runtara-graphql-path": "/admin/api/2026-10/graphql.json",
         "x-runtara-summary": "Get Inventory Levels"
@@ -14441,7 +15603,7 @@
         "tags": [
           "graphql"
         ],
-        "x-runtara-graphql-document": "query getOrder($id: ID!) {\n  order(id: $id) {\n    id\n    legacyResourceId\n    name\n    createdAt\n    updatedAt\n    processedAt\n    cancelledAt\n    cancelReason\n    closedAt\n    email\n    phone\n    note\n    tags\n    test\n    confirmed\n    fullyPaid\n    currencyCode\n    displayFinancialStatus\n    displayFulfillmentStatus\n    poNumber\n    discountCodes\n    customAttributes {\n      key\n      value\n    }\n    totalPriceSet {\n      shopMoney {\n        amount\n        currencyCode\n      }\n    }\n    subtotalPriceSet {\n      shopMoney {\n        amount\n        currencyCode\n      }\n    }\n    totalShippingPriceSet {\n      shopMoney {\n        amount\n        currencyCode\n      }\n    }\n    totalTaxSet {\n      shopMoney {\n        amount\n        currencyCode\n      }\n    }\n    totalDiscountsSet {\n      shopMoney {\n        amount\n        currencyCode\n      }\n    }\n    customer {\n      id\n      displayName\n      firstName\n      lastName\n      defaultEmailAddress {\n        emailAddress\n      }\n    }\n    shippingAddress {\n      address1\n      address2\n      city\n      province\n      provinceCode\n      country\n      countryCodeV2\n      zip\n      phone\n      company\n      firstName\n      lastName\n      name\n    }\n    billingAddress {\n      address1\n      address2\n      city\n      province\n      provinceCode\n      country\n      countryCodeV2\n      zip\n      phone\n      company\n      firstName\n      lastName\n      name\n    }\n    lineItems(first: 100) {\n      nodes {\n        id\n        name\n        title\n        variantTitle\n        sku\n        quantity\n        currentQuantity\n        unfulfilledQuantity\n        requiresShipping\n        variant {\n          id\n        }\n        product {\n          id\n        }\n        originalUnitPriceSet {\n          shopMoney {\n            amount\n            currencyCode\n          }\n        }\n        discountedTotalSet {\n          shopMoney {\n            amount\n            currencyCode\n          }\n        }\n      }\n      pageInfo {\n        hasNextPage\n        endCursor\n      }\n    }\n    shippingLines(first: 10) {\n      nodes {\n        title\n        code\n        originalPriceSet {\n          shopMoney {\n            amount\n            currencyCode\n          }\n        }\n      }\n    }\n  }\n}",
+        "x-runtara-graphql-document": "query getOrder($id: ID!) {\n  order(id: $id) {\n    id\n    legacyResourceId\n    name\n    createdAt\n    updatedAt\n    processedAt\n    cancelledAt\n    cancelReason\n    closedAt\n    email\n    phone\n    note\n    tags\n    test\n    confirmed\n    fullyPaid\n    currencyCode\n    displayFinancialStatus\n    displayFulfillmentStatus\n    poNumber\n    discountCodes\n    customAttributes {\n      key\n      value\n    }\n    totalPriceSet {\n      shopMoney {\n        amount\n        currencyCode\n      }\n    }\n    subtotalPriceSet {\n      shopMoney {\n        amount\n        currencyCode\n      }\n    }\n    totalShippingPriceSet {\n      shopMoney {\n        amount\n        currencyCode\n      }\n    }\n    totalTaxSet {\n      shopMoney {\n        amount\n        currencyCode\n      }\n    }\n    totalDiscountsSet {\n      shopMoney {\n        amount\n        currencyCode\n      }\n    }\n    customer {\n      id\n      displayName\n      firstName\n      lastName\n      defaultEmailAddress {\n        emailAddress\n      }\n    }\n    shippingAddress {\n      address1\n      address2\n      city\n      province\n      provinceCode\n      country\n      countryCodeV2\n      zip\n      phone\n      company\n      firstName\n      lastName\n      name\n    }\n    billingAddress {\n      address1\n      address2\n      city\n      province\n      provinceCode\n      country\n      countryCodeV2\n      zip\n      phone\n      company\n      firstName\n      lastName\n      name\n    }\n    lineItems(first: 100) {\n      nodes {\n        id\n        name\n        title\n        variantTitle\n        sku\n        quantity\n        currentQuantity\n        unfulfilledQuantity\n        requiresShipping\n        variant {\n          id\n          sku\n        }\n        product {\n          id\n        }\n        originalUnitPriceSet {\n          shopMoney {\n            amount\n            currencyCode\n          }\n        }\n        discountedUnitPriceSet {\n          shopMoney {\n            amount\n            currencyCode\n          }\n        }\n        discountedTotalSet {\n          shopMoney {\n            amount\n            currencyCode\n          }\n        }\n      }\n      pageInfo {\n        hasNextPage\n        endCursor\n      }\n    }\n    shippingLines(first: 10) {\n      nodes {\n        title\n        code\n        source\n        originalPriceSet {\n          shopMoney {\n            amount\n            currencyCode\n          }\n        }\n      }\n    }\n  }\n}",
         "x-runtara-graphql-field": "order",
         "x-runtara-graphql-path": "/admin/api/2026-10/graphql.json",
         "x-runtara-summary": "Get Order"
@@ -14456,6 +15618,15 @@
             "application/json": {
               "schema": {
                 "properties": {
+                  "barcodesFirst": {
+                    "default": 1,
+                    "description": "The first `n` elements from the paginated list.",
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer",
+                    "x-runtara-default": "1",
+                    "x-runtara-label": "Barcodes First"
+                  },
                   "id": {
                     "description": "The ID of the `Product` to return.",
                     "type": "string",
@@ -14511,7 +15682,7 @@
           "graphql"
         ],
         "x-runtara-first": true,
-        "x-runtara-graphql-document": "query getProduct($id: ID!, $metafieldNamespace: String, $metafieldsFirst: Int = 50, $mediaFirst: Int = 50) {\n  product(id: $id) {\n    id\n    legacyResourceId\n    title\n    handle\n    status\n    vendor\n    productType\n    tags\n    descriptionHtml\n    createdAt\n    updatedAt\n    publishedAt\n    totalInventory\n    hasOnlyDefaultVariant\n    onlineStoreUrl\n    category {\n      id\n      fullName\n    }\n    seo {\n      title\n      description\n    }\n    options {\n      id\n      name\n      position\n      optionValues {\n        id\n        name\n        hasVariants\n      }\n    }\n    variants(first: 100) {\n      nodes {\n        id\n        title\n        sku\n        price\n        compareAtPrice\n        inventoryQuantity\n        position\n        taxable\n        inventoryPolicy\n        selectedOptions {\n          name\n          value\n        }\n        inventoryItem {\n          id\n        }\n      }\n      pageInfo {\n        hasNextPage\n        endCursor\n      }\n    }\n    media(first: $mediaFirst) {\n      nodes {\n        id\n        alt\n        mediaContentType\n        status\n        ... on MediaImage {\n          image {\n            url\n            width\n            height\n          }\n        }\n      }\n      pageInfo {\n        hasNextPage\n        endCursor\n      }\n    }\n    metafields(first: $metafieldsFirst, namespace: $metafieldNamespace) {\n      nodes {\n        id\n        namespace\n        key\n        type\n        value\n      }\n      pageInfo {\n        hasNextPage\n        endCursor\n      }\n    }\n    collections(first: 20) {\n      nodes {\n        id\n        title\n        handle\n      }\n    }\n  }\n}",
+        "x-runtara-graphql-document": "query getProduct($id: ID!, $metafieldNamespace: String, $metafieldsFirst: Int = 50, $mediaFirst: Int = 50, $barcodesFirst: Int = 1) {\n  product(id: $id) {\n    id\n    legacyResourceId\n    title\n    handle\n    status\n    vendor\n    productType\n    tags\n    descriptionHtml\n    createdAt\n    updatedAt\n    publishedAt\n    totalInventory\n    priceRangeV2 {\n      minVariantPrice {\n        amount\n        currencyCode\n      }\n      maxVariantPrice {\n        amount\n        currencyCode\n      }\n    }\n    hasOnlyDefaultVariant\n    onlineStoreUrl\n    category {\n      id\n      fullName\n    }\n    seo {\n      title\n      description\n    }\n    options {\n      id\n      name\n      position\n      optionValues {\n        id\n        name\n        hasVariants\n      }\n    }\n    variants(first: 100) {\n      nodes {\n        id\n        title\n        sku\n        price\n        compareAtPrice\n        inventoryQuantity\n        position\n        taxable\n        inventoryPolicy\n        barcodes(first: $barcodesFirst) {\n          nodes {\n            value\n            type\n          }\n        }\n        selectedOptions {\n          name\n          value\n        }\n        inventoryItem {\n          id\n        }\n      }\n      pageInfo {\n        hasNextPage\n        endCursor\n      }\n    }\n    media(first: $mediaFirst) {\n      nodes {\n        id\n        alt\n        mediaContentType\n        status\n        ... on MediaImage {\n          image {\n            url\n            width\n            height\n          }\n        }\n      }\n      pageInfo {\n        hasNextPage\n        endCursor\n      }\n    }\n    metafields(first: $metafieldsFirst, namespace: $metafieldNamespace) {\n      nodes {\n        id\n        namespace\n        key\n        type\n        value\n      }\n      pageInfo {\n        hasNextPage\n        endCursor\n      }\n    }\n    collections(first: 20) {\n      nodes {\n        id\n        title\n        handle\n      }\n    }\n  }\n}",
         "x-runtara-graphql-field": "product",
         "x-runtara-graphql-path": "/admin/api/2026-10/graphql.json",
         "x-runtara-summary": "Get Product"
@@ -14871,7 +16042,7 @@
         "tags": [
           "graphql"
         ],
-        "x-runtara-graphql-document": "query listProducts($first: Int = 50, $after: String, $query: String, $sortKey: ProductSortKeys, $reverse: Boolean) {\n  products(\n    first: $first\n    after: $after\n    query: $query\n    sortKey: $sortKey\n    reverse: $reverse\n  ) {\n    nodes {\n      id\n      title\n      handle\n      status\n      vendor\n      productType\n      tags\n      createdAt\n      updatedAt\n      totalInventory\n    }\n    pageInfo {\n      hasNextPage\n      endCursor\n    }\n  }\n}",
+        "x-runtara-graphql-document": "query listProducts($first: Int = 50, $after: String, $query: String, $sortKey: ProductSortKeys, $reverse: Boolean) {\n  products(\n    first: $first\n    after: $after\n    query: $query\n    sortKey: $sortKey\n    reverse: $reverse\n  ) {\n    nodes {\n      id\n      title\n      handle\n      status\n      vendor\n      productType\n      tags\n      createdAt\n      updatedAt\n      totalInventory\n      priceRangeV2 {\n        minVariantPrice {\n          amount\n          currencyCode\n        }\n        maxVariantPrice {\n          amount\n          currencyCode\n        }\n      }\n    }\n    pageInfo {\n      hasNextPage\n      endCursor\n    }\n  }\n}",
         "x-runtara-graphql-field": "products",
         "x-runtara-graphql-path": "/admin/api/2026-10/graphql.json",
         "x-runtara-summary": "List Products"
@@ -14891,6 +16062,15 @@
                     "nullable": true,
                     "type": "string",
                     "x-runtara-label": "After"
+                  },
+                  "barcodesFirst": {
+                    "default": 1,
+                    "description": "The first `n` elements from the paginated list.",
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer",
+                    "x-runtara-default": "1",
+                    "x-runtara-label": "Barcodes First"
                   },
                   "first": {
                     "default": 50,
@@ -14956,7 +16136,7 @@
         "tags": [
           "graphql"
         ],
-        "x-runtara-graphql-document": "query listVariants($first: Int = 50, $after: String, $query: String, $sortKey: ProductVariantSortKeys, $reverse: Boolean) {\n  productVariants(\n    first: $first\n    after: $after\n    query: $query\n    sortKey: $sortKey\n    reverse: $reverse\n  ) {\n    nodes {\n      id\n      title\n      displayName\n      sku\n      price\n      compareAtPrice\n      inventoryQuantity\n      selectedOptions {\n        name\n        value\n      }\n      product {\n        id\n        title\n        handle\n        status\n      }\n      inventoryItem {\n        id\n      }\n    }\n    pageInfo {\n      hasNextPage\n      endCursor\n    }\n  }\n}",
+        "x-runtara-graphql-document": "query listVariants($first: Int = 50, $after: String, $query: String, $sortKey: ProductVariantSortKeys, $reverse: Boolean, $barcodesFirst: Int = 1) {\n  productVariants(\n    first: $first\n    after: $after\n    query: $query\n    sortKey: $sortKey\n    reverse: $reverse\n  ) {\n    nodes {\n      id\n      title\n      displayName\n      sku\n      price\n      compareAtPrice\n      inventoryQuantity\n      barcodes(first: $barcodesFirst) {\n        nodes {\n          value\n          type\n        }\n      }\n      selectedOptions {\n        name\n        value\n      }\n      product {\n        id\n        title\n        handle\n        status\n        vendor\n        productType\n        tags\n        descriptionHtml\n      }\n      inventoryItem {\n        id\n      }\n    }\n    pageInfo {\n      hasNextPage\n      endCursor\n    }\n  }\n}",
         "x-runtara-graphql-field": "productVariants",
         "x-runtara-graphql-path": "/admin/api/2026-10/graphql.json",
         "x-runtara-summary": "List Variants"
