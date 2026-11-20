@@ -1124,6 +1124,23 @@ pub async fn publish_workflow_agent(
     json_result(result)
 }
 
+pub async fn unpublish_workflow_agent(
+    server: &SmoMcpServer,
+    params: PublishWorkflowAgentParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("workflow_id", &params.workflow_id)?;
+    let result = api_post(
+        server,
+        &format!(
+            "/api/runtime/workflows/{}/unpublish-agent",
+            params.workflow_id
+        ),
+        None,
+    )
+    .await?;
+    json_result(result)
+}
+
 pub async fn set_workflow_slug(
     server: &SmoMcpServer,
     params: SetWorkflowSlugParams,

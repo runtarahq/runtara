@@ -741,7 +741,7 @@ operations! {
     |engine, op| for Some(&op.tenant_id) => engine.components_status(&op.tenant_id).await;
 
     UnstageWorkflowAgent { tenant_id: String, slug: String } -> Result<(), String>,
-    needs [WorkflowDelete],
+    needs [WorkflowDelete, WorkflowUpdate],
     |engine, op| for Some(&op.tenant_id) =>
         engine.unstage_workflow_agent(&op.tenant_id, &op.slug).await;
 

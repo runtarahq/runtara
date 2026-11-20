@@ -352,6 +352,7 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         // refused them on the method alone, whatever it was granted.
         ("PUT", "/api/runtime/workflows/{id}/slug") => WorkflowUpdate,
         ("POST", "/api/runtime/workflows/{id}/publish-agent") => WorkflowUpdate,
+        ("POST", "/api/runtime/workflows/{id}/unpublish-agent") => WorkflowUpdate,
         // ── Workflows: delete ────────────────────────────────────────────
         ("POST", "/api/runtime/workflows/{id}/delete") => WorkflowDelete,
         // ── Workflows: execute / run control ─────────────────────────────
@@ -1139,6 +1140,11 @@ mod tests {
             (
                 Method::POST,
                 "/api/runtime/workflows/{id}/publish-agent",
+                Permission::WorkflowUpdate,
+            ),
+            (
+                Method::POST,
+                "/api/runtime/workflows/{id}/unpublish-agent",
                 Permission::WorkflowUpdate,
             ),
             (
@@ -2221,6 +2227,7 @@ mod tests {
                 "/api/runtime/workflows/{id}/versions/{version}/graph",
             ),
             (Method::POST, "/api/runtime/workflows/{id}/delete"),
+            (Method::POST, "/api/runtime/workflows/{id}/unpublish-agent"),
             (Method::PUT, "/api/runtime/workflows/{id}/move"),
             (Method::PUT, "/api/runtime/workflows/folders/rename"),
             (Method::POST, "/api/runtime/workflows/{id}/execute"),

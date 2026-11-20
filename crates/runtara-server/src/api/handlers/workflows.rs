@@ -801,6 +801,80 @@ pub async fn publish_workflow_agent_handler(
     }
 }
 
+/// Unpublish a workflow-agent: take the workflow's published agent out of the
+/// tenant's catalog, so no workflow can be compiled with it any more. The
+/// workflow stays, with its slug; parents that already composed the agent keep
+/// their copy, as when the workflow is deleted. Unpublishing what is not
+/// published does nothing.
+#[utoipa::path(
+    post,
+    path = "/api/runtime/workflows/{id}/unpublish-agent",
+    params(("id" = String, Path, description = "Workflow ID")),
+    responses(
+        (status = 200, description = "Not published as an agent any more", body = Value),
+        (status = 403, description = "Not allowed to change this workflow", body = Value),
+        (status = 409, description = "Workflow has no slug", body = Value),
+        (status = 500, description = "Unstaging failed", body = Value)
+    ),
+    tag = "workflow-controller"
+)]
+#[instrument(skip(pool, engine, user_id, role), fields(workflow_id = %workflow_id))]
+pub async fn unpublish_workflow_agent_handler(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    crate::middleware::tenant_auth::Caller { user_id, role }: crate::middleware::tenant_auth::Caller,
+    State(pool): State<PgPool>,
+    State(engine): State<Arc<dyn Engine>>,
+    Path(workflow_id): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    let repository = Arc::new(WorkflowRepository::new(pool.clone()));
+    let owner = repository
+        .owner(&tenant_id, &workflow_id)
+        .await
+        .ok()
+        .flatten();
+    if let Err(denial) = crate::middleware::authorization::require_ownership(
+        crate::auth::membership_policy(),
+        &tenant_id,
+        role,
+        crate::authz::Permission::WorkflowUpdate,
+        owner.as_deref(),
+        &user_id,
+    ) {
+        return (StatusCode::FORBIDDEN, Json(denial.json_body()));
+    }
+    let slug = match repository.get_slug(&tenant_id, &workflow_id).await {
+        Ok(Some(slug)) => slug,
+        Ok(None) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(
+                    json!({"success": false, "message": "Workflow has no slug, so it is not published as an agent"}),
+                ),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"success": false, "message": format!("Failed to load slug: {e}")})),
+            );
+        }
+    };
+    match engine.unstage_workflow_agent(&tenant_id, &slug).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({
+                "success": true,
+                "message": "Workflow is not published as an agent",
+                "data": {"slug": slug}
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"success": false, "message": format!("Failed to unpublish: {e}")})),
+        ),
+    }
+}
+
 /// List all workflows for a tenant with pagination and optional folder filtering
 #[utoipa::path(
     get,

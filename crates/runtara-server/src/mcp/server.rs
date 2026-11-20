@@ -163,6 +163,16 @@ impl SmoMcpServer {
     }
 
     #[tool(
+        description = "Unpublish a workflow-agent: take the workflow's published agent out of the tenant catalog, so no workflow can be compiled with it any more. The workflow and its slug stay; workflows that already composed it keep their copy."
+    )]
+    async fn unpublish_workflow_agent(
+        &self,
+        params: Parameters<tools::workflows::PublishWorkflowAgentParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::workflows::unpublish_workflow_agent(self, params.0).await
+    }
+
+    #[tool(
         description = "Set a workflow's slug — the stable capability id a workflow-as-agent exports (runtara:agent-<slug>). Lowercase kebab, max 64 chars, per-tenant unique; 409 if taken or reserved by a native agent id."
     )]
     async fn set_workflow_slug(
