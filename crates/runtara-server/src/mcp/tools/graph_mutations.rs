@@ -244,8 +244,27 @@ async fn save_graph(
                         });
 
                 let Some(existing) = existing_graph else {
-                    // No valid existing graph to fall back to
-                    return Err(original_err);
+                    // A version with no steps (a workflow just created) has
+                    // nothing to keep: the edit patches it in place, with the
+                    // structural checks only, as any later edit would. The
+                    // graph is checked whole when it is deployed
+                    // (docs/workflow-authoring-gaps.md, 6).
+                    let patch_body = serde_json::json!({ "executionGraph": graph });
+                    let patched = api_put(
+                        server,
+                        &format!(
+                            "/api/runtime/workflows/{}/versions/{}/graph",
+                            workflow_id, latest_version
+                        ),
+                        Some(patch_body),
+                    )
+                    .await
+                    .map_err(|_| original_err)?;
+                    return Ok((
+                        latest_version.to_string(),
+                        false,
+                        response_warnings(&patched),
+                    ));
                 };
 
                 let existing_body = serde_json::json!({ "executionGraph": existing });
@@ -4281,5 +4300,84 @@ mod state_schema_tests {
         let mut graph = root_graph();
         replace_state_schema(&mut graph, &[], fields).unwrap();
         assert_eq!(graph["stateSchema"], owner_state_schema());
+    }
+}
+
+#[cfg(test)]
+mod new_workflow_edit_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use axum::Json;
+    use axum::http::StatusCode;
+    use axum::routing::{get, post, put};
+
+    /// A workflow just created has one version with no steps. Its first edit,
+    /// refused whole by `update`'s full validation, patches that version in
+    /// place with the structural checks only, as any later edit does, instead
+    /// of failing (docs/workflow-authoring-gaps.md, 6).
+    #[tokio::test]
+    async fn the_first_edit_of_a_stepless_workflow_patches_it() {
+        let patched: Arc<Mutex<Option<(String, serde_json::Value)>>> = Arc::default();
+        let patched_in = patched.clone();
+        let routes = axum::Router::new()
+            .route(
+                "/api/runtime/workflows/{workflow_id}",
+                get(|| async {
+                    Json(serde_json::json!({"data": {
+                        "lastVersionNumber": 1,
+                        "currentVersionNumber": 1,
+                        "definition": {"executionGraph": {
+                            "name": "Untitled", "steps": {}, "executionPlan": [], "entryPoint": null
+                        }}
+                    }}))
+                }),
+            )
+            .route(
+                "/api/runtime/workflows/{workflow_id}/update",
+                post(|| async {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"success": false, "message": "Workflow has no steps defined"})),
+                    )
+                }),
+            )
+            .route(
+                "/api/runtime/workflows/{workflow_id}/versions/{version}/graph",
+                put(
+                    move |axum::extract::Path((_, version)): axum::extract::Path<(String, String)>,
+                          Json(body): Json<serde_json::Value>| {
+                        *patched_in.lock().unwrap() = Some((version, body));
+                        async move { Json(serde_json::json!({"success": true, "warnings": []})) }
+                    },
+                ),
+            );
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/runtara_mcp_new_workflow_test")
+            .unwrap();
+        let server = SmoMcpServer::new(
+            pool,
+            crate::engine::without_runtime(),
+            "acme".into(),
+            routes,
+        );
+        let params: SetInputSchemaParams = serde_json::from_value(serde_json::json!({
+            "workflow_id": "wf",
+            "fields": {"city": {"type": "string", "required": true}}
+        }))
+        .unwrap();
+        set_input_schema(&server, params)
+            .await
+            .expect("the first edit of a new workflow is saved");
+        let (version, body) = patched
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("version 1 was patched");
+        assert_eq!(version, "1");
+        assert_eq!(
+            body["executionGraph"]["inputSchema"]["city"]["type"],
+            serde_json::json!("string")
+        );
     }
 }
