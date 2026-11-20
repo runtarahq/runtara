@@ -1975,6 +1975,12 @@ pub enum ValidationWarning {
         found: String,
         canonical: String,
     },
+    /// An AiAgent tool step that maps inputs: they are fixed arguments,
+    /// merged over the model's, and the model is not asked for them.
+    AiAgentToolFixedArguments {
+        step_id: String,
+        fields: Vec<String>,
+    },
 }
 
 impl ValidationWarning {
@@ -2014,6 +2020,7 @@ impl ValidationWarning {
             Self::ZeroTimeout { .. } => "W091",
             Self::SwitchCaseWithoutRoute { .. } => "W092",
             Self::DeprecatedSpelling { .. } => "W093",
+            Self::AiAgentToolFixedArguments { .. } => "W094",
         }
     }
 }
@@ -2363,6 +2370,20 @@ impl std::fmt::Display for ValidationWarning {
                 "[W093] '{}' uses the deprecated spelling '{}'. Use '{}' instead; both are \
                  read until DSL 4.0, which removes '{}'.",
                 path, found, canonical, found
+            ),
+            ValidationWarning::AiAgentToolFixedArguments { step_id, fields } => write!(
+                f,
+                "[W094] Step '{}' is an AI Agent tool, and its input mapping fixes {}: the model \
+                 is not asked for {} and cannot change {}. A tool's required inputs need no \
+                 mapping; remove one written only to pass validation.",
+                step_id,
+                fields
+                    .iter()
+                    .map(|field| format!("'{field}'"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if fields.len() == 1 { "it" } else { "them" },
+                if fields.len() == 1 { "it" } else { "them" },
             ),
             ValidationWarning::PollIntervalIgnored { step_id } => write!(
                 f,
@@ -3168,9 +3189,13 @@ fn validate_embed_workflow_inputs(
     child_workflows: &HashMap<String, ExecutionGraph>,
     result: &mut ValidationResult,
 ) {
+    // An AiAgent tool's child input is the model's arguments, but for a
+    // connection, which the model cannot know.
+    let tool_targets = ai_agent_tool_targets(graph);
     for (step_id, step) in &graph.steps {
         if let Step::EmbedWorkflow(start_step) = step {
             let child_id = &start_step.child_workflow_id;
+            let is_tool = tool_targets.contains(step_id.as_str());
 
             // Skip if we don't have the child workflow
             let Some(child_graph) = child_workflows.get(child_id) else {
@@ -3211,6 +3236,9 @@ fn validate_embed_workflow_inputs(
 
                 let mut missing_fields = Vec::new();
                 for (field_name, field_def) in &child_required_fields {
+                    if is_tool && field_def.field_type != runtara_dsl::SchemaFieldType::Connection {
+                        continue;
+                    }
                     if !provided_keys.contains(field_name) {
                         missing_fields.push(MissingInputField {
                             name: (*field_name).clone(),
@@ -5758,6 +5786,9 @@ fn validate_agents(
     // Get available agents from the runtime catalog
     let available_agents: Vec<String> = catalog.agents().iter().map(|a| a.id.clone()).collect();
 
+    // An AiAgent tool's inputs are the model's arguments: its required inputs
+    // need no mapping, except one the model cannot give (a connection).
+    let tool_targets = ai_agent_tool_targets(graph);
     for (step_id, step) in &graph.steps {
         if let Step::Agent(agent_step) = step {
             // Agent ids are canonically kebab (e.g. `object-model`), but a
@@ -5842,6 +5873,13 @@ fn validate_agents(
                     if input.required && !provided_keys.contains(&input.name) {
                         // Skip _connection as it's injected automatically
                         if input.name == "_connection" {
+                            continue;
+                        }
+                        // The model gives a tool's input, unless it is a
+                        // connection, which it cannot know.
+                        if tool_targets.contains(step_id.as_str())
+                            && input.type_name != "connection"
+                        {
                             continue;
                         }
                         result.errors.push(ValidationError::MissingRequiredInput {
@@ -8590,7 +8628,46 @@ pub(crate) fn ai_agent_mcp_tool_name_collisions(
 }
 
 /// Validate AI Agent steps for correct configuration.
+/// The steps an AiAgent step's tool edges lead to in `graph`: what their
+/// tools run. `next`, `onError`, `memory` and `mcp.<toolset>` are not tools.
+fn ai_agent_tool_targets(graph: &ExecutionGraph) -> HashSet<&str> {
+    graph
+        .execution_plan
+        .iter()
+        .filter(|edge| matches!(graph.steps.get(&edge.from_step), Some(Step::AiAgent(_))))
+        .filter(|edge| {
+            edge.label.as_deref().is_some_and(|label| {
+                !matches!(label, "next" | "onError" | "memory") && !label.starts_with("mcp.")
+            })
+        })
+        .map(|edge| edge.to_step.as_str())
+        .collect()
+}
+
 fn validate_ai_agent_steps(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    // A tool step's mapped inputs are fixed arguments (W094).
+    let mut tool_targets: Vec<&str> = ai_agent_tool_targets(graph).into_iter().collect();
+    tool_targets.sort_unstable();
+    for target in tool_targets {
+        let mapping = match graph.steps.get(target) {
+            Some(Step::Agent(agent)) => agent.input_mapping.as_ref(),
+            Some(Step::EmbedWorkflow(embed)) => embed.input_mapping.as_ref(),
+            _ => None,
+        };
+        let mut fields: Vec<String> = mapping
+            .map(|mapping| mapping.keys().cloned().collect())
+            .unwrap_or_default();
+        if !fields.is_empty() {
+            fields.sort();
+            result
+                .warnings
+                .push(ValidationWarning::AiAgentToolFixedArguments {
+                    step_id: target.to_string(),
+                    fields,
+                });
+        }
+    }
+
     for (step_id, step) in &graph.steps {
         if let Step::AiAgent(ai_step) = step {
             // Must have a connection — a literal `connection_id` or a
@@ -20025,5 +20102,178 @@ mod step_ids_per_position_tests {
             "{message}"
         );
         assert!(message.contains("Rename one of them."), "{message}");
+    }
+}
+
+#[cfg(test)]
+mod ai_agent_tool_input_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// `kit:send` needs a `to` and a connection, `account`.
+    fn catalog() -> runtara_dsl::agent_meta::AgentCatalog {
+        runtara_dsl::agent_meta::AgentCatalog::from_json(
+            r#"[{
+              "id": "kit", "name": "Kit", "description": "", "hasSideEffects": true,
+              "supportsConnections": false, "integrationIds": [],
+              "capabilities": [{
+                "id": "send", "name": "send", "inputType": "SendInput",
+                "output": {"type": "object"},
+                "hasSideEffects": true, "isIdempotent": false,
+                "rateLimited": false, "trusted": false,
+                "inputs": [
+                  {"name": "to", "type": "string", "required": true},
+                  {"name": "account", "type": "connection", "required": true}
+                ]
+              }]
+            }]"#,
+        )
+        .expect("catalog parses")
+    }
+
+    /// An AiAgent step `ai` whose tool `send` runs `target`.
+    fn graph(target: serde_json::Value, extra: serde_json::Value) -> ExecutionGraph {
+        let mut steps = json!({
+            "ai": {"id": "ai", "stepType": "AiAgent", "connectionId": "llm", "config": {
+                "systemPrompt": {"valueType": "immediate", "value": "s"},
+                "userPrompt": {"valueType": "immediate", "value": "u"}
+            }},
+            "target": target,
+            "finish": {"id": "finish", "stepType": "Finish"}
+        });
+        if let (serde_json::Value::Object(steps), serde_json::Value::Object(extra)) =
+            (&mut steps, extra)
+        {
+            steps.extend(extra);
+        }
+        serde_json::from_value(json!({
+            "entryPoint": "ai",
+            "steps": steps,
+            "executionPlan": [
+                {"fromStep": "ai", "toStep": "target", "label": "send"},
+                {"fromStep": "ai", "toStep": "finish", "label": "next"}
+            ]
+        }))
+        .expect("graph parses")
+    }
+
+    fn missing_inputs(result: &ValidationResult) -> Vec<String> {
+        let mut missing: Vec<String> = result
+            .errors
+            .iter()
+            .filter_map(|error| match error {
+                ValidationError::MissingRequiredInput { input_name, .. } => {
+                    Some(input_name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        missing.sort();
+        missing
+    }
+
+    #[test]
+    fn a_tools_required_input_is_the_models_but_a_connection_is_not() {
+        let tool = graph(
+            json!({"id": "target", "stepType": "Agent", "agentId": "kit", "capabilityId": "send"}),
+            json!({}),
+        );
+        let result = validate_workflow(&tool, &catalog());
+        // `to` comes from the model; the connection id cannot.
+        assert_eq!(missing_inputs(&result), vec!["account".to_string()]);
+
+        let mapped = graph(
+            json!({"id": "target", "stepType": "Agent", "agentId": "kit", "capabilityId": "send",
+                   "inputMapping": {"account": {"valueType": "immediate", "value": "conn-1"}}}),
+            json!({}),
+        );
+        assert!(missing_inputs(&validate_workflow(&mapped, &catalog())).is_empty());
+    }
+
+    #[test]
+    fn a_step_that_is_not_a_tool_still_maps_its_required_inputs() {
+        let mut plain = graph(
+            json!({"id": "target", "stepType": "Agent", "agentId": "kit", "capabilityId": "send"}),
+            json!({}),
+        );
+        plain.execution_plan[0].label = None;
+        let result = validate_workflow(&plain, &catalog());
+        assert_eq!(
+            missing_inputs(&result),
+            vec!["account".to_string(), "to".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_tools_mapped_inputs_are_named_as_fixed_arguments() {
+        let tool = graph(
+            json!({"id": "target", "stepType": "Agent", "agentId": "kit", "capabilityId": "send",
+            "inputMapping": {
+                "account": {"valueType": "immediate", "value": "conn-1"},
+                "to": {"valueType": "immediate", "value": "ops"}
+            }}),
+            json!({}),
+        );
+        let result = validate_workflow(&tool, &catalog());
+        let fixed: Vec<&ValidationWarning> = result
+            .warnings
+            .iter()
+            .filter(|warning| warning.code() == "W094")
+            .collect();
+        assert_eq!(fixed.len(), 1, "{:?}", result.warnings);
+        let message = fixed[0].to_string();
+        assert!(message.contains("Step 'target'"), "{message}");
+        assert!(message.contains("'account', 'to'"), "{message}");
+
+        let unmapped = graph(
+            json!({"id": "target", "stepType": "Agent", "agentId": "kit", "capabilityId": "send",
+                   "inputMapping": {"account": {"valueType": "immediate", "value": "conn-1"}}}),
+            json!({}),
+        );
+        let mut plain = unmapped.clone();
+        plain.execution_plan[0].label = None;
+        assert!(
+            !validate_workflow(&plain, &catalog())
+                .warnings
+                .iter()
+                .any(|warning| warning.code() == "W094"),
+            "a step that is not a tool has no fixed arguments"
+        );
+    }
+
+    #[test]
+    fn an_embedded_tools_required_child_input_is_the_models_but_a_connection_is_not() {
+        let tool = graph(
+            json!({"id": "target", "stepType": "EmbedWorkflow",
+                   "childWorkflowId": "child", "childVersion": "latest"}),
+            json!({}),
+        );
+        let child: ExecutionGraph = serde_json::from_value(json!({
+            "entryPoint": "done",
+            "steps": {"done": {"id": "done", "stepType": "Finish"}},
+            "executionPlan": [],
+            "inputSchema": {
+                "city": {"type": "string", "required": true},
+                "account": {"type": "connection", "required": true}
+            }
+        }))
+        .expect("child parses");
+        let children = HashMap::from([("child".to_string(), child)]);
+        let result = validate_workflow_with_children(&tool, &catalog(), &children);
+        let missing: Vec<String> = result
+            .errors
+            .iter()
+            .filter_map(|error| match error {
+                ValidationError::MissingChildRequiredInputs { missing_fields, .. } => Some(
+                    missing_fields
+                        .iter()
+                        .map(|field| field.name.clone())
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(missing, vec!["account".to_string()]);
     }
 }

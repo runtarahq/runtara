@@ -1,7 +1,8 @@
 # AI Agent tools: tell the model each tool's arguments
 
-Status: plan. Two fixes: tool schemas (compiler only) and fixed arguments
-(compiler, a stdlib import, validation). No DSL, runtime or console change.
+Status: implemented (DSL 3.8.0). Two fixes: tool schemas (compiler only)
+and fixed arguments (compiler, a stdlib import, validation). No runtime or
+console change.
 
 ## The problem
 
@@ -95,9 +96,9 @@ child list already is (by the EmbedWorkflow step id), and read it in the
 ### When the schema is not known
 
 No catalog (some test builds), an unknown capability, or a child with no input
-schema: keep today's empty schema. Add a warning to validation, `W0xx
-AiAgentToolSchemaUnknown`, naming the tool, so it is visible rather than
-silent.
+schema: keep today's empty schema. No warning was added for it: validation
+already refuses an unknown agent or capability, and a real compile always has
+the catalog, so the case is left to test builds.
 
 ### What stays the same
 
@@ -145,8 +146,9 @@ fixed value (a table name, a base URL, a connection) gets nothing, silently.
     Agent tool targeting a workflow-agent), then `timeout_ms` (the step's
     timeout), as today.
   - A mapping that fails (a reference to a step that has not run) fails the
-    tool call, and the error is fed back to the model as any tool error is.
-  - The tool's debug events show the arguments as merged.
+    run, as a step's failing input mapping does. (Feeding it back to the model
+    as a tool error would need an error envelope of its own; not done.)
+  - The tool call's debug start event shows the model's arguments, as before.
 - **In the schema.** A root input mapped as a whole is removed from the
   `properties` and `required` the model sees. One mapped only by path
   (`data.table`) stays, so the model can fill the rest of it.
@@ -155,7 +157,7 @@ fixed value (a table name, a base URL, a connection) gets nothing, silently.
     mapping *or* by the model, so it is no longer an error. It is an error
     only when the input could be neither: hidden from the model (`_`-prefixed,
     a workflow-agent's `connection` input) and not mapped.
-  - A new warning, `W0xx AiAgentToolFixedArguments`, on every tool target
+  - A new warning, `W094 AiAgentToolFixedArguments`, on every tool target
     with a mapping: "`date`, `format` are fixed; the model is not asked for
     them". Authors see at save what the model will not be asked for.
 - **Embedded workflows.** The same, with the child's input data in place of

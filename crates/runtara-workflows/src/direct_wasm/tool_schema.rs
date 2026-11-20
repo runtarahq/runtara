@@ -10,7 +10,9 @@
 //! - a field the host fills (`_`-prefixed, such as `_connection`; `timeout_ms`
 //!   when the tool step sets a timeout);
 //! - a connection (a `connection` input is a connection id, which the model
-//!   cannot know).
+//!   cannot know);
+//! - a field the tool step maps as a whole, which is a fixed argument
+//!   (docs/ai-agent-tool-schemas.md).
 //!
 //! When the input is not known (no catalog, or a target that takes no
 //! arguments), the tool is shown an empty object, as before.
@@ -20,12 +22,12 @@
 //! schema"), so such a boolean is written `{}` (anything is accepted, which is
 //! what the model's arguments are today).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use runtara_dsl::agent_meta::{
     AgentCatalog, CapabilityField, CapabilityInfo, FieldTypeInfo, OutputField,
 };
-use runtara_dsl::{ExecutionGraph, SchemaField, SchemaFieldType, Step};
+use runtara_dsl::{ExecutionGraph, InputMapping, SchemaField, SchemaFieldType, Step};
 use serde_json::{Map, Value, json};
 
 /// The input a child workflow takes, for an EmbedWorkflow step used as a
@@ -61,8 +63,13 @@ pub(super) fn tool_definition(
                 .or_else(|| {
                     capability.and_then(|capability| named(capability.display_name.as_ref()))
                 });
-            let parameters = capability
-                .map(|capability| capability_parameters(capability, agent.timeout.is_some()));
+            let parameters = capability.map(|capability| {
+                capability_parameters(
+                    capability,
+                    agent.timeout.is_some(),
+                    &fixed_inputs(agent.input_mapping.as_ref()),
+                )
+            });
             (description, parameters)
         }
         Some(Step::EmbedWorkflow(embed)) => {
@@ -70,7 +77,12 @@ pub(super) fn tool_definition(
             let description = named(embed.name.as_ref())
                 .or_else(|| child.and_then(|child| named(child.description.as_ref())))
                 .or_else(|| child.and_then(|child| named(child.name.as_ref())));
-            let parameters = child.map(|child| child_parameters(&child.input_schema));
+            let parameters = child.map(|child| {
+                child_parameters(
+                    &child.input_schema,
+                    &fixed_inputs(embed.input_mapping.as_ref()),
+                )
+            });
             (description, parameters)
         }
         Some(other) => (super::manifest::step_name(other).map(str::to_owned), None),
@@ -95,21 +107,44 @@ pub(super) fn empty_parameters() -> Value {
     })
 }
 
-/// Whether the model may give a capability input. It may not give one the
-/// host fills, or a connection.
-pub(super) fn shown_to_the_model(field: &CapabilityField, step_sets_timeout: bool) -> bool {
-    !(field.name.starts_with('_')
-        || (step_sets_timeout && field.name == "timeout_ms")
-        || field.type_name == "connection")
+/// The inputs a tool step maps as a whole (`date`, not `data.table`): fixed
+/// arguments, not the model's to give.
+pub(super) fn fixed_inputs(mapping: Option<&InputMapping>) -> BTreeSet<String> {
+    mapping
+        .map(|mapping| {
+            mapping
+                .keys()
+                .filter(|key| !key.contains('.'))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
-fn capability_parameters(capability: &CapabilityInfo, step_sets_timeout: bool) -> Value {
+/// Whether the model may give a capability input. It may not give one the
+/// host fills, a connection, or a fixed argument.
+pub(super) fn shown_to_the_model(
+    field: &CapabilityField,
+    step_sets_timeout: bool,
+    fixed: &BTreeSet<String>,
+) -> bool {
+    !(field.name.starts_with('_')
+        || (step_sets_timeout && field.name == "timeout_ms")
+        || field.type_name == "connection"
+        || fixed.contains(&field.name))
+}
+
+fn capability_parameters(
+    capability: &CapabilityInfo,
+    step_sets_timeout: bool,
+    fixed: &BTreeSet<String>,
+) -> Value {
     let mut properties = Map::new();
     let mut required = Vec::new();
     for field in capability
         .inputs
         .iter()
-        .filter(|field| shown_to_the_model(field, step_sets_timeout))
+        .filter(|field| shown_to_the_model(field, step_sets_timeout, fixed))
     {
         properties.insert(field.name.clone(), capability_field_schema(field));
         if field.required {
@@ -119,11 +154,16 @@ fn capability_parameters(capability: &CapabilityInfo, step_sets_timeout: bool) -
     object_schema(properties, required)
 }
 
-fn child_parameters(input_schema: &HashMap<String, SchemaField>) -> Value {
+fn child_parameters(
+    input_schema: &HashMap<String, SchemaField>,
+    fixed: &BTreeSet<String>,
+) -> Value {
     let shown: HashMap<String, SchemaField> = input_schema
         .iter()
         .filter(|(name, field)| {
-            !name.starts_with('_') && field.field_type != SchemaFieldType::Connection
+            !fixed.contains(*name)
+                && !name.starts_with('_')
+                && field.field_type != SchemaFieldType::Connection
         })
         .map(|(name, field)| (name.clone(), field.clone()))
         .collect();
@@ -447,6 +487,25 @@ mod tests {
     }
 
     #[test]
+    fn a_mapped_input_is_a_fixed_argument_and_not_shown() {
+        let tool = definition(
+            &graph(
+                agent_tool(json!({"inputMapping": {
+                    "to": {"valueType": "immediate", "value": "ops"},
+                    "query.limit": {"valueType": "immediate", "value": 5}
+                }})),
+                json!({}),
+            ),
+            &ChildToolInputs::new(),
+        );
+        let properties = tool["parameters"]["properties"].as_object().unwrap();
+        assert!(!properties.contains_key("to"));
+        // Mapped only in part: the model fills the rest.
+        assert!(properties.contains_key("query"));
+        assert!(tool["parameters"].get("required").is_none(), "{tool}");
+    }
+
+    #[test]
     fn the_step_name_describes_the_tool() {
         let tool = definition(
             &graph(
@@ -486,7 +545,8 @@ mod tests {
     #[test]
     fn an_embedded_workflow_tool_is_shown_its_childs_input() {
         let embed = graph(
-            json!({"id": "tool", "stepType": "EmbedWorkflow", "childWorkflowId": "wf-weather", "childVersion": "latest"}),
+            json!({"id": "tool", "stepType": "EmbedWorkflow", "childWorkflowId": "wf-weather", "childVersion": "latest",
+                   "inputMapping": {"units": {"valueType": "immediate", "value": "metric"}}}),
             json!({}),
         );
         let input_schema: HashMap<String, SchemaField> = serde_json::from_value(json!({
@@ -516,6 +576,7 @@ mod tests {
         );
         assert_eq!(parameters["required"], json!(["city"]));
         let properties = parameters["properties"].as_object().unwrap();
+        assert!(!properties.contains_key("units"), "mapped: fixed");
         assert!(
             !properties.contains_key("account"),
             "a connection is not the model's"

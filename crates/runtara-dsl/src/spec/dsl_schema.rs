@@ -113,6 +113,33 @@ pub fn get_dsl_changelog() -> Value {
         "version": DSL_VERSION,
         "changes": [
             {
+                "version": "3.8.0",
+                "date": "2026-11-20",
+                "breaking": true,
+                "changes": [
+                    {
+                        "type": "changed",
+                        "component": "step-type",
+                        "description": "An AiAgent tool is shown its arguments: the JSON Schema of the target Agent capability's inputs, or of the target EmbedWorkflow's child input schema, less a connection input and what the host fills (_connection, timeout_ms when the step sets a timeout). The target step's name describes the tool. A tool was shown an empty object before."
+                    },
+                    {
+                        "type": "changed",
+                        "component": "step-type",
+                        "description": "A tool step's inputMapping is a fixed argument: evaluated when the tool is called and merged over the model's arguments (objects deeply, the mapped value winning), and not shown to the model. It was ignored before. A mapping written only to pass validation now fixes that input: remove it."
+                    },
+                    {
+                        "type": "changed",
+                        "component": "validation",
+                        "description": "E022 and E055 no longer ask an AiAgent tool step to map its required inputs, which the model gives, except a connection, which it cannot."
+                    },
+                    {
+                        "type": "added",
+                        "component": "validation",
+                        "description": "W094 an AiAgent tool step's mapped inputs are fixed arguments."
+                    }
+                ]
+            },
+            {
                 "version": "3.7.0",
                 "date": "2026-10-19",
                 "breaking": false,

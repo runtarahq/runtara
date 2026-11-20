@@ -2539,6 +2539,41 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize ai tool args with timeout: {err}"))
     }
 
+    /// Merge a tool step's fixed arguments (its evaluated input mapping) over
+    /// the model's arguments. Objects merge deeply and the fixed value wins at
+    /// a leaf: the model cannot override what the step fixes, and a fixed
+    /// path (`query.limit`) leaves the rest of `query` to the model. Arguments
+    /// that are not an object are replaced by the fixed ones.
+    pub fn ai_tool_args_with_fixed(args: &[u8], fixed: &[u8]) -> Result<Vec<u8>, String> {
+        let mut args: Value = serde_json::from_slice(args)
+            .map_err(|err| format!("failed to parse ai tool args: {err}"))?;
+        let fixed: Value = serde_json::from_slice(fixed)
+            .map_err(|err| format!("failed to parse ai tool fixed args: {err}"))?;
+        fn merge(into: &mut Value, fixed: Value) {
+            match (into, fixed) {
+                (Value::Object(into), Value::Object(fixed)) => {
+                    for (key, value) in fixed {
+                        match into.get_mut(&key) {
+                            Some(existing) if existing.is_object() && value.is_object() => {
+                                merge(existing, value)
+                            }
+                            _ => {
+                                into.insert(key, value);
+                            }
+                        }
+                    }
+                }
+                (into, fixed) => *into = fixed,
+            }
+        }
+        if !args.is_object() {
+            args = Value::Object(Default::default());
+        }
+        merge(&mut args, fixed);
+        serde_json::to_vec(&args)
+            .map_err(|err| format!("failed to serialize ai tool args with fixed: {err}"))
+    }
+
     /// The resolved tool index for the `index`-th tool call (its position in the
     /// advertised tools). Returns `u32::MAX` when the model named an unknown
     /// tool, which the loop dispatches as a no-op.
@@ -13478,6 +13513,44 @@ mod tests {
         assert_eq!(steps["agent"]["outputs"]["toolCalls"], json!([]));
     }
 
+    /// A tool step's fixed arguments win over the model's, deeply: a fixed
+    /// leaf is kept whatever the model sends, and the rest of an object the
+    /// step fixes in part is the model's.
+    #[test]
+    fn ai_tool_args_with_fixed_keeps_what_the_step_fixes() {
+        let merged = |args: Value, fixed: Value| -> Value {
+            let out = DirectJsonManifest::ai_tool_args_with_fixed(
+                &serde_json::to_vec(&args).unwrap(),
+                &serde_json::to_vec(&fixed).unwrap(),
+            )
+            .unwrap();
+            serde_json::from_slice(&out).unwrap()
+        };
+        assert_eq!(
+            merged(
+                json!({"to": "model", "text": "hi", "query": {"q": "x", "limit": 99}}),
+                json!({"to": "ops", "query": {"limit": 5}}),
+            ),
+            json!({"to": "ops", "text": "hi", "query": {"q": "x", "limit": 5}}),
+        );
+        // A fixed object replaces a model value that is not one.
+        assert_eq!(
+            merged(
+                json!({"query": "everything"}),
+                json!({"query": {"limit": 5}})
+            ),
+            json!({"query": {"limit": 5}}),
+        );
+        // Arguments that are not an object are the fixed ones alone.
+        assert_eq!(
+            merged(json!(null), json!({"to": "ops"})),
+            json!({"to": "ops"})
+        );
+        assert_eq!(
+            merged(json!({"to": "model"}), json!({})),
+            json!({"to": "model"})
+        );
+    }
     #[test]
     fn ai_turn_loop_helpers_drive_a_tool_round() {
         // First turn: empty state + empty pending.

@@ -280,7 +280,8 @@ pub(super) enum DirectRunPlan {
 /// composed child workflow run (EmbedWorkflow tool).
 #[derive(Debug, Clone)]
 pub(super) enum DirectAiToolPlan {
-    /// Invoke the target Agent step's capability with the LLM-provided arguments.
+    /// Invoke the target Agent step's capability with the LLM-provided
+    /// arguments, the step's fixed arguments merged over them.
     Agent {
         agent_id: u32,
         agent_component_id: String,
@@ -293,6 +294,9 @@ pub(super) enum DirectAiToolPlan {
         label: String,
         /// Guest-owned budget for one replay-stable model tool call.
         timeout_ms: Option<u64>,
+        /// The tool step's input mapping, when it maps anything: its fixed
+        /// arguments, evaluated at the call and merged over the model's.
+        fixed_mapping_id: Option<u32>,
     },
     /// Run a composed child workflow with the LLM-provided arguments as its input
     /// data and feed the child's final output back as the tool result. Mirrors the
@@ -305,6 +309,9 @@ pub(super) enum DirectAiToolPlan {
         label: String,
         durable: bool,
         timeout_ms: Option<u64>,
+        /// `input_mapping_id`, when the step maps anything: its fixed
+        /// arguments, evaluated at the call and merged over the model's.
+        fixed_mapping_id: Option<u32>,
         /// The composed child workflow run plan (built from the preloaded graph).
         child_plan: Box<DirectRunPlan>,
     },
@@ -1124,12 +1131,12 @@ fn step_run_plan_inner(
                             &child.graph.entry_point,
                             &mut Vec::new(),
                         )?;
+                        let input_mapping_id =
+                            embed_workflow_input_mapping_id(graph, &edge.to_step)?;
                         tools.push(DirectAiToolPlan::Embed {
                             step_id: edge.to_step.clone(),
-                            input_mapping_id: embed_workflow_input_mapping_id(
-                                graph,
-                                &edge.to_step,
-                            )?,
+                            input_mapping_id,
+                            fixed_mapping_id: tool_fixed_mapping_id(graph, input_mapping_id),
                             label: name.clone(),
                             durable: graph.durable
                                 && step
@@ -1178,6 +1185,7 @@ fn step_run_plan_inner(
                         durable: tool_agent.durable,
                         label: name.clone(),
                         timeout_ms: tool_agent.timeout,
+                        fixed_mapping_id: tool_fixed_mapping_id(graph, tool_agent.input_mapping_id),
                     });
                 } else {
                     let tool_agent = graph
@@ -1206,6 +1214,9 @@ fn step_run_plan_inner(
                         // The referenced Agent owns this workflow budget;
                         // capability transport timeouts retain their own meaning.
                         timeout_ms: tool_agent.timeout,
+                        // A synthetic MCP tool's arguments are the search or
+                        // invoke request, all the model's.
+                        fixed_mapping_id: None,
                     });
                 }
             }
@@ -3322,6 +3333,22 @@ fn finish_mapping_id(
         })
 }
 
+/// `mapping_id`, when that mapping maps anything: a tool step's fixed
+/// arguments (docs/ai-agent-tool-schemas.md). An empty mapping fixes nothing.
+fn tool_fixed_mapping_id(graph: &DirectGraphManifest, mapping_id: u32) -> Option<u32> {
+    graph
+        .mappings
+        .iter()
+        .find(|mapping| mapping.id == mapping_id)
+        .filter(|mapping| {
+            mapping
+                .value
+                .as_object()
+                .is_some_and(|value| !value.is_empty())
+        })
+        .map(|mapping| mapping.id)
+}
+
 fn embed_workflow_input_mapping_id(
     graph: &DirectGraphManifest,
     step_id: &str,
@@ -3972,6 +3999,7 @@ mod tests {
             durable: true,
             label: "lookup".into(),
             timeout_ms: None,
+            fixed_mapping_id: None,
         };
         assert!(ai_tool_suspends(&wait_tool), "a Wait tool suspends");
         assert!(!ai_tool_suspends(&agent_tool), "an Agent tool does not");
