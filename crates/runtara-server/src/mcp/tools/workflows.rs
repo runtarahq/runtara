@@ -1,4 +1,4 @@
-use rmcp::model::{CallToolResult, ContentBlock};
+use rmcp::model::CallToolResult;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use sqlx::Row;
@@ -9,9 +9,7 @@ use super::internal_api::{api_get, api_post, api_put, normalize_json_arg, valida
 use crate::api::repositories::workflows::WorkflowRepository;
 
 fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorData> {
-    Ok(CallToolResult::success(vec![ContentBlock::text(
-        serde_json::to_string_pretty(&value).unwrap_or_default(),
-    )]))
+    super::internal_api::answer_result(value)
 }
 
 fn err(msg: impl Into<String>) -> rmcp::ErrorData {
