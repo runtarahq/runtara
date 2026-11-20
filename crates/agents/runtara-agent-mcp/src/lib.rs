@@ -325,6 +325,14 @@ pub struct McpToolInvokeInput {
     )]
     #[serde(default)]
     pub args: Value,
+
+    #[field(
+        display_name = "Fail On Tool Error",
+        description = "Fail the step when the server marks the tool's result as an error (`isError`), instead of returning it with `is_error` set. For a workflow step that must not go on after a refused call; an AI Agent's tool loop leaves it off so the model reads the error.",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub fail_on_tool_error: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
@@ -388,6 +396,14 @@ pub async fn mcp_tool_invoke(input: McpToolInvokeInput) -> Result<McpToolInvokeO
     )
     .await?;
     let text = result.to_text();
+    if let Some(error) = tool_error(
+        input.fail_on_tool_error,
+        result.is_error,
+        &input.tool_name,
+        &text,
+    ) {
+        return Err(error);
+    }
     let content_json: Vec<Value> = result
         .content
         .iter()
@@ -399,6 +415,30 @@ pub async fn mcp_tool_invoke(input: McpToolInvokeInput) -> Result<McpToolInvokeO
         content: content_json,
         is_error: result.is_error,
     })
+}
+
+/// The error a step fails with when it asked to fail on a tool's error and the
+/// server marked the result as one; `None` otherwise. The tool's own text is
+/// the message, cut to a length an error carries.
+fn tool_error(
+    fail_on_tool_error: bool,
+    is_error: bool,
+    tool: &str,
+    text: &str,
+) -> Option<AgentError> {
+    if !(fail_on_tool_error && is_error) {
+        return None;
+    }
+    const MAX: usize = 2000;
+    let message = match text.char_indices().nth(MAX) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_owned(),
+    };
+    Some(
+        AgentError::permanent("MCP_TOOL_ERROR", message)
+            .with_attr("integration", "MCP")
+            .with_attr("tool_name", tool),
+    )
 }
 
 // ============================================================================
@@ -491,6 +531,26 @@ mod tests {
         let cap_names: Vec<&str> = info.capabilities.iter().map(|c| c.id.as_str()).collect();
         assert!(cap_names.contains(&"mcp-tool-search"));
         assert!(cap_names.contains(&"mcp-tool-invoke"));
+    }
+
+    #[test]
+    fn a_tool_error_fails_the_step_only_when_asked() {
+        assert!(tool_error(false, true, "deploy_workflow", "refused").is_none());
+        assert!(tool_error(true, false, "deploy_workflow", "done").is_none());
+        let error = tool_error(true, true, "deploy_workflow", "fix before deploying")
+            .expect("asked to fail, and the tool refused");
+        assert_eq!(error.code, "MCP_TOOL_ERROR");
+        assert!(error.message.contains("fix before deploying"));
+        let long = "x".repeat(5000);
+        let error = tool_error(true, true, "t", &long).unwrap();
+        assert!(error.message.chars().count() <= 2001);
+    }
+
+    #[test]
+    fn failing_on_a_tool_error_is_off_unless_given() {
+        let input: McpToolInvokeInput =
+            serde_json::from_value(json!({"tool_name": "get_workflow"})).unwrap();
+        assert!(!input.fail_on_tool_error);
     }
 
     #[test]

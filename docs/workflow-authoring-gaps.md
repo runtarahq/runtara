@@ -92,9 +92,17 @@ as soon as it is not known to fail.
 its text, and the `mcp` agent's `mcp-tool-invoke` step completed: the run went
 on to publish a workflow that had not deployed.
 
-Fix: the server's MCP tools mark an API answer that is not a success as a tool
-error (`isError: true`), and `mcp-tool-invoke` fails its step on one (a
-retryable or permanent error, by the answer's status).
+Fixed, both ends:
+
+- The server's workflow and graph tools answer a body that says
+  `"success": false` as an error result (`isError`), with the same text
+  (`answer_result` in `mcp/tools/internal_api.rs`). A non-2xx answer was an
+  error already.
+- `mcp-tool-invoke` takes `fail_on_tool_error` (default `false`): set, a
+  result marked as an error fails the step (`MCP_TOOL_ERROR`) instead of
+  returning it with `is_error`. A workflow's fixed MCP steps set it; an AI
+  Agent's tool loop leaves it off, so the model reads the error and can try
+  again.
 
 ### 4. A workflow-agent that may retry cannot be an AI tool
 
