@@ -530,8 +530,10 @@ impl DirectJsonManifest {
             output = unwrap_finish_outputs(output);
         }
         if mapping.purpose == "agent.inputMapping" {
-            resolve_nested_references(&mut output, &source);
-            output = unwrap_top_level_immediate_envelopes(output);
+            // Only what the author wrote: a value that came through a
+            // reference or a template is data, envelopes in it included.
+            resolve_authored_references(&mut output, &mapping.value, &source);
+            output = unwrap_authored_immediate_envelopes(output, &mapping.value);
         }
         serde_json::to_vec(&output)
             .map_err(|err| format!("failed to serialize mapping output: {err}"))
@@ -7495,6 +7497,104 @@ fn apply_composite(value: &Value, source: &Value) -> Result<Value, String> {
     }
 }
 
+/// The authored mapping for the input field `key` of `authored` (a field map):
+/// its own entry, or, when the field is mapped only by path (`key.sub`), a
+/// composite of those paths, so a dotted mapping is walked like a nested one.
+fn authored_field(authored: &Value, key: &str) -> Option<Value> {
+    let map = authored.as_object()?;
+    if let Some(entry) = map.get(key) {
+        return Some(entry.clone());
+    }
+    let prefix = format!("{key}.");
+    let nested: Map<String, Value> = map
+        .iter()
+        .filter_map(|(path, entry)| {
+            path.strip_prefix(&prefix)
+                .map(|rest| (rest.to_owned(), entry.clone()))
+        })
+        .collect();
+    (!nested.is_empty()).then(|| {
+        let mut composite = Map::with_capacity(2);
+        composite.insert("valueType".to_owned(), Value::String("composite".into()));
+        composite.insert("value".to_owned(), Value::Object(nested));
+        Value::Object(composite)
+    })
+}
+
+/// [`resolve_nested_references`] in what the author wrote, and nowhere else:
+/// inside an `immediate` value (where a condition's arguments are written),
+/// through a `composite`'s fields and items, and nowhere a `reference` or
+/// `template` brought data. A workflow graph passed as data (to an MCP tool
+/// that deploys it) keeps its references for the workflow it is
+/// (docs/workflow-authoring-gaps.md, 5).
+fn resolve_authored_references(output: &mut Value, authored: &Value, source: &Value) {
+    let Value::Object(fields) = output else {
+        return;
+    };
+    for (key, value) in fields.iter_mut() {
+        if let Some(entry) = authored_field(authored, key) {
+            resolve_in_authored(value, &entry, source);
+        }
+    }
+}
+
+fn resolve_in_authored(output: &mut Value, authored: &Value, source: &Value) {
+    match authored.get("valueType").and_then(Value::as_str) {
+        Some("immediate") => resolve_nested_references(output, source),
+        Some("composite") => match (output, authored.get("value")) {
+            (Value::Object(fields), Some(Value::Object(_))) => {
+                let inner = authored.get("value").unwrap_or(&Value::Null);
+                for (key, value) in fields.iter_mut() {
+                    if let Some(entry) = authored_field(inner, key) {
+                        resolve_in_authored(value, &entry, source);
+                    }
+                }
+            }
+            (Value::Array(items), Some(Value::Array(entries))) => {
+                for (item, entry) in items.iter_mut().zip(entries) {
+                    resolve_in_authored(item, entry, source);
+                }
+            }
+            _ => {}
+        },
+        // A reference's or a template's value is data.
+        _ => {}
+    }
+}
+
+/// Strips one immediate wrapper from each top-level field the author mapped as
+/// an immediate, the only ones a resolved reference is rewrapped in, so
+/// primitive-typed inputs see their bare value. A field whose data happens to
+/// be shaped like an envelope stays as it is.
+fn unwrap_authored_immediate_envelopes(mut value: Value, authored: &Value) -> Value {
+    if let Value::Object(map) = &mut value {
+        for (key, child) in map.iter_mut() {
+            let authored_immediate = authored_field(authored, key)
+                .and_then(|entry| {
+                    entry
+                        .get("valueType")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .is_some_and(|kind| kind == "immediate");
+            if !authored_immediate {
+                continue;
+            }
+            let Value::Object(child_map) = child else {
+                continue;
+            };
+            let is_immediate = matches!(
+                child_map.get("valueType"),
+                Some(Value::String(s)) if s == "immediate"
+            );
+            if is_immediate && let Some(inner) = child_map.remove("value") {
+                *child = inner;
+            }
+        }
+    }
+    value
+}
+
 /// Resolve `{valueType: "reference", value: "<path>"}` envelopes buried inside
 /// agent input payloads — e.g. `ConditionExpression` arguments or score
 /// expressions nested in an immediate `condition` value.
@@ -7509,8 +7609,8 @@ fn apply_composite(value: &Value, source: &Value) -> Result<Value, String> {
 /// Resolved references are rewritten as `{valueType: "immediate", value: X}`
 /// rather than the bare value: condition arguments are typed at the agent
 /// boundary as untagged `MappingValue` shapes, so a bare scalar there fails
-/// deserialization. [`unwrap_top_level_immediate_envelopes`] strips exactly
-/// one wrapper per top-level field so primitive-typed agent inputs still see
+/// deserialization. [`unwrap_authored_immediate_envelopes`] strips exactly
+/// one wrapper per top-level field the author mapped as an immediate so primitive-typed agent inputs still see
 /// their bare value.
 fn resolve_nested_references(value: &mut Value, source: &Value) {
     match value {
@@ -7582,32 +7682,6 @@ fn resolve_nested_references(value: &mut Value, source: &Value) {
         }
         _ => {}
     }
-}
-
-/// Strip a single `{valueType: "immediate", value: X}` envelope from each
-/// top-level field. Pairs with [`resolve_nested_references`]: the resolver
-/// wraps resolved references as immediates, so a top-level field that was a
-/// reference nested directly inside an immediate would otherwise reach the
-/// agent still wrapped. Nested wrappers deeper in the payload survive intact.
-fn unwrap_top_level_immediate_envelopes(mut value: Value) -> Value {
-    if let Value::Object(map) = &mut value {
-        for child in map.values_mut() {
-            let Value::Object(child_map) = child else {
-                continue;
-            };
-            let is_immediate = matches!(
-                child_map.get("valueType"),
-                Some(Value::String(s)) if s == "immediate"
-            );
-            if !is_immediate {
-                continue;
-            }
-            if let Some(inner) = child_map.remove("value") {
-                *child = inner;
-            }
-        }
-    }
-    value
 }
 
 fn is_reference_envelope(map: &Map<String, Value>) -> bool {
@@ -14816,6 +14890,90 @@ mod tests {
         assert_eq!(end["outputs"]["stepId"], json!("agent"));
         assert_eq!(end["outputs"]["stepType"], json!("Agent"));
         assert_eq!(end["outputs"]["outputs"], json!({ "value": "out" }));
+    }
+
+    fn mapping_only_agent_manifest(mapping_value: Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "graph": {
+                "mappings": [{
+                    "id": 0,
+                    "stepId": "call",
+                    "stepType": "Agent",
+                    "purpose": "agent.inputMapping",
+                    "value": mapping_value
+                }],
+                "steps": []
+            }
+        }))
+        .expect("manifest json")
+    }
+
+    fn apply_agent_mapping(mapping_value: Value, data: Value) -> Value {
+        let manifest = DirectJsonManifest::parse(&mapping_only_agent_manifest(mapping_value))
+            .expect("manifest");
+        let source =
+            build_source(&serde_json::to_vec(&data).unwrap(), b"{}", b"{}").expect("source");
+        serde_json::from_slice(&manifest.apply_mapping(0, &source).expect("mapping")).unwrap()
+    }
+
+    /// A workflow graph that arrives through a reference is data: its own
+    /// references are for the workflow it is, not resolved against this run
+    /// (docs/workflow-authoring-gaps.md, 5).
+    #[test]
+    fn data_shaped_like_a_mapping_is_passed_as_it_is() {
+        let graph = json!({"steps": {"run": {"inputMapping": {
+            "city": {"valueType": "reference", "value": "data.city"},
+            "units": {"valueType": "immediate", "value": "metric"}
+        }}}});
+        let output = apply_agent_mapping(
+            json!({
+                "execution_graph": {"valueType": "reference", "value": "data.graph"},
+                "args": {"valueType": "composite", "value": {
+                    "graph": {"valueType": "reference", "value": "data.graph"}
+                }},
+                // A top-level field whose data is an immediate envelope keeps it.
+                "step": {"valueType": "reference", "value": "data.envelope"}
+            }),
+            json!({"graph": graph, "city": "Kraków",
+                   "envelope": {"valueType": "immediate", "value": 1}}),
+        );
+        assert_eq!(output["execution_graph"], graph);
+        assert_eq!(output["args"]["graph"], graph);
+        assert_eq!(
+            output["step"],
+            json!({"valueType": "immediate", "value": 1})
+        );
+    }
+
+    /// What the author wrote inside an immediate (a condition's arguments) is
+    /// still resolved against the run, directly, inside a composite, and under
+    /// a dotted path.
+    #[test]
+    fn references_the_author_wrote_are_resolved() {
+        let condition = json!({"op": "EQ", "arguments": [
+            {"valueType": "reference", "value": "status"},
+            {"valueType": "reference", "value": "data.wanted"}
+        ]});
+        let output = apply_agent_mapping(
+            json!({
+                "condition": {"valueType": "immediate", "value": condition},
+                "query": {"valueType": "composite", "value": {
+                    "condition": {"valueType": "immediate", "value": condition}
+                }},
+                "filter.condition": {"valueType": "immediate", "value": condition},
+                "limit": {"valueType": "immediate", "value": {"valueType": "reference", "value": "data.limit"}}
+            }),
+            json!({"wanted": "open", "limit": 5}),
+        );
+        let resolved = json!({"op": "EQ", "arguments": [
+            {"valueType": "reference", "value": "status"},
+            {"valueType": "immediate", "value": "open"}
+        ]});
+        assert_eq!(output["condition"], resolved);
+        assert_eq!(output["query"]["condition"], resolved);
+        assert_eq!(output["filter"]["condition"], resolved);
+        // A top-level immediate whose value was a reference is the bare value.
+        assert_eq!(output["limit"], json!(5));
     }
 
     #[test]

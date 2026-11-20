@@ -147,10 +147,17 @@ Seen: a graph sent to `deploy_workflow` through `mcp-tool-invoke` arrived with
 `set_mapping`'s `from_input`) instead; a `template` value passes through,
 being no reference.
 
-Fix: resolve only where a capability declares an input to hold a condition or
-expression (catalog metadata on the input), not anywhere in the input. Find
-what relies on the walk first: the object model's condition inputs, and any
-other capability taking a `MappingValue`-shaped argument.
+Fixed, by what the author wrote rather than by capability metadata: the walk
+follows the step's authored mapping (`resolve_authored_references` in
+`direct_json.rs`). It resolves references inside an `immediate` value (where
+a condition's arguments are written), through a `composite`'s fields and items
+and under dotted paths, and leaves alone any value that came through a
+`reference` or a `template`: that is data. The one-wrapper unwrap of a
+top-level field likewise applies only to fields authored as an immediate.
+
+A workflow that built a condition at run time and passed it through a
+reference, relying on references inside it being resolved against the run,
+now passes it as it is; write such a condition as an immediate instead.
 
 ### 6. Single graph edits cannot build a graph step by step
 
