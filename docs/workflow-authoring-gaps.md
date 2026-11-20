@@ -270,6 +270,16 @@ module attributes, as `supportsConnections` is), read by validation and by
 tooling instead of the name. Left for now: `AgentInfo` is built literally in
 about a hundred places, and `http` is still the only such agent.
 
+### 14. Any workflow may use any of the tenant's connections
+
+A connection is the tenant's, and every workflow of the tenant may name it
+on a step. A workflow drafted by a model (`docs/workflow-tool-builder.md`)
+could name the connection holding the builder's own MCP key and so edit any
+workflow; the builder refuses drafts that use an `mcp` connection by name.
+
+To fix: a connection says who may use it (which workflows, or workflows
+built by whom), checked when a graph is saved and when a step runs.
+
 ## What `tool-builder` cannot do yet
 
 Not platform gaps, but what the version described here is limited to:
