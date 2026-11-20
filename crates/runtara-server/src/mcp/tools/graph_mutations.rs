@@ -243,38 +243,33 @@ async fn save_graph(
                             if has_steps { Some(g) } else { None }
                         });
 
+                // A version with no steps (a workflow just created), or one
+                // that would not pass validation either (a workflow being
+                // built edit by edit), cannot compile or run: it has nothing
+                // to keep, so the edit patches it in place with the structural
+                // checks only, as any later edit would. The graph is checked
+                // whole when it is deployed (docs/workflow-authoring-gaps.md, 6).
                 let Some(existing) = existing_graph else {
-                    // A version with no steps (a workflow just created) has
-                    // nothing to keep: the edit patches it in place, with the
-                    // structural checks only, as any later edit would. The
-                    // graph is checked whole when it is deployed
-                    // (docs/workflow-authoring-gaps.md, 6).
-                    let patch_body = serde_json::json!({ "executionGraph": graph });
-                    let patched = api_put(
-                        server,
-                        &format!(
-                            "/api/runtime/workflows/{}/versions/{}/graph",
-                            workflow_id, latest_version
-                        ),
-                        Some(patch_body),
-                    )
-                    .await
-                    .map_err(|_| original_err)?;
-                    return Ok((
-                        latest_version.to_string(),
-                        false,
-                        response_warnings(&patched),
-                    ));
+                    return patch_in_place(server, workflow_id, graph, latest_version)
+                        .await
+                        .map_err(|_| original_err);
                 };
 
                 let existing_body = serde_json::json!({ "executionGraph": existing });
-                let res = api_post(
+                let res = match api_post(
                     server,
                     &format!("/api/runtime/workflows/{}/update", workflow_id),
                     Some(existing_body),
                 )
                 .await
-                .map_err(|_| original_err)?;
+                {
+                    Ok(res) => res,
+                    Err(_) => {
+                        return patch_in_place(server, workflow_id, graph, latest_version)
+                            .await
+                            .map_err(|_| original_err);
+                    }
+                };
 
                 let version = res
                     .get("version")
@@ -315,6 +310,23 @@ async fn save_graph(
             response_warnings(&patched),
         ))
     }
+}
+
+/// Saves `graph` over version `version` in place, with the structural checks
+/// only (`PUT /versions/{v}/graph`).
+async fn patch_in_place(
+    server: &SmoMcpServer,
+    workflow_id: &str,
+    graph: serde_json::Value,
+    version: i64,
+) -> Result<(String, bool, Vec<String>), rmcp::ErrorData> {
+    let patched = api_put(
+        server,
+        &format!("/api/runtime/workflows/{workflow_id}/versions/{version}/graph"),
+        Some(serde_json::json!({ "executionGraph": graph })),
+    )
+    .await?;
+    Ok((version.to_string(), false, response_warnings(&patched)))
 }
 
 /// The reference to `from_step`'s output: a field of it, or, with no field
@@ -4310,6 +4322,66 @@ mod state_schema_tests {
 #[cfg(test)]
 mod new_workflow_edit_tests {
     use super::*;
+
+    /// A workflow being built edit by edit: its version has a step whose
+    /// required inputs are not mapped yet, so neither the edited graph nor the
+    /// existing one passes `update`. The edit patches the version in place.
+    #[tokio::test]
+    async fn an_edit_of_a_version_that_cannot_validate_patches_it() {
+        let patched: Arc<Mutex<Option<String>>> = Arc::default();
+        let patched_in = patched.clone();
+        let routes = axum::Router::new()
+            .route(
+                "/api/runtime/workflows/{workflow_id}",
+                get(|| async {
+                    Json(serde_json::json!({"data": {
+                        "lastVersionNumber": 1,
+                        "currentVersionNumber": 1,
+                        "definition": {"executionGraph": {
+                            "name": "Building", "entryPoint": "calc", "executionPlan": [],
+                            "steps": {"calc": {"id": "calc", "stepType": "Agent",
+                                               "agentId": "utils", "capabilityId": "calculate"}}
+                        }}
+                    }}))
+                }),
+            )
+            .route(
+                "/api/runtime/workflows/{workflow_id}/update",
+                post(|| async {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"success": false, "message": "Step 'calc' is missing required input 'expression'"})),
+                    )
+                }),
+            )
+            .route(
+                "/api/runtime/workflows/{workflow_id}/versions/{version}/graph",
+                put(
+                    move |axum::extract::Path((_, version)): axum::extract::Path<(String, String)>| {
+                        *patched_in.lock().unwrap() = Some(version);
+                        async move { Json(serde_json::json!({"success": true, "warnings": []})) }
+                    },
+                ),
+            );
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/runtara_mcp_building_workflow_test")
+            .unwrap();
+        let server = SmoMcpServer::new(
+            pool,
+            crate::engine::without_runtime(),
+            "acme".into(),
+            routes,
+        );
+        let params: SetInputSchemaParams = serde_json::from_value(serde_json::json!({
+            "workflow_id": "wf",
+            "fields": {"x": {"type": "number", "required": true}}
+        }))
+        .unwrap();
+        set_input_schema(&server, params)
+            .await
+            .expect("the edit is saved");
+        assert_eq!(patched.lock().unwrap().as_deref(), Some("1"));
+    }
 
     /// A mapping from a step's output names a field of it, or the whole output
     /// when there is none (docs/workflow-authoring-gaps.md, 9).

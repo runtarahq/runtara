@@ -172,12 +172,14 @@ structural corruption … and reports everything else as warnings"), but:
 Only `apply_graph_mutations`, which saves once, builds a new workflow, and
 only with its operations in an order that satisfies each of these.
 
-Fixed for what made a new workflow unbuildable: the first edit of a workflow
-whose version has no steps (one just created) was sent whole through
-`update`'s full validation, with no fallback, so `add_agent_step` failed on
-E022 and `set_input_schema` on "no steps". It now patches that version in
-place with the structural checks only, as every later edit does
-(`save_graph`). `set_mapping` still refuses an input that is not in
+Fixed for what made a new workflow unbuildable: an edit of a version that
+cannot pass validation itself (no steps yet, or a step whose inputs are not
+mapped yet) was sent whole through `update`'s full validation, with no
+fallback, so `add_agent_step` failed on E022 and `set_input_schema` on "no
+steps". Such a version cannot compile or run; the edit now patches it in place
+with the structural checks only, as every later edit does (`save_graph`). Found
+half done on the local server: the first edit of a new workflow worked, the
+second did not. `set_mapping` still refuses an input that is not in
 `inputSchema` yet: that checks the edit's own argument, and catches a typo,
 so set the input schema first.
 
