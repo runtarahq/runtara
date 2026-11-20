@@ -1487,6 +1487,14 @@ pub struct GetStateStep {
 /// tool/branch to execute, collects the result, and loops until it produces a
 /// final text response or reaches max_iterations.
 ///
+/// Each tool is shown to the LLM as the edge label (its name), the target
+/// step's `name` (its description; else the capability's or child
+/// workflow's), and the JSON Schema of its arguments: the target Agent
+/// capability's inputs, or the target EmbedWorkflow's child input schema. A
+/// `connection` input and what the host fills (`_connection`, `timeout_ms`
+/// when the step sets a timeout) are not shown. The LLM's arguments become
+/// that input. A WaitForSignal tool takes no arguments.
+///
 /// Without tool edges, it acts as a simple LLM completion step.
 ///
 /// # Reserved edge labels
