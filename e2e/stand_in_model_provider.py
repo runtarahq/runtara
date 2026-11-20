@@ -5,7 +5,8 @@
 #
 # A request that asks to stream is answered with three pieces of text as
 # server-sent events 400 ms apart; any other, whole. Each request's path, its
-# `stream`, and whether it carried the stand-in key are appended to the log.
+# `stream`, whether it carried the stand-in key, and the tools it offered
+# (each one's name and parameters) are appended to the log.
 import json, sys, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -35,8 +36,12 @@ class Provider(BaseHTTPRequestHandler):
         asked = json.loads(self.body())
         streams = asked.get("stream") is True
         with open(log, "a") as out:
+            tools = [{"name": tool.get("function", {}).get("name"),
+                      "parameters": tool.get("function", {}).get("parameters")}
+                     for tool in asked.get("tools") or []]
             out.write(json.dumps({"path": self.path, "stream": streams,
-                                  "authorized": self.headers.get("authorization") == "Bearer sk-stand-in"}) + "\n")
+                                  "authorized": self.headers.get("authorization") == "Bearer sk-stand-in",
+                                  "tools": tools}) + "\n")
         if not streams:
             body = json.dumps({"choices": [{"message": {"content": "".join(PIECES)}}],
                                "usage": {"prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6}}).encode()

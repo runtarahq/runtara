@@ -318,5 +318,45 @@ done
 [ "$(sed -n 3p "${PROVIDER_LOG}" | jq '.stream')" = "false" ] || { print_error "A run with no conversation asked to stream: $(cat "${PROVIDER_LOG}")"; exit 1; }
 print_success "Unstreamed, as before ✓"
 
+# ---------------------------------------------------------------------------
+print_step "4. A tool is shown its arguments; what its step maps is fixed, and not shown..."
+TOOLED=$(workflow ai-tooled "$(jq -n --arg conn "${CONN}" '{
+    name: "ai-tooled", entryPoint: "answer",
+    steps: {
+        answer: { id: "answer", name: "_answer", stepType: "AiAgent", connectionId: $conn, config: {
+            systemPrompt: { valueType: "immediate", value: "Use the tools." },
+            userPrompt: { valueType: "reference", value: "data.message" },
+            model: { valueType: "immediate", value: "gpt-4o-mini" } } },
+        calc: { id: "calc", name: "Work out an arithmetic expression", stepType: "Agent",
+            agentId: "utils", capabilityId: "calculate" },
+        date: { id: "date", name: "Format a date", stepType: "Agent",
+            agentId: "utils", capabilityId: "format-date-from-iso", inputMapping: {
+                target_format: { valueType: "immediate", value: "%Y-%m-%d" } } },
+        finish: { id: "finish", stepType: "Finish", inputMapping: {
+            response: { valueType: "reference", value: "steps.answer.outputs.response" } } } },
+    executionPlan: [
+        { fromStep: "answer", toStep: "calc", label: "calculate" },
+        { fromStep: "answer", toStep: "date", label: "format_date" },
+        { fromStep: "answer", toStep: "finish", label: "next" } ],
+    variables: {}, inputSchema: { message: { type: "string" } }, outputSchema: {} }')")
+RESP=$(api_post "/workflows/${TOOLED}/execute" '{"inputs": {"data": {"message": "What is 2+2?"}, "variables": {}}}')
+RUN=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
+[ -n "${RUN}" ] || { print_error "Execute failed: ${RESP}"; exit 1; }
+for _ in {1..90}; do
+    STATUS=$(curl -sS "${API}/workflows/instances/${RUN}" | jq -r '.data.status // empty')
+    case "${STATUS}" in completed|failed|cancelled) break ;; esac
+    sleep 1
+done
+[ "${STATUS}" = "completed" ] || { print_error "The run ended ${STATUS}"; exit 1; }
+OFFERED=$(tail -n 1 "${PROVIDER_LOG}" | jq -c '.tools')
+echo "  offered: ${OFFERED}"
+[ "$(echo "${OFFERED}" | jq -c '.[] | select(.name == "calculate") | .parameters.required')" = '["expression","variables"]' ] \
+    || { print_error "calculate was not shown its inputs: ${OFFERED}"; exit 1; }
+[ "$(echo "${OFFERED}" | jq -r '.[] | select(.name == "calculate") | .parameters.properties.expression.type')" = "string" ] \
+    || { print_error "calculate's expression is not a string: ${OFFERED}"; exit 1; }
+[ "$(echo "${OFFERED}" | jq -c '.[] | select(.name == "format_date") | .parameters.properties | keys')" = '["iso_date"]' ] \
+    || { print_error "format_date's fixed target_format was shown, or iso_date was not: ${OFFERED}"; exit 1; }
+print_success "calculate shows expression and variables; format_date shows iso_date and not its fixed format ✓"
+
 echo ""
-print_success "AI Agent streaming: shown as written, said once, and only where a conversation listens ✓"
+print_success "AI Agent streaming: shown as written, said once, and only where a conversation listens; tools shown their arguments ✓"
