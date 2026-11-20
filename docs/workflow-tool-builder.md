@@ -27,9 +27,10 @@ retry and park (`maxRetries: 0`), as publishing reports (`parks`,
 request ─▶ create an empty draft
         ─▶ draft it (AI Agent with authoring tools)      ── not possible ─▶ reason, done
         ─▶ policy check (deterministic)                  ── refused ─────▶ reason, done
+        ─▶ publish it (the engine's proof it does not park)  ── parks ─▶ unpublish, done
         ─▶ test run (only when nothing in it changes data)
-        ─▶ proposal + approve code ─▶ person approves
-        ─▶ deploy the approved version ─▶ publish ─▶ add to the chat
+        ─▶ proposal + approve code ─▶ person approves     ── rejected ─▶ unpublish, done
+        ─▶ add the published version to the chat
 ```
 
 ### Drafting
@@ -61,8 +62,13 @@ when a step:
   Delay) or loops without bound;
 - uses a connection that is not one of the tenant's listed connections;
 
-or when the draft does not validate, or would park as an agent (validation
-reports it, see below).
+or when the draft does not validate.
+
+Then the builder publishes the draft. Whether a workflow-agent parks is the
+engine's own proof, made when it is published (`parks`,
+`usableAsAiTool`); one that parks cannot be a chat tool, so it is
+unpublished and refused. A published agent nothing uses is not reachable
+from any chat: it is added to the chat only after approval.
 
 ### Test
 
@@ -78,14 +84,17 @@ inputs, whether it changes data, and the test result, with the approve code
 the chat's user must type (`approve 1a2b3c`); the chat maps the user's own
 message into the answer as a fixed argument, so the model cannot approve.
 
-Approval is of that version: the builder deploys exactly the version it
-showed, then publishes it and adds it to the chat.
+Approval is of that version: the published agent is what the proposal showed
+and tested, and the draft's editing tools are gone once drafting ends. A
+rejected proposal is unpublished.
 
 ## Platform changes
 
-1. **Whether a workflow can be a tool, before it is published.** Publishing
-   says whether the agent parks; the draft check needs it before approval.
-   `preflight_compile` reports `parks` and its sites.
+1. **Whether a workflow can be a tool, before it is published.** Only
+   publishing says whether an agent parks, so the builder publishes the draft
+   before approval and unpublishes it if it parks or is rejected. Reporting it
+   from validation as well would need the validation sandbox's report to carry
+   it; not needed for this.
 2. **Unpublishing.** A published agent goes away only with its workflow.
    `unpublish_workflow_agent` removes it from the catalog (parents that
    composed it keep their copy, as with a deleted workflow).
@@ -95,8 +104,8 @@ showed, then publishes it and adds it to the chat.
 
 ## Order
 
-1. Preflight reports parking.
-2. Unpublish.
+1. Unpublish.
+2. (Parking is read from publishing.)
 3. The draft tools, with the fixed `workflow_id`.
 4. The builder: draft, check, test, proposal, version pin; model and
    connection as inputs.
