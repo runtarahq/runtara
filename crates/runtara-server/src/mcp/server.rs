@@ -761,7 +761,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Set an input mapping on a step. Use exactly one of: from_step+from_output (step output reference), from_input (workflow input), from_variable (variable), or immediate_value (literal). Validates that referenced steps/inputs/variables exist."
+        description = "Set an input mapping on a step. Use exactly one of: from_step with from_output (a field of a step's output; omit from_output for the whole output), from_input (workflow input), from_variable (variable), or immediate_value (literal). Validates that referenced steps/inputs/variables exist."
     )]
     async fn set_mapping(
         &self,
