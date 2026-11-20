@@ -395,6 +395,15 @@ pub struct ExecuteWorkflowSyncParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct RestoreVersionParams {
+    #[schemars(description = "Workflow ID")]
+    pub workflow_id: String,
+    #[schemars(description = "Version number whose graph to save as a new version")]
+    pub version: i32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SetCurrentVersionParams {
     #[schemars(description = "Workflow ID")]
     pub workflow_id: String,
@@ -1241,6 +1250,52 @@ pub async fn set_current_version(
             params.workflow_id, params.version
         ),
         None,
+    )
+    .await?;
+    json_result(result)
+}
+
+/// Saves `version`'s graph (with its memory and event tracking) as a new
+/// version, so the latest is that graph again: what graph edits start from
+/// once a draft has gone wrong. Versions are never renumbered or removed; the
+/// draft stays in the history.
+pub async fn restore_version(
+    server: &SmoMcpServer,
+    params: RestoreVersionParams,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    validate_path_param("workflow_id", &params.workflow_id)?;
+    let source = api_get(
+        server,
+        &format!(
+            "/api/runtime/workflows/{}?versionNumber={}",
+            params.workflow_id, params.version
+        ),
+    )
+    .await?;
+    let data = source.get("data").unwrap_or(&source);
+    let graph = data
+        .pointer("/definition/executionGraph")
+        .or_else(|| data.get("executionGraph"))
+        .cloned()
+        .ok_or_else(|| {
+            rmcp::ErrorData::invalid_params(
+                format!(
+                    "Workflow '{}' has no version {}",
+                    params.workflow_id, params.version
+                ),
+                None,
+            )
+        })?;
+    let mut body = serde_json::json!({ "executionGraph": graph });
+    for field in ["memoryMb", "trackEvents"] {
+        if let Some(value) = data.get(field).filter(|value| !value.is_null()) {
+            body[field] = value.clone();
+        }
+    }
+    let result = api_post(
+        server,
+        &format!("/api/runtime/workflows/{}/update", params.workflow_id),
+        Some(body),
     )
     .await?;
     json_result(result)
@@ -2909,6 +2964,71 @@ mod tests {
         assert!(
             has_no_required,
             "folder listing takes no inputs: {schema:#}"
+        );
+    }
+
+    /// Restoring a version saves its graph, memory and event tracking as a
+    /// new version: the latest is that graph again, whatever draft followed.
+    #[tokio::test]
+    async fn restore_version_saves_an_old_graph_as_the_latest() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::Json;
+        use axum::extract::RawQuery;
+        use axum::routing::{get, post};
+
+        let good =
+            serde_json::json!({"name": "Good", "steps": {"a": {"id": "a", "stepType": "Finish"}}});
+        let asked: Arc<Mutex<Option<String>>> = Arc::default();
+        let saved: Arc<Mutex<Option<serde_json::Value>>> = Arc::default();
+        let (asked_in, saved_in, good_in) = (asked.clone(), saved.clone(), good.clone());
+        let routes = axum::Router::new()
+            .route(
+                "/api/runtime/workflows/{workflow_id}",
+                get(move |RawQuery(query): RawQuery| {
+                    *asked_in.lock().unwrap() = query;
+                    let graph = good_in.clone();
+                    async move {
+                        Json(serde_json::json!({"data": {
+                            "executionGraph": graph, "memoryMb": 128, "trackEvents": false
+                        }}))
+                    }
+                }),
+            )
+            .route(
+                "/api/runtime/workflows/{workflow_id}/update",
+                post(move |Json(body): Json<serde_json::Value>| {
+                    *saved_in.lock().unwrap() = Some(body);
+                    async move { Json(serde_json::json!({"success": true, "version": "9"})) }
+                }),
+            );
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/runtara_mcp_restore_test")
+            .unwrap();
+        let server = SmoMcpServer::new(
+            pool,
+            crate::engine::without_runtime(),
+            "acme".into(),
+            routes,
+        );
+        let result = restore_version(
+            &server,
+            RestoreVersionParams {
+                workflow_id: "wf".into(),
+                version: 4,
+            },
+        )
+        .await
+        .expect("restore succeeds");
+        assert_eq!(asked.lock().unwrap().as_deref(), Some("versionNumber=4"));
+        assert_eq!(
+            saved.lock().unwrap().clone().expect("a version was saved"),
+            serde_json::json!({"executionGraph": good, "memoryMb": 128, "trackEvents": false})
+        );
+        let text = result.content[0].as_text().unwrap().text.clone();
+        assert!(
+            text.contains("\"version\": \"9\"") || text.contains("\"version\":\"9\""),
+            "{text}"
         );
     }
 }

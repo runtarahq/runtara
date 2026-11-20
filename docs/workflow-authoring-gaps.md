@@ -79,9 +79,12 @@ Seen: after the chat was put back on version 4, the next edit started from
 failed version 6 and inherited its step, which named a workflow-agent since
 deleted ("Agent '…' is not enabled for this tenant").
 
-Fix: a `discard_draft` tool (latest becomes current again), or an option on
-graph edits to start from the current version. With 1, a failed deploy could
-also leave its draft clearly marked as failed.
+Fixed: a `restore_version {workflow_id, version}` MCP tool saves a version's
+graph (with its memory and event tracking) as a new version, so the latest is
+that graph again and edits start from it. Versions are never renumbered or
+removed: the failed draft stays in the history. (Lowering the latest version
+instead would reuse version numbers.) With 1, the restored version is current
+as soon as it is not known to fail.
 
 ### 3. A failed MCP tool call looks like success
 

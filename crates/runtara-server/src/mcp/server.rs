@@ -134,6 +134,16 @@ impl SmoMcpServer {
         tools::workflows::execute_workflow_sync(self, params.0).await
     }
 
+    #[tool(
+        description = "Save a version's graph as a new version, so the latest is that graph again. Graph edits start from the latest version, failed drafts included: restore the last good version before editing again. The draft stays in the history."
+    )]
+    async fn restore_version(
+        &self,
+        params: Parameters<tools::workflows::RestoreVersionParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::workflows::restore_version(self, params.0).await
+    }
+
     #[tool(description = "Set the active (current) version for a workflow. Use for rollback.")]
     async fn set_current_version(
         &self,
@@ -1266,7 +1276,7 @@ impl ServerHandler for SmoMcpServer {
             .with_instructions(
                 "Runtara Runtime MCP server.\n\n\
                 ## Tool Groups\n\n\
-                **Workflows**: get_workflow_authoring_schema, list_workflows, get_workflow, create_workflow, update_workflow, compile_workflow, deploy_workflow (bulk graph), deploy_latest (after mutations), preflight_compile, set_current_version, diff_workflow_versions, validate_graph, validate_mappings — call get_workflow_authoring_schema before authoring raw workflow JSON\n\
+                **Workflows**: get_workflow_authoring_schema, list_workflows, get_workflow, create_workflow, update_workflow, compile_workflow, deploy_workflow (bulk graph), deploy_latest (after mutations), preflight_compile, set_current_version, restore_version (save an old version's graph as the latest, e.g. after a failed draft), diff_workflow_versions, validate_graph, validate_mappings — call get_workflow_authoring_schema before authoring raw workflow JSON\n\
                 **Execution**: execute_workflow, execute_workflow_sync, execute_workflow_wait, list_executions, get_execution, get_step_summaries (supports compact mode), get_step_events, stop_execution, pause_execution, resume_execution\n\
                 **Debugging**: inspect_step (one-call step debugger), trace_reference (resolve a reference path at runtime), why_execution_failed (one-call failure diagnosis)\n\
                 **Object Model**: list_object_schemas, get_object_schema, create_object_schema, update_object_schema, delete_object_schema, list_object_instances, query_object_instances, query_aggregate, query_sql, query_sql_one, query_sql_raw, execute_sql, create_object_instance, update_object_instance, bulk_create_instances, bulk_update_instances, bulk_delete_instances. SQL tools use SQLx prepared statements with Postgres positional placeholders ($1, $2, ...), not named parameters; params are typed and bound in array order, and execute_sql returns rowsAffected.\n\
