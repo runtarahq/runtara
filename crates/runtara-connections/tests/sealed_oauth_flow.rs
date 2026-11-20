@@ -232,6 +232,19 @@ async fn a_flow_never_holds_a_readable_secret() {
     assert!(!clear.contains("at-2"), "{clear}");
     assert_ne!(rotated["token_expires_at"], expired["token_expires_at"]);
 
+    // Another engine read the connection before the refresh, and has
+    // nothing of it in mind: it waits for the refresh lock, reads the
+    // connection again, and presents the pair stored. It makes no refresh
+    // of its own, which with the voided refresh token would fail.
+    runtara_connections::auth::provider_auth::evict_connection_token_caches("c1");
+    let elsewhere = resolve(expired.clone()).await;
+    assert_eq!(elsewhere["access_token"], rotated["access_token"]);
+    assert_eq!(
+        row(&fixture, "c1").await.0,
+        rotated,
+        "nothing was rotated again"
+    );
+
     // The token seal holds reaches the API.
     let response = fixture
         .sealed
@@ -328,4 +341,36 @@ async fn a_rejected_authorizations_sealed_tokens_are_revoked_through_seal() {
     // The client's secret stays the connection's, sealed.
     assert!(is_sealed(&stored["client_secret"]));
     provider.verify().await;
+}
+
+/// A connection's refresh is made by one engine at a time: a second waits
+/// for the lock until the first gives it up.
+#[tokio::test]
+async fn one_refresh_of_a_connection_at_a_time_across_engines() {
+    use runtara_connections::auth::refresh_lock;
+    use std::time::Duration;
+    let valkey = valkey_support::ValkeyFixture::start().await;
+    let first = refresh_lock::take(&valkey.manager, "acme", "c9")
+        .await
+        .expect("free, it is taken");
+    let manager = valkey.manager.clone();
+    let second = tokio::spawn(async move { refresh_lock::take(&manager, "acme", "c9").await });
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        !second.is_finished(),
+        "the second waits while the first holds it"
+    );
+    // Another connection is not held by it.
+    refresh_lock::take(&valkey.manager, "acme", "c10")
+        .await
+        .expect("another connection's lock is free")
+        .release(&valkey.manager)
+        .await;
+    first.release(&valkey.manager).await;
+    let second = tokio::time::timeout(Duration::from_secs(2), second)
+        .await
+        .expect("the second takes it once it is given up")
+        .unwrap()
+        .expect("taken");
+    second.release(&valkey.manager).await;
 }

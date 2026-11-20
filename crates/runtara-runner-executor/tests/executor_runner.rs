@@ -62,7 +62,7 @@ fn run_binary() -> PathBuf {
 /// One executor of a deployment.
 struct AnExecutor {
     runs: Arc<runtara_executor::runs::Runs>,
-    registrar: Arc<runtara_executor::registration::Registrar>,
+    registrar: Arc<runtara_executor::registration::Registrars>,
     state: PathBuf,
     serving: tokio::task::JoinHandle<()>,
 }

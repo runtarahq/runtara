@@ -20,7 +20,7 @@ use crate::observability::metrics;
 use crate::product_events::{ActorType, EventSource, EventType, ProductEvent, ProductEventSink};
 use crate::runtime_client::RuntimeClient;
 use crate::shutdown::ShutdownSignal;
-use crate::valkey::compilation_queue::{CompilationQueue, CompilationRequest};
+use crate::valkey::compilation_queue::{COMPILE_RENEW, CompilationQueue, CompilationRequest};
 
 /// Configuration for the compilation worker
 #[derive(Clone)]
@@ -58,10 +58,10 @@ impl CompilationWorkerConfig {
             // was a coin flip whether an idle worker stopped in time.
             //
             // Shortening it is the fix rather than racing the dequeue against
-            // the signal, because `dequeue` is a `BLPOP` — destructive, with no
-            // consumer group and no redelivery. Abandoning one mid-flight would
-            // drop a compilation request on the floor. An idle worker just makes
-            // a few more round trips.
+            // the signal: a request taken is in progress under this engine's
+            // lease, and one abandoned mid-flight would wait out the lease
+            // before another engine took it. An idle worker just makes a few
+            // more round trips.
             dequeue_timeout_secs: 2,
         }
     }
@@ -104,8 +104,9 @@ pub async fn run(
         "Starting compilation worker"
     );
 
-    // Blocking BLPOP consumer — must not ride the shared manager. See
-    // `crate::valkey::dedicated_manager_for_blocking_consumer` for the rule.
+    // The queue's own connection, apart from the shared manager: a worker
+    // polls it continually. See
+    // `crate::valkey::dedicated_manager_for_blocking_consumer`.
     let manager = match crate::valkey::dedicated_manager_for_blocking_consumer(
         config.redis_url.as_str(),
         &worker_id,
@@ -169,11 +170,20 @@ pub async fn run(
     }
 
     let dequeue_timeout = Duration::from_secs(config.dequeue_timeout_secs);
+    let mut swept_at = Instant::now();
 
     loop {
         if shutdown.is_shutting_down() {
             info!(worker_id = %worker_id, "Compilation worker exiting on shutdown signal");
             return;
+        }
+
+        // Compiles whose engine stopped renewing them are taken again.
+        if swept_at.elapsed() >= COMPILE_RENEW {
+            swept_at = Instant::now();
+            if let Err(e) = queue.recover_expired().await {
+                warn!(error = %e, "Could not recover compilations whose leases expired");
+            }
         }
 
         // Dequeue next compilation request (blocking with timeout)
@@ -195,7 +205,7 @@ pub async fn run(
                 // already exists, so the worker always hands the request off.
                 // The request is one tenant's: row level security keeps the
                 // compile's database work to that tenant's rows.
-                scoped(request.tenant_id.clone(), async {
+                let compile = scoped(request.tenant_id.clone(), async {
                     let compile_start = Instant::now();
 
                     // Track active compilations. No labels: like the duration
@@ -368,8 +378,28 @@ pub async fn run(
                             }
                         }
                     }
-                })
-                .await;
+                });
+                // The compile is this engine's while it renews its lease: an
+                // engine that dies mid-compile stops renewing it, and another
+                // takes it when it expires.
+                tokio::pin!(compile);
+                let mut renew = tokio::time::interval(COMPILE_RENEW);
+                renew.tick().await;
+                loop {
+                    tokio::select! {
+                        _ = &mut compile => break,
+                        _ = renew.tick() => match queue.renew(&request).await {
+                            Ok(true) => {}
+                            Ok(false) => warn!(
+                                tenant_id = %request.tenant_id,
+                                workflow_id = %request.workflow_id,
+                                version = request.version,
+                                "This compile's lease expired and it was put back on the queue"
+                            ),
+                            Err(e) => warn!(error = %e, "Could not renew a compile's lease"),
+                        },
+                    }
+                }
 
                 // Mark as complete (removes from pending set)
                 if let Err(e) = queue.complete(&request).await {

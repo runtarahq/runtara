@@ -1,0 +1,54 @@
+# Runtara with more than one engine (docs/multiple-engines-plan.md).
+#
+# On top of the split stack, the engine service runs as several replicas
+# (RUNTARA_ENGINES, two by default) on one server database, one runtime
+# database and one Valkey:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.seal.yml \
+#     -f docker-compose.executor.yml -f docker-compose.roles.yml \
+#     -f docker-compose.engines.yml up -d
+#
+# Every replica answers to the name `runtara`: executors resolve it and tell
+# each engine they are here, and the API and intake reach whichever the name
+# resolves to. What one engine holds of a run (its run channel) is reached at
+# that engine's own address, which each replica works out when it starts.
+#
+# The engines share their artifacts, in a store on the data volume
+# (RUNTARA_ARTIFACT_STORE_URL); an engine whose artifacts are on its own disk
+# does not start beside another. Each keeps the rest of what it writes in a
+# directory of its own.
+
+services:
+  runtara:
+    deploy:
+      replicas: ${RUNTARA_ENGINES:-2}
+    environment:
+      RUNTARA_ARTIFACT_STORE_URL: file:///data/artifacts
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        # One replica at a time makes the key and enters the object model,
+        # so two starting together do not make two keys.
+        until mkdir /data/.first-start 2>/dev/null; do sleep 1; done
+        trap 'rmdir /data/.first-start 2>/dev/null || true' EXIT
+        if [ -z "$${RUNTARA_CONNECTIONS_ENCRYPTION_KEY}" ]; then
+          key_file=/data/credential-encryption.key
+          if [ ! -s "$$key_file" ]; then
+            (umask 077 && head -c 32 /dev/urandom | base64 > "$$key_file")
+            echo "Generated a credential encryption key at $$key_file"
+          fi
+          RUNTARA_CONNECTIONS_ENCRYPTION_KEY="$$(cat "$$key_file")"
+          export RUNTARA_CONNECTIONS_ENCRYPTION_KEY
+        fi
+        printf '%s' 'postgres://runtara_objects:runtara_objects@postgres/runtara_objects?sslmode=disable' \
+          | runtara-server object-model set --tenant-id "$${TENANT_ID}" --if-unset || exit 1
+        rmdir /data/.first-start
+        trap - EXIT
+        # This replica's own directory, and its own run channel's address.
+        mkdir -p /data/artifacts "/data/engines/$$(hostname)"
+        export DATA_DIR="/data/engines/$$(hostname)"
+        RUNTARA_RUN_CHANNEL_ENDPOINT="https://$$(hostname -i | awk '{print $$1}'):7444"
+        export RUNTARA_RUN_CHANNEL_ENDPOINT
+        exec runtara-server

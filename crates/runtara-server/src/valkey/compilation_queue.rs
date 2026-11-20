@@ -108,11 +108,12 @@ impl CompilationRequest {
 
 /// Compilation queue backed by Redis/Valkey
 ///
-/// Uses three Redis keys per tenant, so processes serving different tenants
+/// Uses four Redis keys per tenant, so processes serving different tenants
 /// can share one Valkey without taking each other's work:
 /// - `{tenant}:compilation:queue` - LIST for ordered processing
 /// - `{tenant}:compilation:pending` - SET for deduplication and tracking
 /// - `{tenant}:compilation:requests` - HASH of full request payloads
+/// - `{tenant}:compilation:inflight` - ZSET of compiles in progress, by lease expiry
 pub struct CompilationQueue {
     /// Shared Redis connection manager (built once at startup and cloned per
     /// operation — no new TCP connection per call).
@@ -122,6 +123,8 @@ pub struct CompilationQueue {
     /// Which tenant's queue `dequeue` tries first, rotated so one busy tenant
     /// does not starve the others.
     next: std::sync::atomic::AtomicUsize,
+    /// How long a compile taken from the queue stays this worker's unrenewed.
+    lease: Duration,
 }
 
 /// The single-Valkey-per-tenant keys of earlier versions, drained into the
@@ -130,6 +133,8 @@ const LEGACY_QUEUE_KEY: &str = "runtara:compilation:queue";
 const LEGACY_PENDING_KEY: &str = "runtara:compilation:pending";
 const LEGACY_REQUESTS_KEY: &str = "runtara:compilation:requests";
 const QUEUE_SUFFIX: &str = ":compilation:queue";
+/// How often an idle worker looks at the queues again.
+const DEQUEUE_POLL: Duration = Duration::from_millis(250);
 
 fn queue_key(tenant: &str) -> String {
     format!("{tenant}{QUEUE_SUFFIX}")
@@ -143,6 +148,56 @@ fn requests_key(tenant: &str) -> String {
     format!("{tenant}:compilation:requests")
 }
 
+/// The compiles in progress: a sorted set of request keys, each scored by
+/// when its lease expires (milliseconds, Valkey's clock). An engine that
+/// stops renewing a compile's lease leaves it to be taken again.
+fn inflight_key(tenant: &str) -> String {
+    format!("{tenant}:compilation:inflight")
+}
+
+/// How long a compile's lease stands unrenewed; a worker renews it every
+/// [`COMPILE_RENEW`] while it compiles.
+pub const COMPILE_LEASE: Duration = Duration::from_secs(30);
+/// How often a worker renews the lease of the compile it is running.
+pub const COMPILE_RENEW: Duration = Duration::from_secs(10);
+
+/// Takes the next request from a tenant's queue and records it in
+/// progress, with a lease, in the same step.
+const TAKE: &str = r#"
+local key = redis.call('LPOP', KEYS[1])
+if not key then
+  return false
+end
+local now = redis.call('TIME')
+local ms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
+redis.call('ZADD', KEYS[2], ms + tonumber(ARGV[1]), key)
+return key
+"#;
+
+/// Renews the lease of a compile in progress, if it is still in progress.
+const RENEW: &str = r#"
+local now = redis.call('TIME')
+local ms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
+return redis.call('ZADD', KEYS[1], 'XX', 'CH', ms + tonumber(ARGV[2]), ARGV[1])
+"#;
+
+/// Puts back on the queue every compile whose lease expired and that is
+/// still wanted (pending); returns how many.
+const RECOVER_EXPIRED: &str = r#"
+local now = redis.call('TIME')
+local ms = tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
+local expired = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ms)
+local requeued = 0
+for _, key in ipairs(expired) do
+  redis.call('ZREM', KEYS[1], key)
+  if redis.call('SISMEMBER', KEYS[2], key) == 1 then
+    redis.call('RPUSH', KEYS[3], key)
+    requeued = requeued + 1
+  end
+end
+return requeued
+"#;
+
 impl CompilationQueue {
     /// Create a compilation queue consuming `tenants`' work from a shared
     /// connection manager.
@@ -151,7 +206,14 @@ impl CompilationQueue {
             manager,
             tenants,
             next: std::sync::atomic::AtomicUsize::new(0),
+            lease: COMPILE_LEASE,
         }
+    }
+
+    /// Takes compiles under leases of `lease` instead of [`COMPILE_LEASE`].
+    pub fn with_lease(mut self, lease: Duration) -> Self {
+        self.lease = lease;
+        self
     }
 
     /// Get a connection from the shared manager (cheap clone — no TCP).
@@ -251,18 +313,34 @@ impl CompilationQueue {
             return Ok(None);
         }
 
-        // BLPOP over every served tenant's queue, starting from a rotating one
-        // (returns the list name and value).
-        let start = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut command = redis::cmd("BLPOP");
-        for i in 0..self.tenants.len() {
-            command.arg(queue_key(&self.tenants[(start + i) % self.tenants.len()]));
-        }
-        let result: Option<(String, String)> = command
-            .arg(timeout.as_secs())
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
+        // Take from every served tenant's queue in turn, starting from a
+        // rotating one, until one has a request or the timeout passes. A
+        // request taken is in progress under a lease (`TAKE`), so an engine
+        // that dies while compiling it leaves it to be taken again.
+        let deadline = tokio::time::Instant::now() + timeout;
+        let result: Option<(String, String)> = loop {
+            let start = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut taken = None;
+            for i in 0..self.tenants.len() {
+                let tenant = &self.tenants[(start + i) % self.tenants.len()];
+                let key: Option<String> = Script::new(TAKE)
+                    .key(queue_key(tenant))
+                    .key(inflight_key(tenant))
+                    .arg(self.lease.as_millis() as u64)
+                    .invoke_async(&mut conn)
+                    .await
+                    .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
+                if let Some(key) = key {
+                    taken = Some((queue_key(tenant), key));
+                    break;
+                }
+            }
+            if taken.is_some() || tokio::time::Instant::now() >= deadline {
+                break taken;
+            }
+            tokio::time::sleep_until((tokio::time::Instant::now() + DEQUEUE_POLL).min(deadline))
+                .await;
+        };
 
         match result {
             Some((queue_name, key)) => {
@@ -293,6 +371,46 @@ impl CompilationQueue {
         }
     }
 
+    /// Renews the lease of a compile this worker is running. `Ok(false)`
+    /// when it is no longer in progress (its lease expired and it was put
+    /// back).
+    pub async fn renew(&self, request: &CompilationRequest) -> Result<bool, CompilationQueueError> {
+        let mut conn = self.get_connection();
+        let changed: i64 = Script::new(RENEW)
+            .key(inflight_key(&request.tenant_id))
+            .arg(request.unique_key())
+            .arg(self.lease.as_millis() as u64)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
+        Ok(changed == 1)
+    }
+
+    /// Puts back on the queue the served tenants' compiles whose leases
+    /// expired: their engine stopped renewing them.
+    pub async fn recover_expired(&self) -> Result<usize, CompilationQueueError> {
+        let mut conn = self.get_connection();
+        let mut requeued = 0usize;
+        for tenant in &self.tenants {
+            let count: i64 = Script::new(RECOVER_EXPIRED)
+                .key(inflight_key(tenant))
+                .key(pending_key(tenant))
+                .key(queue_key(tenant))
+                .invoke_async(&mut conn)
+                .await
+                .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
+            if count > 0 {
+                warn!(
+                    tenant_id = %tenant,
+                    count,
+                    "Re-queued compilations whose engine stopped renewing them"
+                );
+            }
+            requeued += count as usize;
+        }
+        Ok(requeued)
+    }
+
     /// Mark a compilation as complete (removes from pending set)
     ///
     /// Call this after compilation succeeds or fails.
@@ -304,13 +422,13 @@ impl CompilationQueue {
 
         let key = request.unique_key();
 
-        // Remove from pending set
-        let _: () = conn
+        // No longer pending, nor in progress.
+        let _: () = redis::pipe()
+            .atomic()
             .srem(pending_key(&request.tenant_id), &key)
-            .await
-            .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
-        let _: () = conn
             .hdel(requests_key(&request.tenant_id), &key)
+            .zrem(inflight_key(&request.tenant_id), &key)
+            .query_async(&mut conn)
             .await
             .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
 
@@ -390,10 +508,11 @@ impl CompilationQueue {
 
     /// Recover orphaned pending compilations
     ///
-    /// This should be called on worker startup to handle the case where
-    /// a worker crashed after dequeuing an item but before completing it.
-    ///
-    /// It moves any pending items that are NOT in the queue back to the queue.
+    /// Called on worker startup. A compile in progress is in the inflight
+    /// set under a lease, and is put back only when its lease expires
+    /// ([`Self::recover_expired`]): another engine may be compiling it now.
+    /// What is pending but neither queued nor in progress was taken by an
+    /// earlier release, which kept no lease, and is put back here.
     pub async fn recover_orphaned(&self) -> Result<usize, CompilationQueueError> {
         // The legacy keys hold every tenant's entries; a tenant-scoped
         // process may not touch them.
@@ -469,10 +588,15 @@ impl CompilationQueue {
             .await
             .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
 
-        // Find orphaned items (in pending but not in queue)
+        let inflight: Vec<String> = conn
+            .zrange(inflight_key(tenant), 0, -1)
+            .await
+            .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
+
+        // Find orphaned items: pending, but neither queued nor in progress.
         let orphaned: Vec<&String> = pending
             .iter()
-            .filter(|item| !queue_items.contains(item))
+            .filter(|item| !queue_items.contains(item) && !inflight.contains(item))
             .collect();
 
         if orphaned.is_empty() {

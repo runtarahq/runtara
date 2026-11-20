@@ -83,6 +83,9 @@ pub(crate) struct EngineFacts {
     /// What it compiles by, by which the API tells whether a compiled
     /// workflow is current.
     pub compiles_by: crate::api::repositories::workflows::CompilesBy,
+    /// The release it runs. Engines behind one address run one release.
+    #[serde(default)]
+    pub release: Option<String>,
 }
 
 /// Whether `caller` may do what needs any one of `needs`: by its role, as
@@ -283,6 +286,7 @@ operations! {
         tests_agents: engine.tests_agents(),
         trusted_pins: crate::api::repositories::workflows::installed_trusted_pins(),
         compiles_by: crate::api::repositories::workflows::own_compiles_by(),
+        release: Some(crate::peers::release()),
     };
 
     // ---- Launch ---------------------------------------------------------------

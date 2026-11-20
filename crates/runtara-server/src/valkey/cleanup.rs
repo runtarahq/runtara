@@ -18,7 +18,11 @@ const CLEANUP_INTERVAL_HOURS: u64 = 6;
 /// streams are XACK'd on consume, which only clears the pending-entries list —
 /// the entries themselves stay until trimmed, so they need age-based cleanup too
 /// (the publish-time `MAXLEN` cap is the other half of the bound).
-pub async fn start_cleanup_task(redis_client: redis::Client, config: ValkeyConfig) {
+pub async fn start_cleanup_task(
+    redis_client: redis::Client,
+    config: ValkeyConfig,
+    job: crate::peers::singleton::Job,
+) {
     let cleanup_interval = Duration::from_secs(CLEANUP_INTERVAL_HOURS * 60 * 60);
 
     println!(
@@ -29,6 +33,10 @@ pub async fn start_cleanup_task(redis_client: redis::Client, config: ValkeyConfi
     loop {
         // Wait for the cleanup interval
         tokio::time::sleep(cleanup_interval).await;
+        // One engine at a time trims the streams.
+        if !job.is_mine() {
+            continue;
+        }
 
         println!("Running cleanup task for Redis streams");
 

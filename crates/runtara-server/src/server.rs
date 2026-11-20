@@ -2689,6 +2689,9 @@ async fn start_as_platform(
     // runner. The platform components this server runs are a release in it:
     // published from the components directory when one is set, and the
     // agent allowlist is that release's agents.
+    // Whether every engine reads the same artifacts: a store the host
+    // supplied, or one named by URL, and not this engine's own disk.
+    let artifacts_shared = options.artifacts.is_some() || artifact_store_url().is_some();
     let artifacts: Arc<dyn runtara_environment::artifacts::ArtifactStore> =
         match options.artifacts.clone() {
             Some(artifacts) => artifacts,
@@ -3469,6 +3472,69 @@ async fn start_as_platform(
     ));
     let shutdown_signal = shutdown_coordinator.signal();
 
+    // The engines on this runtime database know each other
+    // (docs/multiple-engines-plan.md). One that cannot share with a live
+    // peer does not start beside it.
+    if let Some(runtara) = embedded_runtara
+        .as_ref()
+        .filter(|_| roles.runs(crate::roles::Role::Engine))
+    {
+        let runtime_pool = runtara.pool().clone();
+        let me = crate::peers::members::Me::this_engine();
+        let sharing = crate::peers::members::Sharing::from_env(artifacts_shared);
+        let peers = crate::peers::members::live_peers(&runtime_pool, &me.id).await?;
+        if let Err(why) = crate::peers::members::may_join(&me, &peers, sharing) {
+            eprintln!("❌ This engine does not start: {why}");
+            std::process::exit(1);
+        }
+        crate::peers::members::join(&runtime_pool, &me).await?;
+        println!(
+            "✓ Engine {} joined ({} other engine(s) on this database)",
+            me.id,
+            peers.len()
+        );
+        // A workflow-agent published or removed through one engine is
+        // staged or unstaged by every other.
+        workflow_agents::install_notices(pool.clone());
+        workers.intake(
+            crate::roles::Role::Engine,
+            "workflow-agent sync",
+            &shutdown_coordinator,
+            workflow_agents::keep_in_sync(pool.clone(), shutdown_signal.clone()),
+        );
+        // A run waiting in process on this engine is shown so by every
+        // other, and theirs by this one.
+        let stop_sharing = Arc::new(tokio::sync::Notify::new());
+        let sharing_waits = runtara_environment::in_process_waits::share(
+            runtime_pool.clone(),
+            me.id.clone(),
+            stop_sharing.clone(),
+        );
+        let waits_shutdown = shutdown_signal.clone();
+        workers.intake(
+            crate::roles::Role::Engine,
+            "in-process waits",
+            &shutdown_coordinator,
+            async move {
+                tokio::pin!(sharing_waits);
+                tokio::select! {
+                    _ = &mut sharing_waits => {}
+                    _ = waits_shutdown.wait() => {
+                        stop_sharing.notify_one();
+                        sharing_waits.await;
+                    }
+                }
+            },
+        );
+        let members_shutdown = shutdown_signal.clone();
+        workers.intake(
+            crate::roles::Role::Engine,
+            "engine membership",
+            &shutdown_coordinator,
+            crate::peers::members::run(runtime_pool, me, members_shutdown),
+        );
+    }
+
     // A lifecycle callback can commit an Environment transition and then lose
     // this process before it releases the matching server-side source
     // reservation. Reconcile only those bounded reservations through the
@@ -3513,6 +3579,7 @@ async fn start_as_platform(
     {
         let cleanup_pool = pool.clone();
         let cleanup_shutdown = shutdown_signal.clone();
+        let cleanup_valkey = redis_manager.clone();
         workers.intake(
             crate::roles::Role::Engine,
             "invocation cleanup",
@@ -3520,11 +3587,18 @@ async fn start_as_platform(
             async move {
                 let cfg =
                     workers::invocation_cleanup_worker::InvocationCleanupWorkerConfig::from_env();
+                let job = crate::peers::singleton::Job::new(
+                    cleanup_valkey,
+                    "invocation-cleanup",
+                    cleanup_shutdown.clone(),
+                )
+                .await;
                 let worker = workers::invocation_cleanup_worker::InvocationCleanupWorker::new(
                     cleanup_pool,
                     cfg,
                     cleanup_shutdown,
-                );
+                )
+                .with_job(job);
                 worker.run().await;
             },
         );
@@ -3537,18 +3611,29 @@ async fn start_as_platform(
     {
         let state = runtara_connections::ConnectionsState::from_config(connections_config.clone());
         let pending_shutdown = shutdown_signal.clone();
+        let pending_valkey = redis_manager.clone();
         workers.intake(
             crate::roles::Role::Engine,
             "unconfirmed OAuth sweep",
             &shutdown_coordinator,
             async move {
                 let service = runtara_connections::service::oauth::OAuthService::from_state(&state);
+                // One engine at a time: a provider is asked to revoke once.
+                let job = crate::peers::singleton::Job::new(
+                    pending_valkey,
+                    "unconfirmed-oauth-sweep",
+                    pending_shutdown.clone(),
+                )
+                .await;
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
                 loop {
                     tokio::select! {
                         biased;
                         _ = pending_shutdown.clone().wait() => return,
                         _ = interval.tick() => {}
+                    }
+                    if !job.is_mine() {
+                        continue;
                     }
                     match service.expire_pending(config::served_tenants()).await {
                         Ok(0) => {}
@@ -3696,6 +3781,27 @@ async fn start_as_platform(
             );
         }
 
+        // The consumers of workers that stopped are removed from the
+        // groups, by one engine at a time.
+        if let (Some(manager), Some(valkey_config)) = (redis_manager.clone(), valkey_config.clone())
+        {
+            let streams = served
+                .iter()
+                .map(|tenant| (tenant.clone(), valkey_config.trigger_stream_key(tenant)))
+                .collect();
+            workers.intake(
+                crate::roles::Role::Engine,
+                "trigger consumer cleanup",
+                &shutdown_coordinator,
+                workers::trigger_worker::keep_consumers_tidy(
+                    manager,
+                    streams,
+                    valkey_config.trigger_consumer_group.clone(),
+                    shutdown_signal.clone(),
+                ),
+            );
+        }
+
         // Start compilation worker (processes compilation queue)
         // This worker handles async compilation requests queued by save operations.
         // We hand it the runtime agent catalog so compiled workflows see the
@@ -3770,6 +3876,8 @@ async fn start_as_platform(
         // not `spawn_intake`: it trims streams on its own interval and never
         // reads the shutdown flag, so waiting for it would spend the whole
         // intake grace on every shutdown for a task that cannot exit.
+        let stream_cleanup_valkey = redis_manager.clone();
+        let stream_cleanup_shutdown = shutdown_signal.clone();
         workers.detached(
             crate::roles::Role::Engine,
             "trigger stream cleanup",
@@ -3777,7 +3885,14 @@ async fn start_as_platform(
                 let redis_url = cleanup_config.connection_url();
                 match valkey::open_client(redis_url.as_str()) {
                     Ok(redis_client) => {
-                        valkey::cleanup::start_cleanup_task(redis_client, cleanup_config).await;
+                        let job = crate::peers::singleton::Job::new(
+                            stream_cleanup_valkey,
+                            "trigger-stream-cleanup",
+                            stream_cleanup_shutdown,
+                        )
+                        .await;
+                        valkey::cleanup::start_cleanup_task(redis_client, cleanup_config, job)
+                            .await;
                     }
                     Err(e) => {
                         eprintln!("Failed to create Redis client for cleanup task: {}", e);
@@ -3858,7 +3973,8 @@ async fn start_as_platform(
         .with_agent_catalog(agent_catalog.clone())
         .with_agent_testing(agent_testing.clone())
         .with_agents(agents_service.clone())
-        .with_connections(connections_facade.clone()),
+        .with_connections(connections_facade.clone())
+        .with_valkey(redis_manager.clone()),
     );
     let engine_api: Arc<dyn crate::engine::Engine> = local_engine.clone();
     native_control.install_engine(execution_engine.clone());
@@ -3893,6 +4009,32 @@ async fn start_as_platform(
                     runtara.pool().clone(),
                     shutdown_signal.clone(),
                     tell,
+                ),
+            );
+        }
+        // What another engine stores, or a piece of a reply it is given,
+        // wakes this engine's readers too.
+        workers.intake(
+            crate::roles::Role::Engine,
+            "conversation-notices",
+            &shutdown_coordinator,
+            crate::api::services::conversations::hear_conversations(
+                pool.clone(),
+                local_engine.conversations(),
+                shutdown_signal.clone(),
+            ),
+        );
+        if let Some(redis_url) =
+            crate::valkey::build_redis_url().filter(|_| redis_manager.is_some())
+        {
+            workers.intake(
+                crate::roles::Role::Engine,
+                "conversation-pieces",
+                &shutdown_coordinator,
+                crate::api::services::conversations::hear_pieces(
+                    redis_url,
+                    local_engine.conversations(),
+                    shutdown_signal.clone(),
                 ),
             );
         }

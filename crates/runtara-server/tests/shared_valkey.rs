@@ -29,7 +29,7 @@ fn unique(prefix: &str) -> String {
 async fn cleanup(manager: &redis::aio::ConnectionManager, tenants: &[&str]) {
     let mut conn = manager.clone();
     for tenant in tenants {
-        for suffix in ["queue", "pending", "requests"] {
+        for suffix in ["queue", "pending", "requests", "inflight"] {
             let _: () = conn
                 .del(format!("{tenant}:compilation:{suffix}"))
                 .await
@@ -176,4 +176,188 @@ async fn startup_moves_only_its_tenants_requests_out_of_the_unprefixed_queue() {
         .await
         .unwrap();
     cleanup(&manager, &[&mine, &theirs]).await;
+}
+
+#[tokio::test]
+async fn an_engine_starting_while_a_peer_compiles_does_not_compile_it_again() {
+    let manager = fresh_manager().await;
+    let tenant = unique("tenant");
+    let compiling = CompilationQueue::new(manager.clone(), vec![tenant.clone()]);
+    compiling
+        .enqueue(&CompilationRequest::new(tenant.clone(), "wf".into(), 1))
+        .await
+        .unwrap();
+    let taken = compiling
+        .dequeue(Duration::from_secs(1))
+        .await
+        .unwrap()
+        .expect("taken");
+
+    // Another engine starts while the compile runs.
+    let starting = CompilationQueue::new(manager.clone(), vec![tenant.clone()]);
+    assert_eq!(starting.recover_orphaned().await.unwrap(), 0);
+    assert_eq!(starting.recover_expired().await.unwrap(), 0);
+    assert!(
+        starting
+            .dequeue(Duration::from_millis(500))
+            .await
+            .unwrap()
+            .is_none(),
+        "a compile in progress was taken again"
+    );
+
+    // Its holder renews it and finishes.
+    assert!(compiling.renew(&taken).await.unwrap());
+    compiling.complete(&taken).await.unwrap();
+    assert!(!compiling.renew(&taken).await.unwrap());
+    assert_eq!(compiling.pending_count().await.unwrap(), 0);
+
+    cleanup(&manager, &[&tenant]).await;
+}
+
+#[tokio::test]
+async fn a_compile_whose_engine_died_is_taken_by_another_within_a_lease() {
+    let manager = fresh_manager().await;
+    let tenant = unique("tenant");
+    let lease = Duration::from_millis(500);
+    let dying = CompilationQueue::new(manager.clone(), vec![tenant.clone()]).with_lease(lease);
+    dying
+        .enqueue(&CompilationRequest::new(tenant.clone(), "wf".into(), 3))
+        .await
+        .unwrap();
+    dying
+        .dequeue(Duration::from_secs(1))
+        .await
+        .unwrap()
+        .expect("taken");
+    // It dies: nothing renews the lease.
+
+    let other = CompilationQueue::new(manager.clone(), vec![tenant.clone()]).with_lease(lease);
+    assert_eq!(other.recover_expired().await.unwrap(), 0, "not expired yet");
+    tokio::time::sleep(lease + Duration::from_millis(100)).await;
+    assert_eq!(other.recover_expired().await.unwrap(), 1);
+    let again = other
+        .dequeue(Duration::from_secs(1))
+        .await
+        .unwrap()
+        .expect("taken again");
+    assert_eq!((again.workflow_id.as_str(), again.version), ("wf", 3));
+    // A request for it now is still one compile, not a second.
+    assert!(
+        !other
+            .enqueue(&CompilationRequest::new(tenant.clone(), "wf".into(), 3))
+            .await
+            .unwrap()
+    );
+    other.complete(&again).await.unwrap();
+    assert_eq!(other.pending_count().await.unwrap(), 0);
+
+    cleanup(&manager, &[&tenant]).await;
+}
+
+#[tokio::test]
+async fn a_compile_taken_by_an_earlier_release_without_a_lease_is_put_back_at_startup() {
+    let manager = fresh_manager().await;
+    let tenant = unique("tenant");
+    let request = CompilationRequest::new(tenant.clone(), "wf".into(), 2);
+    let mut conn = manager.clone();
+    // Pending, neither queued nor in progress: popped by a release that kept
+    // no lease, whose process is gone.
+    let _: () = redis::pipe()
+        .sadd(
+            format!("{tenant}:compilation:pending"),
+            request.unique_key(),
+        )
+        .hset(
+            format!("{tenant}:compilation:requests"),
+            request.unique_key(),
+            request.payload().unwrap(),
+        )
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let queue = CompilationQueue::new(manager.clone(), vec![tenant.clone()]);
+    assert_eq!(queue.recover_orphaned().await.unwrap(), 1);
+    assert!(
+        queue
+            .dequeue(Duration::from_secs(1))
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    cleanup(&manager, &[&tenant]).await;
+}
+
+#[tokio::test]
+async fn the_consumers_of_workers_that_are_gone_leave_the_trigger_group() {
+    use runtara_server::workers::trigger_worker::forget_dead_consumers;
+    let manager = fresh_manager().await;
+    let stream = unique("triggers");
+    let group = "workers";
+    let mut conn = manager.clone();
+    let _: () = redis::cmd("XGROUP")
+        .arg("CREATE")
+        .arg(&stream)
+        .arg(group)
+        .arg("$")
+        .arg("MKSTREAM")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let _: String = conn.xadd(&stream, "*", &[("n", "1")]).await.unwrap();
+    // One worker read the entry and holds it pending; another read nothing.
+    for consumer in ["holding", "gone"] {
+        let _: redis::Value = redis::cmd("XREADGROUP")
+            .arg("GROUP")
+            .arg(group)
+            .arg(consumer)
+            .arg("COUNT")
+            .arg(1)
+            .arg("STREAMS")
+            .arg(&stream)
+            .arg(">")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+    }
+    let names = |manager: redis::aio::ConnectionManager, stream: String| async move {
+        let mut conn = manager;
+        let consumers: Vec<std::collections::HashMap<String, redis::Value>> = redis::cmd("XINFO")
+            .arg("CONSUMERS")
+            .arg(&stream)
+            .arg(group)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let mut names: Vec<String> = consumers
+            .iter()
+            .filter_map(|c| match c.get("name") {
+                Some(redis::Value::BulkString(name)) => {
+                    Some(String::from_utf8_lossy(name).into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        names
+    };
+    // Not idle long enough: both stay.
+    assert_eq!(
+        forget_dead_consumers(&manager, &stream, group, Duration::from_secs(3600))
+            .await
+            .unwrap(),
+        0
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Idle past the limit: the one with nothing pending goes, the one
+    // holding an entry stays for another to claim it from.
+    assert_eq!(
+        forget_dead_consumers(&manager, &stream, group, Duration::from_millis(200))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(names(manager.clone(), stream.clone()).await, ["holding"]);
+    let _: () = conn.del(&stream).await.unwrap();
 }

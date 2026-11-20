@@ -86,6 +86,8 @@ pub struct InvocationCleanupWorker {
     oauth_repo: OAuthRepository,
     config: InvocationCleanupWorkerConfig,
     shutdown: ShutdownSignal,
+    /// Run on one engine at a time; `None` on this one always.
+    job: Option<crate::peers::singleton::Job>,
 }
 
 impl InvocationCleanupWorker {
@@ -99,7 +101,20 @@ impl InvocationCleanupWorker {
             pool,
             config,
             shutdown,
+            job: None,
         }
+    }
+
+    /// Runs its passes only while this engine holds `job`.
+    pub fn with_job(mut self, job: crate::peers::singleton::Job) -> Self {
+        self.job = Some(job);
+        self
+    }
+
+    fn is_mine(&self) -> bool {
+        self.job
+            .as_ref()
+            .is_none_or(crate::peers::singleton::Job::is_mine)
     }
 
     /// Run the cleanup loop. Exits when the shutdown signal fires.
@@ -119,15 +134,18 @@ impl InvocationCleanupWorker {
         // bounded retention is enforced even when the server restarts more
         // frequently than `poll_interval`. Race against the shutdown signal so
         // a slow cleanup (e.g. unreachable DB) cannot block shutdown.
-        tokio::select! {
-            biased;
-            _ = self.shutdown.clone().wait() => {
-                info!("Invocation cleanup worker exiting on shutdown signal");
-                return;
-            }
-            res = self.cleanup_once() => {
-                if let Err(e) = res {
-                    error!(error = %e, "Invocation cleanup cycle failed");
+        // On one engine at a time, where engines share a Valkey.
+        if self.is_mine() {
+            tokio::select! {
+                biased;
+                _ = self.shutdown.clone().wait() => {
+                    info!("Invocation cleanup worker exiting on shutdown signal");
+                    return;
+                }
+                res = self.cleanup_once() => {
+                    if let Err(e) = res {
+                        error!(error = %e, "Invocation cleanup cycle failed");
+                    }
                 }
             }
         }
@@ -145,6 +163,9 @@ impl InvocationCleanupWorker {
                     return;
                 }
                 _ = tokio::time::sleep(self.config.poll_interval) => {
+                    if !self.is_mine() {
+                        continue;
+                    }
                     if let Err(e) = self.cleanup_once().await {
                         error!(error = %e, "Invocation cleanup cycle failed");
                     }

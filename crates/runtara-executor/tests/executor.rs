@@ -173,7 +173,7 @@ struct Deployment {
     client: tls::Client,
     /// The executor's own certificate, as a client: not the server's.
     impostor: tls::Client,
-    registrar: Arc<runtara_executor::registration::Registrar>,
+    registrar: Arc<runtara_executor::registration::Registrars>,
     serving: tokio::task::JoinHandle<()>,
     state: tempfile::TempDir,
 }
@@ -694,4 +694,88 @@ async fn only_the_servers_certificate_may_place_runs() {
     .await
     .expect("the connection was neither served nor closed");
     assert!(answered.is_err());
+}
+
+/// A stand-in for one engine's run channel that only hears registrations.
+async fn engine_hearing_registrations(
+    server: &Identity,
+) -> (String, RunChannel, tokio::task::JoinHandle<()>) {
+    let channel = RunChannel::default();
+    let router = axum::Router::new()
+        .route("/executor/v1/executors/{boot}", put(here).delete(leaving))
+        .with_state(channel.clone());
+    let listener = tls::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let endpoint = format!("https://{}", listener.local_addr().unwrap());
+    let serving = tokio::spawn(tls::serve(
+        listener,
+        server.server_config().unwrap(),
+        EXECUTOR_NAME,
+        router,
+    ));
+    (endpoint, channel, serving)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_executor_tells_every_engine_it_is_here() {
+    let (for_server, for_executor) = runtara_executor::pki::issue().unwrap();
+    let server = Identity::from_pem(
+        for_server.ca_pem.clone(),
+        for_server.certificate_pem.as_bytes(),
+        for_server.key_pem.as_bytes(),
+    )
+    .unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let tls_dir = state.path().join("tls");
+    std::fs::create_dir_all(&tls_dir).unwrap();
+    std::fs::write(tls_dir.join("ca.pem"), &for_executor.ca_pem).unwrap();
+    std::fs::write(tls_dir.join("tls.pem"), &for_executor.certificate_pem).unwrap();
+    std::fs::write(tls_dir.join("tls.key"), &for_executor.key_pem).unwrap();
+    let (a, heard_by_a, _a) = engine_hearing_registrations(&server).await;
+    let (b, heard_by_b, _b) = engine_hearing_registrations(&server).await;
+
+    let executor = runtara_executor::Executor::bind(&runtara_executor::Config {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        tls_dir,
+        server_url: format!("{a}, {b}"),
+        advertise_url: None,
+        state_dir: state.path().join("state"),
+        max_runs: 2,
+        run_binary: runner(),
+        no_landlock: std::env::var_os("RUNTARA_RUN_TEST_NO_LANDLOCK").is_some(),
+        unsandboxed: !cfg!(target_os = "linux"),
+    })
+    .await
+    .unwrap();
+    let registrar = executor.registrar();
+    let serving = tokio::spawn(executor.serve());
+    let said = |channel: &RunChannel| channel.registrations.lock().unwrap().clone();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while said(&heard_by_a).len() < 2 || said(&heard_by_b).len() < 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both engines are told");
+    // One executor: the same boot to each.
+    let boot = registrar.boot().to_owned();
+    for (method, from, _) in said(&heard_by_a).into_iter().chain(said(&heard_by_b)) {
+        assert_eq!((method.as_str(), from.as_str()), ("PUT", boot.as_str()));
+    }
+    assert_eq!(registrar.telling(), {
+        let mut both = vec![a.clone(), b.clone()];
+        both.sort();
+        both
+    });
+
+    // Stopping, it tells both.
+    serving.abort();
+    let _ = serving.await;
+    registrar.leave().await;
+    for channel in [&heard_by_a, &heard_by_b] {
+        let last = said(channel).pop().unwrap();
+        assert_eq!(
+            (last.0.as_str(), last.1.as_str()),
+            ("DELETE", boot.as_str())
+        );
+    }
 }

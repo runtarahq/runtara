@@ -57,6 +57,179 @@ pub fn install_store(store: Arc<dyn ArtifactStore>) {
     let _ = STORE.set(store);
 }
 
+/// Where a publish or a removal is said to the other engines: the server
+/// database, set at boot by an engine. Unset, nothing is said.
+static NOTICES: OnceLock<sqlx::PgPool> = OnceLock::new();
+
+/// The channel on which an engine says a tenant's published workflow-agents
+/// changed; its payload is the tenant's id.
+pub const CHANGED_CHANNEL: &str = "runtara_workflow_agents";
+
+/// How often every tenant's staging dir is made to hold what the store
+/// records, whether or not anything said so: what catches a missed notice.
+pub const RESYNCED_EVERY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Say each publish and removal to the other engines over `pool`
+/// (docs/multiple-engines-plan.md, E7).
+pub fn install_notices(pool: sqlx::PgPool) {
+    let _ = NOTICES.set(pool);
+}
+
+/// Tells the other engines that `tenant_id`'s published agents changed.
+async fn tell_the_others(tenant_id: &str) {
+    let Some(pool) = NOTICES.get() else {
+        return;
+    };
+    if let Err(error) = sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(CHANGED_CHANNEL)
+        .bind(tenant_id)
+        .execute(pool)
+        .await
+    {
+        // The others find it at their next resync.
+        tracing::warn!(tenant = %tenant_id, %error, "the other engines were not told of a workflow-agent change");
+    }
+}
+
+/// Make `tenant_id`'s staging dir hold exactly what the store records: each
+/// record is written, and what is staged with no record is removed. Nothing
+/// staged here is recorded: the store is the truth, and an agent another
+/// engine removed is not brought back. Returns how many are staged.
+pub async fn resync_tenant(tenant_id: &str) -> std::io::Result<usize> {
+    let store = store();
+    let prefix = tenant_prefix(tenant_id);
+    let mut recorded = std::collections::HashSet::new();
+    for key in store.list_manifests(&prefix).await.map_err(store_error)? {
+        let Some(snake) = key
+            .strip_prefix(&prefix)
+            .and_then(|file| file.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        let Some(manifest) = store.get_manifest(&key).await.map_err(store_error)? else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_slice::<StagedRecord>(manifest.metadata_bytes()) else {
+            tracing::warn!(%key, "malformed workflow-agent record; not staged");
+            continue;
+        };
+        let Some(wasm) = store.get(&manifest.content).await.map_err(store_error)? else {
+            continue;
+        };
+        write_staged_files(
+            tenant_id,
+            snake,
+            &wasm,
+            record.meta.get().as_bytes(),
+            &record.lowering,
+        )?;
+        recorded.insert(snake.to_owned());
+    }
+    if let Ok(entries) = std::fs::read_dir(staging_dir(tenant_id)) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(snake) = name.to_str().and_then(|name| {
+                let rest = name.strip_prefix("runtara_agent_")?;
+                [".wasm", ".meta.json", ".lowering"]
+                    .iter()
+                    .find_map(|suffix| rest.strip_suffix(suffix))
+            }) else {
+                continue;
+            };
+            if !recorded.contains(snake) {
+                match std::fs::remove_file(entry.path()) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+    Ok(recorded.len())
+}
+
+/// The tenants that have a published workflow-agent recorded or staged.
+async fn tenants_with_agents() -> std::io::Result<std::collections::BTreeSet<String>> {
+    let mut tenants = std::collections::BTreeSet::new();
+    for key in store()
+        .list_manifests("tenants/")
+        .await
+        .map_err(store_error)?
+    {
+        if let Some(tenant_id) = key
+            .strip_prefix("tenants/")
+            .and_then(|rest| rest.split_once("/workflow-agents/"))
+            .and_then(|(tenant, _)| hex::decode(tenant).ok())
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+        {
+            tenants.insert(tenant_id);
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(data_dir().join("workflow-agents")) {
+        tenants.extend(
+            entries
+                .flatten()
+                .filter_map(|entry| entry.file_name().to_str().map(str::to_owned)),
+        );
+    }
+    Ok(tenants)
+}
+
+/// Keeps this engine's staging dirs to what the store records, until the
+/// server stops: a tenant's when another engine says it changed, and every
+/// tenant's every [`RESYNCED_EVERY`].
+pub async fn keep_in_sync(pool: sqlx::PgPool, shutdown: crate::shutdown::ShutdownSignal) {
+    let resync_all = || async {
+        match tenants_with_agents().await {
+            Ok(tenants) => {
+                for tenant_id in tenants {
+                    if let Err(error) = resync_tenant(&tenant_id).await {
+                        tracing::warn!(tenant = %tenant_id, %error, "workflow-agents were not restaged");
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(%error, "the tenants with workflow-agents were not read"),
+        }
+    };
+    loop {
+        let heard = async {
+            let mut listener = sqlx::postgres::PgListener::connect_with(&pool).await?;
+            listener.listen(CHANGED_CHANNEL).await?;
+            // Whatever changed while this engine was not listening.
+            resync_all().await;
+            let mut every = tokio::time::interval(RESYNCED_EVERY);
+            every.tick().await;
+            loop {
+                tokio::select! {
+                    notice = listener.recv() => {
+                        let notice = notice?;
+                        let tenant_id = notice.payload();
+                        match resync_tenant(tenant_id).await {
+                            Ok(staged) => tracing::info!(tenant = %tenant_id, staged, "workflow-agents restaged: another engine changed them"),
+                            Err(error) => tracing::warn!(tenant = %tenant_id, %error, "workflow-agents were not restaged"),
+                        }
+                    }
+                    _ = every.tick() => resync_all().await,
+                }
+            }
+            #[allow(unreachable_code)]
+            Ok::<_, sqlx::Error>(())
+        };
+        tokio::select! {
+            biased;
+            _ = shutdown.clone().wait() => return,
+            heard = heard => if let Err(error) = heard {
+                tracing::warn!(%error, "workflow-agent changes are not heard; listening again");
+            },
+        }
+        tokio::select! {
+            biased;
+            _ = shutdown.clone().wait() => return,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+        }
+    }
+}
+
 fn store() -> Arc<dyn ArtifactStore> {
     STORE.get().cloned().unwrap_or_else(|| {
         Arc::new(runtara_environment::image_registry::default_artifact_store(
@@ -416,6 +589,7 @@ pub async fn unstage(tenant_id: &str, slug: &str) -> std::io::Result<()> {
             Err(e) => return Err(e),
         }
     }
+    tell_the_others(tenant_id).await;
     Ok(())
 }
 
@@ -446,7 +620,9 @@ pub async fn stage(
     let wasm = std::fs::read(composed_wasm)?;
     let lowering = crate::config::workflow_lowering_tag();
     put_record(tenant_id, &snake, &wasm, &meta, &lowering).await?;
-    write_staged_files(tenant_id, &snake, &wasm, &meta, &lowering)
+    let staged = write_staged_files(tenant_id, &snake, &wasm, &meta, &lowering)?;
+    tell_the_others(tenant_id).await;
+    Ok(staged)
 }
 
 /// A staged workflow-agent that was built by another lowering than this
@@ -599,6 +775,55 @@ mod tests {
 
         unstage(TENANT, "relowered").await.unwrap();
         assert!(!dir.join("runtara_agent_relowered.lowering").exists());
+    }
+
+    /// Another engine publishes or removes an agent in the shared store: a
+    /// resync stages what it published and unstages what it removed, and
+    /// never records again what was staged here and removed there.
+    #[tokio::test]
+    async fn a_resync_follows_what_another_engine_published_or_removed() {
+        const TENANT: &str = "resync-tenant";
+        let _env = crate::test_env::ENV_MUTEX.lock().await;
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set("DATA_DIR", data_dir.path().to_str().unwrap());
+        let wasm = data_dir.path().join("agent.wasm");
+        std::fs::write(&wasm, b"\0asm here").unwrap();
+        stage(TENANT, "here", &wasm, &info("here")).await.unwrap();
+
+        // Another engine publishes `there`: its record, none of its files.
+        let meta = serde_json::to_vec(&info("there")).unwrap();
+        put_record(TENANT, "there", b"\0asm there", &meta, "lowering-x")
+            .await
+            .unwrap();
+        assert_eq!(resync_tenant(TENANT).await.unwrap(), 2);
+        let dir = staging_dir(TENANT);
+        assert_eq!(
+            std::fs::read(dir.join("runtara_agent_there.wasm")).unwrap(),
+            b"\0asm there"
+        );
+
+        // It removes `here`: its record goes, and so do the files staged here.
+        store()
+            .delete_manifest(&record_key(TENANT, "here").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resync_tenant(TENANT).await.unwrap(), 1);
+        for suffix in ["wasm", "meta.json", "lowering"] {
+            assert!(!dir.join(format!("runtara_agent_here.{suffix}")).exists());
+        }
+        assert!(
+            store()
+                .get_manifest(&record_key(TENANT, "here").unwrap())
+                .await
+                .unwrap()
+                .is_none(),
+            "what was removed is not recorded again"
+        );
+        assert_eq!(
+            published_agent_ids(TENANT).into_iter().collect::<Vec<_>>(),
+            ["there"]
+        );
     }
 
     /// The store is the truth: a lost staging dir is rebuilt from the records,
