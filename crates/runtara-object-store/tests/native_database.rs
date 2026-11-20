@@ -537,3 +537,65 @@ async fn independent_batches_continue_after_rejected_sql_and_result_decoding() {
         .unwrap();
     assert_eq!(count.rows, vec![vec![SqlValue::Integer("1".into())]]);
 }
+
+/// Relays connections to the test database, as seal relays a tenant's
+/// sessions, and ends every session it holds when told to, as seal ends one
+/// that has been idle. Answers the URL to reach the database through it.
+async fn relay_to_test_database() -> (String, tokio::sync::watch::Sender<u32>) {
+    use std::str::FromStr;
+    let url = std::env::var("TEST_DATABASE_URL").expect("isolated TEST_DATABASE_URL required");
+    let options = sqlx::postgres::PgConnectOptions::from_str(&url).unwrap();
+    let target = format!("{}:{}", options.get_host(), options.get_port());
+    assert!(url.contains(&target), "TEST_DATABASE_URL names its port");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relayed = url.replacen(&target, &listener.local_addr().unwrap().to_string(), 1);
+    let (cut, cuts) = tokio::sync::watch::channel(0u32);
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            let target = target.clone();
+            let mut cuts = cuts.clone();
+            cuts.borrow_and_update();
+            tokio::spawn(async move {
+                let mut server = tokio::net::TcpStream::connect(target).await.unwrap();
+                tokio::select! {
+                    _ = tokio::io::copy_bidirectional(&mut client, &mut server) => {}
+                    _ = cuts.changed() => {}
+                }
+            });
+        }
+    });
+    (relayed, cut)
+}
+
+/// A session ended under an idle pool is replaced before it is used, not
+/// handed to the next query to fail with.
+#[tokio::test]
+async fn an_idle_connection_ended_under_the_pool_is_replaced() {
+    for ping_idle_after in [Some(Duration::ZERO), None] {
+        let (url, cut) = relay_to_test_database().await;
+        let store = ObjectStore::connect(
+            StoreConfig::builder(url)
+                .pool(runtara_object_store::PoolConfig {
+                    max_connections: 1,
+                    min_connections: 0,
+                    ping_idle_after,
+                    ..Default::default()
+                })
+                .build(),
+        )
+        .await
+        .expect("the store connects through the relay");
+        let one = || sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(store.pool());
+        assert_eq!(one().await.unwrap(), 1);
+        // Back in the pool (sqlx tests a connection as it is released), and
+        // idle, before its session ends.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        cut.send_modify(|n| *n += 1);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let after = one().await;
+        match ping_idle_after {
+            Some(_) => assert_eq!(after.unwrap(), 1, "the idle connection was replaced"),
+            None => assert!(after.is_err(), "unpinged, the ended session is used"),
+        }
+    }
+}

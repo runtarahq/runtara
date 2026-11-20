@@ -85,18 +85,31 @@ impl ObjectStore {
             .application_name("runtara-object-model")
             .statement_cache_capacity(config.pool.statement_cache_capacity);
 
-        let pool = PgPoolOptions::new()
+        let mut options = PgPoolOptions::new()
             .max_connections(config.pool.max_connections)
             .min_connections(config.pool.min_connections)
             .acquire_timeout(config.pool.acquire_timeout)
             .idle_timeout(config.pool.idle_timeout)
             .max_lifetime(config.pool.max_lifetime)
-            .test_before_acquire(config.pool.test_before_acquire)
-            .connect_with(connect_options)
-            .await
-            .map_err(|e| {
-                ObjectStoreError::Connection(format!("Database connection failed: {}", e))
-            })?;
+            .test_before_acquire(config.pool.test_before_acquire);
+        // A connection that sat idle may have been ended under the pool (seal
+        // ends an idle relayed session): ping it first, and a
+        // connection that does not answer is replaced instead of failing the
+        // query it was for.
+        if let (false, Some(after)) = (config.pool.test_before_acquire, config.pool.ping_idle_after)
+        {
+            options = options.before_acquire(move |connection, meta| {
+                Box::pin(async move {
+                    if meta.idle_for < after {
+                        return Ok(true);
+                    }
+                    Ok(sqlx::Connection::ping(connection).await.is_ok())
+                })
+            });
+        }
+        let pool = options.connect_with(connect_options).await.map_err(|e| {
+            ObjectStoreError::Connection(format!("Database connection failed: {}", e))
+        })?;
 
         let store = Self {
             pool,

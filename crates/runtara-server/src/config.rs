@@ -237,6 +237,10 @@ impl Config {
                 "OBJECT_MODEL_POOL_TEST_BEFORE_ACQUIRE",
                 runtara_object_store::DEFAULT_POOL_TEST_BEFORE_ACQUIRE,
             )?,
+            ping_idle_after: secs_to_opt_duration(parse_u64_or(
+                "OBJECT_MODEL_POOL_PING_IDLE_AFTER_SECS",
+                runtara_object_store::DEFAULT_POOL_PING_IDLE_AFTER_SECS,
+            )?),
             statement_cache_capacity: parse_usize_or(
                 "OBJECT_MODEL_POOL_STMT_CACHE",
                 runtara_object_store::DEFAULT_POOL_STATEMENT_CACHE_CAPACITY,
