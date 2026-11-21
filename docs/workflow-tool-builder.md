@@ -56,13 +56,18 @@ The builder reads the saved draft and refuses it, before anyone is asked,
 when a step:
 
 - uses a connection of the `mcp` integration (the builder's own keys: a tool
-  holding one could edit workflows), or an `mcp`, `conversation`, `control`
-  or model agent;
+  holding one could edit workflows), or an `mcp`, `conversation` or
+  `control` agent;
 - embeds another workflow, or is a step type that waits (WaitForSignal,
   Delay) or loops without bound;
 - uses a connection that is not one of the tenant's listed connections;
 
 or when the draft does not validate.
+
+A tool may use a model (a model agent's capability, or an AI Agent step) on
+one of the tenant's model connections: a tool that reads a page and
+describes it needs one. A model step changes no data, so such a tool is
+tried before it is proposed.
 
 Then the builder publishes the draft. Whether a workflow-agent parks is the
 engine's own proof, made when it is published (`parks`,
@@ -138,6 +143,13 @@ Through the chat, with `gpt-5.4` drafting:
   example.com ("Example Domain"), proposed with its approve code, refused
   when the chat model tried to approve it, approved with the code, and used
   from the next message.
+- "I give you a URL, you return an Ideal Customer Profile of the site":
+  three steps (fetch the page, reduce it to its text and cut it to a size
+  a model takes, `ai-tools`/`text-completion` with an output schema), and
+  an accurate profile of linear.app. Two earlier drafts failed in ways the
+  model is now told about: a prompt written as an immediate value, whose
+  `{{ ... }}` is not filled in (the model never saw the page and made a
+  profile up), and a whole page's HTML sent to the model (575k tokens).
 - "send a fax": not possible, with the reason; the draft deleted.
 - a tool that must use a Delay step: not possible (the model keeps to the
   rules).
