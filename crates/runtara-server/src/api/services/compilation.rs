@@ -2018,6 +2018,16 @@ impl CompilationService {
             "wasmSizeBytes": result.wasm_size,
             "stagedWasm": wasm_path.display().to_string(),
             "stagedMeta": meta_path.display().to_string(),
+            // Whether the agent parks, and where: a parking agent runs as a
+            // child run, which cannot be an AI Agent's tool. Said here, at
+            // publish, so its publisher knows before a caller fails to compile.
+            "parks": parks,
+            "usableAsAiTool": !parks,
+            "parkingSites": safety.parking_sites.iter().map(|site| serde_json::json!({
+                "stepId": site.step_id,
+                "stepType": site.step_type,
+                "reason": site.reason,
+            })).collect::<Vec<_>>(),
         }))
     }
 

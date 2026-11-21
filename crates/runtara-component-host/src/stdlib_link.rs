@@ -196,6 +196,7 @@ stdlib_functions! {
     "ai-turn-tool-args" (u64, Vec<u8>, u32) => Result<Vec<u8>, String>;
     "ai-turn-tool-index" (u64, Vec<u8>, u32) => Result<u32, String>;
     "ai-tool-args-with-timeout" (u64, Vec<u8>, u64) => Result<Vec<u8>, String>;
+    "ai-tool-args-with-fixed" (u64, Vec<u8>, Vec<u8>) => Result<Vec<u8>, String>;
     "ai-turn-add-result" (u64, Vec<u8>, Vec<u8>, u32, Vec<u8>) => Result<Vec<u8>, String>;
     "ai-turn-cache-key" (u64, String, u32, Vec<u8>) => Result<String, String>;
     "ai-turn-response-key" (u64, String, u32, Vec<u8>) => Result<String, String>;

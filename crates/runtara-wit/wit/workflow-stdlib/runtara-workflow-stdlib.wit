@@ -692,6 +692,15 @@ interface json {
         args: list<u8>,
         timeout-ms: u64,
     ) -> result<list<u8>, string>;
+    // Merge a tool step's fixed arguments (its evaluated input mapping) over
+    // the model's: objects deeply, the fixed value winning at a leaf, so the
+    // model cannot override what the step fixes. A non-object args value is
+    // replaced by the fixed object.
+    ai-tool-args-with-fixed: func(
+        ctx: u64,
+        args: list<u8>,
+        fixed: list<u8>,
+    ) -> result<list<u8>, string>;
     // Append the index-th tool call's dispatched result to the pending list.
     ai-turn-add-result: func(
         ctx: u64,

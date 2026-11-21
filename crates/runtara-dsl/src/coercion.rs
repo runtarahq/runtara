@@ -149,6 +149,13 @@ pub fn coerce_input(mut input: Value, meta: &InputTypeMeta) -> Value {
     if let Value::Object(ref mut map) = input {
         for field in meta.fields {
             if let Some(value) = map.remove(field.name) {
+                // A null for an optional input means it was not given (a
+                // mapping from a value that is absent, a tool argument left
+                // out): leave it out, so the field's own default applies
+                // instead of failing to deserialize a null.
+                if value.is_null() && field.is_optional {
+                    continue;
+                }
                 let coerced = coerce_field_value(value, field.type_name);
                 map.insert(field.name.to_string(), coerced);
             }
@@ -189,7 +196,58 @@ fn extract_inner_type<'a>(type_name: &'a str, wrapper: &str) -> Option<&'a str> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_meta::InputFieldMeta;
     use serde_json::json;
+
+    /// A null for an optional input is left out, so its default applies (a
+    /// mapping from an absent value sends null); a required input keeps an
+    /// explicit null.
+    #[test]
+    fn a_null_optional_input_is_left_out() {
+        static FIELDS: [InputFieldMeta; 3] = [
+            InputFieldMeta {
+                name: "method",
+                type_name: "HttpMethod",
+                is_optional: true,
+                display_name: None,
+                description: None,
+                example: None,
+                default_value: None,
+                enum_values_fn: None,
+            },
+            InputFieldMeta {
+                name: "value",
+                type_name: "Value",
+                is_optional: false,
+                display_name: None,
+                description: None,
+                example: None,
+                default_value: None,
+                enum_values_fn: None,
+            },
+            InputFieldMeta {
+                name: "count",
+                type_name: "Option<i64>",
+                is_optional: true,
+                display_name: None,
+                description: None,
+                example: None,
+                default_value: None,
+                enum_values_fn: None,
+            },
+        ];
+        let meta = InputTypeMeta {
+            type_name: "Probe",
+            display_name: None,
+            description: None,
+            fields: &FIELDS,
+        };
+        let input = coerce_input(
+            json!({"method": null, "value": null, "count": "3", "other": null}),
+            &meta,
+        );
+        assert_eq!(input, json!({"value": null, "count": 3, "other": null}));
+    }
 
     // ========================================
     // String → Number coercions

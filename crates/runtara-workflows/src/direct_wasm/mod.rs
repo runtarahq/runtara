@@ -33,6 +33,7 @@ mod plan;
 #[cfg(feature = "compiler")]
 mod static_data;
 pub mod support;
+mod tool_schema;
 
 #[cfg(feature = "compiler")]
 pub use compile::{

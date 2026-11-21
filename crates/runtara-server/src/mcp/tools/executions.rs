@@ -134,6 +134,17 @@ pub struct ExecuteWorkflowWaitParams {
     pub version: Option<i32>,
     #[schemars(description = "Max seconds to wait for completion (default: 120, max: 300)")]
     pub timeout_seconds: Option<u32>,
+    #[schemars(
+        description = "Also return when the run is suspended (waiting for a signal, a person or a child run), not only when it finishes: for a run that may stop for an answer"
+    )]
+    pub return_when_waiting: Option<bool>,
+}
+
+/// Whether a run in `status` is where the waiter stops: a terminal state, or,
+/// when asked, a suspended one.
+fn wait_is_over(status: &str, return_when_waiting: bool) -> bool {
+    matches!(status, "completed" | "failed" | "timeout" | "cancelled")
+        || (return_when_waiting && status == "suspended")
 }
 
 // ===== Tool Implementations =====
@@ -508,7 +519,7 @@ pub async fn execute_workflow_wait(
             .unwrap_or("");
 
         match status {
-            "completed" | "failed" | "timeout" | "cancelled" => {
+            status if wait_is_over(status, params.return_when_waiting.unwrap_or(false)) => {
                 return json_result(result);
             }
             _ => {
@@ -2736,6 +2747,19 @@ pub async fn why_execution_failed(
 
 #[cfg(test)]
 mod tests {
+
+    /// A waiter stops at a terminal state, and at a suspended run only when
+    /// asked to (`return_when_waiting`).
+    #[test]
+    fn a_waiter_stops_at_a_suspension_only_when_asked() {
+        for terminal in ["completed", "failed", "timeout", "cancelled"] {
+            assert!(super::wait_is_over(terminal, false));
+        }
+        assert!(!super::wait_is_over("suspended", false));
+        assert!(super::wait_is_over("suspended", true));
+        assert!(!super::wait_is_over("running", true));
+    }
+
     use super::*;
     use schemars::JsonSchema;
     use serde_json::json;

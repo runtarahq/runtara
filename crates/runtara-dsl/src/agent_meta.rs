@@ -2169,8 +2169,22 @@ fn capability_field_from_schema(field_name: &str, field: &crate::SchemaField) ->
                 })
                 .collect()
         }),
-        schema: None,
+        // An object's properties, or an array's item properties, would be
+        // lost in the flat field: carry the field's whole JSON Schema, so a
+        // caller (a model calling the agent as a tool) is shown them.
+        schema: has_nested_fields(field)
+            .then(|| crate::schema_convert::schema_field_to_json_schema(field)),
     }
+}
+
+/// Whether a workflow input field has structure below it: an object's
+/// properties, or properties of an array's items.
+fn has_nested_fields(field: &crate::SchemaField) -> bool {
+    field
+        .properties
+        .as_ref()
+        .is_some_and(|properties| !properties.is_empty())
+        || field.items.as_deref().is_some_and(has_nested_fields)
 }
 
 fn field_type_info_from_schema(field: &crate::SchemaField) -> FieldTypeInfo {
@@ -3714,5 +3728,48 @@ mod input_field_type_tests {
             input_field_to_api(&input("String", None)).type_name,
             "string"
         );
+    }
+}
+
+#[cfg(test)]
+mod workflow_agent_input_tests {
+    use super::*;
+
+    /// A published workflow's object input keeps its properties, and an
+    /// array's item properties, in the capability input's schema; a flat input
+    /// has none (docs/workflow-authoring-gaps.md, 7).
+    #[test]
+    fn a_published_input_keeps_its_nested_fields() {
+        let input_schema: std::collections::HashMap<String, crate::SchemaField> =
+            serde_json::from_value(serde_json::json!({
+                "where": {"type": "object", "required": true, "properties": {
+                    "lat": {"type": "number", "required": true},
+                    "lon": {"type": "number", "required": true}
+                }},
+                "stops": {"type": "array", "required": false, "items": {
+                    "type": "object", "properties": {"name": {"type": "string", "required": true}}
+                }},
+                "city": {"type": "string", "required": true}
+            }))
+            .expect("schema parses");
+        let info = workflow_agent_info("trip", "Trip", "", &input_schema, &Default::default());
+        let input = |name: &str| {
+            info.capabilities[0]
+                .inputs
+                .iter()
+                .find(|field| field.name == name)
+                .unwrap()
+                .clone()
+        };
+        let place = input("where")
+            .schema
+            .expect("an object keeps its properties");
+        assert_eq!(place["properties"]["lat"]["type"], "number");
+        assert_eq!(place["required"], serde_json::json!(["lat", "lon"]));
+        let stops = input("stops")
+            .schema
+            .expect("an array keeps its items' properties");
+        assert_eq!(stops["items"]["properties"]["name"]["type"], "string");
+        assert!(input("city").schema.is_none());
     }
 }

@@ -720,7 +720,7 @@ pub async fn structured_output(
             "type": "json_schema",
             "json_schema": {
                 "name": "structured_response",
-                "strict": true,
+                "strict": runtara_ai::provider::openai_strict_compatible(&input.json_schema),
                 "schema": input.json_schema
             }
         }

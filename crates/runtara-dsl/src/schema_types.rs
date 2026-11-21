@@ -26,7 +26,7 @@
 // (S, M, L, XL) also reads lowercase. DSL 4.0 removes the deprecated ones.
 
 /// DSL version - bump when making breaking changes
-pub const DSL_VERSION: &str = "3.7.0";
+pub const DSL_VERSION: &str = "3.8.0";
 
 // ============================================================================
 // Root Types
@@ -1486,6 +1486,20 @@ pub struct GetStateStep {
 /// a concrete step (Agent, EmbedWorkflow, WaitForSignal). The LLM picks which
 /// tool/branch to execute, collects the result, and loops until it produces a
 /// final text response or reaches max_iterations.
+///
+/// Each tool is shown to the LLM as the edge label (its name), the target
+/// step's `name` (its description; else the capability's or child
+/// workflow's), and the JSON Schema of its arguments: the target Agent
+/// capability's inputs, or the target EmbedWorkflow's child input schema. A
+/// `connection` input and what the host fills (`_connection`, `timeout_ms`
+/// when the step sets a timeout) are not shown. The LLM's arguments become
+/// that input. A WaitForSignal tool takes no arguments.
+///
+/// A tool step's `inputMapping` holds fixed arguments: evaluated when the
+/// tool is called and merged over the LLM's (objects deeply, the mapped value
+/// winning), and an input mapped as a whole is not shown to the LLM (W094
+/// names them). A tool's required inputs need no mapping, except a
+/// connection, which the LLM cannot give.
 ///
 /// Without tool edges, it acts as a simple LLM completion step.
 ///

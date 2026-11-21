@@ -1,4 +1,4 @@
-use rmcp::model::{CallToolResult, ContentBlock};
+use rmcp::model::CallToolResult;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -12,9 +12,7 @@ use super::internal_api::{
 };
 
 fn json_result(value: serde_json::Value) -> Result<CallToolResult, rmcp::ErrorData> {
-    Ok(CallToolResult::success(vec![ContentBlock::text(
-        serde_json::to_string_pretty(&value).unwrap_or_default(),
-    )]))
+    super::internal_api::answer_result(value)
 }
 
 fn err(msg: impl Into<String>) -> rmcp::ErrorData {
@@ -245,19 +243,33 @@ async fn save_graph(
                             if has_steps { Some(g) } else { None }
                         });
 
+                // A version with no steps (a workflow just created), or one
+                // that would not pass validation either (a workflow being
+                // built edit by edit), cannot compile or run: it has nothing
+                // to keep, so the edit patches it in place with the structural
+                // checks only, as any later edit would. The graph is checked
+                // whole when it is deployed (docs/workflow-authoring-gaps.md, 6).
                 let Some(existing) = existing_graph else {
-                    // No valid existing graph to fall back to
-                    return Err(original_err);
+                    return patch_in_place(server, workflow_id, graph, latest_version)
+                        .await
+                        .map_err(|_| original_err);
                 };
 
                 let existing_body = serde_json::json!({ "executionGraph": existing });
-                let res = api_post(
+                let res = match api_post(
                     server,
                     &format!("/api/runtime/workflows/{}/update", workflow_id),
                     Some(existing_body),
                 )
                 .await
-                .map_err(|_| original_err)?;
+                {
+                    Ok(res) => res,
+                    Err(_) => {
+                        return patch_in_place(server, workflow_id, graph, latest_version)
+                            .await
+                            .map_err(|_| original_err);
+                    }
+                };
 
                 let version = res
                     .get("version")
@@ -297,6 +309,32 @@ async fn save_graph(
             false,
             response_warnings(&patched),
         ))
+    }
+}
+
+/// Saves `graph` over version `version` in place, with the structural checks
+/// only (`PUT /versions/{v}/graph`).
+async fn patch_in_place(
+    server: &SmoMcpServer,
+    workflow_id: &str,
+    graph: serde_json::Value,
+    version: i64,
+) -> Result<(String, bool, Vec<String>), rmcp::ErrorData> {
+    let patched = api_put(
+        server,
+        &format!("/api/runtime/workflows/{workflow_id}/versions/{version}/graph"),
+        Some(serde_json::json!({ "executionGraph": graph })),
+    )
+    .await?;
+    Ok((version.to_string(), false, response_warnings(&patched)))
+}
+
+/// The reference to `from_step`'s output: a field of it, or, with no field
+/// (or an empty one), the whole output.
+fn step_output_reference(from_step: &str, from_output: Option<&str>) -> String {
+    match from_output.filter(|output| !output.is_empty()) {
+        Some(output) => format!("steps.{from_step}.outputs.{output}"),
+        None => format!("steps.{from_step}.outputs"),
     }
 }
 
@@ -506,7 +544,7 @@ pub struct SetMappingParams {
     )]
     pub from_step: Option<String>,
     #[schemars(
-        description = "Output field path from the referenced step (e.g., \"value\", \"items\", \"result.name\", \"data.orders\"). Supports dot-notation for nested object access. Required when from_step is set."
+        description = "Output field path from the referenced step (e.g., \"value\", \"items\", \"result.name\", \"data.orders\"). Supports dot-notation for nested object access. Omit it for the step's whole output (steps.<from_step>.outputs), as for a capability that returns a value rather than an object."
     )]
     pub from_output: Option<String>,
     #[schemars(
@@ -2174,13 +2212,9 @@ pub async fn set_mapping(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     // Build the mapping value from typed parameters
     let mapping_value = if let Some(ref from_step) = params.from_step {
-        let from_output = params
-            .from_output
-            .as_deref()
-            .ok_or_else(|| err("from_output is required when from_step is set"))?;
         serde_json::json!({
             "valueType": "reference",
-            "value": format!("steps.{}.outputs.{}", from_step, from_output)
+            "value": step_output_reference(from_step, params.from_output.as_deref())
         })
     } else if let Some(ref from_input) = params.from_input {
         serde_json::json!({
@@ -2199,7 +2233,7 @@ pub async fn set_mapping(
         })
     } else {
         return Err(err(
-            "Exactly one of from_step+from_output, from_input, from_variable, or immediate_value must be provided",
+            "Exactly one of from_step (with an optional from_output), from_input, from_variable, or immediate_value must be provided",
         ));
     };
 
@@ -2242,7 +2276,9 @@ pub async fn set_mapping(
                 ),
             )
             .await;
-            if let Ok(cap_data) = cap_result {
+            if let Ok(cap_data) = cap_result
+                && !from_output.is_empty()
+            {
                 validate_output_path(&cap_data, from_output, from_step, agent_id, capability_id)?;
             }
         }
@@ -3562,13 +3598,10 @@ pub async fn apply_graph_mutations(
                     .count();
                     if source_count != 1 {
                         return Err(err(
-                            "Operation 'set_mapping' requires exactly one of from_step+from_output, from_input, from_variable, or immediate_value",
+                            "Operation 'set_mapping' requires exactly one of from_step (with an optional from_output), from_input, from_variable, or immediate_value",
                         ));
                     }
                     let mapping_value = if let Some(from_step) = &operation.from_step {
-                        let from_output = operation.from_output.as_deref().ok_or_else(|| {
-                            err("Operation 'set_mapping' requires from_output when from_step is set")
-                        })?;
                         if !target
                             .get("steps")
                             .and_then(|steps| steps.as_object())
@@ -3581,7 +3614,7 @@ pub async fn apply_graph_mutations(
                         }
                         serde_json::json!({
                             "valueType": "reference",
-                            "value": format!("steps.{}.outputs.{}", from_step, from_output)
+                            "value": step_output_reference(from_step, operation.from_output.as_deref())
                         })
                     } else if let Some(from_input) = &operation.from_input {
                         let root_key = from_input.split('.').next().unwrap_or(from_input);
@@ -3622,7 +3655,7 @@ pub async fn apply_graph_mutations(
                         })
                     } else {
                         return Err(err(
-                            "Operation 'set_mapping' requires one of from_step+from_output, from_input, from_variable, or immediate_value",
+                            "Operation 'set_mapping' requires one of from_step (with an optional from_output), from_input, from_variable, or immediate_value",
                         ));
                     };
                     let step = target
@@ -4283,5 +4316,156 @@ mod state_schema_tests {
         let mut graph = root_graph();
         replace_state_schema(&mut graph, &[], fields).unwrap();
         assert_eq!(graph["stateSchema"], owner_state_schema());
+    }
+}
+
+#[cfg(test)]
+mod new_workflow_edit_tests {
+    use super::*;
+
+    /// A workflow being built edit by edit: its version has a step whose
+    /// required inputs are not mapped yet, so neither the edited graph nor the
+    /// existing one passes `update`. The edit patches the version in place.
+    #[tokio::test]
+    async fn an_edit_of_a_version_that_cannot_validate_patches_it() {
+        let patched: Arc<Mutex<Option<String>>> = Arc::default();
+        let patched_in = patched.clone();
+        let routes = axum::Router::new()
+            .route(
+                "/api/runtime/workflows/{workflow_id}",
+                get(|| async {
+                    Json(serde_json::json!({"data": {
+                        "lastVersionNumber": 1,
+                        "currentVersionNumber": 1,
+                        "definition": {"executionGraph": {
+                            "name": "Building", "entryPoint": "calc", "executionPlan": [],
+                            "steps": {"calc": {"id": "calc", "stepType": "Agent",
+                                               "agentId": "utils", "capabilityId": "calculate"}}
+                        }}
+                    }}))
+                }),
+            )
+            .route(
+                "/api/runtime/workflows/{workflow_id}/update",
+                post(|| async {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"success": false, "message": "Step 'calc' is missing required input 'expression'"})),
+                    )
+                }),
+            )
+            .route(
+                "/api/runtime/workflows/{workflow_id}/versions/{version}/graph",
+                put(
+                    move |axum::extract::Path((_, version)): axum::extract::Path<(String, String)>| {
+                        *patched_in.lock().unwrap() = Some(version);
+                        async move { Json(serde_json::json!({"success": true, "warnings": []})) }
+                    },
+                ),
+            );
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/runtara_mcp_building_workflow_test")
+            .unwrap();
+        let server = SmoMcpServer::new(
+            pool,
+            crate::engine::without_runtime(),
+            "acme".into(),
+            routes,
+        );
+        let params: SetInputSchemaParams = serde_json::from_value(serde_json::json!({
+            "workflow_id": "wf",
+            "fields": {"x": {"type": "number", "required": true}}
+        }))
+        .unwrap();
+        set_input_schema(&server, params)
+            .await
+            .expect("the edit is saved");
+        assert_eq!(patched.lock().unwrap().as_deref(), Some("1"));
+    }
+
+    /// A mapping from a step's output names a field of it, or the whole output
+    /// when there is none (docs/workflow-authoring-gaps.md, 9).
+    #[test]
+    fn a_step_output_reference_may_be_the_whole_output() {
+        assert_eq!(
+            step_output_reference("run", Some("result.name")),
+            "steps.run.outputs.result.name"
+        );
+        assert_eq!(step_output_reference("run", None), "steps.run.outputs");
+        assert_eq!(step_output_reference("run", Some("")), "steps.run.outputs");
+    }
+    use std::sync::{Arc, Mutex};
+
+    use axum::Json;
+    use axum::http::StatusCode;
+    use axum::routing::{get, post, put};
+
+    /// A workflow just created has one version with no steps. Its first edit,
+    /// refused whole by `update`'s full validation, patches that version in
+    /// place with the structural checks only, as any later edit does, instead
+    /// of failing (docs/workflow-authoring-gaps.md, 6).
+    #[tokio::test]
+    async fn the_first_edit_of_a_stepless_workflow_patches_it() {
+        let patched: Arc<Mutex<Option<(String, serde_json::Value)>>> = Arc::default();
+        let patched_in = patched.clone();
+        let routes = axum::Router::new()
+            .route(
+                "/api/runtime/workflows/{workflow_id}",
+                get(|| async {
+                    Json(serde_json::json!({"data": {
+                        "lastVersionNumber": 1,
+                        "currentVersionNumber": 1,
+                        "definition": {"executionGraph": {
+                            "name": "Untitled", "steps": {}, "executionPlan": [], "entryPoint": null
+                        }}
+                    }}))
+                }),
+            )
+            .route(
+                "/api/runtime/workflows/{workflow_id}/update",
+                post(|| async {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"success": false, "message": "Workflow has no steps defined"})),
+                    )
+                }),
+            )
+            .route(
+                "/api/runtime/workflows/{workflow_id}/versions/{version}/graph",
+                put(
+                    move |axum::extract::Path((_, version)): axum::extract::Path<(String, String)>,
+                          Json(body): Json<serde_json::Value>| {
+                        *patched_in.lock().unwrap() = Some((version, body));
+                        async move { Json(serde_json::json!({"success": true, "warnings": []})) }
+                    },
+                ),
+            );
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/runtara_mcp_new_workflow_test")
+            .unwrap();
+        let server = SmoMcpServer::new(
+            pool,
+            crate::engine::without_runtime(),
+            "acme".into(),
+            routes,
+        );
+        let params: SetInputSchemaParams = serde_json::from_value(serde_json::json!({
+            "workflow_id": "wf",
+            "fields": {"city": {"type": "string", "required": true}}
+        }))
+        .unwrap();
+        set_input_schema(&server, params)
+            .await
+            .expect("the first edit of a new workflow is saved");
+        let (version, body) = patched
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("version 1 was patched");
+        assert_eq!(version, "1");
+        assert_eq!(
+            body["executionGraph"]["inputSchema"]["city"]["type"],
+            serde_json::json!("string")
+        );
     }
 }

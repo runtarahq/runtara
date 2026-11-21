@@ -83,10 +83,12 @@ pub(crate) fn tool_authz(tool: &str) -> ToolAuthz {
         | "deploy_workflow"
         | "deploy_latest"
         | "set_current_version"
+        | "restore_version"
         | "set_workflow_slug"
         | "set_workflow_metadata"
         | "move_workflow"
         | "publish_workflow_agent"
+        | "unpublish_workflow_agent"
         | "add_agent_step"
         | "add_step"
         | "remove_step"
@@ -277,6 +279,7 @@ mod tests {
         "remove_step",
         "remove_variable",
         "resolve_connection_resource",
+        "restore_version",
         "resume_execution",
         "set_current_version",
         "set_entry_point",
@@ -295,6 +298,7 @@ mod tests {
         "summarize_workflow",
         "test_capability",
         "trace_reference",
+        "unpublish_workflow_agent",
         "update_object_instance",
         "update_object_schema",
         "update_step",

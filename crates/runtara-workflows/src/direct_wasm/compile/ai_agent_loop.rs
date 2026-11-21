@@ -824,7 +824,19 @@ pub(super) fn emit_ai_agent_loop_plan(
                 durable,
                 label,
                 timeout_ms,
+                fixed_mapping_id,
             } => {
+                if let Some(mapping_id) = fixed_mapping_id {
+                    emit_ai_tool_fixed_arguments(
+                        body,
+                        indices,
+                        *mapping_id,
+                        source_ptr_local,
+                        source_len_local,
+                        route_ptr_local,
+                        route_len_local,
+                    );
+                }
                 let tool_invoke = indices
                     .agent_invoke(agent_component_id)
                     .expect("AiAgent tool has a matching component import");
@@ -922,8 +934,20 @@ pub(super) fn emit_ai_agent_loop_plan(
                 label,
                 durable,
                 timeout_ms,
+                fixed_mapping_id,
                 child_plan,
             } => {
+                if let Some(mapping_id) = fixed_mapping_id {
+                    emit_ai_tool_fixed_arguments(
+                        body,
+                        indices,
+                        *mapping_id,
+                        source_ptr_local,
+                        source_len_local,
+                        route_ptr_local,
+                        route_len_local,
+                    );
+                }
                 emit_embed_workflow_tool_arm(
                     body,
                     indices,
@@ -1706,4 +1730,44 @@ fn set_segment(
     body.instruction(&Instruction::LocalSet(ptr_local));
     body.instruction(&Instruction::I32Const(segment.len_i32()));
     body.instruction(&Instruction::LocalSet(len_local));
+}
+
+/// Merge a tool step's fixed arguments over the model's, in the tool-args
+/// locals: `fixed = apply-mapping(mapping_id, source)` against the run's source
+/// at the call, then `args = ai-tool-args-with-fixed(args, fixed)`. The fixed
+/// value wins, so the model cannot override what the step maps
+/// (docs/ai-agent-tool-schemas.md). The TURN_INPUT scratch holds `fixed`: it
+/// is free during dispatch. A mapping that fails fails the run, as a step's
+/// failing input mapping does.
+fn emit_ai_tool_fixed_arguments(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    mapping_id: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+) {
+    emit_apply_mapping(
+        body,
+        indices,
+        mapping_id,
+        source_ptr_local,
+        source_len_local,
+        DIRECT_AI_TURN_INPUT_PTR_LOCAL,
+        DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+        None,
+    );
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_ARGS_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_ARGS_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_LEN_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_ai_tool_args_with_fixed));
+    emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
+    load_retptr_list(
+        body,
+        DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
+        DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
+    );
 }

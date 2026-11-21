@@ -1516,6 +1516,17 @@ mod component {
             .unwrap_or_else(|| Err(context::unknown(ctx)))
         }
 
+        fn ai_tool_args_with_fixed(
+            ctx: u64,
+            args: Vec<u8>,
+            fixed: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            context::run(ctx, || {
+                direct_json::DirectJsonManifest::ai_tool_args_with_fixed(&args, &fixed)
+            })
+            .unwrap_or_else(|| Err(context::unknown(ctx)))
+        }
+
         fn ai_turn_add_result(
             ctx: u64,
             pending: Vec<u8>,

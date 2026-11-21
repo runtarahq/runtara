@@ -46,6 +46,7 @@ async fn rpc_call(
     extra_headers: &[(String, String)],
     method: &str,
     params: Value,
+    timeout: Duration,
 ) -> Result<Value, McpError> {
     // ── 1. initialize ────────────────────────────────────────────────────────
     let init_body = json!({
@@ -58,7 +59,16 @@ async fn rpc_call(
             "clientInfo": { "name": CLIENT_NAME, "version": CLIENT_VERSION },
         },
     });
-    let init_resp = send_http(url, connection_id, extra_headers, &init_body, None).await?;
+    let handshake = Duration::from_millis(DEFAULT_TIMEOUT_MS);
+    let init_resp = send_http(
+        url,
+        connection_id,
+        extra_headers,
+        &init_body,
+        None,
+        handshake,
+    )
+    .await?;
     if !(200..300).contains(&init_resp.status) {
         return Err(McpError::Http(format!(
             "MCP initialize returned HTTP {}",
@@ -81,6 +91,7 @@ async fn rpc_call(
         extra_headers,
         &notify_body,
         session_id.as_deref(),
+        handshake,
     )
     .await?;
 
@@ -97,6 +108,7 @@ async fn rpc_call(
         extra_headers,
         &body,
         session_id.as_deref(),
+        timeout,
     )
     .await?;
     if !(200..300).contains(&resp.status) {
@@ -122,8 +134,9 @@ async fn send_http(
     extra_headers: &[(String, String)],
     body: &Value,
     session_id: Option<&str>,
+    timeout: Duration,
 ) -> Result<McpResp, McpError> {
-    let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(DEFAULT_TIMEOUT_MS));
+    let client = runtara_http::HttpClient::with_timeout(timeout);
     let mut req = client
         .request("POST", url)
         .header("Content-Type", "application/json")
@@ -217,7 +230,15 @@ pub async fn list_tools(
     connection_id: &str,
     extra_headers: &[(String, String)],
 ) -> Result<Vec<Tool>, McpError> {
-    let result = rpc_call(url, connection_id, extra_headers, "tools/list", json!({})).await?;
+    let result = rpc_call(
+        url,
+        connection_id,
+        extra_headers,
+        "tools/list",
+        json!({}),
+        Duration::from_millis(DEFAULT_TIMEOUT_MS),
+    )
+    .await?;
     let tools = result
         .get("tools")
         .and_then(|v| v.as_array())
@@ -226,13 +247,15 @@ pub async fn list_tools(
         .map_err(|e| McpError::Deserialize(format!("could not parse tools: {e}")))
 }
 
-/// MCP `tools/call` — invoke a tool by name with JSON args.
+/// MCP `tools/call` — invoke a tool by name with JSON args, waiting up to
+/// `timeout_ms` for its answer (the default when `None`).
 pub async fn call_tool(
     url: &str,
     connection_id: &str,
     extra_headers: &[(String, String)],
     name: &str,
     args: &Value,
+    timeout_ms: Option<u64>,
 ) -> Result<ToolResult, McpError> {
     let result = rpc_call(
         url,
@@ -243,6 +266,7 @@ pub async fn call_tool(
             "name": name,
             "arguments": args,
         }),
+        Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)),
     )
     .await?;
 

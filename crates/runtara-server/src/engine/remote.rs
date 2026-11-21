@@ -2203,6 +2203,13 @@ mod tests {
                 vec![get("/api/runtime/operations/queues")],
             ),
             (
+                "UnstageWorkflowAgent",
+                vec![
+                    post("/api/runtime/workflows/{id}/delete"),
+                    post("/api/runtime/workflows/{id}/unpublish-agent"),
+                ],
+            ),
+            (
                 "AuthorizeExecution",
                 vec![
                     get("/api/runtime/workflows/{workflowId}/instances/{instanceId}/pending-input"),

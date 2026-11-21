@@ -55,6 +55,7 @@ use runtime_client::RuntimeClient;
         api::handlers::workflows::toggle_track_events_handler,
         api::handlers::workflows::update_workflow_slug_handler,
         api::handlers::workflows::publish_workflow_agent_handler,
+        api::handlers::workflows::unpublish_workflow_agent_handler,
         api::handlers::workflows::list_workflows_handler,
         api::handlers::workflows::get_workflow_handler,
         api::handlers::workflows::list_workflow_versions_handler,
@@ -1012,6 +1013,10 @@ fn api_app(parts: ApiParts) -> Router {
         .route(
             "/api/runtime/workflows/{id}/publish-agent",
             post(api::handlers::workflows::publish_workflow_agent_handler),
+        )
+        .route(
+            "/api/runtime/workflows/{id}/unpublish-agent",
+            post(api::handlers::workflows::unpublish_workflow_agent_handler),
         )
         .route(
             "/api/runtime/workflows",

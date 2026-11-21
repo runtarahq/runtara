@@ -33,6 +33,24 @@ pub(crate) fn caller_tenant() -> Option<String> {
 /// Run `fut` with the MCP caller's [`AuthContext`] bound as the ambient identity for
 /// any in-process API call it makes. Tool handlers `await` their `api_*` calls inline
 /// on this same task, so the task-local is visible at [`build_request`] time.
+/// A tool's answer: an error result (`isError`) when the answer says it did
+/// not succeed (`"success": false`), so a client that only reads the result's
+/// status (a workflow's MCP step) does not take a refused deploy for a done
+/// one. The answer's text is kept either way.
+pub fn answer_result(
+    value: serde_json::Value,
+) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    let text =
+        rmcp::model::ContentBlock::text(serde_json::to_string_pretty(&value).unwrap_or_default());
+    Ok(
+        if value.get("success") == Some(&serde_json::Value::Bool(false)) {
+            rmcp::model::CallToolResult::error(vec![text])
+        } else {
+            rmcp::model::CallToolResult::success(vec![text])
+        },
+    )
+}
+
 pub async fn with_caller_auth<F, T>(auth: AuthContext, fut: F) -> T
 where
     F: std::future::Future<Output = T>,
@@ -760,5 +778,29 @@ mod tests {
                 && msg.contains("Some MCP clients stringify object arguments"),
             "got: {msg}"
         );
+    }
+
+    /// An answer that says it did not succeed is a tool error; any other is a
+    /// result. The text is the answer either way.
+    #[test]
+    fn an_unsuccessful_answer_is_a_tool_error() {
+        let refused = serde_json::json!({"success": false, "message": "fix before deploying"});
+        let result = super::answer_result(refused).unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert!(
+            result.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("fix before deploying")
+        );
+
+        for fine in [
+            serde_json::json!({"success": true}),
+            serde_json::json!({"data": {"id": "wf"}}),
+            serde_json::json!([1, 2]),
+        ] {
+            assert_ne!(super::answer_result(fine).unwrap().is_error, Some(true));
+        }
     }
 }

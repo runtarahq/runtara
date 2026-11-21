@@ -104,6 +104,48 @@ pub fn create_openai_model_with_connection(
     Ok(client.completion_model(model_id))
 }
 
+/// Whether OpenAI accepts `schema` in strict mode: every object lists its
+/// properties, requires them all, and allows no others.
+pub fn openai_strict_compatible(schema: &Value) -> bool {
+    let Some(object) = schema.as_object() else {
+        return true;
+    };
+    let is_object = match object.get("type") {
+        Some(Value::String(kind)) => kind == "object",
+        Some(Value::Array(kinds)) => kinds.iter().any(|kind| kind == "object"),
+        _ => object.contains_key("properties"),
+    };
+    if is_object {
+        let Some(properties) = object.get("properties").and_then(Value::as_object) else {
+            return false;
+        };
+        if object.get("additionalProperties") != Some(&Value::Bool(false)) {
+            return false;
+        }
+        let required: Vec<&str> = object
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|names| names.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if !properties
+            .keys()
+            .all(|name| required.contains(&name.as_str()))
+        {
+            return false;
+        }
+        if !properties.values().all(openai_strict_compatible) {
+            return false;
+        }
+    }
+    ["items", "anyOf", "oneOf", "allOf"]
+        .iter()
+        .all(|key| match object.get(*key) {
+            Some(Value::Array(schemas)) => schemas.iter().all(openai_strict_compatible),
+            Some(schema) => openai_strict_compatible(schema),
+            None => true,
+        })
+}
+
 /// Build provider-specific `additional_params` for structured output.
 ///
 /// Takes a standard JSON Schema and wraps it in the format required by
@@ -121,7 +163,10 @@ pub fn structured_output_params(integration_id: &str, json_schema: Value) -> Opt
                 "type": "json_schema",
                 "json_schema": {
                     "name": "structured_response",
-                    "strict": true,
+                    // OpenAI refuses a strict schema with an open object (a
+                    // field of type object with no properties): such a schema
+                    // is sent as guidance, and the answer is checked here.
+                    "strict": openai_strict_compatible(&json_schema),
                     "schema": json_schema
                 }
             }
@@ -195,6 +240,31 @@ pub fn create_completion_model_with_connection(
 
 #[cfg(test)]
 mod tests {
+
+    /// An open object (no properties) cannot be strict on OpenAI, which
+    /// refuses the request: it is sent as guidance instead.
+    #[test]
+    fn a_schema_with_an_open_object_is_not_sent_strict() {
+        let closed = json!({"type": "object", "additionalProperties": false, "required": ["a"],
+            "properties": {"a": {"type": "string"}}});
+        assert!(openai_strict_compatible(&closed));
+        let params = structured_output_params("openai_api_key", closed).unwrap();
+        assert_eq!(params["response_format"]["json_schema"]["strict"], true);
+
+        let open = json!({"type": "object", "additionalProperties": false, "required": ["a", "sample"],
+            "properties": {"a": {"type": "string"}, "sample": {"type": "object"}}});
+        assert!(!openai_strict_compatible(&open));
+        let params = structured_output_params("openai_api_key", open).unwrap();
+        assert_eq!(params["response_format"]["json_schema"]["strict"], false);
+
+        let optional = json!({"type": "object", "additionalProperties": false, "required": [],
+            "properties": {"a": {"type": "string"}}});
+        assert!(!openai_strict_compatible(&optional));
+        let nested = json!({"type": "object", "additionalProperties": false, "required": ["list"],
+            "properties": {"list": {"type": "array", "items": {"type": "object"}}}});
+        assert!(!openai_strict_compatible(&nested));
+    }
+
     use super::*;
 
     #[test]

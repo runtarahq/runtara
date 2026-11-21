@@ -415,8 +415,8 @@ pub(super) fn emit_embed_workflow_tool_arm(
         route_ptr_local,
         route_len_local,
     );
-    // The LLM tool arguments ARE the child workflow's input data (no input
-    // mapping, matching the generated tool arm's `__child_data = __tool_args`).
+    // The LLM tool arguments ARE the child workflow's input data, with the
+    // step's fixed arguments already merged over them by the AiAgent loop.
     body.instruction(&Instruction::LocalGet(tool_args_ptr_local));
     body.instruction(&Instruction::LocalSet(DIRECT_EMBED_CHILD_DATA_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(tool_args_len_local));

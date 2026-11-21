@@ -8,6 +8,13 @@ use std::time::Duration;
 
 use crate::{Body, HttpError, HttpResponse, RequestBuilder};
 
+/// A ureq agent that follows no redirect: the host's outbound service
+/// follows none, and the native backend answers as it does (a caller that
+/// wants a redirect followed makes the next request itself).
+fn agent_builder() -> ureq::AgentBuilder {
+    ureq::AgentBuilder::new().redirects(0)
+}
+
 /// Native HTTP client backed by `ureq::Agent`.
 #[derive(Clone)]
 pub struct NativeHttpClient {
@@ -18,14 +25,14 @@ impl NativeHttpClient {
     /// Create a new client with default settings.
     pub fn new() -> Self {
         Self {
-            agent: ureq::Agent::new(),
+            agent: agent_builder().build(),
         }
     }
 
     /// Create a new client with a custom timeout.
     pub fn with_timeout(timeout: Duration) -> Self {
         Self {
-            agent: ureq::AgentBuilder::new().timeout(timeout).build(),
+            agent: agent_builder().timeout(timeout).build(),
         }
     }
 
@@ -51,7 +58,7 @@ pub(crate) fn execute(builder: RequestBuilder) -> Result<HttpResponse, HttpError
         ));
     }
     // Build the agent: use the stored one or create a fresh one
-    let agent = builder.agent.unwrap_or_else(ureq::Agent::new);
+    let agent = builder.agent.unwrap_or_else(|| agent_builder().build());
 
     // Build the URL with query parameters
     let url = crate::build_url_with_query(&builder.url, &builder.query_params);

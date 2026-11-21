@@ -772,7 +772,22 @@ pub fn build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
         feature_summary.agent_ids.sort();
     }
     let root_durable = graph.durable.unwrap_or(true);
-    let mut state = DirectManifestBuildState::default();
+    let mut state = DirectManifestBuildState {
+        child_tool_inputs: child_workflows
+            .iter()
+            .map(|child| {
+                (
+                    child.step_id.to_string(),
+                    super::tool_schema::ChildToolInput {
+                        name: child.execution_graph.name.clone(),
+                        description: child.execution_graph.description.clone(),
+                        input_schema: child.execution_graph.input_schema.clone(),
+                    },
+                )
+            })
+            .collect(),
+        ..DirectManifestBuildState::default()
+    };
     let root_graph = graph_manifest(graph, root_durable, None, &mut state, agent_catalog)?;
     let mut child_workflows = child_workflows.to_vec();
     child_workflows.sort_by(|left, right| {
@@ -876,6 +891,9 @@ struct DirectManifestBuildState {
     next_log_id: u32,
     next_error_id: u32,
     next_agent_id: u32,
+    /// The input each embedded child takes, by EmbedWorkflow step id: an
+    /// EmbedWorkflow step used as an AI Agent tool is shown it.
+    child_tool_inputs: super::tool_schema::ChildToolInputs,
 }
 
 impl DirectManifestBuildState {
@@ -1340,26 +1358,18 @@ fn step_manifest(
             let capability_id = if tool_edges.is_empty() && !has_memory && !has_mcp {
                 "chat-completion"
             } else {
+                // Each tool is shown the input its target runs with
+                // (`tool_schema`): the model's arguments become it.
                 let mut tool_defs = tool_edges
                     .iter()
                     .map(|(label, target)| {
-                        serde_json::json!({
-                            "name": label,
-                            "description": graph
-                                .steps
-                                .get(target)
-                                .and_then(step_name)
-                                .unwrap_or(label.as_str()),
-                            "parameters": {
-                                "type": "object",
-                                "properties": {},
-                                // `{}` (not `true`): a bare boolean subschema is
-                                // rejected by strict LLM tool-schema validators
-                                // ("Unrecognized schema: true"); `{}` is the
-                                // provider-safe equivalent.
-                                "additionalProperties": {}
-                            }
-                        })
+                        super::tool_schema::tool_definition(
+                            graph,
+                            label,
+                            target,
+                            &state.child_tool_inputs,
+                            agent_catalog,
+                        )
                     })
                     .collect::<Vec<_>>();
                 // MCP toolsets each advertise two synthetic meta-tools, appended
@@ -1771,8 +1781,24 @@ fn ai_agent_mcp_prompt_addition(toolsets: &[String]) -> String {
         "\n\nExternal toolsets are available: {names}. To use one, first call \
          `<toolset>_search` with a description of what you need to find available \
          tools, then call `<toolset>_invoke` with the exact tool name and args \
-         from the search result. Do not guess tool names."
+         from the search result. Do not guess tool names. The search matches the \
+         toolset's tools by their names and descriptions (an action, such as \
+         \"list agents\"), not the data they return: to find data, search for \
+         the tool that lists or reads it, then invoke that tool."
     )
+}
+
+#[cfg(test)]
+mod mcp_prompt_tests {
+    /// The model is told what a toolset's search finds, so it searches for a
+    /// tool rather than for the data a tool returns
+    /// (docs/workflow-authoring-gaps.md, 10).
+    #[test]
+    fn the_prompt_says_search_finds_tools_not_data() {
+        let prompt = super::ai_agent_mcp_prompt_addition(&["runtara".to_string()]);
+        assert!(prompt.contains("`runtara`"), "{prompt}");
+        assert!(prompt.contains("not the data they return"), "{prompt}");
+    }
 }
 
 /// The AiAgent's tool edges as `(label, target_step_id)` pairs: labelled
@@ -1908,7 +1934,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
-fn step_name(step: &Step) -> Option<&str> {
+pub(super) fn step_name(step: &Step) -> Option<&str> {
     match step {
         Step::Finish(step) => step.name.as_deref(),
         Step::Agent(step) => step.name.as_deref(),
@@ -2634,8 +2660,9 @@ mod tests {
     /// tools and the MCP search/invoke meta-tools) must not contain a bare
     /// boolean subschema (`true`/`false`). Strict tool-schema validators reject
     /// `additionalProperties: true` with "Unrecognized schema: true". A boolean
-    /// can only ever be a JSON-Schema subschema in this shape, so any boolean
-    /// anywhere in a tool def is a violation.
+    /// in a subschema's place is a violation (a boolean that is a value, such
+    /// as a `default`, is not). Built with the catalog, so the schemas derived
+    /// from capability inputs are held to it too.
     #[test]
     fn ai_agent_tool_defs_emit_no_bare_boolean_subschema() {
         let graph: runtara_dsl::ExecutionGraph = serde_json::from_str(
@@ -2644,6 +2671,7 @@ mod tests {
               "executionPlan": [
                 {"fromStep":"ai","toStep":"finish","label":"next"},
                 {"fromStep":"ai","toStep":"helper","label":"my_tool"},
+                {"fromStep":"ai","toStep":"fetch","label":"fetch"},
                 {"fromStep":"ai","toStep":"mcp_agent","label":"mcp.local"}
               ],
               "steps": {
@@ -2653,6 +2681,7 @@ mod tests {
                   "provider":{"valueType":"immediate","value":"openai"}
                 }},
                 "helper": {"id":"helper","stepType":"Agent","agentId":"utils","capabilityId":"random-double"},
+                "fetch": {"id":"fetch","stepType":"Agent","agentId":"http","capabilityId":"http-request"},
                 "mcp_agent": {"id":"mcp_agent","stepType":"Agent","agentId":"http","capabilityId":"http-request","connectionId":"mcp-conn"},
                 "finish": {"id":"finish","stepType":"Finish"}
               }
@@ -2660,7 +2689,11 @@ mod tests {
         )
         .expect("graph parses");
 
-        let manifest = build_direct_workflow_manifest(&graph).expect("manifest builds");
+        let catalog =
+            AgentCatalog::from_json(include_str!("../../tests/catalog/agent_catalog.json"))
+                .expect("test catalog parses");
+        let manifest = build_direct_workflow_manifest_with_agent_catalog(&graph, Some(&catalog))
+            .expect("manifest builds");
         let agent = manifest
             .graph
             .agents
@@ -2687,27 +2720,24 @@ mod tests {
             "expected 1 workflow-step tool + 2 MCP meta-tools, got {tools:?}"
         );
 
-        fn bare_boolean(value: &serde_json::Value, path: &str, out: &mut Vec<String>) {
-            match value {
-                serde_json::Value::Bool(_) => out.push(path.to_string()),
-                serde_json::Value::Object(map) => {
-                    for (k, v) in map {
-                        bare_boolean(v, &format!("{path}.{k}"), out);
-                    }
-                }
-                serde_json::Value::Array(arr) => {
-                    for (i, v) in arr.iter().enumerate() {
-                        bare_boolean(v, &format!("{path}[{i}]"), out);
-                    }
-                }
-                _ => {}
-            }
-        }
-
         let mut violations = Vec::new();
         for tool in tools {
-            bare_boolean(tool, "tool", &mut violations);
+            let mut cleaned = tool["parameters"].clone();
+            crate::direct_wasm::tool_schema::without_boolean_subschemas(&mut cleaned);
+            if cleaned != tool["parameters"] {
+                violations.push(tool["name"].to_string());
+            }
         }
+        // The capability's input reached the model: the derived schema is in
+        // the check, not an empty object.
+        let fetch = tools
+            .iter()
+            .find(|tool| tool["name"] == "fetch")
+            .expect("fetch tool");
+        assert!(
+            fetch["parameters"]["properties"]["url"].is_object(),
+            "http-request's inputs are shown: {fetch}"
+        );
         assert!(
             violations.is_empty(),
             "bare boolean schema subschemas in AI-agent tool defs: {violations:?}",

@@ -4087,6 +4087,198 @@ fn llm_tool_call(tool_name: &str, arguments: &str) -> Value {
     })
 }
 
+/// An AI Agent with both tools and an output schema: the model calls a tool,
+/// then answers to the schema, and the step's response is the parsed object,
+/// as a single-shot step's is (docs/workflow-authoring-gaps.md, 11).
+#[test]
+fn direct_wasm_execute_ai_agent_tool_loop_answers_to_its_output_schema() {
+    let components_dir = direct_e2e_components_dir();
+    let mut graph: Value = serde_json::from_str(&ai_agent_tool_loop_graph_json()).unwrap();
+    graph["steps"]["ai"]
+        .as_object_mut()
+        .unwrap()
+        .remove("breakpoint");
+    graph["steps"]["ai"]["config"]["outputSchema"] = serde_json::json!({
+        "sentiment": {"type": "string", "required": true, "enum": ["positive", "negative"]},
+        "confidence": {"type": "number", "required": true}
+    });
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-tool-loop-structured",
+        &graph.to_string(),
+        b"{}",
+        vec![
+            llm_tool_call("echo", r#"{"value":"checked"}"#),
+            llm_ok(r#"{"sentiment": "positive", "confidence": 0.9}"#),
+        ],
+    );
+    assert!(
+        result.status_success,
+        "stderr: {} error: {:?}",
+        result.stderr, result.error_json
+    );
+    assert_eq!(
+        result.output_json.expect("workflow completes")["answer"],
+        serde_json::json!({"sentiment": "positive", "confidence": 0.9}),
+        "the structured answer is the parsed object"
+    );
+    // The schema reached the model on its turns.
+    let asked = result.llm_requests.last().unwrap()["body"].to_string();
+    assert!(asked.contains("sentiment"), "{asked}");
+}
+
+/// The content of each tool result the model was sent back, in order, from
+/// the recorded model requests.
+fn tool_results_sent_to_the_model(result: &CapturedRun) -> Vec<Value> {
+    let last = result.llm_requests.last().expect("a model request");
+    last["body"]["messages"]
+        .as_array()
+        .expect("chat messages")
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .map(|message| {
+            let content = message["content"].as_str().unwrap_or_default();
+            serde_json::from_str(content).unwrap_or_else(|_| Value::String(content.to_owned()))
+        })
+        .collect()
+}
+
+/// A tool step's mapping is a fixed argument: the capability receives the
+/// mapped value whatever the model sends (docs/ai-agent-tool-schemas.md).
+#[test]
+fn direct_wasm_execute_ai_agent_tool_mapping_is_a_fixed_argument() {
+    let components_dir = direct_e2e_components_dir();
+    let mut graph: Value = serde_json::from_str(&ai_agent_tool_loop_graph_json()).unwrap();
+    graph["steps"]["ai"]
+        .as_object_mut()
+        .unwrap()
+        .remove("breakpoint");
+    graph["steps"]["echo_tool"]["inputMapping"] =
+        serde_json::json!({"value": {"valueType": "immediate", "value": "fixed"}});
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-tool-fixed-argument",
+        &graph.to_string(),
+        b"{}",
+        vec![
+            llm_tool_call("echo", r#"{"value":"from the model"}"#),
+            llm_ok("done"),
+        ],
+    );
+    assert!(
+        result.status_success,
+        "stderr: {} error: {:?}",
+        result.stderr, result.error_json
+    );
+    assert_eq!(
+        tool_results_sent_to_the_model(&result),
+        vec![serde_json::json!("fixed")],
+        "the step's mapped value reached the capability, not the model's"
+    );
+}
+
+/// A fixed argument that is a reference is resolved when the tool is called,
+/// against the run's data.
+#[test]
+fn direct_wasm_execute_ai_agent_tool_fixed_argument_reads_the_run() {
+    let components_dir = direct_e2e_components_dir();
+    let mut graph: Value = serde_json::from_str(&ai_agent_tool_loop_graph_json()).unwrap();
+    graph["steps"]["ai"]
+        .as_object_mut()
+        .unwrap()
+        .remove("breakpoint");
+    graph["steps"]["echo_tool"]["inputMapping"] =
+        serde_json::json!({"value": {"valueType": "reference", "value": "data.team"}});
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-tool-fixed-reference",
+        &graph.to_string(),
+        br#"{"data":{"team":"ops"},"variables":{}}"#,
+        vec![llm_tool_call("echo", "{}"), llm_ok("done")],
+    );
+    assert!(
+        result.status_success,
+        "stderr: {} error: {:?}",
+        result.stderr, result.error_json
+    );
+    assert_eq!(
+        tool_results_sent_to_the_model(&result),
+        vec![serde_json::json!("ops")]
+    );
+}
+
+/// An EmbedWorkflow tool's child receives the model's arguments with the
+/// step's fixed ones merged over them.
+#[test]
+fn direct_wasm_execute_ai_embed_tool_mapping_is_a_fixed_argument() {
+    let components_dir = direct_e2e_components_dir();
+    let parent = serde_json::json!({
+        "name": "Ai Embed Tool Fixed",
+        "durable": true,
+        "entryPoint": "ai",
+        "executionPlan": [
+            {"fromStep": "ai", "toStep": "finish", "label": "next"},
+            {"fromStep": "ai", "toStep": "tool", "label": "lookup"}
+        ],
+        "steps": {
+            "ai": {"id": "ai", "stepType": "AiAgent", "connectionId": "conn-1", "config": {
+                "systemPrompt": {"valueType": "immediate", "value": "You call tools"},
+                "userPrompt": {"valueType": "immediate", "value": "Use the lookup tool"},
+                "provider": {"valueType": "immediate", "value": "openai"},
+                "model": {"valueType": "immediate", "value": "gpt-4o"}}},
+            "tool": {"id": "tool", "stepType": "EmbedWorkflow", "name": "lookup",
+                "childWorkflowId": "tool-child", "childVersion": "latest",
+                "inputMapping": {"units": {"valueType": "immediate", "value": "metric"}}},
+            "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {
+                "answer": {"valueType": "reference", "value": "steps.ai.outputs.response"}}}
+        },
+        "variables": {},
+        "inputSchema": {},
+        "outputSchema": {}
+    });
+    let tool: ExecutionGraph = serde_json::from_value(serde_json::json!({
+        "name": "Tool Child",
+        "entryPoint": "done",
+        "executionPlan": [],
+        "steps": {
+            "done": {"id": "done", "stepType": "Finish", "inputMapping": {
+                "city": {"valueType": "reference", "value": "data.city"},
+                "units": {"valueType": "reference", "value": "data.units"}}}
+        },
+        "variables": {},
+        "inputSchema": {},
+        "outputSchema": {}
+    }))
+    .expect("tool child parses");
+    let result = run_direct_workflow_with_llm_script_and_children(
+        &components_dir,
+        "ai-embed-tool-fixed",
+        &parent.to_string(),
+        br#"{"data":{},"variables":{}}"#,
+        vec![
+            llm_tool_call("lookup", r#"{"city":"Kraków","units":"imperial"}"#),
+            llm_ok("done"),
+        ],
+        vec![runtara_workflows::compile::ChildWorkflowInput {
+            step_id: "tool".to_string(),
+            workflow_id: "tool-child".to_string(),
+            version_requested: "latest".to_string(),
+            version_resolved: 1,
+            execution_graph: tool,
+        }],
+    );
+    assert!(
+        result.status_success,
+        "stderr: {} error: {:?}",
+        result.stderr, result.error_json
+    );
+    assert_eq!(
+        tool_results_sent_to_the_model(&result),
+        vec![serde_json::json!({"city": "Kraków", "units": "metric"})],
+        "the model's city, the step's units"
+    );
+}
+
 #[test]
 fn direct_wasm_execute_repeated_ai_wait_tools_use_distinct_managed_requests_without_tracking() {
     let components = direct_e2e_components_dir();

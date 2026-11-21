@@ -321,10 +321,36 @@ pub struct HttpRequestInput {
     )]
     #[serde(default = "default_fail_on_error")]
     pub fail_on_error: bool,
+
+    #[field(
+        display_name = "Follow Redirects",
+        description = "If true, a 3xx answer with a Location header is followed with a new request, each one \
+                       checked like the first, up to Max Redirects. Off by default: the 3xx is returned (or \
+                       fails the step, with Fail on Error). Not with a connection: its answers are returned \
+                       as they are, so its credentials go nowhere but its own host.",
+        example = "true",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub follow_redirects: bool,
+
+    #[field(
+        display_name = "Max Redirects",
+        description = "How many redirects to follow at most, with Follow Redirects. One more fails the step \
+                       (TOO_MANY_REDIRECTS).",
+        example = "5",
+        default = "5"
+    )]
+    #[serde(default = "default_max_redirects")]
+    pub max_redirects: u32,
 }
 
 fn default_timeout() -> u64 {
     30_000
+}
+
+fn default_max_redirects() -> u32 {
+    5
 }
 
 fn default_fail_on_error() -> bool {
@@ -345,6 +371,8 @@ impl Default for HttpRequestInput {
             response_type: ResponseType::default(),
             timeout_ms: default_timeout(),
             fail_on_error: default_fail_on_error(),
+            follow_redirects: false,
+            max_redirects: default_max_redirects(),
         }
     }
 }
@@ -406,32 +434,140 @@ pub enum HttpResponseBody {
     module_secure = true
 )]
 pub async fn http_request(input: HttpRequestInput) -> Result<HttpResponse, AgentError> {
-    let request = prepare_http_request(&input);
-    finish_http_request(&input, request.call_agent_async().await)
+    let mut hop = Hop::first(&input);
+    let mut redirects = 0u32;
+    loop {
+        let response = prepare_http_request(&input, &hop).call_agent_async().await;
+        let Some(next) = response
+            .as_ref()
+            .ok()
+            .and_then(|r| redirect_to(&input, &hop, r))
+        else {
+            return finish_http_request(&input, response);
+        };
+        if redirects >= input.max_redirects {
+            return Err(AgentError::permanent(
+                "TOO_MANY_REDIRECTS",
+                format!(
+                    "{} redirected more than {} times (max_redirects)",
+                    input.url, input.max_redirects
+                ),
+            )
+            .with_attr("url", input.url.clone())
+            .with_attr("last_url", hop.url.clone()));
+        }
+        redirects += 1;
+        hop = next;
+    }
 }
 
-fn prepare_http_request(input: &HttpRequestInput) -> runtara_http::RequestBuilder {
-    let headers = input.headers.clone();
-    let mut url = input.url.clone();
-    let query_parameters = input.query_parameters.clone();
+/// One request of a call: the first, or one a redirect asked for.
+struct Hop {
+    url: String,
+    method: HttpMethod,
+    /// Whether the request body and its content headers are still sent
+    /// (dropped once a redirect turns the request into a GET).
+    with_body: bool,
+    /// Whether the caller's credential headers are still sent (dropped once
+    /// a redirect leaves the first URL's origin).
+    with_credentials: bool,
+}
 
-    // Append query parameters.
-    if !query_parameters.is_empty() {
-        let query_string: String = query_parameters
-            .iter()
-            .map(|(k, v)| format!("{}={}", url_encode(k), url_encode(v)))
-            .collect::<Vec<_>>()
-            .join("&");
-        if url.contains('?') {
-            url = format!("{url}&{query_string}");
-        } else {
-            url = format!("{url}?{query_string}");
+impl Hop {
+    fn first(input: &HttpRequestInput) -> Self {
+        Hop {
+            url: with_query(&input.url, &input.query_parameters),
+            method: input.method.clone(),
+            with_body: true,
+            with_credentials: true,
         }
     }
+}
+
+/// The request a redirect asks for, when the step follows redirects and
+/// `response` is one.
+fn redirect_to(
+    input: &HttpRequestInput,
+    hop: &Hop,
+    response: &runtara_http::HttpResponse,
+) -> Option<Hop> {
+    if !input.follow_redirects || has_connection(input) {
+        return None;
+    }
+    let status = response.status;
+    if !matches!(status, 301 | 302 | 303 | 307 | 308) {
+        return None;
+    }
+    let location = response.header("location")?;
+    let current = url::Url::parse(&hop.url).ok()?;
+    let next = current.join(location).ok()?;
+    if !matches!(next.scheme(), "http" | "https") {
+        return None;
+    }
+    // As browsers do: 303 always, and 301/302 after a POST, become a GET
+    // without the body; 307 and 308 repeat the request as it was.
+    let becomes_get = status == 303 && !matches!(hop.method, HttpMethod::Head)
+        || matches!(status, 301 | 302) && matches!(hop.method, HttpMethod::Post);
+    let first = url::Url::parse(&with_query(&input.url, &input.query_parameters)).ok();
+    Some(Hop {
+        method: if becomes_get {
+            HttpMethod::Get
+        } else {
+            hop.method.clone()
+        },
+        with_body: hop.with_body && !becomes_get,
+        with_credentials: hop.with_credentials
+            && first.is_some_and(|f| f.origin() == next.origin()),
+        url: next.into(),
+    })
+}
+
+fn has_connection(input: &HttpRequestInput) -> bool {
+    input
+        ._connection
+        .as_ref()
+        .is_some_and(|c| !c.connection_id.is_empty())
+}
+
+/// Headers that carry the caller's credentials: not sent to another origin.
+fn is_credential_header(name: &str) -> bool {
+    ["authorization", "proxy-authorization", "cookie"]
+        .iter()
+        .any(|h| name.eq_ignore_ascii_case(h))
+}
+
+fn with_query(url: &str, query_parameters: &HashMap<String, String>) -> String {
+    if query_parameters.is_empty() {
+        return url.to_string();
+    }
+    let query_string: String = query_parameters
+        .iter()
+        .map(|(k, v)| format!("{}={}", url_encode(k), url_encode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+    if url.contains('?') {
+        format!("{url}&{query_string}")
+    } else {
+        format!("{url}?{query_string}")
+    }
+}
+
+fn prepare_http_request(input: &HttpRequestInput, hop: &Hop) -> runtara_http::RequestBuilder {
+    let headers: HashMap<String, String> = input
+        .headers
+        .iter()
+        .filter(|(k, _)| hop.with_credentials || !is_credential_header(k))
+        .filter(|(k, _)| {
+            hop.with_body
+                || !(k.eq_ignore_ascii_case("content-type")
+                    || k.eq_ignore_ascii_case("content-length"))
+        })
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
 
     let client = runtara_http::HttpClient::with_timeout(Duration::from_millis(input.timeout_ms));
-    let method_str = input.method.as_str();
-    let mut request = client.request(method_str, &url);
+    let method_str = hop.method.as_str();
+    let mut request = client.request(method_str, &hop.url);
 
     if let Some(connection) = input
         ._connection
@@ -453,8 +589,9 @@ fn prepare_http_request(input: &HttpRequestInput) -> runtara_http::RequestBuilde
         request = request.header(key, value);
     }
 
-    request = match input.method {
+    request = match hop.method {
         HttpMethod::Get | HttpMethod::Head | HttpMethod::Options | HttpMethod::Delete => request,
+        HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch if !hop.with_body => request,
         HttpMethod::Post | HttpMethod::Put | HttpMethod::Patch => {
             if let Some(body_str) = input.body.to_string_body() {
                 let has_content_type = headers
@@ -1072,6 +1209,171 @@ mod tests {
         let response = result.unwrap();
         assert_eq!(response.status_code, 200);
         assert!(response.headers.contains_key("allow"));
+    }
+
+    async fn redirecting(status: u16, from: &str, to: &str, server: &MockServer) {
+        Mock::given(path(from.to_string()))
+            .respond_with(ResponseTemplate::new(status).insert_header("location", to))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_redirect_is_not_followed_unless_asked() {
+        let server = MockServer::start().await;
+        redirecting(301, "/old", "/new", &server).await;
+        Mock::given(path("/new"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("moved here"))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let response = http_request(HttpRequestInput {
+            url: format!("{}/old", server.uri()),
+            fail_on_error: false,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(response.status_code, 301);
+        assert_eq!(response.headers.get("location").unwrap(), "/new");
+
+        let refused = http_request(HttpRequestInput {
+            url: format!("{}/old", server.uri()),
+            ..Default::default()
+        })
+        .await;
+        assert!(refused.unwrap_err().message.contains("301"));
+    }
+
+    #[tokio::test]
+    async fn redirects_are_followed_when_asked() {
+        let server = MockServer::start().await;
+        redirecting(301, "/a", "/b?x=1", &server).await;
+        redirecting(307, "/b", "/c", &server).await;
+        Mock::given(method("GET"))
+            .and(path("/c"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("the page"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let response = http_request(HttpRequestInput {
+            url: format!("{}/a", server.uri()),
+            response_type: ResponseType::Text,
+            follow_redirects: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(response.status_code, 200);
+        assert!(matches!(response.body, HttpResponseBody::Text(ref t) if t == "the page"));
+    }
+
+    #[tokio::test]
+    async fn one_redirect_more_than_max_redirects_fails() {
+        let server = MockServer::start().await;
+        redirecting(302, "/1", "/2", &server).await;
+        redirecting(302, "/2", "/3", &server).await;
+        redirecting(302, "/3", "/4", &server).await;
+        Mock::given(path("/4"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let input = |max_redirects| HttpRequestInput {
+            url: format!("{}/1", server.uri()),
+            follow_redirects: true,
+            max_redirects,
+            ..Default::default()
+        };
+
+        let error = http_request(input(2)).await.unwrap_err();
+        assert_eq!(error.code, "TOO_MANY_REDIRECTS");
+        assert_eq!(http_request(input(3)).await.unwrap().status_code, 200);
+    }
+
+    #[tokio::test]
+    async fn credentials_are_not_sent_to_another_origin() {
+        let first = MockServer::start().await;
+        let other = MockServer::start().await;
+        redirecting(302, "/start", &format!("{}/landing", other.uri()), &first).await;
+        Mock::given(path("/landing"))
+            .and(header("x-kept", "yes"))
+            .respond_with(|request: &wiremock::Request| {
+                let leaked = ["authorization", "cookie"]
+                    .iter()
+                    .any(|h| request.headers.contains_key(*h));
+                ResponseTemplate::new(if leaked { 400 } else { 200 })
+            })
+            .expect(1)
+            .mount(&other)
+            .await;
+
+        let headers = HashMap::from([
+            ("Authorization".to_string(), "Bearer secret".to_string()),
+            ("Cookie".to_string(), "session=1".to_string()),
+            ("X-Kept".to_string(), "yes".to_string()),
+        ]);
+        let response = http_request(HttpRequestInput {
+            url: format!("{}/start", first.uri()),
+            headers,
+            follow_redirects: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(response.status_code, 200);
+    }
+
+    #[tokio::test]
+    async fn a_see_other_after_a_post_is_a_get_without_the_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/orders"))
+            .respond_with(ResponseTemplate::new(303).insert_header("location", "/orders/7"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/orders/7"))
+            .and(body_string(""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 7})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let response = http_request(HttpRequestInput {
+            method: HttpMethod::Post,
+            url: format!("{}/orders", server.uri()),
+            body: HttpBody(serde_json::json!({"item": "a"})),
+            follow_redirects: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(response.status_code, 200);
+    }
+
+    #[test]
+    fn a_connections_redirect_is_not_followed() {
+        let input = HttpRequestInput {
+            _connection: Some(RawConnection {
+                connection_id: "conn-1".into(),
+                connection_subtype: None,
+                integration_id: "http_bearer".into(),
+                parameters: Value::Null,
+                rate_limit_config: None,
+            }),
+            url: "https://api.example.com/v1/a".into(),
+            follow_redirects: true,
+            ..Default::default()
+        };
+        let response = runtara_http::HttpResponse {
+            status: 302,
+            headers: HashMap::from([("location".into(), "https://elsewhere.example/".into())]),
+            body: Vec::new(),
+        };
+        assert!(redirect_to(&input, &Hop::first(&input), &response).is_none());
     }
 
     #[tokio::test]
