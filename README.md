@@ -2,227 +2,177 @@
 
 **Secure AI automation from workflow design to live operations.**
 
-Runtara is an end-to-end platform for building, running, and operating AI workflows. It brings workflow design, triggers, connections, operational data, files, reports, analytics, and durable execution into one workspace so teams can ship automations as production systems instead of loose prompt chains.
-
-## Local deployment using Docker Compose:
-
-``` bash
-curl -fsSL https://raw.githubusercontent.com/runtarahq/runtara/refs/heads/main/docker-compose.yml \
-    -o docker-compose.yml  \
-    && FETCH_EXAMPLES=yes RUNTARA_PORT=3030 docker compose up
-```
-
-Go to **http://localhost:3030/ui/** and it will have the platform and example workflows.
-
+Runtara is a platform for building, running, and operating AI workflows as
+production systems. It brings workflows, triggers, connections, operational
+data, conversations, and durable execution together behind one API, with
+every workflow step running in a WebAssembly sandbox and every credential
+kept sealed.
 
 [Website](https://runtara.com) | [Product docs](https://runtara.com/docs/runtara-platform) | [Runtara Cloud](https://tally.so/r/81qE5o)
 
-![Runtara workflow builder](docs/assets/readme/hero-workflow-builder-crop.png)
+This repository is the server and runtime. The web console lives in
+[runtarahq/runtara-frontend](https://github.com/runtarahq/runtara-frontend)
+and is deployed on its own; the Docker Compose stack below runs both.
+
+## Try It With Docker Compose
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/runtarahq/runtara/refs/heads/main/docker-compose.yml \
+    -o docker-compose.yml \
+    && FETCH_EXAMPLES=yes RUNTARA_PORT=3030 docker compose up
+```
+
+Open **http://localhost:3030/ui/**. The stack starts the server and console
+images plus PostgreSQL and Valkey, wired for password-free local auth so there
+is no identity provider to configure. `FETCH_EXAMPLES=yes` seeds the example
+workflows from [`examples/`](examples/README.md) (conditionals, error
+handling, split, while loops, an HTTP call).
+
+Without `RUNTARA_PORT` the console is on port 3000; the API is on 7001
+(`RUNTARA_API_PORT`). This is a turnkey trial stack, not a production
+deployment.
 
 ## What Runtara Does
 
-Runtara gives builders and operators one product surface for AI automation:
+- **Workflows**: JSON execution graphs of agent steps, conditionals, splits,
+  loops, waits, child workflows, and error paths, validated and compiled to
+  WebAssembly components. Workflows are versioned and can be called as tools
+  by AI agents.
+- **Triggers**: start workflows from HTTP calls, cron schedules, incoming
+  email, and events from connected applications.
+- **Integrations**: 39 agent components, from HTTP, CSV, XML, XLSX, crypto,
+  and transforms to OpenAI, Bedrock, MCP, Shopify, Stripe, HubSpot, Slack,
+  Jira, QuickBooks, Xero, Zendesk, S3, Azure Blob Storage, SharePoint, and
+  more (`crates/agents`).
+- **Connections**: provider credentials, OAuth, and rate limits, managed
+  outside workflow definitions and stored sealed.
+- **Object model**: schema-driven operational records stored in a tenant's own
+  PostgreSQL database, reachable from workflows and the API.
+- **Conversations**: chat with a workflow. A conversation is found by a key,
+  kept by the engine, and carried by one run after another; chat platforms
+  connect to it as integrations built from workflows (see
+  [`examples/integrations`](examples/integrations)).
+- **Operations**: views and processes for running and monitoring work across
+  workflows.
+- **Executions and analytics**: execution history, step events, metrics,
+  usage, and rate-limit visibility.
+- **MCP**: an MCP endpoint (`/mcp`) for running and authoring workflows from
+  AI clients.
 
-- **Workflows**: design agent steps, transformations, waits, child workflows, and completion paths in timeline and canvas views.
-- **Triggers**: start workflows from manual runs, chat, schedules, HTTP calls, and event-driven entry points.
-- **Connections**: manage provider credentials, storage targets, and shared integrations outside workflow definitions.
-- **Database**: model operational records such as catalogs, inventory, suppliers, support knowledge, and workflow-owned data.
-- **Files**: store files created or consumed by workflow runs.
-- **Reports**: publish narrative text, metrics, charts, tables, and reusable report definitions backed by Runtara data.
-- **Invocation history**: inspect executions across workflows and triggers.
-- **Analytics**: monitor usage, system health, rate limits, and execution trends.
+## Security And Runtime Design
 
-## Product Tour
-
-### Build Workflows As Operational Systems
-
-Runtara organizes workflows by operational area and keeps builders focused on the process they own. Workflow definitions include structure, versions, validation, history, and run context.
-
-| Workflow workspace | Timeline builder |
-| --- | --- |
-| ![Runtara workflow workspace organized by business area](docs/assets/readme/01-workflows-organized-operations.png) | ![Runtara workflow timeline builder](docs/assets/readme/02-workflow-timeline-builder.png) |
-
-### Start Workflows From Real Events
-
-Triggers let teams start automations from schedules, HTTP calls, and event-driven entry points without duplicating workflow logic.
-
-![Runtara trigger automation catalog](docs/assets/readme/03-trigger-automation-catalog.png)
-
-### Connect Agents To Data And Systems
-
-Connections stay server-side. Workflow logic can use approved integrations and storage targets without embedding credentials in workflow definitions.
-
-| Connections | Operational records |
-| --- | --- |
-| ![Runtara integration connections catalog](docs/assets/readme/04-integration-connections.png) | ![Runtara object model records](docs/assets/readme/05-object-model-records.png) |
-
-### Publish Automation Outputs
-
-Runtara reports turn workflow outputs and object data into pages people can use: narrative summaries, metrics, charts, tables, and reusable report definitions.
-
-![Runtara category performance dashboard](docs/assets/readme/07-category-performance-dashboard.png)
-
-### Operate With Visibility
-
-Invocation history and analytics give operators a live view of workflow health, usage, rate limits, and execution trends.
-
-| Invocation history | Usage analytics |
-| --- | --- |
-| ![Runtara invocation history](docs/assets/readme/09-invocation-history.png) | ![Runtara usage analytics](docs/assets/readme/10-usage-analytics.png) |
-
-## Runtime Design
-
-Runtara combines the product surface above with runtime primitives for secure, durable AI automation:
-
-- **Sandboxed agent runs**: workflow logic executes inside WebAssembly isolation by default with no raw filesystem, network, or credential access.
-- **Credential mediation**: provider credentials remain server-side and are injected at the host boundary instead of being exposed to agents.
-- **Durable checkpoints**: long-running agent loops checkpoint after tool calls, resume after crashes, and avoid replaying completed work.
-- **Operational visibility**: reports, invocation history, analytics, files, and object data give teams a live surface for production automation.
-
-At a high level, the Rust workspace is organized into three layers:
+- **Sandboxed steps**: agents and workflows are WebAssembly components with no
+  raw network, filesystem, or credential access. Runs can also be placed on
+  executors, each run in a sandboxed process of its own
+  (`RUNTARA_RUNNER=executor`).
+- **Sealed credentials**: a connection's secrets are sealed by
+  [seal](https://github.com/runtarahq/seal), which attaches them to outgoing
+  requests. Nothing else reads them, and seal can run as a separate process
+  (`RUNTARA_SEAL_MODE`).
+- **Durable execution**: runs checkpoint, park on waits and signals, resume
+  after crashes, and do not replay completed work.
+- **Tenant isolation**: every database access runs in a tenant's scope and is
+  enforced by PostgreSQL row-level security.
+- **Separable roles**: one `runtara-server` binary runs as the API, the
+  engine, the intake for public webhooks, or all three (`RUNTARA_ROLE`). Split
+  apart, the API holds no runtime state or keys and asks the engine over
+  mutual TLS.
 
 ```text
-┌──────────────────────────────────────────────────────────────────┐
-│  runtara-server                                                  │
-│  Full application server: workflows, connections, auth, MCP,     │
-│  channels, workers, file storage, object model                   │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │  runtara-environment                                       │  │
-│  │  Management plane: image registry, instance lifecycle,     │  │
-│  │  embedded WASM runner, wake scheduling                     │  │
-│  │  ┌──────────────────────────────────────────────────────┐  │  │
-│  │  │  runtara-core                                        │  │  │
-│  │  │  Durable execution: checkpoints, signals, events,    │  │  │
-│  │  │  durable sleep                                       │  │  │
-│  │  └──────────────────────────────────────────────────────┘  │  │
-│  └────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────┘
+                ┌─────────────┐
+ webhooks,      │   intake    │  public routes only; no run state, no keys
+ OAuth ───────▶ └──────┬──────┘
+ redirects             │ mTLS
+                ┌──────▼──────┐        ┌──────────┐
+ console, API,  │   engine    │◀──────▶│   seal   │  holds connection secrets
+ MCP ──▶ api ──▶│ core + env  │        └──────────┘
+          mTLS  └──────┬──────┘
+                       │ mTLS
+                ┌──────▼──────┐
+                │  executors  │  one sandboxed process per run (optional)
+                └─────────────┘
 ```
 
-## Repository Contents
+The Compose overlays bring up each topology:
 
-This repository contains the Rust implementation of the Runtara platform:
+| Overlay | Adds |
+| --- | --- |
+| `docker-compose.seal.yml` | seal as its own process |
+| `docker-compose.executor.yml` | executors; runs and compiles leave the server |
+| `docker-compose.roles.yml` | API, engine, and intake as separate processes (needs the seal overlay) |
+| `docker-compose.engines.yml` | several engine replicas (on top of the split stack) |
 
-- `crates/runtara-server`: application HTTP API, auth, workflows, connections, MCP integration, file storage, object model, and background workers.
-- `crates/runtara-environment`: image registry, instance lifecycle, runners, and wake scheduling. A library — its management API is served over HTTP by `runtara-server`.
-- `crates/runtara-core`: durable runtime persistence for checkpoints, signals, events, and sleep. A library — `runtara-environment` calls its instance protocol in-process for every workflow; `runtara-server` can also serve it over HTTP on loopback for tests (`RUNTARA_CORE_INSTANCE_API`).
-- `crates/runtara-workflows`: workflow compiler and validation pipeline.
-- `crates/runtara-dsl`: workflow and agent metadata types.
-- `crates/runtara-connections`: connection management, OAuth2, and rate limiting.
-- `crates/runtara-object-store`: schema-driven dynamic PostgreSQL object store.
-- `crates/runtara-agents`, `crates/runtara-ai`, and `crates/runtara-workflow-stdlib`: built-in agents, AI helpers, and workflow runtime support.
-- `docs`: architecture notes, DSL spec, deployment notes, and reference material.
-- `e2e`: shell-based end-to-end tests and sample workflows.
-- `dev`: local Docker Compose stack for development dependencies.
+Each file's header comment gives the exact `docker compose -f ...` command.
 
-## Quick Start
+## Running From Source
 
 ### Prerequisites
 
-- Rust toolchain, stable, Edition 2024.
-- `wasm32-wasip2` target for default workflow compilation:
+- Rust, pinned by `rust-toolchain.toml` (it also installs the
+  `wasm32-wasip2` target).
+- PostgreSQL for server and runtime state.
+- Valkey (or Redis).
+
+`dev/README.md` describes a Docker Compose stack for these dependencies.
+
+### Start The Server
 
 ```bash
-rustup target add wasm32-wasip2
+./start.sh            # ./start.sh help lists the settings
 ```
 
-- PostgreSQL for platform, environment, and core state.
-- A separate PostgreSQL database for the object model when running `runtara-server`.
-- Valkey or Redis for `runtara-server` checkpoint storage during workflow execution and MCP session recovery.
-
-### Start The Local Runtime
-
-For local development, use the included launcher:
-
-```bash
-./start.sh
-```
-
-`start.sh` runs `runtara-server`, which embeds `runtara-environment` and `runtara-core`. See `./start.sh help` for supported environment variables.
-
-To run the full application server directly:
+`start.sh` builds and runs `runtara-server`, generating a credential
+encryption key once into `.data/credential-encryption.key`. To run the server
+directly:
 
 ```bash
 export RUNTARA_DATABASE_URL=postgres://localhost/runtara
 export VALKEY_HOST=localhost
-# Credentials are always encrypted at rest; the server won't start without a
-# key. Keep it: what is stored under a lost key cannot be recovered.
+# Keep this key: what is stored under a lost key cannot be recovered.
 export RUNTARA_CONNECTIONS_ENCRYPTION_KEY="$(openssl rand -base64 32)"
 cargo run -p runtara-server --release
 ```
 
-`./start.sh` does this for you, keeping a key in
-`.data/credential-encryption.key`.
+The API listens on port `7001`. Valkey supports auth (`VALKEY_USER` /
+`VALKEY_PASSWORD`) and TLS (`VALKEY_TLS=1`, with `VALKEY_TLS_CA_CERT` for a
+self-signed certificate).
 
-Valkey supports auth (`VALKEY_USER` / `VALKEY_PASSWORD`) and TLS: set
-`VALKEY_TLS=1`, plus `VALKEY_TLS_CA_CERT=/path/cert.pem` to trust a
-self-signed certificate or `VALKEY_TLS_INSECURE=1` to skip verification
-(local testing only).
+To give a tenant an object model, enter its PostgreSQL connection with
+`runtara-server object-model set`; it is stored sealed.
 
-Default local ports:
+### Images And Releases
 
-| Component | Default port |
-| --- | --- |
-| `runtara-server` public API | `7001` |
-| `runtara-core` instance API (test-only, loopback; served only with `RUNTARA_CORE_INSTANCE_API=true`) | `8003` |
-
-### Run With Docker
-
-Each release publishes a multi-arch (amd64 + arm64) server image to the GitHub
-Container Registry: `ghcr.io/runtarahq/runtara` (tags `:X.Y.Z`, `:latest`, and
-a rolling `:dev`). The console is a separate image,
-`ghcr.io/runtarahq/runtara-frontend`, released from
-[runtara-frontend](https://github.com/runtarahq/runtara-frontend); the server
-serves no UI.
-
-**Evaluating? One command brings up the whole stack:**
+Each release publishes a multi-arch server image, `ghcr.io/runtarahq/runtara`
+(tags `:X.Y.Z`, `:latest`, and a rolling `:dev`), and a native bundle:
 
 ```bash
-docker compose up          # then open http://localhost:3000/ui/
+curl -fsSL https://github.com/runtarahq/runtara/releases/latest/download/install.sh | sh
 ```
 
-The root `docker-compose.yml` starts the server and console images plus
-PostgreSQL and Valkey, wired for password-free local auth so you land straight
-in the console — no identity provider to configure. It is a turnkey trial
-stack, not a production deployment. The console is on host port 3000 and the
-API on 7001; if either is taken, override it with
-`RUNTARA_PORT=3030 RUNTARA_API_PORT=7101 docker compose up`. (Before the first tagged release, use the
-rolling dev image: `RUNTARA_IMAGE_TAG=dev docker compose up`.)
+The image holds `runtara-server` with its toolchain and agent components;
+supply PostgreSQL, Valkey, and configuration through the environment, using
+`docker-compose.yml` as the reference. State is written under `/data`. Run
+the console image (`ghcr.io/runtarahq/runtara-frontend`) beside it with
+`RUNTARA_UI_API_BASE_URL` pointing at the server, and list the console's
+origin in the server's `CORS_ALLOWED_ORIGINS` and `RUNTARA_UI_PUBLIC_URL`.
+The native install is headless: the API and MCP only.
 
-**Running the image yourself:** it contains `runtara-server` plus its bundled
-toolchain and agent components — a server image, not all-in-one. Supply
-PostgreSQL, Valkey, and config via environment (same variables as a native
-run); the `docker-compose.yml` above is the reference for the full set. All
-runtime state is written under `/data`, which is exposed as a volume. Run the
-console image next to it with `RUNTARA_UI_API_BASE_URL` set to the server, and
-list the console's origin in the server's `CORS_ALLOWED_ORIGINS` and as its
-`RUNTARA_UI_PUBLIC_URL` (runtara-frontend's README lists the console's
-settings). A native install (`scripts/install.sh`) is headless: the API and
-MCP only.
-
-### Build And Test
+## Build And Test
 
 ```bash
 cargo build
-cargo test
+cargo test                        # runtara-server only (the default member)
+cargo test -p runtara-workflows   # one crate
+scripts/build-agent-components.sh # agent .wasm components
+./e2e/run_all.sh                  # a selected end-to-end suite
 ```
 
-Target specific crates when iterating:
-
-```bash
-cargo test -p runtara-core
-cargo test -p runtara-environment
-cargo test -p runtara-workflows
-```
-
-Run shell-based end-to-end checks:
-
-```bash
-./e2e/run_all.sh
-```
+`.github/workflows/ci.yml` is the authoritative build and lint matrix; some
+integration tests need feature flags and test databases.
 
 ## Workflow DSL
-Runtara workflows are described as JSON execution graphs. A minimal workflow:
+
+Workflows are JSON execution graphs. A minimal one:
 
 ```json
 {
@@ -248,27 +198,43 @@ Runtara workflows are described as JSON execution graphs. A minimal workflow:
 }
 ```
 
-Useful references:
+The live JSON Schema is served at `GET /api/runtime/specs/dsl`. See also
+`crates/runtara-dsl/README.md`, `crates/runtara-workflows/README.md`, and the
+workflows in `examples/workflows`.
 
-- The live DSL JSON Schema: `GET /api/runtime/specs/dsl`
-- `crates/runtara-dsl/README.md`
-- `crates/runtara-workflows/README.md`
+## Repository Layout
 
-## Development References
+| Path | Contents |
+| --- | --- |
+| `crates/runtara-server` | The server: HTTP API, auth, MCP, workers, OpenAPI; runs as API, engine, intake, or all |
+| `crates/runtara-core` | Durable execution: instances, checkpoints, signals, events, sleep |
+| `crates/runtara-environment` | Image and instance lifecycle, runners, wake scheduling |
+| `crates/runtara-run`, `runtara-executor`, `runtara-runner-executor` | Running workflows outside the server, one sandboxed process per run |
+| `crates/runtara-dsl` | Workflow schema and step metadata |
+| `crates/runtara-workflows` | Workflow validation and compilation |
+| `crates/runtara-workflow-stdlib` | Guest-side workflow runtime |
+| `crates/runtara-component-host` | Loading and invoking WebAssembly components |
+| `crates/runtara-wit` | All WIT contracts |
+| `crates/agents/runtara-agent-*` | Workflow agents, one component crate each |
+| `crates/runtara-agents` | Host-side agent support (connection extractors) |
+| `crates/runtara-connections` | Connections, OAuth, sealed credentials, rate limiting |
+| `crates/runtara-object-store` | Schema-driven object storage |
+| `crates/runtara-tenant-scope` | Tenant scoping for database work |
+| `crates/runtara-validation-wasm` | Workflow validation for the browser console |
+| `examples` | Example workflows and the seeding script |
+| `e2e` | End-to-end tests |
+| `dev` | Development dependencies stack |
+| `scripts` | Install, build, and role-provisioning scripts |
 
-- Full platform entry point: `crates/runtara-server`
-- Durable runtime: `crates/runtara-core`
-- Management plane: `crates/runtara-environment`
-- Workflow compiler: `crates/runtara-workflows`
-- Local development stack: `dev/README.md`
-- Install & update from a release bundle: `docs/install.md`
-- Deployment notes: `docs/deployment/`
-- Pipeline metrics and observability: [OTEL monitoring](docs/pipeline-monitoring.md)
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md), [CLA.md](CLA.md), and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Report vulnerabilities as described
+in [SECURITY.md](SECURITY.md).
 
 ## License
 
-Licensed under `AGPL-3.0-or-later`.
-
-For commercial licensing options, contact `hello@syncmyorders.com`.
+Licensed under `AGPL-3.0-or-later`; see [LICENSING.md](LICENSING.md) for
+details and commercial licensing. Contact `hello@syncmyorders.com`.
 
 Copyright (C) 2025 SyncMyOrders Sp. z o.o.
