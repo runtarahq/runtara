@@ -20,6 +20,7 @@ base64 = { workspace = true }
 runtara-agent-macro = { workspace = true }
 runtara-dsl = { workspace = true }
 strum = { version = "0.26", features = ["derive"] }
+url = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
