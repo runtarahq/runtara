@@ -8,7 +8,7 @@ data, conversations, and durable execution together behind one API, with
 every workflow step running in a WebAssembly sandbox and every credential
 kept sealed.
 
-[Website](https://runtara.com) | [Product docs](https://runtara.com/docs/runtara-platform) | [Runtara Cloud](https://tally.so/r/81qE5o)
+[Website](https://runtara.com) | [Product docs](https://runtara.com/docs/runtara-platform) 
 
 This repository is the server and runtime. The web console lives in
 [runtarahq/runtara-frontend](https://github.com/runtarahq/runtara-frontend)
