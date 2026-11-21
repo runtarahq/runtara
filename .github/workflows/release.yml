@@ -216,6 +216,22 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # docker-compose.yml is downloaded and run on its own (the README's quick
+      # start), and the smoke suite below builds the console from source, so
+      # nothing else here pulls the image users get. Its default console tag
+      # is this release's console, and that image must be published.
+      - name: Check the console image docker-compose.yml pulls
+        run: |
+          tag=$(sed -nE 's|^[[:space:]]*image: ghcr\.io/runtarahq/runtara-frontend:\$\{RUNTARA_CONSOLE_TAG:-([^}]+)\}.*|\1|p' docker-compose.yml)
+          if [ "$tag" != "$RUNTARA_FRONTEND_VERSION" ]; then
+              echo "::error file=docker-compose.yml::the console tag defaults to '${tag}', not RUNTARA_FRONTEND_VERSION (${RUNTARA_FRONTEND_VERSION})"
+              exit 1
+          fi
+          if ! docker pull "ghcr.io/runtarahq/runtara-frontend:${tag}"; then
+              echo "::error::ghcr.io/runtarahq/runtara-frontend:${tag} is not published; release runtara-frontend ${tag} first"
+              exit 1
+          fi
+
       # The smoke suite is runtara-frontend's, at RUNTARA_FRONTEND_VERSION.
       - name: Checkout runtara-frontend
         uses: actions/checkout@v4

@@ -17,7 +17,9 @@
 #   RUNTARA_PORT=3030 RUNTARA_API_PORT=7101 docker compose up
 # Until the first tagged release publishes :latest, point at the rolling dev
 # image:  RUNTARA_IMAGE_TAG=dev docker compose up
-# The console image's tag: RUNTARA_CONSOLE_TAG (default latest).
+# The console image's tag: RUNTARA_CONSOLE_TAG (default: the console release
+# this server is released with, RUNTARA_FRONTEND_VERSION in
+# .github/workflows/release.yml, which checks the two match).
 
 services:
   postgres:
@@ -207,7 +209,7 @@ services:
   # config.js rendered from these RUNTARA_UI_* values at start. The browser
   # loads it from the host's port and calls the API at RUNTARA_UI_API_BASE_URL.
   console:
-    image: ghcr.io/runtarahq/runtara-frontend:${RUNTARA_CONSOLE_TAG:-latest}
+    image: ghcr.io/runtarahq/runtara-frontend:${RUNTARA_CONSOLE_TAG:-10.0.1}
     pull_policy: always
     environment:
       RUNTARA_UI_AUTH_MODE: local
