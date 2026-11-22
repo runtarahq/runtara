@@ -1954,6 +1954,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A server on a seal of its own keeps it when its certificate is
+  renewed.** With `RUNTARA_SEAL_MODE=mtls` the server read `ca.pem`,
+  `tls.pem` and `tls.key` from `RUNTARA_SEAL_TLS_DIR` once, at its start.
+  seal checks the certificate each connection is made with, and ends a
+  connection after an hour, so where certificates last hours and are
+  renewed in place the server lost seal, and every credential with it, when
+  the certificate it started with expired. It now looks at the files every
+  few seconds and makes its next connections with the new ones; files that
+  do not load, as when a renewal is half written, are logged once and the
+  certificates in use are kept.
+
 - **A tenant moved with `migrate-tenant` could run none of its workflows.**
   The engine's record of what it approved to run, and of the version of
   each workflow that runs when none is named, was not copied with the
