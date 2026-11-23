@@ -6968,7 +6968,7 @@
   "paths": {
     "/V1/categories": {
       "get": {
-        "description": "Retrieve list of categories",
+        "description": "The category tree under a root category (the catalog's root when none is given), to the depth given.",
         "operationId": "getCategoryTree",
         "parameters": [
           {
@@ -7388,7 +7388,7 @@
         "x-runtara-summary": "Get Customer"
       },
       "put": {
-        "description": "Create or update a customer.",
+        "description": "Saves the customer that has the ID with the fields given. Magento needs the customer's email, first name and last name in every update. Answers the saved customer.",
         "operationId": "updateCustomer",
         "parameters": [
           {
@@ -7498,7 +7498,7 @@
     },
     "/V1/inventory/source-items": {
       "get": {
-        "description": "Find SourceItems by SearchCriteria We need to have this method for direct work with SourceItems because this object contains additional data like as qty, status (for example can be searchable by additional field)",
+        "description": "Lists the source items (a SKU's quantity and stock status at one source) that match the search criteria.",
         "operationId": "searchSourceItems",
         "parameters": [
           {
@@ -7569,7 +7569,7 @@
         "x-runtara-summary": "Search Source Items"
       },
       "post": {
-        "description": "Save Multiple Source item data",
+        "description": "Sets the quantity and stock status of SKUs at their sources. Answers an empty list.",
         "operationId": "saveSourceItems",
         "requestBody": {
           "content": {
@@ -7654,7 +7654,7 @@
     },
     "/V1/inventory/sources": {
       "get": {
-        "description": "Find Sources by SearchCriteria SearchCriteria is not required because load all stocks is useful case",
+        "description": "Lists the inventory sources that match the search criteria; `{}` lists all.",
         "operationId": "searchSources",
         "parameters": [
           {
@@ -7800,7 +7800,7 @@
     },
     "/V1/order/{orderId}/invoice": {
       "post": {
-        "description": "",
+        "description": "Invoices an order: every item not invoiced yet, or the `items` given. `capture` captures the payment online where its method can. Answers the new invoice's ID.",
         "operationId": "invoiceOrder",
         "parameters": [
           {
@@ -7921,7 +7921,7 @@
     },
     "/V1/order/{orderId}/refund": {
       "post": {
-        "description": "Create offline refund for order",
+        "description": "Refunds an order offline (a credit memo): every refundable item, or the `items` given, with the shipping amount and adjustments in `arguments`. Answers the new credit memo's ID.",
         "operationId": "refundOrder",
         "parameters": [
           {
@@ -8038,7 +8038,7 @@
     },
     "/V1/order/{orderId}/ship": {
       "post": {
-        "description": "Creates new Shipment for given Order.",
+        "description": "Ships an order: every item not shipped yet, or the `items` given, with the `tracks` given. Answers the new shipment's ID.",
         "operationId": "shipOrder",
         "parameters": [
           {
@@ -8608,7 +8608,7 @@
     },
     "/V1/products": {
       "get": {
-        "description": "Get product list",
+        "description": "Lists the products that match the search criteria.",
         "operationId": "searchProducts",
         "parameters": [
           {
@@ -8679,7 +8679,7 @@
         "x-runtara-summary": "Search Products"
       },
       "post": {
-        "description": "Create product",
+        "description": "Saves a product by its SKU: creates it, or updates the product that has the SKU already. Answers the saved product.",
         "operationId": "saveProduct",
         "requestBody": {
           "content": {
@@ -8762,7 +8762,7 @@
     },
     "/V1/products/{sku}": {
       "delete": {
-        "description": "",
+        "description": "Deletes the product that has the SKU. Answers true.",
         "operationId": "deleteProduct",
         "parameters": [
           {
@@ -8955,7 +8955,7 @@
         "x-runtara-summary": "Get Product"
       },
       "put": {
-        "description": "Create product",
+        "description": "Updates the product that has `current_sku` with the fields given; a `sku` renames it. Answers the saved product.",
         "operationId": "updateProduct",
         "parameters": [
           {
@@ -9051,7 +9051,7 @@
     },
     "/V1/shipment/track": {
       "post": {
-        "description": "Performs persist operations for a specified shipment track.",
+        "description": "Adds a tracking number to a shipment (`parent_id`) of an order (`order_id`). Answers the saved track.",
         "operationId": "addShipmentTrack",
         "requestBody": {
           "content": {
@@ -9207,7 +9207,7 @@
     },
     "/V1/stockItems/{productSku}": {
       "get": {
-        "description": "",
+        "description": "The stock item of a SKU in Magento's single-source stock: its quantity, whether it is in stock, and its thresholds.",
         "operationId": "getStockItem",
         "parameters": [
           {
@@ -9300,7 +9300,7 @@
     },
     "/V1/store/storeConfigs": {
       "get": {
-        "description": "",
+        "description": "The configuration of each store view (its base URLs, locale, currencies and time zone), or of the views named in `storeCodes`.",
         "operationId": "getStoreConfigs",
         "parameters": [
           {
@@ -9380,7 +9380,7 @@
     },
     "/V1/store/storeViews": {
       "get": {
-        "description": "Retrieve list of all stores",
+        "description": "Lists the store views, and the admin store.",
         "operationId": "listStoreViews",
         "responses": {
           "200": {

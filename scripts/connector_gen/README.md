@@ -400,11 +400,22 @@ operation_names:
   GetV1Orders: searchOrders
 ```
 
+Where the vendor's description says something else (Magento's update of a
+product reads "Create product"), is written for its own developers, or is
+missing, the entry gives the capability's description too:
+
+```yaml
+operation_names:
+  PutV1ProductsSku:
+    name: updateProduct
+    description: Updates the product that has `current_sku` with the fields given.
+```
+
 **One object is declared as a query parameter per key**, at fixed indices, as
 Magento's search criteria are (`searchCriteria[filterGroups][0][filters][0][field]`,
 `searchCriteria[pageSize]`, …), which allow one filter and one sort order. Name
 the object, and its parameters become one free-form `deepObject` input under
-its name (`search_criteria`), sent with any keys and indices by `kit.rs`'s
+its name (`searchCriteria`), sent with any keys and indices by `kit.rs`'s
 `query_object`; give its description, and `required` when the API refuses a
 request without it though the spec leaves every key optional. Nested keys need
 a `query_object` that recurses, as `runtara-agent-magento`'s does:
@@ -743,7 +754,8 @@ crates/agents/runtara-agent-<id>/
 - An operation that declares no 2xx response (Magento's save of source items
   declares only 400, 401 and `default`) is given a `200` without a body, so its
   output is `Value`; openapi-generator would otherwise take `default`'s, an
-  error's shape.
+  error's shape. `fetch` notes each one: a spec that declares its success only
+  as `default` would lose its output's type the same way.
 - `fetch` marks operations with `x-runtara-*` vendor extensions (side effects,
   summaries, which capability carries the agent's module attributes) because
   the templates cannot compute them. An operation with several tags keeps its

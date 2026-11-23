@@ -9,12 +9,14 @@
 //! agents (e.g. `runtara-agent-stripe`) carry. Meant to move into a crate shared
 //! by every generated agent.
 //!
-//! A request that may change something twice is never reported as worth
-//! retrying when its outcome is unknown: Magento has no idempotency key, and
-//! sending an invoice, a shipment, a refund or a comment again after a timeout
-//! or a 5xx makes a second one. A GET reads, and a PUT saves what it is given,
-//! so those are sent again. A write whose answer cannot be read counts as
-//! unknown too, because it may have been carried out. See [`outcome_unknown`].
+//! A request that is not a read is never reported as worth retrying when its
+//! outcome is unknown: Magento has no idempotency key, and sending an invoice,
+//! a shipment, a refund or a comment again after a timeout or a 5xx makes a
+//! second one. An update (PUT) is no safer: it adds the images, custom options
+//! or addresses it carries without an id again, and after a SKU rename it no
+//! longer finds the product. Only a GET is sent again. A write whose answer
+//! cannot be read counts as unknown too, because it may have been carried
+//! out. See [`outcome_unknown`].
 //!
 //! Magento habits the schema does not state: an error answers
 //! `{"message": "… %1 …", "parameters": […]}` (or named `%fieldName`
@@ -150,6 +152,12 @@ pub fn encode_path<T: ToString>(value: &T) -> String {
 /// How a parameter value is written into a query string or a header.
 pub trait ParamValue {
     fn to_param(&self) -> String;
+
+    /// The items of a list, each as text; `None` for a single value. A list
+    /// goes into the query one indexed key per item (see [`Request::query`]).
+    fn list_items(&self) -> Option<Vec<String>> {
+        None
+    }
 }
 
 macro_rules! display_param {
@@ -164,13 +172,17 @@ macro_rules! display_param {
 
 display_param!(String, i32, i64, f32, f64, bool);
 
-/// Arrays use the comma-separated (`style: form, explode: false`) encoding.
+/// A list in a header is comma-separated; in a query, see [`Request::query`].
 impl<T: ParamValue> ParamValue for Vec<T> {
     fn to_param(&self) -> String {
         self.iter()
             .map(ParamValue::to_param)
             .collect::<Vec<_>>()
             .join(",")
+    }
+
+    fn list_items(&self) -> Option<Vec<String>> {
+        Some(self.iter().map(ParamValue::to_param).collect())
     }
 }
 
@@ -264,8 +276,19 @@ impl Request {
             .and_then(|bytes| serde_json::from_slice(bytes).ok())
     }
 
+    /// A list goes in one indexed key per item, `storeCodes[0]=default&storeCodes[1]=fr`:
+    /// Magento is PHP, which reads a list from a query string only that way.
+    /// `storeCodes=default,fr` is one string, and Magento refuses it where its
+    /// signature takes `string[]`.
     pub fn query<T: ParamValue>(mut self, name: &str, value: &T) -> Self {
-        self.query.push((name.to_string(), value.to_param()));
+        match value.list_items() {
+            Some(items) => {
+                for (index, item) in items.into_iter().enumerate() {
+                    self.query.push((format!("{name}[{index}]"), item));
+                }
+            }
+            None => self.query.push((name.to_string(), value.to_param())),
+        }
         self
     }
 
@@ -276,10 +299,13 @@ impl Request {
         }
     }
 
-    /// An exploded array parameter: one `name=value` pair per item.
+    /// An exploded array parameter. PHP keeps only the last of repeated
+    /// `name=value` pairs, so each item gets an indexed key, as in
+    /// [`Request::query`].
     pub fn query_each<T: ParamValue>(mut self, name: &str, values: &[T]) -> Self {
-        for value in values {
-            self.query.push((name.to_string(), value.to_param()));
+        for (index, value) in values.iter().enumerate() {
+            self.query
+                .push((format!("{name}[{index}]"), value.to_param()));
         }
         self
     }
@@ -403,27 +429,24 @@ impl Request {
 }
 
 /// A request that got no response (a network error or the timeout). Only a
-/// request that is safe to repeat is worth retrying; anything else may have
-/// been carried out.
+/// read is worth retrying; anything else may have been carried out.
 pub fn network_error(method: &str, path: &str, prefix: &str, cause: &str) -> AgentError {
     let message = format!("{prefix} {method} {path} failed: {cause}");
-    if is_repeatable(method) {
+    if is_read(method) {
         AgentError::transient(format!("{prefix}_NETWORK_ERROR"), message)
     } else {
         outcome_unknown(prefix, message)
     }
 }
 
-/// A GET reads; a PUT saves the fields it is given (a product, a customer), so
-/// sending it again leaves the same record. A POST or a DELETE is neither: a
-/// second invoice, shipment, refund or comment is a new one.
-fn is_repeatable(method: &str) -> bool {
-    method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("PUT")
+/// Every operation of this agent that changes nothing is a GET.
+fn is_read(method: &str) -> bool {
+    method.eq_ignore_ascii_case("GET")
 }
 
-/// A request that is not safe to repeat and got no answer, or a 5xx: Magento
-/// may or may not have carried it out. Permanent, so the step is not sent
-/// again; the workflow decides (look the order up) before retrying.
+/// A request that is not a read and got no answer, or a 5xx: Magento may or
+/// may not have carried it out. Permanent, so the step is not sent again; the
+/// workflow decides (look the order or the product up) before retrying.
 pub fn outcome_unknown(prefix: &str, message: String) -> AgentError {
     AgentError::permanent(
         format!("{prefix}_OUTCOME_UNKNOWN"),
@@ -491,7 +514,7 @@ pub fn magento_error_message(body: &[u8]) -> Option<String> {
 ///   ([`magento_error_message`]) when the body is one: 404 is
 ///   `<PREFIX>_NOT_FOUND` (no order, product or customer with that id or
 ///   SKU), 429 is transient (something in front of the store refused the
-///   request), a 5xx is transient for a request safe to repeat and
+///   request), a 5xx is transient for a read and
 ///   [`outcome_unknown`] otherwise, and the rest are permanent.
 /// - An empty 2xx body decodes as JSON `null`, so an operation without a
 ///   response body returns `Value::Null`.
@@ -514,7 +537,7 @@ pub fn decode<T: DeserializeOwned>(
         let err = match status {
             429 => AgentError::transient(format!("{prefix}_RATE_LIMITED"), message)
                 .with_retry_after_ms(retry_after_ms(&response.headers)),
-            500..=599 if is_repeatable(method) => {
+            500..=599 if is_read(method) => {
                 AgentError::transient(format!("{prefix}_UPSTREAM_ERROR"), message)
             }
             500..=599 => outcome_unknown(prefix, message),
@@ -537,7 +560,7 @@ pub fn decode<T: DeserializeOwned>(
 
     let invalid = |e: serde_json::Error| {
         let message = format!("{prefix} {method} {path}: {e}");
-        if method.eq_ignore_ascii_case("GET") {
+        if is_read(method) {
             return AgentError::permanent(format!("{prefix}_INVALID_RESPONSE"), message);
         }
         // Magento accepted the write; the record's id is what lets a workflow

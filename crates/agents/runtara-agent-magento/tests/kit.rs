@@ -97,27 +97,51 @@ fn a_refused_token_says_where_to_look() {
 }
 
 #[test]
-fn a_server_error_is_retried_only_where_sending_again_is_safe() {
-    for method in ["GET", "PUT"] {
-        let err = decode::<Value>(method, response(503, "", &[])).unwrap_err();
-        assert_eq!(err.code, "MAGENTO_UPSTREAM_ERROR", "{method}");
-        assert_eq!(err.category, "transient", "{method}");
-    }
-    for method in ["POST", "DELETE"] {
+fn only_a_read_is_retried() {
+    let err = decode::<Value>("GET", response(503, "", &[])).unwrap_err();
+    assert_eq!(err.code, "MAGENTO_UPSTREAM_ERROR");
+    assert_eq!(err.category, "transient");
+    // An update is no safer than a create: it adds images or options without
+    // an id again, and after a rename it no longer finds the product.
+    for method in ["POST", "PUT", "DELETE"] {
         let err = decode::<Value>(method, response(503, "", &[])).unwrap_err();
         assert_eq!(err.code, "MAGENTO_OUTCOME_UNKNOWN", "{method}");
         assert_eq!(err.category, "permanent", "{method}");
     }
-    let err = kit::network_error(
-        "POST",
-        "/rest/all/V1/order/3/invoice",
-        "MAGENTO",
-        "timed out",
-    );
-    assert_eq!(err.code, "MAGENTO_OUTCOME_UNKNOWN");
-    let err = kit::network_error("PUT", "/rest/all/V1/products/MH01", "MAGENTO", "timed out");
+    let err = kit::network_error("GET", "/rest/all/V1/orders/3", "MAGENTO", "timed out");
     assert_eq!(err.code, "MAGENTO_NETWORK_ERROR");
     assert_eq!(err.category, "transient");
+    for (method, path) in [
+        ("POST", "/rest/all/V1/order/3/invoice"),
+        ("PUT", "/rest/all/V1/products/MH01"),
+    ] {
+        let err = kit::network_error(method, path, "MAGENTO", "timed out");
+        assert_eq!(err.code, "MAGENTO_OUTCOME_UNKNOWN", "{method}");
+        assert_eq!(err.category, "permanent", "{method}");
+    }
+}
+
+#[test]
+fn a_list_in_the_query_is_one_indexed_key_per_item() {
+    // PHP reads `storeCodes=default,fr` as one string, and Magento refuses it
+    // where it takes `string[]`.
+    let request = kit::Request::new("GET", "/rest/all/V1/store/storeConfigs".into())
+        .query_opt(
+            "storeCodes",
+            &Some(vec!["default".to_string(), "fr".to_string()]),
+        )
+        .query("depth", &2_i64)
+        .query_each("ids", &[4_i64, 5]);
+    assert_eq!(
+        request.query_pairs(),
+        [
+            ("storeCodes[0]".to_string(), "default".to_string()),
+            ("storeCodes[1]".to_string(), "fr".to_string()),
+            ("depth".to_string(), "2".to_string()),
+            ("ids[0]".to_string(), "4".to_string()),
+            ("ids[1]".to_string(), "5".to_string()),
+        ]
+    );
 }
 
 #[test]

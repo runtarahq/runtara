@@ -30,17 +30,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that address to `<store>/rest/all/V1`, Magento's global scope; the store
   must allow integration tokens as standalone Bearer tokens (Stores →
   Configuration → Services → OAuth). It is limited by default to 5
-  requests/s with a burst of 10. An invoice, shipment, refund or comment that
-  gets no answer, a 5xx or an answer it cannot read fails with
-  `MAGENTO_OUTCOME_UNKNOWN` instead of being sent again; a GET or a PUT is
-  retried. An unknown id or SKU is `MAGENTO_NOT_FOUND`, and Magento's error
-  messages are filled in, without the trace a store in developer mode adds.
+  requests/s with a burst of 10. A request that is not a read (an invoice, a
+  shipment, a refund, an update) and gets no answer, a 5xx or an answer it
+  cannot read fails with `MAGENTO_OUTCOME_UNKNOWN` instead of being sent
+  again: Magento has no idempotency key, and an update sent twice adds its new
+  images or options twice. Only a GET is retried. A list in the query is sent
+  as PHP reads one (`storeCodes[0]=…`). An unknown id or SKU is
+  `MAGENTO_NOT_FOUND`, and Magento's error messages are filled in, without
+  the trace a store in developer mode adds.
   Not covered: requests signed with OAuth 1.0a, Adobe Commerce as a Cloud
   Service (Adobe IMS) and the endpoints only Adobe Commerce has.
 
 - **`connector_gen` takes Magento's schema.** `operation_names` names an
   operation whose vendor id is not a name (`GetV1OrdersId` is generated as
-  `getOrder`), and `query_objects` makes the query parameters a spec declares
+  `getOrder`), and may describe it where the vendor's description misleads,
+  and `query_objects` makes the query parameters a spec declares
   one per key of one object, at fixed indices, one free-form object input,
   required where the API needs it. A Swagger 2.0 parameter keeps its vendor
   extensions (`x-runtara-input-name`), and an operation that declares no 2xx

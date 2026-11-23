@@ -845,6 +845,8 @@ def check_operation(spec: dict, path: str, method: str, op: dict, item: dict, en
     responses = op.get("responses") or {}
     if not any(str(code).startswith("2") for code in responses):
         op["responses"] = {"200": {"description": "OK"}, **responses}
+        print(f"note: {name}: declares no 2xx response; its output is `Value`, "
+              "not the shape of its `default` response")
 
     # Facts the logic-less templates branch on, and text they print as is.
     if method != "get":
@@ -1397,10 +1399,10 @@ def slice_specs(specs: list, config: dict, reads: list = ()) -> dict:
     else:
         sliced = merge_slices(slices)
         check_names(sliced, [op for source, _ in specs for op in source["operations"]], model_names)
-    names = config.get("operation_names") or {}
-    if names:
+    if config.get("operation_names"):
         listed = [op for source, _ in specs for op in source["operations"]]
-        rename_operations(sliced, names, listed)
+        rename_operations(sliced, config["operation_names"], listed)
+        names = operation_names(config)
         check_names(sliced, [names.get(op, op) for op in listed], model_names)
     make_optional(sliced, config.get("optional_fields") or {})
     retype_titled(sliced, config.get("title_types") or {})
@@ -1531,29 +1533,57 @@ def unexplode_query_arrays(sliced: dict) -> None:
 OPERATION_NAME = re.compile(r"[a-z][A-Za-z0-9]*")
 
 
+def operation_name_entries(names) -> dict:
+    """`operation_names`, each entry as `{name, description?}`: a bare name, or
+    a mapping that also gives the capability's description."""
+    if not isinstance(names, dict):
+        sys.exit("operation_names maps a listed operationId to the name it is generated under")
+    entries = {}
+    for vendor, entry in names.items():
+        entry = {"name": entry} if not isinstance(entry, dict) else entry
+        description = entry.get("description")
+        if (set(entry) - {"name", "description"}
+                or (description is not None and (not isinstance(description, str) or not description.strip()))):
+            sys.exit(f"operation_names: `{vendor}` takes a name, or `{{name: …, description: …}}`")
+        entries[vendor] = entry
+    return entries
+
+
+def operation_names(config: dict) -> dict:
+    """The vendor's operationId -> the one it is generated under."""
+    return {vendor: entry.get("name") for vendor, entry in
+            operation_name_entries(config.get("operation_names") or {}).items()}
+
+
 def rename_operations(sliced: dict, names: dict, listed: list) -> None:
     """`operation_names`: the vendor's operationId -> ours, which names the
     capability (`getOrder` is `get-order`), its function and, without a
     summary of the vendor's, its label ("Get Order"). Magento derives its ids
-    from the path (`GetV1OrdersId`) and writes no summaries. `operations:` and
-    the other options name the vendor's ids, as the spec does."""
-    if not isinstance(names, dict):
-        sys.exit("operation_names maps a listed operationId to the name it is generated under")
-    unknown = sorted(set(names) - set(listed))
+    from the path (`GetV1OrdersId`) and writes no summaries. An entry may also
+    give the capability's description, where the vendor's says something else
+    (Magento's update of a product reads "Create product") or nothing.
+    `operations:` and the other options name the vendor's ids, as the spec
+    does."""
+    entries = operation_name_entries(names)
+    unknown = sorted(set(entries) - set(listed))
     if unknown:
         sys.exit(f"operation_names {unknown} are not in operations")
-    bad = sorted(str(name) for name in names.values() if not OPERATION_NAME.fullmatch(str(name)))
+    bad = sorted(str(entry.get("name")) for entry in entries.values()
+                 if not OPERATION_NAME.fullmatch(str(entry.get("name"))))
     if bad:
         sys.exit(f"operation_names {bad} are not camelCase names (like `getOrder`)")
-    final = [names.get(op, op) for op in listed]
+    final = [entries[op]["name"] if op in entries else op for op in listed]
     twice = sorted({name for name in final if final.count(name) > 1})
     if twice:
         sys.exit(f"operation_names: {twice} would name two operations")
     for item in sliced["paths"].values():
         for method, op in item.items():
-            if method in HTTP_METHODS and op["operationId"] in names:
-                op["operationId"] = names[op["operationId"]]
+            if method in HTTP_METHODS and op["operationId"] in entries:
+                entry = entries[op["operationId"]]
+                op["operationId"] = entry["name"]
                 op["x-runtara-summary"] = clean_text(op.get("summary") or humanize(op["operationId"]))
+                if entry.get("description"):
+                    op["description"] = entry["description"].strip()
 
 
 def make_optional(sliced: dict, fields: dict) -> None:
@@ -2248,7 +2278,7 @@ def drift(crate: Path) -> list:
     sliced = json.loads((crate / "spec.slice.json").read_text())
     problems = []
 
-    names = config.get("operation_names") or {}
+    names = operation_names(config)
     listed = {names.get(op, op) for op in operation_ids(config)}
     sliced_ops = {
         op["operationId"]

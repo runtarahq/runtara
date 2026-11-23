@@ -11,12 +11,13 @@ use runtara_agent_magento::{
     AddOrderCommentInput, CatalogDataCategoryTreeInterface, CatalogDataProductInterface,
     CatalogDataProductSearchResultsInterface, CatalogInventoryDataStockItemInterface,
     CustomerDataCustomerInterface, CustomerDataCustomerSearchResultsInterface,
-    InventoryApiDataSourceItemSearchResultsInterface, InventoryApiDataSourceSearchResultsInterface,
-    RefundOrderInput, SalesDataCreditmemoSearchResultInterface,
-    SalesDataInvoiceSearchResultInterface, SalesDataOrderInterface,
-    SalesDataOrderSearchResultInterface, SalesDataShipmentSearchResultInterface, SaveProductInput,
-    SaveSourceItemsInput, SearchOrdersInput, ShipOrderInput, StoreDataStoreConfigInterface,
-    StoreDataStoreInterface, UpdateCustomerInput, UpdateProductInput,
+    GetStoreConfigsInput, InventoryApiDataSourceItemSearchResultsInterface,
+    InventoryApiDataSourceSearchResultsInterface, RefundOrderInput,
+    SalesDataCreditmemoSearchResultInterface, SalesDataInvoiceSearchResultInterface,
+    SalesDataOrderInterface, SalesDataOrderSearchResultInterface,
+    SalesDataShipmentSearchResultInterface, SaveProductInput, SaveSourceItemsInput,
+    SearchOrdersInput, ShipOrderInput, StoreDataStoreConfigInterface, StoreDataStoreInterface,
+    UpdateCustomerInput, UpdateProductInput,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -454,4 +455,22 @@ fn source_items_are_saved_as_a_list() {
             {"sku": "24-MB01", "source_code": "default", "quantity": 100.0, "status": 1}
         ]}))
     );
+}
+
+#[test]
+fn store_configs_are_asked_for_by_indexed_store_codes() {
+    // A store refuses `storeCodes=default,fr`: PHP reads it as one string.
+    let input: GetStoreConfigsInput =
+        serde_json::from_value(json!({ "storeCodes": ["default", "fr"] })).unwrap();
+    let request = input.request().unwrap();
+    assert_eq!(request.path(), "/rest/all/V1/store/storeConfigs");
+    assert_eq!(
+        request.query_pairs(),
+        [
+            ("storeCodes[0]".to_string(), "default".to_string()),
+            ("storeCodes[1]".to_string(), "fr".to_string()),
+        ]
+    );
+    let all: GetStoreConfigsInput = serde_json::from_value(json!({})).unwrap();
+    assert!(all.request().unwrap().query_pairs().is_empty());
 }

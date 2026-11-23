@@ -8791,7 +8791,7 @@ pub struct GetCategoryTreeInput {
     module = "magento",
     id = "get-category-tree",
     display_name = r##"Get Category Tree"##,
-    description = r##"Retrieve list of categories"##
+    description = r##"The category tree under a root category (the catalog's root when none is given), to the depth given."##
 )]
 pub async fn get_category_tree(
     input: GetCategoryTreeInput,
@@ -8829,7 +8829,7 @@ pub struct GetStockItemInput {
     module = "magento",
     id = "get-stock-item",
     display_name = r##"Get Stock Item"##,
-    description = r##""##
+    description = r##"The stock item of a SKU in Magento's single-source stock: its quantity, whether it is in stock, and its thresholds."##
 )]
 pub async fn get_stock_item(
     input: GetStockItemInput,
@@ -8865,7 +8865,7 @@ pub struct DeleteProductInput {
     module = "magento",
     id = "delete-product",
     display_name = r##"Delete Product"##,
-    description = r##""##,
+    description = r##"Deletes the product that has the SKU. Answers true."##,
     side_effects = true
 )]
 pub async fn delete_product(input: DeleteProductInput) -> Result<bool, AgentError> {
@@ -9054,7 +9054,7 @@ pub struct SaveProductInput {
     module = "magento",
     id = "save-product",
     display_name = r##"Save Product"##,
-    description = r##"Create product"##,
+    description = r##"Saves a product by its SKU: creates it, or updates the product that has the SKU already. Answers the saved product."##,
     side_effects = true
 )]
 pub async fn save_product(
@@ -9112,7 +9112,7 @@ pub struct SearchProductsInput {
     module = "magento",
     id = "search-products",
     display_name = r##"Search Products"##,
-    description = r##"Get product list"##
+    description = r##"Lists the products that match the search criteria."##
 )]
 pub async fn search_products(
     input: SearchProductsInput,
@@ -9254,7 +9254,7 @@ pub struct UpdateProductInput {
     module = "magento",
     id = "update-product",
     display_name = r##"Update Product"##,
-    description = r##"Create product"##,
+    description = r##"Updates the product that has `current_sku` with the fields given; a `sku` renames it. Answers the saved product."##,
     side_effects = true
 )]
 pub async fn update_product(
@@ -9705,7 +9705,7 @@ pub struct UpdateCustomerInput {
     module = "magento",
     id = "update-customer",
     display_name = r##"Update Customer"##,
-    description = r##"Create or update a customer."##,
+    description = r##"Saves the customer that has the ID with the fields given. Magento needs the customer's email, first name and last name in every update. Answers the saved customer."##,
     side_effects = true
 )]
 pub async fn update_customer(
@@ -9772,7 +9772,7 @@ pub struct SearchSourceItemsInput {
     module = "magento",
     id = "search-source-items",
     display_name = r##"Search Source Items"##,
-    description = r##"Find SourceItems by SearchCriteria We need to have this method for direct work with SourceItems because this object contains additional data like as qty, status (for example can be searchable by additional field)"##
+    description = r##"Lists the source items (a SKU's quantity and stock status at one source) that match the search criteria."##
 )]
 pub async fn search_source_items(
     input: SearchSourceItemsInput,
@@ -9806,7 +9806,7 @@ pub struct SaveSourceItemsInput {
     module = "magento",
     id = "save-source-items",
     display_name = r##"Save Source Items"##,
-    description = r##"Save Multiple Source item data"##,
+    description = r##"Sets the quantity and stock status of SKUs at their sources. Answers an empty list."##,
     side_effects = true
 )]
 pub async fn save_source_items(input: SaveSourceItemsInput) -> Result<Value, AgentError> {
@@ -9844,7 +9844,7 @@ pub struct SearchSourcesInput {
     module = "magento",
     id = "search-sources",
     display_name = r##"Search Sources"##,
-    description = r##"Find Sources by SearchCriteria SearchCriteria is not required because load all stocks is useful case"##
+    description = r##"Lists the inventory sources that match the search criteria; `{}` lists all."##
 )]
 pub async fn search_sources(
     input: SearchSourcesInput,
@@ -9937,7 +9937,7 @@ pub struct InvoiceOrderInput {
     module = "magento",
     id = "invoice-order",
     display_name = r##"Invoice Order"##,
-    description = r##""##,
+    description = r##"Invoices an order: every item not invoiced yet, or the `items` given. `capture` captures the payment online where its method can. Answers the new invoice's ID."##,
     side_effects = true
 )]
 pub async fn invoice_order(input: InvoiceOrderInput) -> Result<i64, AgentError> {
@@ -10320,7 +10320,7 @@ pub struct RefundOrderInput {
     module = "magento",
     id = "refund-order",
     display_name = r##"Refund Order"##,
-    description = r##"Create offline refund for order"##,
+    description = r##"Refunds an order offline (a credit memo): every refundable item, or the `items` given, with the shipping amount and adjustments in `arguments`. Answers the new credit memo's ID."##,
     side_effects = true
 )]
 pub async fn refund_order(input: RefundOrderInput) -> Result<i64, AgentError> {
@@ -10388,7 +10388,7 @@ pub struct ShipOrderInput {
     module = "magento",
     id = "ship-order",
     display_name = r##"Ship Order"##,
-    description = r##"Creates new Shipment for given Order."##,
+    description = r##"Ships an order: every item not shipped yet, or the `items` given, with the `tracks` given. Answers the new shipment's ID."##,
     side_effects = true
 )]
 pub async fn ship_order(input: ShipOrderInput) -> Result<i64, AgentError> {
@@ -10534,7 +10534,7 @@ pub struct AddShipmentTrackInput {
     module = "magento",
     id = "add-shipment-track",
     display_name = r##"Add Shipment Track"##,
-    description = r##"Performs persist operations for a specified shipment track."##,
+    description = r##"Adds a tracking number to a shipment (`parent_id`) of an order (`order_id`). Answers the saved track."##,
     side_effects = true
 )]
 pub async fn add_shipment_track(
@@ -10588,7 +10588,7 @@ pub struct GetStoreConfigsInput {
     module = "magento",
     id = "get-store-configs",
     display_name = r##"Get Store Configs"##,
-    description = r##""##,
+    description = r##"The configuration of each store view (its base URLs, locale, currencies and time zone), or of the views named in `storeCodes`."##,
     module_display_name = r##"Magento / Adobe Commerce"##,
     module_description = r##"Magento Open Source and Adobe Commerce — orders, invoices, shipments, refunds, products, inventory and customers."##,
     module_has_side_effects = true,
@@ -10624,7 +10624,7 @@ pub struct ListStoreViewsInput {
     module = "magento",
     id = "list-store-views",
     display_name = r##"List Store Views"##,
-    description = r##"Retrieve list of all stores"##
+    description = r##"Lists the store views, and the admin store."##
 )]
 pub async fn list_store_views(
     input: ListStoreViewsInput,

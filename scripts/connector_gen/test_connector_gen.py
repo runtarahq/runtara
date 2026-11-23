@@ -2197,9 +2197,13 @@ class NoSuccessResponseTest(unittest.TestCase):
             "schema": {"$ref": "#/components/schemas/Error"}}}}
         spec = spec_with({"responses": {"400": error, "default": error}},
                          {"Error": {"type": "object", "properties": {"message": {"type": "string"}}}})
-        responses = operation(cg.slice_spec(spec, ["op"]), "op")["responses"]
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            responses = operation(cg.slice_spec(spec, ["op"]), "op")["responses"]
         self.assertEqual(responses["200"], {"description": "OK"})
         self.assertEqual(set(responses), {"200", "400", "default"})
+        # Said, so that a spec whose success is its `default` is noticed.
+        self.assertIn("note: op: declares no 2xx response", printed.getvalue())
 
     def test_a_declared_success_is_left_alone(self):
         responses = operation(cg.slice_spec(spec_with({}), ["op"]), "op")["responses"]
@@ -2240,8 +2244,19 @@ class OperationNamesTest(unittest.TestCase):
                 self.sliced(names)
             self.assertIn(message, str(raised.exception))
 
+    def test_an_entry_may_also_describe_the_operation(self):
+        sliced = self.sliced({"GetV1OrdersId": {"name": "getOrder", "description": " Reads one order. "},
+                              "GetV1Orders": {"name": "searchOrders"}})
+        order = operation(sliced, "getOrder")
+        self.assertEqual((order["x-runtara-summary"], order["description"]), ("Get Order", "Reads one order."))
+        self.assertNotIn("description", operation(sliced, "searchOrders"))
+        for entry in ({"name": "getOrder", "summary": "x"}, {"name": "getOrder", "description": ""}):
+            with self.subTest(entry=entry), self.assertRaises(SystemExit) as raised:
+                self.sliced({"GetV1OrdersId": entry})
+            self.assertIn("takes a name", str(raised.exception))
+
     def test_check_reads_the_listed_operations_under_their_new_names(self):
-        names = {"GetV1OrdersId": "getOrder"}
+        names = {"GetV1OrdersId": {"name": "getOrder", "description": "Reads one order."}}
         with tempfile.TemporaryDirectory() as tmp:
             crate = Path(tmp)
             (crate / "connector.yaml").write_text(yaml.safe_dump({
