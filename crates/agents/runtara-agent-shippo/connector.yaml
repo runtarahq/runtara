@@ -7,7 +7,7 @@ agent:
   error_prefix: SHIPPO
 spec:
   url: https://docs.goshippo.com/spec/shippoapi/public-api.yaml
-  sha256: faa31b2d81826108ad9fe513d9447e355b02772feeea4906c12e45fc03bd28ba
+  sha256: bf951753d9d9d8e61348afbb02bd4fb619bccfc7194d7433b7de21b2213f0010
 # The shippo_api_token connection pins the API version the generated types
 # describe; without the header, Shippo uses the account's default.
 connection_headers:

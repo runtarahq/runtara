@@ -704,7 +704,9 @@ crates/agents/runtara-agent-<id>/
   non-JSON one as its text.
 - Enums keep their wire type (`String`, `i64`) in inputs and outputs, so a value
   the spec does not list passes through unchanged; the allowed values are listed
-  in the field's description. A `$ref` to an enum schema is inlined by `fetch`.
+  in the field's description. A `$ref` to an enum schema is inlined by `fetch`,
+  as is one to an enum written as an `allOf` of a scalar and its values
+  (Shippo's `CustomsDeclarationIncotermEnum`).
 - `integer` without a `format` is generated as `i64` (`fetch` adds
   `format: int64`), so large ids and amounts fit.
 - Every input and output field gets a label for the step editor, chosen by

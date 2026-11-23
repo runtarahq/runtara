@@ -117,7 +117,7 @@ specs:
       - paymentActions_getOrderRefunds
   - name: Products
     url: https://docs.bigcommerce.com/openapi/admin-catalog-products.json
-    sha256: e8fa8297e9ba9a58cf21c3110132c6a0b055aae81f8a6e6dfdc8e268395dcdd9
+    sha256: 72111adc512d1aa8fb6b10ba65854b392f04049d85bf827c4adcf6b5e3215297
     operations:
       - products_getProducts
       - products_getProduct
@@ -128,7 +128,7 @@ specs:
   # variant's id instead.
   - name: Variants
     url: https://docs.bigcommerce.com/openapi/admin-catalog-product-variants.json
-    sha256: 0fce2c720f4a15b3c40ed8c45f205d939a7fb2ce042c9d87e5901ff6ff6f7dc9
+    sha256: 1da582f7c0ebf543133a72d12c21921195f273419141aee09d328697c15fd1c3
     operations:
       - productVariants_getProductVariants
       - variantsBatch_updateVariantsBatch

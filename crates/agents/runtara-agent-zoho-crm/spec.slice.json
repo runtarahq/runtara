@@ -10094,8 +10094,10 @@
                   "description": "Ensures at least one item in the array has a 'success' status.",
                   "properties": {
                     "status": {
-                      "const": "success",
                       "description": "The status value that must be 'success' for the item to match this constraint.",
+                      "enum": [
+                        "success"
+                      ],
                       "type": "string",
                       "x-runtara-label": "Status"
                     }
@@ -10113,8 +10115,10 @@
                   "description": "Ensures at least one item in the array has an 'error' status.",
                   "properties": {
                     "status": {
-                      "const": "error",
                       "description": "The status value that must be 'error' for the item to match this constraint.",
+                      "enum": [
+                        "error"
+                      ],
                       "type": "string",
                       "x-runtara-label": "Status"
                     }
@@ -18312,8 +18316,10 @@
                             "description": "Ensures at least one item in the array has a 'success' status.",
                             "properties": {
                               "status": {
-                                "const": "success",
                                 "description": "The status value that must be 'success' for the item to match this constraint.",
+                                "enum": [
+                                  "success"
+                                ],
                                 "type": "string",
                                 "x-runtara-label": "Status"
                               }
@@ -18331,8 +18337,10 @@
                             "description": "Ensures at least one item in the array has an 'error' status.",
                             "properties": {
                               "status": {
-                                "const": "error",
                                 "description": "The status value that must be 'error' for the item to match this constraint.",
+                                "enum": [
+                                  "error"
+                                ],
                                 "type": "string",
                                 "x-runtara-label": "Status"
                               }
@@ -18979,8 +18987,10 @@
                             "description": "Ensures at least one item in the array has a 'success' status.",
                             "properties": {
                               "status": {
-                                "const": "success",
                                 "description": "The status value that must be 'success' for the item to match this constraint.",
+                                "enum": [
+                                  "success"
+                                ],
                                 "type": "string",
                                 "x-runtara-label": "Status"
                               }
@@ -18998,8 +19008,10 @@
                             "description": "Ensures at least one item in the array has an 'error' status.",
                             "properties": {
                               "status": {
-                                "const": "error",
                                 "description": "The status value that must be 'error' for the item to match this constraint.",
+                                "enum": [
+                                  "error"
+                                ],
                                 "type": "string",
                                 "x-runtara-label": "Status"
                               }
@@ -21191,8 +21203,10 @@
                             "description": "Schema used to identify items in the response that represent a successful upsert operation.",
                             "properties": {
                               "status": {
-                                "const": "success",
                                 "description": "Indicates a successful upsert. Always \"success\" for matched items.",
+                                "enum": [
+                                  "success"
+                                ],
                                 "x-runtara-label": "Status"
                               }
                             },
@@ -21209,8 +21223,10 @@
                             "description": "Schema used to identify items in the response that represent a failed upsert operation.",
                             "properties": {
                               "status": {
-                                "const": "error",
                                 "description": "Indicates a failed upsert. Always \"error\" for matched items.",
+                                "enum": [
+                                  "error"
+                                ],
                                 "x-runtara-label": "Status"
                               }
                             },

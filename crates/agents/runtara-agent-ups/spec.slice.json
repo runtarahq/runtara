@@ -829,7 +829,7 @@
             "description": "Total weight of the content. Pounds and Ounces are allowed up to 2 decimals.  Required if the CN22 form container is present.",
             "maxLength": 7,
             "maximum": 1,
-            "minLength": 7,
+            "minLength": 1,
             "type": "string",
             "x-runtara-label": "Weight"
           }
@@ -863,7 +863,7 @@
             "description": "Required if weight is provided, valid values are lbs. and ozs.  Required if weight is provided.",
             "maxLength": 3,
             "maximum": 1,
-            "minLength": 1,
+            "minLength": 3,
             "type": "string",
             "x-runtara-label": "Code"
           },
@@ -922,7 +922,7 @@
             "description": "The tariff number associated with the CN22 contents.",
             "maxLength": 40,
             "maximum": 1,
-            "minLength": 40,
+            "minLength": 1,
             "type": "string",
             "x-runtara-label": "CN22 Content Tariff Number"
           },
@@ -930,7 +930,7 @@
             "description": "Total value of the items associated with this content.  Required if the CN22 form container is present.",
             "maxLength": 9,
             "maximum": 1,
-            "minLength": 9,
+            "minLength": 1,
             "type": "string",
             "x-runtara-label": "CN22 Content Total Value"
           },
@@ -1236,7 +1236,7 @@
             "description": "SoldTo AccountNumber",
             "maxLength": 6,
             "maximum": 1,
-            "minLength": 1,
+            "minLength": 6,
             "type": "string",
             "x-runtara-label": "Account Number"
           },
@@ -1439,11 +1439,15 @@
         "properties": {
           "Code": {
             "description": "Required for EEI form. Unit of measurement code. The two or three (3) alpha unit of measurement for the article being shipped. For example: BAG/BG - bags  Applies to EEI form only.  It is required for EEIFilingOption code 1A and 3.",
+            "maxLength": 3,
+            "minLength": 3,
             "type": "string",
             "x-runtara-label": "Code"
           },
           "Description": {
             "description": "Description for Unit of Measurement.  Applies to EEI form only.",
+            "maxLength": 15,
+            "minLength": 1,
             "type": "string",
             "x-runtara-label": "Description"
           }
@@ -1763,7 +1767,7 @@
             "description": "Input for Shipper Filed option B. 30.2(d)(2), 30.26(a), 30.36, 30.37(a), 30.37(b), 30.37(c), 30.37(d), 30.37(e), 30.37(f), 30.37(h), 30.37(i), 30.30(j), 30.37(k), 30.37(i), 30.37(j), 30.37(k), 30.37(l), 30.37(m), 30.37(n), 30.37(o), 30.37(p), 30.37(q), 30.37(r), 30.37(s), 30.37(t), 30.37(u), 30.37(x), 30.37(y)(1), 30.37(y)(2), 30.37(y)(3), 30.37(y)(4), 30.37(y)(5), 30.37(y)(6), 30.39, 30.40(a), 30.40(b), 30.40(c), 30.40(d), 30.8(b)  Valid and Required for Shipper Filed option B. EEI form only.",
             "maxLength": 20,
             "maximum": 1,
-            "minLength": 20,
+            "minLength": 5,
             "type": "string",
             "x-runtara-label": "Exemption Legend"
           },
@@ -1771,7 +1775,7 @@
             "description": "Input for Shipper Filed option A and AES Direct. The format is available from AESDirect website.  Valid and Required for Shipper Filed option A. EEI form only.",
             "maxLength": 17,
             "maximum": 1,
-            "minLength": 17,
+            "minLength": 1,
             "type": "string",
             "x-runtara-label": "Pre Departure ITN Number"
           }
@@ -2650,7 +2654,7 @@
             "description": "Required if CN22Type is OTHER.  Required if the CN22 form container is present.",
             "maxLength": 20,
             "maximum": 1,
-            "minLength": 20,
+            "minLength": 1,
             "type": "string",
             "x-runtara-label": "CN22 Other Description"
           },
@@ -2663,10 +2667,10 @@
             "x-runtara-label": "CN22 Type"
           },
           "FoldHereText": {
-            "description": "String will replace default \"Fold Here\" text displayed on the label.",
+            "description": "String will replace default \"Fold Here\" text displayed on the label and its optional.",
             "maxLength": 35,
             "maximum": 1,
-            "minLength": 35,
+            "minLength": 1,
             "type": "string",
             "x-runtara-label": "Fold Here Text"
           },
@@ -2674,15 +2678,15 @@
             "description": "Valid Values are pdf, png, gif, zpl, star, epl2 and spl.\n  Required if the CN22 form container is present.",
             "maxLength": 4,
             "maximum": 1,
-            "minLength": 1,
+            "minLength": 3,
             "type": "string",
             "x-runtara-label": "Label Print Type"
           },
           "LabelSize": {
             "description": "Provide the valid values: \n6 = 4X6\n1 = 8.5X11\n  Required if the CN22 form container is present.",
-            "maxLength": 2,
+            "maxLength": 1,
             "maximum": 1,
-            "minLength": 2,
+            "minLength": 1,
             "type": "string",
             "x-runtara-label": "Label Size"
           },
@@ -2798,7 +2802,9 @@
           },
           "ShipmentDate": {
             "description": "Shipment Date associated with UPS Premium Care Shipment.   Valid Format: yyyyMMdd",
+            "maxLength": 8,
             "maximum": 1,
+            "minLength": 8,
             "type": "string",
             "x-runtara-label": "Shipment Date"
           }
@@ -3011,11 +3017,11 @@
           "Description": {
             "description": "Description of the product.  Applies to all International Forms. Optional for Partial Invoice. Must be present at least once and can occur for a maximum of 3 times.",
             "items": {
+              "maxLength": 35,
+              "minLength": 1,
               "type": "string"
             },
-            "maxLength": 35,
             "maximum": 3,
-            "minLength": 1,
             "type": "array",
             "x-runtara-label": "Description"
           },
@@ -6935,6 +6941,9 @@
           },
           "ProductNote": {
             "description": "Product Note.",
+            "maxLength": 35,
+            "maximum": 35,
+            "minLength": 1,
             "type": "string",
             "x-runtara-label": "Product Note"
           }
@@ -7298,7 +7307,7 @@
             "description": "Code for unit of Measurement of weight.  Applies to CO and EEI forms only.  Valid values:\n- KGS\n- LBS\n",
             "maxLength": 3,
             "maximum": 1,
-            "minLength": 1,
+            "minLength": 3,
             "type": "string",
             "x-runtara-label": "Code"
           },
@@ -7326,10 +7335,10 @@
           "FormType": {
             "description": "Indicates the name of the International form requested to NOT have product information.  Possible Values are 04 – USMCA.  Please note that if this is used and you DO NOT have the corresponding form type requested this will be IGNORED.",
             "items": {
+              "maxLength": 2,
+              "minLength": 2,
               "type": "string"
             },
-            "maxLength": 2,
-            "minLength": 1,
             "type": "array",
             "x-runtara-label": "Form Type"
           }
@@ -10208,7 +10217,7 @@
             "items": {
               "$ref": "#/components/schemas/InternationalForms_Product"
             },
-            "maximum": 50,
+            "maximum": 1000,
             "type": "array",
             "x-runtara-label": "Product"
           },
@@ -10351,7 +10360,7 @@
           },
           "NotificationCode": {
             "description": "The type of notification requested.\n\nNote:\n- QVN Exception notification and return notification are not applicable to GFP.\n- QV In-transit and Return Notifications are only valid for ImportControl and Return shipment.\n- QV In-transit Notification is allowed for return shipments only.\n- QV Ship Notification is allowed for forward moving shipments only.\n\nValid values:\n- 5 - QV In-transit Notification\n- 6 - QV Ship Notification\n- 7 - QV Exception Notification\n- 8 - QV Delivery Notification\n- 2 - Return Notification or Label Creation Notification\n- 012 - Alternate Delivery Location Notification\n- 013 - UAP Shipper Notification.",
-            "maxLength": 1,
+            "maxLength": 3,
             "maximum": 1,
             "minLength": 1,
             "type": "string",
@@ -10483,53 +10492,6 @@
         "type": "object",
         "xml": {
           "name": "RestrictedArticles"
-        }
-      },
-      "ShipmentServiceOptions_VerifiedDelivery": {
-        "description": "Protected Delivery container required for Secure Pin Delivery. Protected Delivery will offer shippers extra security to ensure their packages are delivered to the intended recipient.",
-        "maximum": 1,
-        "properties": {
-          "RecipientEmail": {
-            "description": "Specifies the recipient's email address for delivery notifications. This field is required.",
-            "maxLength": 50,
-            "maximum": 1,
-            "minLength": 1,
-            "type": "string",
-            "x-runtara-label": "Recipient Email"
-          },
-          "RecipientPhone": {
-            "description": "Recipient phone number for notifications. Valid characters are digits (0-9) only. This field is optional.",
-            "maxLength": 15,
-            "maximum": 1,
-            "minLength": 1,
-            "type": "string",
-            "x-runtara-label": "Recipient Phone"
-          },
-          "SecurePINType": {
-            "description": "Specifies the type of Secure PIN. Valid value is 2, which represents VDS (Shipper Generated PIN). This field is required.",
-            "maxLength": 1,
-            "maximum": 1,
-            "minLength": 1,
-            "type": "string",
-            "x-runtara-label": "Secure PIN Type"
-          },
-          "TokenValue": {
-            "description": "This field is required and must contain a 32-character hexadecimal string, using only the characters 0-9 and A-F (case-insensitive).",
-            "maxLength": 32,
-            "maximum": 1,
-            "minLength": 32,
-            "type": "string",
-            "x-runtara-label": "Token Value"
-          }
-        },
-        "required": [
-          "SecurePINType",
-          "TokenValue",
-          "RecipientEmail"
-        ],
-        "type": "object",
-        "xml": {
-          "name": "VerifiedDelivery"
         }
       },
       "Shipment_AlternateDeliveryAddress": {
@@ -11396,14 +11358,6 @@
             "maximum": 1,
             "type": "string",
             "x-runtara-label": "UP Scarbonneutral Indicator"
-          },
-          "VerifiedDelivery": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/ShipmentServiceOptions_VerifiedDelivery"
-              }
-            ],
-            "x-runtara-label": "Verified Delivery"
           }
         },
         "type": "object",

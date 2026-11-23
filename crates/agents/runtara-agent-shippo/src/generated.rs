@@ -25,8 +25,7 @@ pub struct Address {
         description = r##"**required for purchase**
 
 Name of a city. When creating a Quote Address, sending a city is optional but will yield more accurate Rates.
-Please bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state
-or a ZIP code (see below), if known, it will yield more accurate results.
+Please bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state or a ZIP code (see below), if known, to get more accurate results.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -101,8 +100,7 @@ First and Last Name of the addressee
     pub name: Option<String>,
     #[field(
         display_name = r##"Phone"##,
-        description = r##"Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This
-increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.
+        description = r##"Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -117,9 +115,7 @@ increases the probability of delivery and helps to avoid accessorial charges aft
         display_name = r##"State"##,
         description = r##"**required for purchase for some countries**
 
-State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some
-countries (i.e Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers
-only accept two or three character state abbreviations.
+State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some countries (i.e. Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers only accept two or three character state abbreviations.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -179,8 +175,7 @@ This field can be included in street1 for all carriers except for DHL Germany."#
         display_name = r##"Zip"##,
         description = r##"**required for purchase**
 
-Postal code of an Address. When creating a Quote Addresses, sending a ZIP is optional but will yield more
-accurate Rates.
+Postal code of an Address. When creating a Quote Address, sending a ZIP is optional but will yield more accurate Rates.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -284,8 +279,7 @@ pub struct AddressBase {
         description = r##"**required for purchase**
 
 Name of a city. When creating a Quote Address, sending a city is optional but will yield more accurate Rates.
-Please bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state
-or a ZIP code (see below), if known, it will yield more accurate results.
+Please bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state or a ZIP code (see below), if known, to get more accurate results.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -360,8 +354,7 @@ First and Last Name of the addressee
     pub name: Option<String>,
     #[field(
         display_name = r##"Phone"##,
-        description = r##"Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This
-increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.
+        description = r##"Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -376,9 +369,7 @@ increases the probability of delivery and helps to avoid accessorial charges aft
         display_name = r##"State"##,
         description = r##"**required for purchase for some countries**
 
-State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some
-countries (i.e Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers
-only accept two or three character state abbreviations.
+State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some countries (i.e. Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers only accept two or three character state abbreviations.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -438,8 +429,7 @@ This field can be included in street1 for all carriers except for DHL Germany."#
         display_name = r##"Zip"##,
         description = r##"**required for purchase**
 
-Postal code of an Address. When creating a Quote Addresses, sending a ZIP is optional but will yield more
-accurate Rates.
+Postal code of an Address. When creating a Quote Address, sending a ZIP is optional but will yield more accurate Rates.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -463,8 +453,7 @@ pub struct AddressCreateRequest {
         description = r##"**required for purchase**
 
 Name of a city. When creating a Quote Address, sending a city is optional but will yield more accurate Rates.
-Please bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state
-or a ZIP code (see below), if known, it will yield more accurate results.
+Please bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state or a ZIP code (see below), if known, to get more accurate results.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -539,8 +528,7 @@ First and Last Name of the addressee
     pub name: Option<String>,
     #[field(
         display_name = r##"Phone"##,
-        description = r##"Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This
-increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.
+        description = r##"Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -555,9 +543,7 @@ increases the probability of delivery and helps to avoid accessorial charges aft
         display_name = r##"State"##,
         description = r##"**required for purchase for some countries**
 
-State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some
-countries (i.e Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers
-only accept two or three character state abbreviations.
+State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some countries (i.e. Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers only accept two or three character state abbreviations.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -617,8 +603,7 @@ This field can be included in street1 for all carriers except for DHL Germany."#
         display_name = r##"Zip"##,
         description = r##"**required for purchase**
 
-Postal code of an Address. When creating a Quote Addresses, sending a ZIP is optional but will yield more
-accurate Rates.
+Postal code of an Address. When creating a Quote Address, sending a ZIP is optional but will yield more accurate Rates.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -649,8 +634,7 @@ pub struct AddressFrom {
         description = r##"**required for purchase**
 
 Name of a city. When creating a Quote Address, sending a city is optional but will yield more accurate Rates.
-Please bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state
-or a ZIP code (see below), if known, it will yield more accurate results.
+Please bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state or a ZIP code (see below), if known, to get more accurate results.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -725,8 +709,7 @@ First and Last Name of the addressee
     pub name: Option<String>,
     #[field(
         display_name = r##"Phone"##,
-        description = r##"Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This
-increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.
+        description = r##"Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -741,9 +724,7 @@ increases the probability of delivery and helps to avoid accessorial charges aft
         display_name = r##"State"##,
         description = r##"**required for purchase for some countries**
 
-State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some
-countries (i.e Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers
-only accept two or three character state abbreviations.
+State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some countries (i.e. Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers only accept two or three character state abbreviations.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -803,8 +784,7 @@ This field can be included in street1 for all carriers except for DHL Germany."#
         display_name = r##"Zip"##,
         description = r##"**required for purchase**
 
-Postal code of an Address. When creating a Quote Addresses, sending a ZIP is optional but will yield more
-accurate Rates.
+Postal code of an Address. When creating a Quote Address, sending a ZIP is optional but will yield more accurate Rates.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -902,8 +882,7 @@ pub struct AddressFromCreateRequest {
         description = r##"**required for purchase**
 
 Name of a city. When creating a Quote Address, sending a city is optional but will yield more accurate Rates.
-Please bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state
-or a ZIP code (see below), if known, it will yield more accurate results.
+Please bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state or a ZIP code (see below), if known, to get more accurate results.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -978,8 +957,7 @@ First and Last Name of the addressee
     pub name: Option<String>,
     #[field(
         display_name = r##"Phone"##,
-        description = r##"Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This
-increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.
+        description = r##"Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -994,9 +972,7 @@ increases the probability of delivery and helps to avoid accessorial charges aft
         display_name = r##"State"##,
         description = r##"**required for purchase for some countries**
 
-State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some
-countries (i.e Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers
-only accept two or three character state abbreviations.
+State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some countries (i.e. Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers only accept two or three character state abbreviations.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -1056,8 +1032,7 @@ This field can be included in street1 for all carriers except for DHL Germany."#
         display_name = r##"Zip"##,
         description = r##"**required for purchase**
 
-Postal code of an Address. When creating a Quote Addresses, sending a ZIP is optional but will yield more
-accurate Rates.
+Postal code of an Address. When creating a Quote Address, sending a ZIP is optional but will yield more accurate Rates.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -1141,7 +1116,7 @@ Sending a country is always required."##,
         display_name = r##"State"##,
         description = r##"**required for purchase for some countries**
 
-State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some countries (i.e Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers only accept two or three character state abbreviations."##,
+State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some countries (i.e. Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers only accept two or three character state abbreviations."##,
         example = r##"CA"##
     )]
     #[serde(rename = "state", default, skip_serializing_if = "Option::is_none")]
@@ -1196,8 +1171,7 @@ pub struct AddressReturn {
         description = r##"**required for purchase**
 
 Name of a city. When creating a Quote Address, sending a city is optional but will yield more accurate Rates.
-Please bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state
-or a ZIP code (see below), if known, it will yield more accurate results.
+Please bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state or a ZIP code (see below), if known, to get more accurate results.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -1272,8 +1246,7 @@ First and Last Name of the addressee
     pub name: Option<String>,
     #[field(
         display_name = r##"Phone"##,
-        description = r##"Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This
-increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.
+        description = r##"Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -1288,9 +1261,7 @@ increases the probability of delivery and helps to avoid accessorial charges aft
         display_name = r##"State"##,
         description = r##"**required for purchase for some countries**
 
-State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some
-countries (i.e Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers
-only accept two or three character state abbreviations.
+State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some countries (i.e. Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers only accept two or three character state abbreviations.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -1350,8 +1321,7 @@ This field can be included in street1 for all carriers except for DHL Germany."#
         display_name = r##"Zip"##,
         description = r##"**required for purchase**
 
-Postal code of an Address. When creating a Quote Addresses, sending a ZIP is optional but will yield more
-accurate Rates.
+Postal code of an Address. When creating a Quote Address, sending a ZIP is optional but will yield more accurate Rates.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -1449,8 +1419,7 @@ pub struct AddressTo {
         description = r##"**required for purchase**
 
 Name of a city. When creating a Quote Address, sending a city is optional but will yield more accurate Rates.
-Please bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state
-or a ZIP code (see below), if known, it will yield more accurate results.
+Please bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state or a ZIP code (see below), if known, to get more accurate results.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -1525,8 +1494,7 @@ First and Last Name of the addressee
     pub name: Option<String>,
     #[field(
         display_name = r##"Phone"##,
-        description = r##"Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This
-increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.
+        description = r##"Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -1541,9 +1509,7 @@ increases the probability of delivery and helps to avoid accessorial charges aft
         display_name = r##"State"##,
         description = r##"**required for purchase for some countries**
 
-State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some
-countries (i.e Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers
-only accept two or three character state abbreviations.
+State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some countries (i.e. Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers only accept two or three character state abbreviations.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -1603,8 +1569,7 @@ This field can be included in street1 for all carriers except for DHL Germany."#
         display_name = r##"Zip"##,
         description = r##"**required for purchase**
 
-Postal code of an Address. When creating a Quote Addresses, sending a ZIP is optional but will yield more
-accurate Rates.
+Postal code of an Address. When creating a Quote Address, sending a ZIP is optional but will yield more accurate Rates.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -1702,8 +1667,7 @@ pub struct AddressToCreateRequest {
         description = r##"**required for purchase**
 
 Name of a city. When creating a Quote Address, sending a city is optional but will yield more accurate Rates.
-Please bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state
-or a ZIP code (see below), if known, it will yield more accurate results.
+Please bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state or a ZIP code (see below), if known, to get more accurate results.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -1778,8 +1742,7 @@ First and Last Name of the addressee
     pub name: Option<String>,
     #[field(
         display_name = r##"Phone"##,
-        description = r##"Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This
-increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.
+        description = r##"Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -1794,9 +1757,7 @@ increases the probability of delivery and helps to avoid accessorial charges aft
         display_name = r##"State"##,
         description = r##"**required for purchase for some countries**
 
-State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some
-countries (i.e Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers
-only accept two or three character state abbreviations.
+State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some countries (i.e. Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers only accept two or three character state abbreviations.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -1856,8 +1817,7 @@ This field can be included in street1 for all carriers except for DHL Germany."#
         display_name = r##"Zip"##,
         description = r##"**required for purchase**
 
-Postal code of an Address. When creating a Quote Addresses, sending a ZIP is optional but will yield more
-accurate Rates.
+Postal code of an Address. When creating a Quote Address, sending a ZIP is optional but will yield more accurate Rates.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -2022,7 +1982,7 @@ To protect account information, this field will be masked in any API response."#
     pub active: Option<bool>,
     #[field(
         display_name = r##"Carrier"##,
-        description = r##"Carrier token, see [Carriers](/shippoapi/public-api/carriers)
+        description = r##"Carrier token, see [Carriers](/shippoapi/public-api/carriers).
 Please check the [carrier accounts tutorial](https://docs.goshippo.com/docs/carriers/carrieraccounts/) page for all supported carriers."##,
         example = r##"usps"##
     )]
@@ -2118,7 +2078,7 @@ To protect account information, this field will be masked in any API response."#
     pub active: Option<bool>,
     #[field(
         display_name = r##"Carrier"##,
-        description = r##"Carrier token, see [Carriers](/shippoapi/public-api/carriers)
+        description = r##"Carrier token, see [Carriers](/shippoapi/public-api/carriers).
 Please check the [carrier accounts tutorial](https://docs.goshippo.com/docs/carriers/carrieraccounts/) page for all supported carriers."##,
         example = r##"usps"##
     )]
@@ -2222,7 +2182,7 @@ To protect account information, this field will be masked in any API response."#
     pub active: Option<bool>,
     #[field(
         display_name = r##"Carrier"##,
-        description = r##"Carrier token, see [Carriers](/shippoapi/public-api/carriers)
+        description = r##"Carrier token, see [Carriers](/shippoapi/public-api/carriers).
 Please check the [carrier accounts tutorial](https://docs.goshippo.com/docs/carriers/carrieraccounts/) page for all supported carriers."##,
         example = r##"usps"##
     )]
@@ -2381,7 +2341,7 @@ pub struct Cod {
     #[field(
         display_name = r##"Payment Method"##,
         description = r##"Secured funds include money orders, certified cheques and others (see [UPS](https://www.ups.com/content/us/en/shipping/time/service/value_added/cod.html) for details).
-If no payment_method inputted the value defaults to "ANY".) One of: SECURED_FUNDS, CASH, ANY."##,
+If no `payment_method` is provided, the value defaults to "ANY". One of: SECURED_FUNDS, CASH, ANY."##,
         example = r##"CASH"##
     )]
     #[serde(
@@ -2465,7 +2425,7 @@ The [official ISO 4217](http://www.xe.com/iso4217.php) currency codes are used, 
     #[field(
         display_name = r##"Servicelevel Name"##,
         description = r##"Service level name, e.g. `Priority Mail` or `FedEx Ground®`.
-A service level commonly defines the transit time of a Shipment (e.g., Express vs. Standard), along with other properties.  These names vary depending on the provider.
+A service level commonly defines the transit time of a Shipment (e.g., Express vs. Standard), along with other properties. These names vary depending on the provider.
 See [Service Levels](/shippoapi/public-api/service-levels)."##,
         example = r##"Priority Mail"##
     )]
@@ -2501,8 +2461,7 @@ pub struct CreateAddressRequest {
         description = r##"**required for purchase**
 
 Name of a city. When creating a Quote Address, sending a city is optional but will yield more accurate Rates.
-Please bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state
-or a ZIP code (see below), if known, it will yield more accurate results.
+Please bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state or a ZIP code (see below), if known, to get more accurate results.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -2577,8 +2536,7 @@ First and Last Name of the addressee
     pub name: Option<String>,
     #[field(
         display_name = r##"Phone"##,
-        description = r##"Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This
-increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.
+        description = r##"Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -2593,9 +2551,7 @@ increases the probability of delivery and helps to avoid accessorial charges aft
         display_name = r##"State"##,
         description = r##"**required for purchase for some countries**
 
-State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some
-countries (i.e Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers
-only accept two or three character state abbreviations.
+State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some countries (i.e. Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers only accept two or three character state abbreviations.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -2662,8 +2618,7 @@ This field can be included in street1 for all carriers except for DHL Germany."#
         display_name = r##"Zip"##,
         description = r##"**required for purchase**
 
-Postal code of an Address. When creating a Quote Addresses, sending a ZIP is optional but will yield more
-accurate Rates.
+Postal code of an Address. When creating a Quote Address, sending a ZIP is optional but will yield more accurate Rates.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -2866,7 +2821,7 @@ pub struct CreateShipmentRequest {
     pub r#async: Option<bool>,
     #[field(
         display_name = r##"Carrier Accounts"##,
-        description = r##"List of [Carrier Accounts](/shippoapi/public-api/carrier-accounts) `object_id`s used to filter the returned rates.  If set, only rates from these carriers will be returned."##
+        description = r##"List of [Carrier Accounts](/shippoapi/public-api/carrier-accounts) `object_id`s used to filter the returned rates. If set, only rates from these carriers will be returned."##
     )]
     #[serde(
         rename = "carrier_accounts",
@@ -3014,8 +2969,7 @@ pub struct CustomerReference {
     pub ref_sort: Option<i64>,
     #[field(
         display_name = r##"Value"##,
-        description = r##"Optional text to be printed on the shipping label for customer reference. Up to 40 characters. If
-this is provided, reference_1 will be ignored.
+        description = r##"Optional text to be printed on the shipping label for customer reference. Up to 40 characters. If this is provided, reference_1 will be ignored.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -3340,15 +3294,6 @@ Allowed values available [here](/shippoapi/public-api/customs-declaration-non-de
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
-#[capability_output(display_name = "CustomsDeclarationB13AFilingOptionEnum")]
-pub struct CustomsDeclarationB13AFilingOptionEnum {
-    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
-    #[field(skip)]
-    #[serde(flatten)]
-    pub __extra: HashMap<String, Value>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "CustomsDeclarationBase")]
 pub struct CustomsDeclarationBase {
     #[field(
@@ -3584,15 +3529,6 @@ pub struct CustomsDeclarationBaseDutiesPayorAddress {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
-#[capability_output(display_name = "CustomsDeclarationContentsTypeEnum")]
-pub struct CustomsDeclarationContentsTypeEnum {
-    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
-    #[field(skip)]
-    #[serde(flatten)]
-    pub __extra: HashMap<String, Value>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "CustomsDeclarationCreateRequest")]
 pub struct CustomsDeclarationCreateRequest {
     #[field(
@@ -3603,13 +3539,19 @@ AES / ITN reference of the shipment."##
     )]
     #[serde(rename = "aes_itn", default, skip_serializing_if = "Option::is_none")]
     pub aes_itn: Option<String>,
-    #[field(display_name = r##"B13a Filing Option"##)]
+    #[field(
+        display_name = r##"B13a Filing Option"##,
+        description = r##"B13A Option details are obtained by filing a B13A Canada Export Declaration via the Canadian Export Reporting System (CERS).
+[More information on reporting commercial exports from Canada.](https://www.cbsa-asfc.gc.ca/services/export/guide-eng.html)
+Allowed values available [here](/shippoapi/public-api/customs-declaration-b13a-filing-option) One of: FILED_ELECTRONICALLY, SUMMARY_REPORTING, NOT_REQUIRED."##,
+        example = r##"FILED_ELECTRONICALLY"##
+    )]
     #[serde(
         rename = "b13a_filing_option",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub b13a_filing_option: Option<CustomsDeclarationB13AFilingOptionEnum>,
+    pub b13a_filing_option: Option<String>,
     #[field(
         display_name = r##"B13a Number"##,
         description = r##"**must be provided if and only if b13a_filing_option is provided**
@@ -3772,59 +3714,60 @@ Explanation of the type of goods of the shipment."##,
         skip_serializing_if = "Option::is_none"
     )]
     pub address_importer: Option<AddressImporter>,
-    #[field(display_name = r##"Contents Type"##)]
+    #[field(
+        display_name = r##"Contents Type"##,
+        description = r##"Type of goods of the shipment.  
+Allowed values available [here](/shippoapi/public-api/customs-declaration-contents-type) One of: DOCUMENTS, GIFT, SAMPLE, MERCHANDISE, HUMANITARIAN_DONATION, RETURN_MERCHANDISE, OTHER."##,
+        example = r##"MERCHANDISE"##
+    )]
     #[serde(
         rename = "contents_type",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub contents_type: Option<CustomsDeclarationContentsTypeEnum>,
-    #[field(display_name = r##"Eel Pfc"##)]
+    pub contents_type: Option<String>,
+    #[field(
+        display_name = r##"Eel Pfc"##,
+        description = r##"EEL / PFC type of the shipment. For most shipments from the US to CA, `NOEEI_30_36` is applicable; for most other shipments from the US, `NOEEI_30_37_a` is applicable.
+Allowed values available [here](/shippoapi/public-api/customs-declaration-eelpfc) One of: NOEEI_30_37_a, NOEEI_30_37_h, NOEEI_30_37_f, NOEEI_30_36, AES_ITN."##,
+        example = r##"NOEEI_30_37_a"##
+    )]
     #[serde(rename = "eel_pfc", default, skip_serializing_if = "Option::is_none")]
-    pub eel_pfc: Option<CustomsDeclarationEelPfcEnum>,
-    #[field(display_name = r##"Incoterm"##)]
+    pub eel_pfc: Option<String>,
+    #[field(
+        display_name = r##"Incoterm"##,
+        description = r##"The incoterm reference of the shipment. FCA is available for DHL Express and FedEx only.
+eDAP is available for DPD UK only. DAP is available for DHL Express, FedEx, and DPD UK.
+If expecting DAP for other carriers, please use DDU.
+Allowed values available [here](/shippoapi/public-api/customs-declaration-incoterm)
+Carrier-specific restrictions are in the table below.
+
+**Carrier-Specific Constraints:**
+| Carrier | Constraints |
+|:---|:---|
+| FedEx | Must be one of DDP, DDU, FCA, DAP | One of: DDP, DDU, FCA, DAP, eDAP."##,
+        example = r##"DDP"##
+    )]
     #[serde(rename = "incoterm", default, skip_serializing_if = "Option::is_none")]
-    pub incoterm: Option<CustomsDeclarationIncotermEnum>,
+    pub incoterm: Option<String>,
     #[field(display_name = r##"Items"##)]
     #[serde(rename = "items", default, skip_serializing_if = "Option::is_none")]
     pub items: Option<Vec<CustomsItemCreateRequest>>,
-    #[field(display_name = r##"Non Delivery Option"##)]
+    #[field(
+        display_name = r##"Non Delivery Option"##,
+        description = r##"Indicates how the carrier should proceed in case the shipment can't be delivered.
+Allowed values available [here](/shippoapi/public-api/customs-declaration-non-delivery-option) One of: ABANDON, RETURN."##,
+        example = r##"RETURN"##
+    )]
     #[serde(
         rename = "non_delivery_option",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub non_delivery_option: Option<CustomsDeclarationNonDeliveryOptionEnum>,
+    pub non_delivery_option: Option<String>,
     #[field(display_name = r##"Test"##, example = r##"true"##)]
     #[serde(rename = "test", default, skip_serializing_if = "Option::is_none")]
     pub test: Option<bool>,
-    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
-    #[field(skip)]
-    #[serde(flatten)]
-    pub __extra: HashMap<String, Value>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
-#[capability_output(display_name = "CustomsDeclarationEelPfcEnum")]
-pub struct CustomsDeclarationEelPfcEnum {
-    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
-    #[field(skip)]
-    #[serde(flatten)]
-    pub __extra: HashMap<String, Value>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
-#[capability_output(display_name = "CustomsDeclarationIncotermEnum")]
-pub struct CustomsDeclarationIncotermEnum {
-    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
-    #[field(skip)]
-    #[serde(flatten)]
-    pub __extra: HashMap<String, Value>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
-#[capability_output(display_name = "CustomsDeclarationNonDeliveryOptionEnum")]
-pub struct CustomsDeclarationNonDeliveryOptionEnum {
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -3946,7 +3889,7 @@ pub struct CustomsItemBase {
     pub eu_exempt_category: Option<bool>,
     #[field(
         display_name = r##"Hs Code"##,
-        description = r##"HS code of the item, which is required by some carriers. If `tariff_number` is not provided, `hs_code` will be used.  If both `hs_code` and `tariff_number` are provided, `tariff_number` will be used. 50 character limit."##,
+        description = r##"HS code of the item, which is required by some carriers. If `tariff_number` is not provided, `hs_code` will be used. If both `hs_code` and `tariff_number` are provided, `tariff_number` will be used. 50 character limit."##,
         example = r##"0901.21"##
     )]
     #[serde(rename = "hs_code", default, skip_serializing_if = "Option::is_none")]
@@ -4011,7 +3954,7 @@ All accepted values can be found on the [Official ISO Website](http://www.iso.or
     pub origin_country: Option<String>,
     #[field(
         display_name = r##"Quantity"##,
-        description = r##"Quantity of this item in the shipment you send.  Must be greater than 0."##,
+        description = r##"Quantity of this item in the shipment you send. Must be greater than 0."##,
         example = r##"20"##
     )]
     #[serde(rename = "quantity", default, skip_serializing_if = "Option::is_none")]
@@ -4046,7 +3989,7 @@ All accepted values can be found on the [Official ISO Website](http://www.iso.or
     pub value_amount: Option<String>,
     #[field(
         display_name = r##"Value Currency"##,
-        description = r##"Currency used for value_amount. The [official ISO 4217](http://www.xe.com/iso4217.php) currency codes are used, e.g.  `USD` or `EUR`."##,
+        description = r##"Currency used for value_amount. The [official ISO 4217](http://www.xe.com/iso4217.php) currency codes are used, e.g. `USD` or `EUR`."##,
         example = r##"USD"##
     )]
     #[serde(
@@ -4097,7 +4040,7 @@ pub struct CustomsItemCreateRequest {
     pub eu_exempt_category: Option<bool>,
     #[field(
         display_name = r##"Hs Code"##,
-        description = r##"HS code of the item, which is required by some carriers. If `tariff_number` is not provided, `hs_code` will be used.  If both `hs_code` and `tariff_number` are provided, `tariff_number` will be used. 50 character limit."##,
+        description = r##"HS code of the item, which is required by some carriers. If `tariff_number` is not provided, `hs_code` will be used. If both `hs_code` and `tariff_number` are provided, `tariff_number` will be used. 50 character limit."##,
         example = r##"0901.21"##
     )]
     #[serde(rename = "hs_code", default, skip_serializing_if = "Option::is_none")]
@@ -4162,7 +4105,7 @@ All accepted values can be found on the [Official ISO Website](http://www.iso.or
     pub origin_country: Option<String>,
     #[field(
         display_name = r##"Quantity"##,
-        description = r##"Quantity of this item in the shipment you send.  Must be greater than 0."##,
+        description = r##"Quantity of this item in the shipment you send. Must be greater than 0."##,
         example = r##"20"##
     )]
     #[serde(rename = "quantity", default, skip_serializing_if = "Option::is_none")]
@@ -4197,7 +4140,7 @@ All accepted values can be found on the [Official ISO Website](http://www.iso.or
     pub value_amount: Option<String>,
     #[field(
         display_name = r##"Value Currency"##,
-        description = r##"Currency used for value_amount. The [official ISO 4217](http://www.xe.com/iso4217.php) currency codes are used, e.g.  `USD` or `EUR`."##,
+        description = r##"Currency used for value_amount. The [official ISO 4217](http://www.xe.com/iso4217.php) currency codes are used, e.g. `USD` or `EUR`."##,
         example = r##"USD"##
     )]
     #[serde(
@@ -4583,8 +4526,7 @@ pub struct InvoiceNumber {
     pub ref_sort: Option<i64>,
     #[field(
         display_name = r##"Value"##,
-        description = r##"Optional text to be printed on the shipping label for invoice number. Up to 40 characters. If
-provided, this will be used on the label instead of shipment.customs_declaration.invoice.
+        description = r##"Optional text to be printed on the shipping label for invoice number. Up to 40 characters. If provided, this will be used on the label instead of shipment.customs_declaration.invoice.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -5702,8 +5644,7 @@ pub struct PoNumber {
     pub ref_sort: Option<i64>,
     #[field(
         display_name = r##"Value"##,
-        description = r##"Optional text to be printed on the shipping label for PO number. Up to 40 characters. If
-this is provided, reference_2 will be ignored.
+        description = r##"Optional text to be printed on the shipping label for PO number. Up to 40 characters. If this is provided, reference_2 will be ignored.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -6234,10 +6175,7 @@ See [servicelevels](/shippoapi/public-api/service-levels)."##,
     pub token: Option<String>,
     #[field(
         display_name = r##"Parent Servicelevel"##,
-        description = r##"Used for some Service Levels to link to the more "generic" version of this Service Level - for example, 
-if this Service Level is a variation specific to shipments to Europe("ups_saver_eu"), the "parent" is 
-the fully generic version ("ups_saver"). Helpful when displaying Service Levels to users. Has the same 
-structure of the servicelevel - "name", "token", "terms", and "extended_token", or it is otherwise null."##
+        description = r##"Used for some Service Levels to link to the more "generic" version of this Service Level - for example, if this Service Level is a variation specific to shipments to Europe ("ups_saver_eu"), the "parent" is the fully generic version ("ups_saver"). Helpful when displaying Service Levels to users. Has the same structure as the servicelevel - "name", "token", "terms", and "extended_token", or it is otherwise null."##
     )]
     #[serde(
         rename = "parent_servicelevel",
@@ -6472,7 +6410,7 @@ Defaults to current date and time if no value is provided. Please note that some
     pub r#async: Option<bool>,
     #[field(
         display_name = r##"Carrier Accounts"##,
-        description = r##"List of [Carrier Accounts](/shippoapi/public-api/carrier-accounts) `object_id`s used to filter the returned rates.  If set, only rates from these carriers will be returned."##
+        description = r##"List of [Carrier Accounts](/shippoapi/public-api/carrier-accounts) `object_id`s used to filter the returned rates. If set, only rates from these carriers will be returned."##
     )]
     #[serde(
         rename = "carrier_accounts",
@@ -7410,7 +7348,7 @@ A value will only be returned if the Transactions has been processed successfull
         display_name = r##"Label URL"##,
         description = r##"A URL pointing directly to the label in the format you've set in your settings.
 A value will only be returned if the Transactions has been processed successfully.
-The URL expires. The `Expires` query parameter gives the expiration time as a Unix timestamp in seconds. Before you download the label, compare `Expires` with the current time. If `Expires` is in the past, call `GET /transactions/{TransactionId}` to get a new `label_url`. If the `Expires` value on the new `label_url` is also in the past, the label file is no longer available. This occurs for labels created more than one year ago. Do not retry."##,
+The URL expires. The `Expires` query parameter gives the expiration time as a Unix timestamp in seconds. Before you download the label, compare `Expires` with the current time. If `Expires` is in the past, read the `object_created` value of the transaction. If `object_created` is more than one year ago, the label file is no longer available. Do not call `GET /transactions/{TransactionId}`. If `object_created` is less than one year ago, call `GET /transactions/{TransactionId}` to get a new `label_url`."##,
         example = r##"https://shippo-delivery.s3.amazonaws.com/70ae8117ee1749e393f249d5b77c45e0.pdf?Signature=vDw1ltcyGveVR1OQoUDdzC43BY8%3D&Expires=1437093830&AWSAccessKeyId=AKIAJTHP3LLFMYAWALIA"##
     )]
     #[serde(rename = "label_url", default, skip_serializing_if = "Option::is_none")]
@@ -7847,8 +7785,7 @@ pub struct CreateAddressInput {
         description = r##"**required for purchase**
 
 Name of a city. When creating a Quote Address, sending a city is optional but will yield more accurate Rates.
-Please bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state
-or a ZIP code (see below), if known, it will yield more accurate results.
+Please bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state or a ZIP code (see below), if known, to get more accurate results.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -7923,8 +7860,7 @@ First and Last Name of the addressee
     pub name: Option<String>,
     #[field(
         display_name = r##"Phone"##,
-        description = r##"Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This
-increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.
+        description = r##"Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -7939,9 +7875,7 @@ increases the probability of delivery and helps to avoid accessorial charges aft
         display_name = r##"State"##,
         description = r##"**required for purchase for some countries**
 
-State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some
-countries (i.e Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers
-only accept two or three character state abbreviations.
+State/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some countries (i.e. Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers only accept two or three character state abbreviations.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -8008,8 +7942,7 @@ This field can be included in street1 for all carriers except for DHL Germany."#
         display_name = r##"Zip"##,
         description = r##"**required for purchase**
 
-Postal code of an Address. When creating a Quote Addresses, sending a ZIP is optional but will yield more
-accurate Rates.
+Postal code of an Address. When creating a Quote Address, sending a ZIP is optional but will yield more accurate Rates.
 
 **Carrier-Specific Constraints:**
 | Carrier | Constraints |
@@ -8554,8 +8487,7 @@ pub struct ListOrdersInput {
     pub shop_app: Option<String>,
     #[field(
         display_name = r##"Start Date"##,
-        description = r##"Filter orders created after the input date and time (ISO 8601 UTC format).  This is based on the 
-`placed_at` field, meaning when the order has been placed, not when the order object was created."##
+        description = r##"Filter orders created after the input date and time (ISO 8601 UTC format). This is based on the `placed_at` field, meaning when the order has been placed, not when the order object was created."##
     )]
     #[serde(
         rename = "start_date",
@@ -8565,8 +8497,7 @@ pub struct ListOrdersInput {
     pub start_date: Option<String>,
     #[field(
         display_name = r##"End Date"##,
-        description = r##"Filter orders created before the input date and time (ISO 8601 UTC format).  This is based on the 
-`placed_at` field, meaning when the order has been placed, not when the order object was created."##
+        description = r##"Filter orders created before the input date and time (ISO 8601 UTC format). This is based on the `placed_at` field, meaning when the order has been placed, not when the order object was created."##
     )]
     #[serde(rename = "end_date", default, skip_serializing_if = "Option::is_none")]
     pub end_date: Option<String>,
@@ -8846,7 +8777,7 @@ pub struct CreateShipmentInput {
     pub r#async: Option<bool>,
     #[field(
         display_name = r##"Carrier Accounts"##,
-        description = r##"List of [Carrier Accounts](/shippoapi/public-api/carrier-accounts) `object_id`s used to filter the returned rates.  If set, only rates from these carriers will be returned."##
+        description = r##"List of [Carrier Accounts](/shippoapi/public-api/carrier-accounts) `object_id`s used to filter the returned rates. If set, only rates from these carriers will be returned."##
     )]
     #[serde(
         rename = "carrier_accounts",
@@ -9364,7 +9295,7 @@ pub struct GetTransactionInput {
     id = "get-transaction",
     display_name = r##"Retrieve a shipping label"##,
     description = r##"Returns an existing transaction using an object ID.
-Each call returns a new `label_url` with a new expiration time. Use this endpoint to get a new `label_url` when the `Expires` value on the current `label_url` is in the past. Send one call for each transaction."##
+Each call returns a new `label_url` with a new expiration time. Use this endpoint to get a new `label_url` when the `Expires` value on the current `label_url` is in the past. Send one call for each transaction. If the transaction `object_created` is more than one year ago, this endpoint does not return a new `label_url`."##
 )]
 pub async fn get_transaction(input: GetTransactionInput) -> Result<Transaction, AgentError> {
     let connection = kit::require_connection(&input._connection, "SHIPPO")?;
@@ -9731,10 +9662,6 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
             &__OUTPUT_META_CustomsDeclaration as &OutputTypeMeta,
         ),
         (
-            "CustomsDeclarationB13AFilingOptionEnum",
-            &__OUTPUT_META_CustomsDeclarationB13AFilingOptionEnum as &OutputTypeMeta,
-        ),
-        (
             "CustomsDeclarationBase",
             &__OUTPUT_META_CustomsDeclarationBase as &OutputTypeMeta,
         ),
@@ -9747,24 +9674,8 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
             &__OUTPUT_META_CustomsDeclarationBaseDutiesPayorAddress as &OutputTypeMeta,
         ),
         (
-            "CustomsDeclarationContentsTypeEnum",
-            &__OUTPUT_META_CustomsDeclarationContentsTypeEnum as &OutputTypeMeta,
-        ),
-        (
             "CustomsDeclarationCreateRequest",
             &__OUTPUT_META_CustomsDeclarationCreateRequest as &OutputTypeMeta,
-        ),
-        (
-            "CustomsDeclarationEelPfcEnum",
-            &__OUTPUT_META_CustomsDeclarationEelPfcEnum as &OutputTypeMeta,
-        ),
-        (
-            "CustomsDeclarationIncotermEnum",
-            &__OUTPUT_META_CustomsDeclarationIncotermEnum as &OutputTypeMeta,
-        ),
-        (
-            "CustomsDeclarationNonDeliveryOptionEnum",
-            &__OUTPUT_META_CustomsDeclarationNonDeliveryOptionEnum as &OutputTypeMeta,
         ),
         (
             "CustomsExporterIdentification",

@@ -5279,6 +5279,17 @@ pub struct CreateIssueInput {
     )]
     pub update_history: Option<bool>,
     #[field(
+        display_name = r##"Prefer Field Associated Errors"##,
+        description = r##"EXPERIMENTAL. Whether you prefer errors that relate to a field to be returned as field errors (`errors`) rather than as general errors (`errorMessages`). A response can contain both kinds of error, regardless of what this is set to. When this is `true`, more errors are returned as field errors, and which errors are field errors and which are general errors isn't part of the contract and can change without notice."##,
+        default = r##"false"##
+    )]
+    #[serde(
+        rename = "preferFieldAssociatedErrors",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub prefer_field_associated_errors: Option<bool>,
+    #[field(
         display_name = r##"Fields"##,
         description = r##"List of issue screen fields to update, specifying the sub-field to update and its value for each field. This field provides a straightforward option when setting a sub-field. When multiple sub-fields or other operations are required, use `update`. Fields included in here cannot be included in `update`."##
     )]
@@ -5347,8 +5358,12 @@ impl CreateIssueInput {
     /// The request this capability sends; the connection supplies host and credentials.
     pub fn request(&self) -> Result<kit::Request, AgentError> {
         let path = String::from("/rest/api/2/issue");
-        let request =
-            kit::Request::new("POST", path).query_opt("updateHistory", &self.update_history);
+        let request = kit::Request::new("POST", path)
+            .query_opt("updateHistory", &self.update_history)
+            .query_opt(
+                "preferFieldAssociatedErrors",
+                &self.prefer_field_associated_errors,
+            );
         request.json_body(
             kit::Body::new()
                 .field_opt("fields", &self.fields)
@@ -5433,6 +5448,17 @@ pub struct DoTransitionInput {
     #[serde(rename = "issueIdOrKey")]
     pub issue_id_or_key: String,
     #[field(
+        display_name = r##"Prefer Field Associated Errors"##,
+        description = r##"EXPERIMENTAL. Whether you prefer errors that relate to a field to be returned as field errors (`errors`) rather than as general errors (`errorMessages`). A response can contain both kinds of error, regardless of what this is set to. When this is `true`, more errors are returned as field errors, and which errors are field errors and which are general errors isn't part of the contract and can change without notice."##,
+        default = r##"false"##
+    )]
+    #[serde(
+        rename = "preferFieldAssociatedErrors",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub prefer_field_associated_errors: Option<bool>,
+    #[field(
         display_name = r##"Fields"##,
         description = r##"List of issue screen fields to update, specifying the sub-field to update and its value for each field. This field provides a straightforward option when setting a sub-field. When multiple sub-fields or other operations are required, use `update`. Fields included in here cannot be included in `update`."##
     )]
@@ -5504,7 +5530,10 @@ impl DoTransitionInput {
             "/rest/api/2/issue/{issueIdOrKey}/transitions",
             issueIdOrKey = kit::encode_path(&self.issue_id_or_key)
         );
-        let request = kit::Request::new("POST", path);
+        let request = kit::Request::new("POST", path).query_opt(
+            "preferFieldAssociatedErrors",
+            &self.prefer_field_associated_errors,
+        );
         request.json_body(
             kit::Body::new()
                 .field_opt("fields", &self.fields)

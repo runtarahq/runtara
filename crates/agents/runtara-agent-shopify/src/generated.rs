@@ -981,7 +981,7 @@ pub struct CreateDraftOrderDraftOrderTotalPriceSetShopMoney {
 pub struct CreateDraftOrderRequest {
     #[field(
         display_name = r##"Accept Automatic Discounts"##,
-        description = r##"Whether or not to accept automatic discounts on the draft order during calculation. If false, only discount codes and custom draft order discounts (see `appliedDiscount`) will be applied. If true, eligible automatic discounts will be applied in addition to discount codes and custom draft order discounts."##
+        description = r##"Whether or not to accept automatic discounts on the draft order during calculation. If false, only discount codes and custom draft order discounts (see `appliedDiscount`) will be applied. If true, eligible automatic discounts will be applied in addition to discount codes and custom draft order discounts. In `draftOrderCreate` and `draftOrderUpdate`, a staff member without the `apply_discounts_to_draft_orders` permission can't set this field to `true` unless the draft order already accepts automatic discounts."##
     )]
     #[serde(
         rename = "acceptAutomaticDiscounts",
@@ -1036,7 +1036,7 @@ pub struct CreateDraftOrderRequest {
     pub custom_attributes: Option<Option<Vec<AttributeInput>>>,
     #[field(
         display_name = r##"Discount Codes"##,
-        description = r##"The list of discount codes that will be attempted to be applied to the draft order. If the draft isn't eligible for any given discount code it will be skipped during calculation."##
+        description = r##"The list of discount codes that will be attempted to be applied to the draft order. If the draft isn't eligible for any given discount code it will be skipped during calculation. In `draftOrderCreate` and `draftOrderUpdate`, a staff member without the `apply_discounts_to_draft_orders` permission can't add a discount code that the draft order doesn't already have."##
     )]
     #[serde(
         rename = "discountCodes",
@@ -12596,7 +12596,7 @@ pub struct CreateDraftOrderInput {
     pub _connection: Option<RawConnection>,
     #[field(
         display_name = r##"Accept Automatic Discounts"##,
-        description = r##"Whether or not to accept automatic discounts on the draft order during calculation. If false, only discount codes and custom draft order discounts (see `appliedDiscount`) will be applied. If true, eligible automatic discounts will be applied in addition to discount codes and custom draft order discounts."##
+        description = r##"Whether or not to accept automatic discounts on the draft order during calculation. If false, only discount codes and custom draft order discounts (see `appliedDiscount`) will be applied. If true, eligible automatic discounts will be applied in addition to discount codes and custom draft order discounts. In `draftOrderCreate` and `draftOrderUpdate`, a staff member without the `apply_discounts_to_draft_orders` permission can't set this field to `true` unless the draft order already accepts automatic discounts."##
     )]
     #[serde(
         rename = "acceptAutomaticDiscounts",
@@ -12651,7 +12651,7 @@ pub struct CreateDraftOrderInput {
     pub custom_attributes: Option<Option<Vec<AttributeInput>>>,
     #[field(
         display_name = r##"Discount Codes"##,
-        description = r##"The list of discount codes that will be attempted to be applied to the draft order. If the draft isn't eligible for any given discount code it will be skipped during calculation."##
+        description = r##"The list of discount codes that will be attempted to be applied to the draft order. If the draft isn't eligible for any given discount code it will be skipped during calculation. In `draftOrderCreate` and `draftOrderUpdate`, a staff member without the `apply_discounts_to_draft_orders` permission can't add a discount code that the draft order doesn't already have."##
     )]
     #[serde(
         rename = "discountCodes",
@@ -12871,7 +12871,9 @@ After creating a draft order, you can:
 
 > Note:
 > When you create a draft order, you can't reserve or hold inventory for the items in the order by default.
-> However, you can reserve inventory using the `reserveInventoryUntil` input."##,
+> However, you can reserve inventory using the `reserveInventoryUntil` input.
+
+A staff member needs the `apply_discounts_to_draft_orders` permission to add discounts."##,
     side_effects = true,
     rate_limited = true
 )]

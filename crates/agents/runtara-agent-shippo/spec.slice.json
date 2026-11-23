@@ -341,7 +341,7 @@
         "description": "Address represents the address as retrieved from the database",
         "properties": {
           "city": {
-            "description": "**required for purchase**\n\nName of a city. When creating a Quote Address, sending a city is optional but will yield more accurate Rates.\nPlease bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state\nor a ZIP code (see below), if known, it will yield more accurate results.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Required; Max 35 characters |",
+            "description": "**required for purchase**\n\nName of a city. When creating a Quote Address, sending a city is optional but will yield more accurate Rates.\nPlease bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state or a ZIP code (see below), if known, to get more accurate results.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Required; Max 35 characters |",
             "example": "San Francisco",
             "maxLength": 100,
             "type": "string",
@@ -394,7 +394,7 @@
             "x-runtara-label": "Name"
           },
           "phone": {
-            "description": "Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This\nincreases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Required; Min 1, max 15 characters |\n| USPS | Sender phone required for shipments during label purchase; Min 8, max 15 digits |",
+            "description": "Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Required; Min 1, max 15 characters |\n| USPS | Sender phone required for shipments during label purchase; Min 8, max 15 digits |",
             "example": "+1 555 341 9393",
             "maxLength": 50,
             "type": "string",
@@ -402,7 +402,7 @@
             "x-runtara-label": "Phone"
           },
           "state": {
-            "description": "**required for purchase for some countries**\n\nState/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some\ncountries (i.e Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers\nonly accept two or three character state abbreviations.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Required if country requires state; Max 2 characters for US, CA, PR |",
+            "description": "**required for purchase for some countries**\n\nState/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some countries (i.e. Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers only accept two or three character state abbreviations.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Required if country requires state; Max 2 characters for US, CA, PR |",
             "example": "CA",
             "maxLength": 100,
             "type": "string",
@@ -439,7 +439,7 @@
             "x-runtara-label": "Street No"
           },
           "zip": {
-            "description": "**required for purchase**\n\nPostal code of an Address. When creating a Quote Addresses, sending a ZIP is optional but will yield more\naccurate Rates.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Max 10 characters |",
+            "description": "**required for purchase**\n\nPostal code of an Address. When creating a Quote Address, sending a ZIP is optional but will yield more accurate Rates.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Max 10 characters |",
             "example": "94117",
             "maxLength": 20,
             "type": "string",
@@ -539,7 +539,7 @@
             "x-runtara-label": "Phone"
           },
           "state": {
-            "description": "**required for purchase for some countries**\n\nState/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some countries (i.e Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers only accept two or three character state abbreviations.",
+            "description": "**required for purchase for some countries**\n\nState/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some countries (i.e. Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers only accept two or three character state abbreviations.",
             "example": "CA",
             "type": "string",
             "x-runtara-example": "CA",
@@ -790,7 +790,7 @@
             "x-runtara-label": "Active"
           },
           "carrier": {
-            "description": "Carrier token, see [Carriers](/shippoapi/public-api/carriers)\nPlease check the [carrier accounts tutorial](https://docs.goshippo.com/docs/carriers/carrieraccounts/) page for all supported carriers.",
+            "description": "Carrier token, see [Carriers](/shippoapi/public-api/carriers).\nPlease check the [carrier accounts tutorial](https://docs.goshippo.com/docs/carriers/carrieraccounts/) page for all supported carriers.",
             "example": "usps",
             "type": "string",
             "x-runtara-example": "usps",
@@ -938,7 +938,7 @@
             "x-runtara-label": "Currency"
           },
           "payment_method": {
-            "description": "Secured funds include money orders, certified cheques and others (see [UPS](https://www.ups.com/content/us/en/shipping/time/service/value_added/cod.html) for details).\nIf no payment_method inputted the value defaults to \"ANY\".)",
+            "description": "Secured funds include money orders, certified cheques and others (see [UPS](https://www.ups.com/content/us/en/shipping/time/service/value_added/cod.html) for details).\nIf no `payment_method` is provided, the value defaults to \"ANY\".",
             "enum": [
               "SECURED_FUNDS",
               "CASH",
@@ -956,7 +956,7 @@
       },
       "ConnectExistingOwnAccountParameters": {
         "additionalProperties": true,
-        "description": "An array of additional parameters for the account, such as e.g. password or token. Please check our \n[carrier accounts guide](https://docs.goshippo.com/docs/carriers/carrieraccounts/) \nfor the parameters per carrier.\nTo protect account information, this field will be masked in any API response.\nIn the case of masked fields, they should be handled carefully.\n\nFields also must consider: \n- Not providing a *fields* in parameters will not result in a change to any configured value \n- Providing a value in a *masked field* with ****** (exactly 6 asterisks) will not change the configured value \n- Providing *field* with null will clear the configured value \n- Providing *field* with any other value will change the configured value and may affect the behavior of the account.\n",
+        "description": "An array of additional parameters for the account, such as password or token. Please check our [carrier accounts guide](https://docs.goshippo.com/docs/carriers/carrieraccounts/) for the parameters per carrier.\nTo protect account information, this field will be masked in any API response.\nIn the case of masked fields, they should be handled carefully.\n\nFields also must consider: \n- Not providing a *field* in parameters will not result in a change to any configured value \n- Providing a value in a *masked field* with ****** (exactly 6 asterisks) will not change the configured value \n- Providing *field* with null will clear the configured value \n- Providing *field* with any other value will change the configured value and may affect the behavior of the account.\n",
         "title": "Account parameters"
       },
       "CoreRate": {
@@ -988,7 +988,7 @@
                 "x-runtara-label": "Provider"
               },
               "servicelevel_name": {
-                "description": "Service level name, e.g. `Priority Mail` or `FedEx Ground®`.\nA service level commonly defines the transit time of a Shipment (e.g., Express vs. Standard), along with other properties.  These names vary depending on the provider.\nSee [Service Levels](/shippoapi/public-api/service-levels).",
+                "description": "Service level name, e.g. `Priority Mail` or `FedEx Ground®`.\nA service level commonly defines the transit time of a Shipment (e.g., Express vs. Standard), along with other properties. These names vary depending on the provider.\nSee [Service Levels](/shippoapi/public-api/service-levels).",
                 "example": "Priority Mail",
                 "type": "string",
                 "x-runtara-example": "Priority Mail",
@@ -1023,7 +1023,7 @@
             "x-runtara-label": "Ref Sort"
           },
           "value": {
-            "description": "Optional text to be printed on the shipping label for customer reference. Up to 40 characters. If\nthis is provided, reference_1 will be ignored.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Max 40 characters (Express services); Max 30 characters (Ground services) |",
+            "description": "Optional text to be printed on the shipping label for customer reference. Up to 40 characters. If this is provided, reference_1 will be ignored.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Max 40 characters (Express services); Max 30 characters (Ground services) |",
             "maxLength": 40,
             "type": "string",
             "x-runtara-label": "Value"
@@ -1165,20 +1165,6 @@
         "description": "B13A Option details are obtained by filing a B13A Canada Export Declaration via the Canadian Export Reporting System (CERS).\n[More information on reporting commercial exports from Canada.](https://www.cbsa-asfc.gc.ca/services/export/guide-eng.html)\nAllowed values available [here](/shippoapi/public-api/customs-declaration-b13a-filing-option)",
         "example": "FILED_ELECTRONICALLY",
         "type": "string"
-      },
-      "CustomsDeclarationB13AFilingOptionEnum": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/CustomsDeclarationB13AFilingOption"
-          },
-          {
-            "enum": [
-              "FILED_ELECTRONICALLY",
-              "SUMMARY_REPORTING",
-              "NOT_REQUIRED"
-            ]
-          }
-        ]
       },
       "CustomsDeclarationBase": {
         "properties": {
@@ -1353,24 +1339,6 @@
         "example": "MERCHANDISE",
         "type": "string"
       },
-      "CustomsDeclarationContentsTypeEnum": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/CustomsDeclarationContentsType"
-          },
-          {
-            "enum": [
-              "DOCUMENTS",
-              "GIFT",
-              "SAMPLE",
-              "MERCHANDISE",
-              "HUMANITARIAN_DONATION",
-              "RETURN_MERCHANDISE",
-              "OTHER"
-            ]
-          }
-        ]
-      },
       "CustomsDeclarationCreateRequest": {
         "allOf": [
           {
@@ -1387,35 +1355,59 @@
                 "x-runtara-label": "Address Importer"
               },
               "b13a_filing_option": {
-                "allOf": [
-                  {
-                    "$ref": "#/components/schemas/CustomsDeclarationB13AFilingOptionEnum"
-                  }
+                "description": "B13A Option details are obtained by filing a B13A Canada Export Declaration via the Canadian Export Reporting System (CERS).\n[More information on reporting commercial exports from Canada.](https://www.cbsa-asfc.gc.ca/services/export/guide-eng.html)\nAllowed values available [here](/shippoapi/public-api/customs-declaration-b13a-filing-option)",
+                "enum": [
+                  "FILED_ELECTRONICALLY",
+                  "SUMMARY_REPORTING",
+                  "NOT_REQUIRED"
                 ],
+                "example": "FILED_ELECTRONICALLY",
+                "type": "string",
+                "x-runtara-example": "FILED_ELECTRONICALLY",
                 "x-runtara-label": "B13a Filing Option"
               },
               "contents_type": {
-                "allOf": [
-                  {
-                    "$ref": "#/components/schemas/CustomsDeclarationContentsTypeEnum"
-                  }
+                "description": "Type of goods of the shipment.  \nAllowed values available [here](/shippoapi/public-api/customs-declaration-contents-type)",
+                "enum": [
+                  "DOCUMENTS",
+                  "GIFT",
+                  "SAMPLE",
+                  "MERCHANDISE",
+                  "HUMANITARIAN_DONATION",
+                  "RETURN_MERCHANDISE",
+                  "OTHER"
                 ],
+                "example": "MERCHANDISE",
+                "type": "string",
+                "x-runtara-example": "MERCHANDISE",
                 "x-runtara-label": "Contents Type"
               },
               "eel_pfc": {
-                "allOf": [
-                  {
-                    "$ref": "#/components/schemas/CustomsDeclarationEelPfcEnum"
-                  }
+                "description": "EEL / PFC type of the shipment. For most shipments from the US to CA, `NOEEI_30_36` is applicable; for most other shipments from the US, `NOEEI_30_37_a` is applicable.\nAllowed values available [here](/shippoapi/public-api/customs-declaration-eelpfc)",
+                "enum": [
+                  "NOEEI_30_37_a",
+                  "NOEEI_30_37_h",
+                  "NOEEI_30_37_f",
+                  "NOEEI_30_36",
+                  "AES_ITN"
                 ],
+                "example": "NOEEI_30_37_a",
+                "type": "string",
+                "x-runtara-example": "NOEEI_30_37_a",
                 "x-runtara-label": "Eel Pfc"
               },
               "incoterm": {
-                "allOf": [
-                  {
-                    "$ref": "#/components/schemas/CustomsDeclarationIncotermEnum"
-                  }
+                "description": "The incoterm reference of the shipment. FCA is available for DHL Express and FedEx only.\neDAP is available for DPD UK only. DAP is available for DHL Express, FedEx, and DPD UK.\nIf expecting DAP for other carriers, please use DDU.\nAllowed values available [here](/shippoapi/public-api/customs-declaration-incoterm)\nCarrier-specific restrictions are in the table below.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Must be one of DDP, DDU, FCA, DAP |",
+                "enum": [
+                  "DDP",
+                  "DDU",
+                  "FCA",
+                  "DAP",
+                  "eDAP"
                 ],
+                "example": "DDP",
+                "type": "string",
+                "x-runtara-example": "DDP",
                 "x-runtara-label": "Incoterm"
               },
               "items": {
@@ -1426,11 +1418,14 @@
                 "x-runtara-label": "Items"
               },
               "non_delivery_option": {
-                "allOf": [
-                  {
-                    "$ref": "#/components/schemas/CustomsDeclarationNonDeliveryOptionEnum"
-                  }
+                "description": "Indicates how the carrier should proceed in case the shipment can't be delivered.\nAllowed values available [here](/shippoapi/public-api/customs-declaration-non-delivery-option)",
+                "enum": [
+                  "ABANDON",
+                  "RETURN"
                 ],
+                "example": "RETURN",
+                "type": "string",
+                "x-runtara-example": "RETURN",
                 "x-runtara-label": "Non Delivery Option"
               },
               "test": {
@@ -1451,60 +1446,15 @@
         "example": "NOEEI_30_37_a",
         "type": "string"
       },
-      "CustomsDeclarationEelPfcEnum": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/CustomsDeclarationEelPfc"
-          },
-          {
-            "enum": [
-              "NOEEI_30_37_a",
-              "NOEEI_30_37_h",
-              "NOEEI_30_37_f",
-              "NOEEI_30_36",
-              "AES_ITN"
-            ]
-          }
-        ]
-      },
       "CustomsDeclarationIncoterm": {
         "description": "The incoterm reference of the shipment. FCA is available for DHL Express and FedEx only.\neDAP is available for DPD UK only. DAP is available for DHL Express, FedEx, and DPD UK.\nIf expecting DAP for other carriers, please use DDU.\nAllowed values available [here](/shippoapi/public-api/customs-declaration-incoterm)\nCarrier-specific restrictions are in the table below.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Must be one of DDP, DDU, FCA, DAP |",
         "example": "DDP",
         "type": "string"
       },
-      "CustomsDeclarationIncotermEnum": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/CustomsDeclarationIncoterm"
-          },
-          {
-            "enum": [
-              "DDP",
-              "DDU",
-              "FCA",
-              "DAP",
-              "eDAP"
-            ]
-          }
-        ]
-      },
       "CustomsDeclarationNonDeliveryOption": {
         "description": "Indicates how the carrier should proceed in case the shipment can't be delivered.\nAllowed values available [here](/shippoapi/public-api/customs-declaration-non-delivery-option)",
         "example": "RETURN",
         "type": "string"
-      },
-      "CustomsDeclarationNonDeliveryOptionEnum": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/CustomsDeclarationNonDeliveryOption"
-          },
-          {
-            "enum": [
-              "ABANDON",
-              "RETURN"
-            ]
-          }
-        ]
       },
       "CustomsExporterIdentification": {
         "description": "Additional exporter identification that may be required to ship in certain countries",
@@ -1584,7 +1534,7 @@
             "x-runtara-label": "Eu Exempt Category"
           },
           "hs_code": {
-            "description": "HS code of the item, which is required by some carriers. If `tariff_number` is not provided, `hs_code` will be used.  If both `hs_code` and `tariff_number` are provided, `tariff_number` will be used. 50 character limit.",
+            "description": "HS code of the item, which is required by some carriers. If `tariff_number` is not provided, `hs_code` will be used. If both `hs_code` and `tariff_number` are provided, `tariff_number` will be used. 50 character limit.",
             "example": "0901.21",
             "type": "string",
             "x-runtara-example": "0901.21",
@@ -1637,7 +1587,7 @@
             "x-runtara-label": "Origin Country"
           },
           "quantity": {
-            "description": "Quantity of this item in the shipment you send.  Must be greater than 0.",
+            "description": "Quantity of this item in the shipment you send. Must be greater than 0.",
             "example": 20,
             "format": "int64",
             "type": "integer",
@@ -1664,7 +1614,7 @@
             "x-runtara-label": "Value Amount"
           },
           "value_currency": {
-            "description": "Currency used for value_amount. The [official ISO 4217](http://www.xe.com/iso4217.php) currency codes are used, e.g.  `USD` or `EUR`.",
+            "description": "Currency used for value_amount. The [official ISO 4217](http://www.xe.com/iso4217.php) currency codes are used, e.g. `USD` or `EUR`.",
             "example": "USD",
             "type": "string",
             "x-runtara-example": "USD",
@@ -1808,7 +1758,7 @@
         "type": "object"
       },
       "FedExConnectExistingOwnAccountParameters": {
-        "description": "In the case of masked fields, they should be handled carefully.\n\nFields also must consider: \n- Not providing a *fields* in parameters will not result in a change to any configured value \n- Providing a value in a *masked field* with ****** (exactly 6 asterisks) will not change the configured value \n- Providing *field* with null will clear the configured value \n- Providing *field* with any other value will change the configured value and may affect the behavior of the account.\n",
+        "description": "In the case of masked fields, they should be handled carefully.\n\nFields also must consider: \n- Not providing a *field* in parameters will not result in a change to any configured value \n- Providing a value in a *masked field* with ****** (exactly 6 asterisks) will not change the configured value \n- Providing *field* with null will clear the configured value \n- Providing *field* with any other value will change the configured value and may affect the behavior of the account.\n",
         "properties": {
           "first_name": {
             "description": "First name of the account holder",
@@ -1919,7 +1869,7 @@
         "type": "object"
       },
       "HealthcareHandling": {
-        "description": "Requests the carrier's healthcare handling program, where the carrier offers one. The rate returned keeps the carrier's\nregular service level token.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| Purolator | Maps to Health Care+. Domestic Express services only (Express, Express 9AM, Express 10:30AM, Express Evening). Available to Purolator-approved accounts only. |",
+        "description": "Requests the carrier's healthcare handling program, where the carrier offers one. The rate returned keeps the carrier's regular service level token.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| Purolator | Maps to Health Care+. Domestic Express services only (Express, Express 9AM, Express 10:30AM, Express Evening). Available to Purolator-approved accounts only. |",
         "properties": {
           "enabled": {
             "description": "Set to `true` to request the carrier's healthcare handling program for this shipment.",
@@ -1981,7 +1931,7 @@
             "x-runtara-label": "Ref Sort"
           },
           "value": {
-            "description": "Optional text to be printed on the shipping label for invoice number. Up to 40 characters. If\nprovided, this will be used on the label instead of shipment.customs_declaration.invoice.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Max 30 characters |",
+            "description": "Optional text to be printed on the shipping label for invoice number. Up to 40 characters. If provided, this will be used on the label instead of shipment.customs_declaration.invoice.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Max 30 characters |",
             "maxLength": 40,
             "type": "string",
             "x-runtara-label": "Value"
@@ -2758,7 +2708,7 @@
             "x-runtara-label": "Ref Sort"
           },
           "value": {
-            "description": "Optional text to be printed on the shipping label for PO number. Up to 40 characters. If\nthis is provided, reference_2 will be ignored.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Max 30 characters |",
+            "description": "Optional text to be printed on the shipping label for PO number. Up to 40 characters. If this is provided, reference_2 will be ignored.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Max 30 characters |",
             "maxLength": 40,
             "type": "string",
             "x-runtara-label": "Value"
@@ -3152,7 +3102,7 @@
                     "$ref": "#/components/schemas/ServiceLevel"
                   },
                   {
-                    "description": "Used for some Service Levels to link to the more \"generic\" version of this Service Level - for example, \nif this Service Level is a variation specific to shipments to Europe(\"ups_saver_eu\"), the \"parent\" is \nthe fully generic version (\"ups_saver\"). Helpful when displaying Service Levels to users. Has the same \nstructure of the servicelevel - \"name\", \"token\", \"terms\", and \"extended_token\", or it is otherwise null."
+                    "description": "Used for some Service Levels to link to the more \"generic\" version of this Service Level - for example, if this Service Level is a variation specific to shipments to Europe (\"ups_saver_eu\"), the \"parent\" is the fully generic version (\"ups_saver\"). Helpful when displaying Service Levels to users. Has the same structure as the servicelevel - \"name\", \"token\", \"terms\", and \"extended_token\", or it is otherwise null."
                   }
                 ],
                 "x-runtara-label": "Parent Servicelevel"
@@ -3377,7 +3327,7 @@
                 "x-runtara-label": "Async"
               },
               "carrier_accounts": {
-                "description": "List of [Carrier Accounts](/shippoapi/public-api/carrier-accounts) `object_id`s used to filter the returned rates.  If set, only rates from these carriers will be returned.",
+                "description": "List of [Carrier Accounts](/shippoapi/public-api/carrier-accounts) `object_id`s used to filter the returned rates. If set, only rates from these carriers will be returned.",
                 "example": [
                   "065a4a8c10d24a34ab932163a1b87f52",
                   "73f706f4bdb94b54a337563840ce52b0"
@@ -4234,7 +4184,7 @@
             "x-runtara-label": "Label File Type"
           },
           "label_url": {
-            "description": "A URL pointing directly to the label in the format you've set in your settings.\nA value will only be returned if the Transactions has been processed successfully.\nThe URL expires. The `Expires` query parameter gives the expiration time as a Unix timestamp in seconds. Before you download the label, compare `Expires` with the current time. If `Expires` is in the past, call `GET /transactions/{TransactionId}` to get a new `label_url`. If the `Expires` value on the new `label_url` is also in the past, the label file is no longer available. This occurs for labels created more than one year ago. Do not retry.",
+            "description": "A URL pointing directly to the label in the format you've set in your settings.\nA value will only be returned if the Transactions has been processed successfully.\nThe URL expires. The `Expires` query parameter gives the expiration time as a Unix timestamp in seconds. Before you download the label, compare `Expires` with the current time. If `Expires` is in the past, read the `object_created` value of the transaction. If `object_created` is more than one year ago, the label file is no longer available. Do not call `GET /transactions/{TransactionId}`. If `object_created` is less than one year ago, call `GET /transactions/{TransactionId}` to get a new `label_url`.",
             "example": "https://shippo-delivery.s3.amazonaws.com/70ae8117ee1749e393f249d5b77c45e0.pdf?Signature=vDw1ltcyGveVR1OQoUDdzC43BY8%3D&Expires=1437093830&AWSAccessKeyId=AKIAJTHP3LLFMYAWALIA",
             "type": "string",
             "x-runtara-example": "https://shippo-delivery.s3.amazonaws.com/70ae8117ee1749e393f249d5b77c45e0.pdf?Signature=vDw1ltcyGveVR1OQoUDdzC43BY8%3D&Expires=1437093830&AWSAccessKeyId=AKIAJTHP3LLFMYAWALIA",
@@ -4390,7 +4340,7 @@
         ]
       },
       "UpsConnectExistingOwnAccountParameters": {
-        "description": "An array of additional parameters for the account, such as e.g. password or token.\nPlease check the [carrier accounts tutorial](https://docs.goshippo.com/docs/carriers/carrieraccounts/) page for the parameters per carrier.\nTo protect account information, this field will be masked in any API response.\nIn the case of masked fields, they should be handled carefully.\n\nFields also must consider: \n- Not providing a *fields* in parameters will not result in a change to any configured value \n- Providing a value in a *masked field* with ****** (exactly 6 asterisks) will not change the configured value \n- Providing *field* with null will clear the configured value \n- Providing *field* with any other value will change the configured value and may affect the behavior of the account.",
+        "description": "An array of additional parameters for the account, such as password or token.\nPlease check the [carrier accounts tutorial](https://docs.goshippo.com/docs/carriers/carrieraccounts/) page for the parameters per carrier.\nTo protect account information, this field will be masked in any API response.\nIn the case of masked fields, they should be handled carefully.\n\nFields also must consider: \n- Not providing a *field* in parameters will not result in a change to any configured value \n- Providing a value in a *masked field* with ****** (exactly 6 asterisks) will not change the configured value \n- Providing *field* with null will clear the configured value \n- Providing *field* with any other value will change the configured value and may affect the behavior of the account.",
         "properties": {
           "account_number": {
             "description": "The UPS account number",
@@ -4660,7 +4610,7 @@
               "schema": {
                 "properties": {
                   "city": {
-                    "description": "**required for purchase**\n\nName of a city. When creating a Quote Address, sending a city is optional but will yield more accurate Rates.\nPlease bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state\nor a ZIP code (see below), if known, it will yield more accurate results.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Required; Max 35 characters |",
+                    "description": "**required for purchase**\n\nName of a city. When creating a Quote Address, sending a city is optional but will yield more accurate Rates.\nPlease bear in mind that city names may be ambiguous (there are 34 Springfields in the US). Pass in a state or a ZIP code (see below), if known, to get more accurate results.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Required; Max 35 characters |",
                     "example": "San Francisco",
                     "maxLength": 100,
                     "type": "string",
@@ -4713,7 +4663,7 @@
                     "x-runtara-label": "Name"
                   },
                   "phone": {
-                    "description": "Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This\nincreases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Required; Min 1, max 15 characters |\n| USPS | Sender phone required for shipments during label purchase; Min 8, max 15 digits |",
+                    "description": "Addresses containing a phone number allow carriers to call the recipient when delivering the Parcel. This increases the probability of delivery and helps to avoid accessorial charges after a Parcel has been shipped.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Required; Min 1, max 15 characters |\n| USPS | Sender phone required for shipments during label purchase; Min 8, max 15 digits |",
                     "example": "+1 555 341 9393",
                     "maxLength": 50,
                     "type": "string",
@@ -4721,7 +4671,7 @@
                     "x-runtara-label": "Phone"
                   },
                   "state": {
-                    "description": "**required for purchase for some countries**\n\nState/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some\ncountries (i.e Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers\nonly accept two or three character state abbreviations.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Required if country requires state; Max 2 characters for US, CA, PR |",
+                    "description": "**required for purchase for some countries**\n\nState/Province values are required for shipments from/to the US, AU, and CA. UPS requires province for some countries (i.e. Ireland). To receive more accurate quotes, passing this field is recommended. Most carriers only accept two or three character state abbreviations.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Required if country requires state; Max 2 characters for US, CA, PR |",
                     "example": "CA",
                     "maxLength": 100,
                     "type": "string",
@@ -4765,7 +4715,7 @@
                     "x-runtara-label": "Validate"
                   },
                   "zip": {
-                    "description": "**required for purchase**\n\nPostal code of an Address. When creating a Quote Addresses, sending a ZIP is optional but will yield more\naccurate Rates.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Max 10 characters |",
+                    "description": "**required for purchase**\n\nPostal code of an Address. When creating a Quote Address, sending a ZIP is optional but will yield more accurate Rates.\n\n**Carrier-Specific Constraints:**\n| Carrier | Constraints |\n|:---|:---|\n| FedEx | Max 10 characters |",
                     "example": "94117",
                     "maxLength": 20,
                     "type": "string",
@@ -5187,7 +5137,7 @@
             "x-runtara-label": "Shop App"
           },
           {
-            "description": "Filter orders created after the input date and time (ISO 8601 UTC format).  This is based on the \n`placed_at` field, meaning when the order has been placed, not when the order object was created.",
+            "description": "Filter orders created after the input date and time (ISO 8601 UTC format). This is based on the `placed_at` field, meaning when the order has been placed, not when the order object was created.",
             "in": "query",
             "name": "start_date",
             "required": false,
@@ -5197,7 +5147,7 @@
             "x-runtara-label": "Start Date"
           },
           {
-            "description": "Filter orders created before the input date and time (ISO 8601 UTC format).  This is based on the \n`placed_at` field, meaning when the order has been placed, not when the order object was created.",
+            "description": "Filter orders created before the input date and time (ISO 8601 UTC format). This is based on the `placed_at` field, meaning when the order has been placed, not when the order object was created.",
             "in": "query",
             "name": "end_date",
             "required": false,
@@ -5854,7 +5804,7 @@
                     "x-runtara-label": "Async"
                   },
                   "carrier_accounts": {
-                    "description": "List of [Carrier Accounts](/shippoapi/public-api/carrier-accounts) `object_id`s used to filter the returned rates.  If set, only rates from these carriers will be returned.",
+                    "description": "List of [Carrier Accounts](/shippoapi/public-api/carrier-accounts) `object_id`s used to filter the returned rates. If set, only rates from these carriers will be returned.",
                     "example": [
                       "065a4a8c10d24a34ab932163a1b87f52",
                       "73f706f4bdb94b54a337563840ce52b0"
@@ -6603,7 +6553,7 @@
     },
     "/transactions/{TransactionId}": {
       "get": {
-        "description": "Returns an existing transaction using an object ID.\nEach call returns a new `label_url` with a new expiration time. Use this endpoint to get a new `label_url` when the `Expires` value on the current `label_url` is in the past. Send one call for each transaction.",
+        "description": "Returns an existing transaction using an object ID.\nEach call returns a new `label_url` with a new expiration time. Use this endpoint to get a new `label_url` when the `Expires` value on the current `label_url` is in the past. Send one call for each transaction. If the transaction `object_created` is more than one year ago, this endpoint does not return a new `label_url`.",
         "operationId": "GetTransaction",
         "parameters": [
           {

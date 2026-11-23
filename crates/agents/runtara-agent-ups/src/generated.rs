@@ -2746,7 +2746,7 @@ pub struct InternationalFormsCn22Form {
     pub cn22_type: Option<String>,
     #[field(
         display_name = r##"Fold Here Text"##,
-        description = r##"String will replace default "Fold Here" text displayed on the label."##
+        description = r##"String will replace default "Fold Here" text displayed on the label and its optional."##
     )]
     #[serde(
         rename = "FoldHereText",
@@ -11180,55 +11180,6 @@ pub struct ShipmentServiceOptionsRestrictedArticles {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
-#[capability_output(display_name = "ShipmentServiceOptionsVerifiedDelivery")]
-pub struct ShipmentServiceOptionsVerifiedDelivery {
-    #[field(
-        display_name = r##"Recipient Email"##,
-        description = r##"Specifies the recipient's email address for delivery notifications. This field is required."##
-    )]
-    #[serde(
-        rename = "RecipientEmail",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub recipient_email: Option<String>,
-    #[field(
-        display_name = r##"Recipient Phone"##,
-        description = r##"Recipient phone number for notifications. Valid characters are digits (0-9) only. This field is optional."##
-    )]
-    #[serde(
-        rename = "RecipientPhone",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub recipient_phone: Option<String>,
-    #[field(
-        display_name = r##"Secure PIN Type"##,
-        description = r##"Specifies the type of Secure PIN. Valid value is 2, which represents VDS (Shipper Generated PIN). This field is required."##
-    )]
-    #[serde(
-        rename = "SecurePINType",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub secure_pin_type: Option<String>,
-    #[field(
-        display_name = r##"Token Value"##,
-        description = r##"This field is required and must contain a 32-character hexadecimal string, using only the characters 0-9 and A-F (case-insensitive)."##
-    )]
-    #[serde(
-        rename = "TokenValue",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub token_value: Option<String>,
-    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
-    #[field(skip)]
-    #[serde(flatten)]
-    pub __extra: HashMap<String, Value>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
 #[capability_output(display_name = "ShipmentShipFrom")]
 pub struct ShipmentShipFrom {
     #[field(display_name = r##"Address"##)]
@@ -11721,13 +11672,6 @@ This accessorial is only valid for UPS Worldwide Express Freight and UPS Worldwi
         skip_serializing_if = "Option::is_none"
     )]
     pub up_scarbonneutral_indicator: Option<String>,
-    #[field(display_name = r##"Verified Delivery"##)]
-    #[serde(
-        rename = "VerifiedDelivery",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub verified_delivery: Option<ShipmentServiceOptionsVerifiedDelivery>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -14612,10 +14556,6 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         (
             "ShipmentServiceOptionsRestrictedArticles",
             &__OUTPUT_META_ShipmentServiceOptionsRestrictedArticles as &OutputTypeMeta,
-        ),
-        (
-            "ShipmentServiceOptionsVerifiedDelivery",
-            &__OUTPUT_META_ShipmentServiceOptionsVerifiedDelivery as &OutputTypeMeta,
         ),
         (
             "ShipmentShipFrom",

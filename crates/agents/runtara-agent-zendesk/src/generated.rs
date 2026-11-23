@@ -868,7 +868,7 @@ pub struct CurrentUserResponseUser {
     pub details: Option<String>,
     #[field(
         display_name = r##"Email"##,
-        description = r##"The primary email address of this user. If the primary email address is not [verified](https://support.zendesk.com/hc/en-us/articles/4408886752410), the secondary email address is used"##
+        description = r##"The user's email address selected for notifications. This can differ from the primary email address if the primary email is unverified or undeliverable."##
     )]
     #[serde(rename = "email", default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
@@ -2459,6 +2459,16 @@ pub struct TicketFieldObject {
     )]
     pub relationship_filter: Option<Value>,
     #[field(
+        display_name = r##"Relationship Target Publicly Listable"##,
+        description = r##"Present for "lookup" and "multi_lookup" fields that target a custom object, and only when the `include_anonymous_availability` query parameter is true. True if anonymous users can read the target custom object's records. See [Anonymous access](/api-reference/custom-data/custom-objects/custom_object_records/#anonymous-access)."##
+    )]
+    #[serde(
+        rename = "relationship_target_publicly_listable",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub relationship_target_publicly_listable: Option<bool>,
+    #[field(
         display_name = r##"Relationship Target Type"##,
         description = r##"Present for "lookup" and "multi_lookup" fields. A representation of what type of object the field references. Options are "zen:user", "zen:organization", "zen:ticket", or "zen:custom_object:{key}", where key is a custom object key. For example, "zen:custom_object:apartment"."##
     )]
@@ -4037,7 +4047,7 @@ pub struct UserForAdmin {
     pub details: Option<String>,
     #[field(
         display_name = r##"Email"##,
-        description = r##"The user's primary email address. *Writeable on create only. On update, a secondary email is added. See [Email Address](#email-address)"##
+        description = r##"In responses, the user's email address selected for notifications. This can differ from the primary email address if the primary email is unverified or undeliverable. Writeable on create only. On update, a secondary email is added. See [Email Address](#email-address)"##
     )]
     #[serde(rename = "email", default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
@@ -4378,7 +4388,7 @@ pub struct UserForEndUser {
     pub created_at: Option<String>,
     #[field(
         display_name = r##"Email"##,
-        description = r##"The primary email address of this user. If the primary email address is not [verified](https://support.zendesk.com/hc/en-us/articles/4408886752410), the secondary email address is used"##
+        description = r##"The user's email address selected for notifications. This can differ from the primary email address if the primary email is unverified or undeliverable."##
     )]
     #[serde(rename = "email", default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
@@ -5758,15 +5768,21 @@ Accepted values:
 * 0 — return only account-scoped (brand-less) end users; all agents and admins remain visible.
 * A numeric brand id — if the brand has user separation enabled, return that
   brand's end users plus the agents with membership in that brand and all admins.
-  If the brand does not have user separation enabled, the request falls back to
-  account scope (0). A brand id that does not exist on the account matches no users.
+  If the brand's users are account-scoped, return the account-scoped end users, any end
+  users still indexed with the brand, and all agents and admins. A brand id that does
+  not exist on the account matches no users.
 
 Any other value returns 400 Bad Request, whether or not brand separation is enabled.
 
-The query keyword form (`query=type:user brand_id:{brand_id}`) continues to work. It
-matches the brand id as indexed on every document type, so admins match only through
-their brand memberships, and it does not apply the account-scope fallback for brands
-without user separation.
+Omitting `brand_id` applies no brand scoping; this endpoint does not fall back to the
+account's default brand_id behavior. Use the users search and autocomplete endpoints
+for that fallback.
+
+The query keyword forms (`query=type:user brand_id:{brand_id}` and `brand:{brand_id}`)
+continue to work. They match the brand id as indexed on every document type, so agents
+and admins match only through their brand memberships. When brand separation is enabled
+and the brand's users are account-scoped, they also match every account-scoped end user,
+and a negated keyword (`-brand_id:{brand_id}`) excludes those end users too.
 "##,
         example = r##"all"##
     )]
@@ -6051,6 +6067,17 @@ Example: `locale="de"`.
     )]
     pub only_system_fields: Option<bool>,
     #[field(
+        display_name = r##"Include Anonymous Availability"##,
+        description = r##"If true, includes the `relationship_target_publicly_listable` property on each lookup and multi-lookup field that targets a custom object. The property is true when anonymous users can read the target custom object's records. See [Anonymous access](/api-reference/custom-data/custom-objects/custom_object_records/#anonymous-access).
+"##
+    )]
+    #[serde(
+        rename = "include_anonymous_availability",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub include_anonymous_availability: Option<bool>,
+    #[field(
         display_name = r##"Page After"##,
         description = r##"Cursor token for fetching next page"##,
         example = r##"eyJvIjoiaWQiLCJ2IjoiYVFFPSJ9"##
@@ -6181,6 +6208,10 @@ impl ListTicketFieldsInput {
             .query_opt("creator", &self.creator)
             .query_opt("active_forms_count", &self.active_forms_count)
             .query_opt("only_system_fields", &self.only_system_fields)
+            .query_opt(
+                "include_anonymous_availability",
+                &self.include_anonymous_availability,
+            )
             .query_opt("page[after]", &self.page_after)
             .query_opt("page[before]", &self.page_before)
             .query_opt("page[size]", &self.page_size)
