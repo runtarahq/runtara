@@ -1291,6 +1291,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Generated agents follow their vendors' current specs.** Seven vendors
+  changed the specs the agents are pinned to; the pins are updated and the
+  agents regenerated. For a step:
+  - Jira: `create-issue` and `do-transition` take
+    `preferFieldAssociatedErrors`, which Atlassian marks experimental.
+  - Pipedrive: `add-deal` takes `channel`, `channel_id` and `origin_id`, and
+    no longer `is_deleted`; `update-deal` takes `channel` and `channel_id`,
+    and its `is_deleted` only restores a deleted deal (`false`).
+  - Zendesk: `list-ticket-fields` takes `include_anonymous_availability`, and
+    a ticket field it returns has `relationship_target_publicly_listable`.
+  - UPS: `shipment` no longer lists `VerifiedDelivery` under the shipment's
+    service options, which UPS removed from its Shipping spec. A value a
+    workflow sets there is still sent, as any undeclared field is.
+  - Shopify: descriptions only. Shippo: descriptions, and the customs fields
+    `connector_gen` now types (see Fixed). BigCommerce: the changes are
+    outside the operations the agent uses, so it is unchanged.
+  - Zoho CRM's slice is fetched again, writing its `const`s as enums; the
+    agent is unchanged.
+
 - **BREAKING: the Shopify agent is generated from Shopify's Admin GraphQL
   schema, version 2026-10.** It keeps its id (`shopify`) and both connection
   types and replaces the hand-written agent: whatever that one did, this one
