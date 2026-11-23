@@ -388,6 +388,34 @@ omit_parameters:
   - cross_filters
 ```
 
+**The vendor's operationIds are not names**, as Magento's are derived from the
+path (`GetV1OrdersId`) and it writes no summaries, so the steps would read
+"Get V1 Orders ID". Name each one; `getOrder` is the capability `get-order`,
+labelled "Get Order" unless the vendor gives a summary. `operations:` and every
+other option keep naming the vendor's ids, as the spec does:
+
+```yaml
+operation_names:
+  GetV1OrdersId: getOrder
+  GetV1Orders: searchOrders
+```
+
+**One object is declared as a query parameter per key**, at fixed indices, as
+Magento's search criteria are (`searchCriteria[filterGroups][0][filters][0][field]`,
+`searchCriteria[pageSize]`, …), which allow one filter and one sort order. Name
+the object, and its parameters become one free-form `deepObject` input under
+its name (`search_criteria`), sent with any keys and indices by `kit.rs`'s
+`query_object`; give its description, and `required` when the API refuses a
+request without it though the spec leaves every key optional. Nested keys need
+a `query_object` that recurses, as `runtara-agent-magento`'s does:
+
+```yaml
+query_objects:
+  searchCriteria:
+    required: true
+    description: Magento's search criteria, as its REST API documents them …
+```
+
 **An operation only reads, though its method is not GET**, such as a query sent
 as a POST (Zoho's COQL). List it, and the step is not marked as having side
 effects:
@@ -709,8 +737,13 @@ crates/agents/runtara-agent-<id>/
   `components.schemas`; a `body` parameter becomes the request body; `formData`
   parameters become an object request body offered in every media type the
   operation `consumes`, so an API that also takes JSON is sent JSON; an array
-  query parameter is comma-separated unless `collectionFormat: multi`; and a
-  response's `schema` and `examples` become its `content`.
+  query parameter is comma-separated unless `collectionFormat: multi`; a
+  response's `schema` and `examples` become its `content`; and a parameter's
+  vendor extensions (`x-runtara-input-name`) stay on it.
+- An operation that declares no 2xx response (Magento's save of source items
+  declares only 400, 401 and `default`) is given a `200` without a body, so its
+  output is `Value`; openapi-generator would otherwise take `default`'s, an
+  error's shape.
 - `fetch` marks operations with `x-runtara-*` vendor extensions (side effects,
   summaries, which capability carries the agent's module attributes) because
   the templates cannot compute them. An operation with several tags keeps its

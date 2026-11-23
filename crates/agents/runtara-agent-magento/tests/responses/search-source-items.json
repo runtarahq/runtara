@@ -1,0 +1,21 @@
+{
+  "items": [
+    {
+      "quantity": 100,
+      "sku": "24-MB01",
+      "source_code": "default",
+      "status": 1
+    },
+    {
+      "quantity": 100,
+      "sku": "24-MB04",
+      "source_code": "default",
+      "status": 1
+    }
+  ],
+  "search_criteria": {
+    "filter_groups": [],
+    "page_size": 2
+  },
+  "total_count": 2038
+}

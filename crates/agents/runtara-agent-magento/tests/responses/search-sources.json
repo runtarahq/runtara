@@ -1,0 +1,24 @@
+{
+  "items": [
+    {
+      "carrier_links": [],
+      "country_id": "US",
+      "description": "Default Source",
+      "enabled": true,
+      "extension_attributes": {
+        "frontend_name": "",
+        "is_pickup_location_active": false
+      },
+      "latitude": 0,
+      "longitude": 0,
+      "name": "Default Source",
+      "postcode": "00000",
+      "source_code": "default",
+      "use_default_carrier_config": true
+    }
+  ],
+  "search_criteria": {
+    "filter_groups": []
+  },
+  "total_count": 1
+}

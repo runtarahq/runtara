@@ -1,0 +1,146 @@
+# Input to scripts/connector_gen/connector_gen.py; see its README.md.
+agent:
+  id: magento
+  name: Magento / Adobe Commerce
+  description: >-
+    Magento Open Source and Adobe Commerce — orders, invoices, shipments,
+    refunds, products, inventory and customers.
+  integration_id: magento_access_token
+  error_prefix: MAGENTO
+# Magento publishes no spec of its own: each install serves the schema of the
+# modules it runs. This is the admin schema of a stock Magento Open Source
+# 2.4.9 install with sample data (`GET /rest/all/schema?services=all` with an
+# admin token), pretty-printed and otherwise as served, but for one change:
+# `PUT /V1/products/{sku}` takes the SKU in its path and in the product, so
+# the path's is the input `current_sku` (`x-runtara-input-name`). Adobe
+# Commerce serves the same operations, with more fields and more endpoints.
+# Paths are relative to the connection's base URL,
+# `<store URL>/rest/<store code>`.
+spec:
+  path: magento-2.4.9-schema.json
+  sha256: 3d74fec190c40ee4b1226364de6c85f0844a123c21d8cc980e0e1ecff0e4bfb0
+# Magento derives its operationIds from the path (`GetV1OrdersId`) and writes
+# no summaries, so each step is named here.
+operation_names:
+  GetV1StoreStoreConfigs: getStoreConfigs
+  GetV1StoreStoreViews: listStoreViews
+  GetV1Orders: searchOrders
+  GetV1OrdersId: getOrder
+  PostV1OrdersIdComments: addOrderComment
+  PostV1OrdersIdHold: holdOrder
+  PostV1OrdersIdUnhold: unholdOrder
+  PostV1OrdersIdCancel: cancelOrder
+  PostV1OrderOrderIdInvoice: invoiceOrder
+  PostV1OrderOrderIdShip: shipOrder
+  PostV1OrderOrderIdRefund: refundOrder
+  PostV1ShipmentTrack: addShipmentTrack
+  GetV1Invoices: searchInvoices
+  GetV1Shipments: searchShipments
+  GetV1Creditmemos: searchCreditMemos
+  GetV1Products: searchProducts
+  GetV1ProductsSku: getProduct
+  PostV1Products: saveProduct
+  PutV1ProductsSku: updateProduct
+  DeleteV1ProductsSku: deleteProduct
+  GetV1Categories: getCategoryTree
+  GetV1InventorySourceitems: searchSourceItems
+  PostV1InventorySourceitems: saveSourceItems
+  GetV1InventorySources: searchSources
+  GetV1StockItemsProductSku: getStockItem
+  GetV1CustomersSearch: searchCustomers
+  GetV1CustomersCustomerId: getCustomer
+  PostV1Customers: createCustomer
+  PutV1CustomersCustomerId: updateCustomer
+# Magento wraps a product, a customer, an order comment and a shipment track
+# in one object (`{"product": {…}}`). Fields beside it (`saveOptions`, a new
+# customer's `password`) are dropped.
+body_envelopes:
+  - product
+  - customer
+  - statusHistory
+  - entity
+# A custom attribute's value is typed as text, but some are lists: a product's
+# `category_ids` is `["3", "5"]`.
+field_types:
+  framework-attribute-interface:
+    value:
+      description: The attribute's value, as text, or as a list of text (a product's `category_ids`).
+      anyOf: [{type: string}, {type: array, items: {type: string}}]
+  # An order item's parent is an order item too; a field of a struct's own
+  # type cannot be generated, so the parent (also in the order's `items`) is
+  # kept as it comes.
+  sales-data-order-item-interface:
+    parent_item:
+      description: The parent item (a configurable or bundle product), as Magento sends it; it is also one of the order's items.
+      type: object
+      additionalProperties: true
+# The schema requires every field whose getter is not nullable; a store takes
+# an order comment with its text alone (the order is the path's), a shipment
+# track without a weight, a quantity or a description, and a product update
+# without its SKU.
+optional_fields:
+  sales-data-order-status-history-interface:
+    - is_customer_notified
+    - is_visible_on_front
+    - parent_id
+  sales-data-shipment-track-interface:
+    - weight
+    - qty
+    - description
+  # An update names the product by `current_sku`; a `sku` beside it renames it.
+  catalog-data-product-interface:
+    - sku
+# `PUT /V1/customers/{customerId}` types the id as text; every other operation
+# takes it as an integer.
+input_types:
+  customerId: {type: integer, format: int64}
+# The schema declares search criteria as one query parameter per key at index
+# 0 (`searchCriteria[filterGroups][0][filters][0][field]`), which allows one
+# filter and one sort order, and leaves them optional, though every search
+# refuses a request without `searchCriteria`.
+query_objects:
+  searchCriteria:
+    required: true
+    description: >-
+      Magento's search criteria, as its REST API documents them:
+      `filterGroups`, each a list of `filters` with a `field`, a `value` and a
+      `conditionType` (`eq`, `neq`, `like`, `in`, `nin`, `gt`, `gteq`, `lt`,
+      `lteq`, `null`, `notnull`, `from`, `to`, `finset`); `sortOrders`, each a
+      `field` and a `direction` (`ASC` or `DESC`); `pageSize` and
+      `currentPage`. The filters of a group are joined with OR, and the groups
+      with AND. For example: {"filterGroups": [{"filters": [{"field":
+      "status", "value": "pending", "conditionType": "eq"}]}, {"filters":
+      [{"field": "updated_at", "value": "2026-01-01 00:00:00",
+      "conditionType": "gteq"}]}], "sortOrders": [{"field": "updated_at",
+      "direction": "ASC"}], "pageSize": 50, "currentPage": 1}. `{}` matches
+      everything in one answer, without paging.
+operations:
+  - GetV1StoreStoreConfigs
+  - GetV1StoreStoreViews
+  - GetV1Orders
+  - GetV1OrdersId
+  - PostV1OrdersIdComments
+  - PostV1OrdersIdHold
+  - PostV1OrdersIdUnhold
+  - PostV1OrdersIdCancel
+  - PostV1OrderOrderIdInvoice
+  - PostV1OrderOrderIdShip
+  - PostV1OrderOrderIdRefund
+  - PostV1ShipmentTrack
+  - GetV1Invoices
+  - GetV1Shipments
+  - GetV1Creditmemos
+  - GetV1Products
+  - GetV1ProductsSku
+  - PostV1Products
+  - PutV1ProductsSku
+  - DeleteV1ProductsSku
+  - GetV1Categories
+  - GetV1InventorySourceitems
+  - PostV1InventorySourceitems
+  - GetV1InventorySources
+  - GetV1StockItemsProductSku
+  - GetV1CustomersSearch
+  - GetV1CustomersCustomerId
+  - PostV1Customers
+  - PutV1CustomersCustomerId

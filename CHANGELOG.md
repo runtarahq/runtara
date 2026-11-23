@@ -13,6 +13,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Magento / Adobe Commerce agent, generated from Magento's REST schema.**
+  Twenty-nine capabilities: search and read orders, comment on, hold, unhold
+  and cancel them, invoice, ship (with tracking), add a track to a shipment
+  and refund them, and search invoices, shipments and credit memos; search,
+  read, save, update and delete products and read the category tree; search
+  and save source items, search sources and read a stock item; search, read,
+  create and update customers; and read the store views and their
+  configuration. Magento publishes no spec of its own, so the agent is
+  generated from the schema a stock Magento Open Source 2.4.9 install serves,
+  kept in the crate. Every search takes Magento's search criteria as one
+  `searchCriteria` object (filter groups, filters, sort orders, page size and
+  page), where the schema allows one filter. The new `magento_access_token`
+  connection type takes the store's address (with the path it lives under,
+  if any) and an integration's access token, sent as a Bearer token under
+  that address to `<store>/rest/all/V1`, Magento's global scope; the store
+  must allow integration tokens as standalone Bearer tokens (Stores →
+  Configuration → Services → OAuth). It is limited by default to 5
+  requests/s with a burst of 10. An invoice, shipment, refund or comment that
+  gets no answer, a 5xx or an answer it cannot read fails with
+  `MAGENTO_OUTCOME_UNKNOWN` instead of being sent again; a GET or a PUT is
+  retried. An unknown id or SKU is `MAGENTO_NOT_FOUND`, and Magento's error
+  messages are filled in, without the trace a store in developer mode adds.
+  Not covered: requests signed with OAuth 1.0a, Adobe Commerce as a Cloud
+  Service (Adobe IMS) and the endpoints only Adobe Commerce has.
+
+- **`connector_gen` takes Magento's schema.** `operation_names` names an
+  operation whose vendor id is not a name (`GetV1OrdersId` is generated as
+  `getOrder`), and `query_objects` makes the query parameters a spec declares
+  one per key of one object, at fixed indices, one free-form object input,
+  required where the API needs it. A Swagger 2.0 parameter keeps its vendor
+  extensions (`x-runtara-input-name`), and an operation that declares no 2xx
+  response answers with no declared body instead of its `default` error's
+  shape. The existing generated agents are unchanged.
+
 - **Chat platforms reach a workflow with no code of theirs in the server**
   (`docs/native-chat-phase-5.md`). A webhook's run reads the request's
   headers (`data.headers`), without the caller's `authorization`, `cookie`

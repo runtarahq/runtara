@@ -84,6 +84,12 @@
     "fnv1a64": "edbfa6eb6da9906b"
   },
   {
+    "integrationId": "magento_access_token",
+    "fieldCount": 2,
+    "serializedBytes": 1388,
+    "fnv1a64": "e4f7803a870360a4"
+  },
+  {
     "integrationId": "mailgun",
     "fieldCount": 4,
     "serializedBytes": 1402,
