@@ -1644,6 +1644,12 @@
             "type": "object",
             "x-runtara-label": "Relationship Filter"
           },
+          "relationship_target_publicly_listable": {
+            "description": "Present for \"lookup\" and \"multi_lookup\" fields that target a custom object, and only when the `include_anonymous_availability` query parameter is true. True if anonymous users can read the target custom object's records. See [Anonymous access](/api-reference/custom-data/custom-objects/custom_object_records/#anonymous-access).",
+            "readOnly": true,
+            "type": "boolean",
+            "x-runtara-label": "Relationship Target Publicly Listable"
+          },
           "relationship_target_type": {
             "description": "Present for \"lookup\" and \"multi_lookup\" fields. A representation of what type of object the field references. Options are \"zen:user\", \"zen:organization\", \"zen:ticket\", or \"zen:custom_object:{key}\", where key is a custom object key. For example, \"zen:custom_object:apartment\".",
             "type": "string",
@@ -3065,7 +3071,7 @@
             "x-runtara-label": "Details"
           },
           "email": {
-            "description": "The user's primary email address. *Writeable on create only. On update, a secondary email is added. See [Email Address](#email-address)",
+            "description": "In responses, the user's email address selected for notifications. This can differ from the primary email address if the primary email is unverified or undeliverable. Writeable on create only. On update, a secondary email is added. See [Email Address](#email-address)",
             "type": "string",
             "x-runtara-label": "Email"
           },
@@ -3324,7 +3330,7 @@
             "x-runtara-label": "Created At"
           },
           "email": {
-            "description": "The primary email address of this user. If the primary email address is not [verified](https://support.zendesk.com/hc/en-us/articles/4408886752410), the secondary email address is used",
+            "description": "The user's email address selected for notifications. This can differ from the primary email address if the primary email is unverified or undeliverable.",
             "type": "string",
             "x-runtara-label": "Email"
           },
@@ -3840,6 +3846,7 @@
               "accounts:write": "Accounts write scope.",
               "ai_agents:chat": "Ai agents chat scope.",
               "ai_agents:list": "Ai agents list scope.",
+              "ai_agents:search": "Ai agents search scope.",
               "any_channel:write": "Push messages from an external channel into Zendesk. Includes creating tickets, comments, and users from an integrated channel. Write only.",
               "apps:read": "View installed apps and their settings. Includes a list of installed apps and each app's settings.",
               "apps:write": "Install, configure, and remove apps. Includes installing and uninstalling apps, changing settings, and uploading custom app packages.",
@@ -4019,6 +4026,13 @@
             "description": "Success response"
           }
         },
+        "security": [
+          {
+            "oauth2": [
+              "groups:read"
+            ]
+          }
+        ],
         "summary": "List Groups",
         "tags": [
           "Groups"
@@ -4084,6 +4098,13 @@
             "description": "Created"
           }
         },
+        "security": [
+          {
+            "oauth2": [
+              "organizations:write"
+            ]
+          }
+        ],
         "summary": "Create Organization",
         "tags": [
           "Organizations"
@@ -4156,6 +4177,13 @@
             "description": "Success response"
           }
         },
+        "security": [
+          {
+            "oauth2": [
+              "organizations:read"
+            ]
+          }
+        ],
         "summary": "Show Organization",
         "tags": [
           "Organizations"
@@ -4254,6 +4282,13 @@
             "description": "Too Many Requests"
           }
         },
+        "security": [
+          {
+            "oauth2": [
+              "organizations:write"
+            ]
+          }
+        ],
         "summary": "Update Organization",
         "tags": [
           "Organizations"
@@ -4298,7 +4333,7 @@
             "x-runtara-label": "Sort Order"
           },
           {
-            "description": "When brand separation is enabled, scopes user results to the specified brand.\nThis parameter applies only when the account has brand separation enabled\n(`brand_user_separation_eap`). Non-user document types are unaffected.\n\nAccepted values:\n\n* \"all\" — apply no brand scoping.\n* 0 — return only account-scoped (brand-less) end users; all agents and admins remain visible.\n* A numeric brand id — if the brand has user separation enabled, return that\n  brand's end users plus the agents with membership in that brand and all admins.\n  If the brand does not have user separation enabled, the request falls back to\n  account scope (0). A brand id that does not exist on the account matches no users.\n\nAny other value returns 400 Bad Request, whether or not brand separation is enabled.\n\nThe query keyword form (`query=type:user brand_id:{brand_id}`) continues to work. It\nmatches the brand id as indexed on every document type, so admins match only through\ntheir brand memberships, and it does not apply the account-scope fallback for brands\nwithout user separation.\n",
+            "description": "When brand separation is enabled, scopes user results to the specified brand.\nThis parameter applies only when the account has brand separation enabled\n(`brand_user_separation_eap`). Non-user document types are unaffected.\n\nAccepted values:\n\n* \"all\" — apply no brand scoping.\n* 0 — return only account-scoped (brand-less) end users; all agents and admins remain visible.\n* A numeric brand id — if the brand has user separation enabled, return that\n  brand's end users plus the agents with membership in that brand and all admins.\n  If the brand's users are account-scoped, return the account-scoped end users, any end\n  users still indexed with the brand, and all agents and admins. A brand id that does\n  not exist on the account matches no users.\n\nAny other value returns 400 Bad Request, whether or not brand separation is enabled.\n\nOmitting `brand_id` applies no brand scoping; this endpoint does not fall back to the\naccount's default brand_id behavior. Use the users search and autocomplete endpoints\nfor that fallback.\n\nThe query keyword forms (`query=type:user brand_id:{brand_id}` and `brand:{brand_id}`)\ncontinue to work. They match the brand id as indexed on every document type, so agents\nand admins match only through their brand memberships. When brand separation is enabled\nand the brand's users are account-scoped, they also match every account-scoped end user,\nand a negated keyword (`-brand_id:{brand_id}`) excludes those end users too.\n",
             "example": "all",
             "in": "query",
             "name": "brand_id",
@@ -4352,6 +4387,13 @@
             "description": "Success response"
           }
         },
+        "security": [
+          {
+            "oauth2": [
+              "read"
+            ]
+          }
+        ],
         "summary": "List Search Results",
         "tags": [
           "Search"
@@ -4440,6 +4482,13 @@
             "description": "Success response"
           }
         },
+        "security": [
+          {
+            "oauth2": [
+              "read"
+            ]
+          }
+        ],
         "summary": "Export Search Results",
         "tags": [
           "Search"
@@ -4487,6 +4536,15 @@
               "type": "boolean"
             },
             "x-runtara-label": "Only System Fields"
+          },
+          {
+            "description": "If true, includes the `relationship_target_publicly_listable` property on each lookup and multi-lookup field that targets a custom object. The property is true when anonymous users can read the target custom object's records. See [Anonymous access](/api-reference/custom-data/custom-objects/custom_object_records/#anonymous-access).\n",
+            "in": "query",
+            "name": "include_anonymous_availability",
+            "schema": {
+              "type": "boolean"
+            },
+            "x-runtara-label": "Include Anonymous Availability"
           },
           {
             "description": "Cursor token for fetching next page",
@@ -4576,6 +4634,13 @@
             "description": "Success response"
           }
         },
+        "security": [
+          {
+            "oauth2": [
+              "account_settings:read"
+            ]
+          }
+        ],
         "summary": "List Ticket Fields",
         "tags": [
           "Ticket Fields"
@@ -4805,6 +4870,13 @@
             "description": "List tickets"
           }
         },
+        "security": [
+          {
+            "oauth2": [
+              "tickets:read"
+            ]
+          }
+        ],
         "summary": "List Tickets",
         "tags": [
           "Tickets"
@@ -5003,6 +5075,13 @@
             }
           }
         },
+        "security": [
+          {
+            "oauth2": [
+              "tickets:write"
+            ]
+          }
+        ],
         "summary": "Create Ticket",
         "tags": [
           "Tickets"
@@ -5025,6 +5104,13 @@
             "description": "No content"
           }
         },
+        "security": [
+          {
+            "oauth2": [
+              "tickets:write"
+            ]
+          }
+        ],
         "summary": "Delete Ticket",
         "tags": [
           "Tickets"
@@ -5200,6 +5286,13 @@
             "description": "Ticket"
           }
         },
+        "security": [
+          {
+            "oauth2": [
+              "tickets:read"
+            ]
+          }
+        ],
         "summary": "Show Ticket",
         "tags": [
           "Tickets"
@@ -5347,6 +5440,13 @@
             "description": "Conflict - optimistic locking failure (database collision)"
           }
         },
+        "security": [
+          {
+            "oauth2": [
+              "tickets:write"
+            ]
+          }
+        ],
         "summary": "Update Ticket",
         "tags": [
           "Tickets"
@@ -5499,6 +5599,13 @@
             "description": "Success response"
           }
         },
+        "security": [
+          {
+            "oauth2": [
+              "tickets:read"
+            ]
+          }
+        ],
         "summary": "List Comments",
         "tags": [
           "Ticket Comments"
@@ -5933,6 +6040,13 @@
             "description": "Created response"
           }
         },
+        "security": [
+          {
+            "oauth2": [
+              "users:write"
+            ]
+          }
+        ],
         "summary": "Create User",
         "tags": [
           "Users"
@@ -6372,6 +6486,13 @@
             "description": "Created response, when user is new"
           }
         },
+        "security": [
+          {
+            "oauth2": [
+              "users:write"
+            ]
+          }
+        ],
         "summary": "Create Or Update User",
         "tags": [
           "Users"
@@ -6636,6 +6757,18 @@
             "description": "Success response"
           }
         },
+        "security": [
+          {
+            "oauth2": [
+              "users:read"
+            ]
+          },
+          {
+            "oauth2": [
+              "users:write"
+            ]
+          }
+        ],
         "summary": "Search Users",
         "tags": [
           "Users"
@@ -6686,6 +6819,13 @@
             "description": "Success response"
           }
         },
+        "security": [
+          {
+            "oauth2": [
+              "users:read"
+            ]
+          }
+        ],
         "summary": "Show User",
         "tags": [
           "Users"
@@ -6753,6 +6893,13 @@
             "description": "Success response"
           }
         },
+        "security": [
+          {
+            "oauth2": [
+              "users:write"
+            ]
+          }
+        ],
         "summary": "Update User",
         "tags": [
           "Users"
