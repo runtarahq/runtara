@@ -1008,6 +1008,127 @@ fn test_bigcommerce_connection_type_is_registered() {
 }
 
 // ============================================================================
+// MagentoExtractor Tests
+// ============================================================================
+
+#[test]
+fn test_magento_extractor_sends_the_token_as_a_bearer_to_the_store() {
+    let config = extract_http_config(
+        "magento_access_token",
+        &json!({ "store_url": "https://shop.example.com/", "access_token": " token-value\n" }),
+        None,
+    )
+    .expect("Should extract config");
+
+    assert_eq!(
+        config.headers.get("Authorization"),
+        Some(&"Bearer token-value".to_string())
+    );
+    assert_eq!(config.url_prefix, "https://shop.example.com");
+}
+
+#[test]
+fn test_magento_extractor_refuses_an_invalid_store_url() {
+    let err = extract_http_config(
+        "magento_access_token",
+        &json!({ "store_url": "https://user@shop.example.com", "access_token": "t" }),
+        None,
+    )
+    .expect_err("a store URL with a user should fail");
+    assert!(err.contains("store URL"), "{err}");
+    let err = extract_http_config("magento_access_token", &json!({}), None)
+        .expect_err("missing parameters should fail");
+    assert!(err.contains("magento_access_token"), "{err}");
+}
+
+#[test]
+fn test_magento_base_url_is_the_stores_address() {
+    use connection_types::magento_base_url;
+    for (input, expected) in [
+        ("https://shop.example.com", "https://shop.example.com"),
+        (" https://Shop.Example.com/ ", "https://shop.example.com"),
+        ("HTTPS://shop.example.com", "https://shop.example.com"),
+        ("https://example.com/shop/", "https://example.com/shop"),
+        (
+            "https://example.com/index.php",
+            "https://example.com/index.php",
+        ),
+        (
+            "https://shop.example.com:8443",
+            "https://shop.example.com:8443",
+        ),
+        ("http://localhost:8090", "http://localhost:8090"),
+        // An API path pasted after the address.
+        ("https://shop.example.com/rest", "https://shop.example.com"),
+        (
+            "https://shop.example.com/rest/V1/",
+            "https://shop.example.com",
+        ),
+        (
+            "https://example.com/shop/rest/all/V1/orders",
+            "https://example.com/shop",
+        ),
+        // A path that only starts like one stays.
+        (
+            "https://example.com/restaurant",
+            "https://example.com/restaurant",
+        ),
+    ] {
+        assert_eq!(
+            magento_base_url(input).as_deref(),
+            Ok(expected),
+            "{input:?}"
+        );
+    }
+}
+
+#[test]
+fn test_magento_base_url_names_one_place_only() {
+    use connection_types::magento_base_url;
+    for input in [
+        "",
+        "shop.example.com",
+        "ftp://shop.example.com",
+        "https://",
+        "https://user:pass@shop.example.com",
+        "https://shop.example.com@evil.example",
+        "https://shop.example.com?x=1",
+        "https://shop.example.com/#x",
+        "https://shop.example.com/a/../b",
+        "https://shop.example.com/./b",
+        "https://shop.example.com//b",
+        "https://shop.example.com/a%2F..",
+        "https://shop.example.com/a b",
+        "https://shop.example.com\\evil.example",
+        "https://-shop.example.com",
+        "https://shop..example.com",
+        "https://shop.example.com:0",
+        "https://shop.example.com:99999",
+        "https://shop.example.com:",
+        "https://[::1]",
+    ] {
+        assert!(magento_base_url(input).is_err(), "{input:?} was accepted");
+    }
+}
+
+#[test]
+fn test_magento_connection_type_is_registered() {
+    assert!(get_http_extractor_ids().contains(&"magento_access_token"));
+    let meta = crate::registry::find_connection_type("magento_access_token")
+        .expect("magento_access_token is in the static registry");
+    assert_eq!(meta.display_name, "Magento / Adobe Commerce");
+    let token = meta
+        .fields
+        .iter()
+        .find(|f| f.name == "access_token")
+        .unwrap();
+    assert!(token.is_secret);
+    let url = meta.fields.iter().find(|f| f.name == "store_url").unwrap();
+    assert!(!url.is_secret);
+    assert!(url.is_url);
+}
+
+// ============================================================================
 // Jira Extractor Tests
 // ============================================================================
 

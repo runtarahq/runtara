@@ -19,8 +19,8 @@ use seal_format::{FieldName, PolicyName};
 use serde_json::{Value, json};
 
 use crate::auth::provider_auth::{
-    bigcommerce_store_url, first_string_param, jira_account_url, normalize_endpoint,
-    openai_proxy_base_url, resolve_azure_blob_base_url, resolve_named_endpoint,
+    bigcommerce_store_url, first_string_param, jira_account_url, magento_store_url,
+    normalize_endpoint, openai_proxy_base_url, resolve_azure_blob_base_url, resolve_named_endpoint,
 };
 
 /// Destinations a deployment lets credentials go to that seal refuses by
@@ -1287,6 +1287,8 @@ fn secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
             &bigcommerce_store_url(params)?,
             header("X-Auth-Token", "{}"),
         ),
+        // Sent only under the store's own address, a host the user names.
+        "magento_access_token" => one("access_token", &magento_store_url(params)?, bearer()),
         "jira_api_token" => one(
             "api_token",
             &jira_account_url(params)?,
@@ -1676,6 +1678,7 @@ pub const SEALABLE_TYPES: &[&str] = &[
     "pipedrive_api_token",
     "shippo_api_token",
     "bigcommerce_api_token",
+    "magento_access_token",
     "jira_api_token",
     "telegram_bot",
     "slack_bot",
@@ -1989,6 +1992,13 @@ mod tests {
                 json!({"header": {"name": "X-Auth-Token", "format": "{}"}}),
             ),
             (
+                "magento_access_token",
+                json!({"access_token": "s", "store_url": "https://example.com/shop/"}),
+                "access_token",
+                json!({"scheme": "https", "host": "example.com", "path_prefix": "/shop"}),
+                json!({"header": {"name": "Authorization", "format": "Bearer {}"}}),
+            ),
+            (
                 "http_bearer",
                 json!({"token": "s", "base_url": "https://api.example.com/v2/"}),
                 "token",
@@ -2089,6 +2099,42 @@ mod tests {
     }
 
     #[test]
+    fn a_magento_token_without_a_valid_store_is_not_sealed() {
+        for store_url in [
+            json!("https://user@shop.example.com"),
+            json!("https://shop.example.com?x=1"),
+            json!("shop.example.com"),
+            Value::Null,
+        ] {
+            let params = json!({"access_token": "s", "store_url": store_url});
+            assert_eq!(
+                policies("magento_access_token", &params, &Allowances::default()),
+                None,
+                "{store_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_magento_store_on_plain_http_is_sealed_only_where_the_deployment_allows_it() {
+        let params = json!({"access_token": "s", "store_url": "http://localhost:8090"});
+        assert_eq!(
+            policies("magento_access_token", &params, &Allowances::default()),
+            None
+        );
+        let allowances = Allowances {
+            private_hosts: vec!["localhost:8090".to_owned()],
+            plain_http_hosts: vec!["localhost".to_owned()],
+            ..Allowances::default()
+        };
+        let policy = policies("magento_access_token", &params, &allowances).unwrap();
+        assert_eq!(
+            canonical(&policy["access_token"])["rules"][0]["destination"],
+            json!({"scheme": "http", "host": "localhost", "port": 8090})
+        );
+    }
+
+    #[test]
     fn every_listed_type_is_one_the_registry_knows() {
         for integration_id in SEALABLE_TYPES {
             assert!(
@@ -2114,6 +2160,7 @@ mod tests {
             "client_certificate_pem": "-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----",
             "client_id": "client", "client_secret": "s", "app_id": "app", "app_password": "s",
             "tenant_id": "tenant", "scope": "read", "subdomain": "acme", "store_hash": "abc123",
+            "store_url": "https://shop.example.com",
             "token_url": "https://auth.example.com/token",
             "database_target": "postgres://app@db.example.com:5432/orders",
         });

@@ -313,6 +313,8 @@ def parameter_schema(parameter: dict, described: bool = False) -> dict:
 
 def convert_parameter(parameter: dict) -> dict:
     converted = {key: parameter[key] for key in ("name", "in", "description", "required") if key in parameter}
+    # Vendor extensions, `x-runtara-input-name` among them, stay on the parameter.
+    converted.update({key: value for key, value in parameter.items() if key.startswith("x-")})
     converted["schema"] = parameter_schema(parameter)
     if converted["schema"].get("type") == "array" and parameter["in"] == "query":
         # Swagger 2.0 sends arrays comma-separated unless told otherwise.
@@ -837,6 +839,15 @@ def check_operation(spec: dict, path: str, method: str, op: dict, item: dict, en
     if len(op.get("tags") or []) > 1:
         op["tags"] = op["tags"][:1]
 
+    # Of an operation that declares no 2xx response, openapi-generator takes
+    # `default` for the answer: an error's shape. Magento's save of source
+    # items declares only 400, 401 and `default`, and answers 200 with `[]`.
+    responses = op.get("responses") or {}
+    if not any(str(code).startswith("2") for code in responses):
+        op["responses"] = {"200": {"description": "OK"}, **responses}
+        print(f"note: {name}: declares no 2xx response; its output is `Value`, "
+              "not the shape of its `default` response")
+
     # Facts the logic-less templates branch on, and text they print as is.
     if method != "get":
         op["x-runtara-side-effects"] = True
@@ -863,6 +874,65 @@ def drop_connection_parameters(spec: dict, op: dict, item: dict, names: list, lo
                 kept.append(parameter)
         owner["parameters"] = kept
     return dropped
+
+
+def query_object_option(value) -> tuple:
+    """A `query_objects` entry: its description, alone or with `required`."""
+    if isinstance(value, str):
+        value = {"description": value}
+    if (not isinstance(value, dict) or set(value) - {"description", "required"}
+            or not isinstance(value.get("description"), str) or not value["description"].strip()
+            or not isinstance(value.get("required", False), bool)):
+        sys.exit("query_objects maps each object's name to the description of its input, "
+                 "or to `{description: …, required: true}`")
+    return value["description"].strip(), value.get("required", False)
+
+
+def collapse_query_objects(spec: dict, op: dict, item: dict, objects: dict) -> set:
+    """`query_objects`: object name -> description (or `{description,
+    required}`). The query parameters a vendor declares one per key of one
+    object, at fixed indices, become that object: one free-form `deepObject`
+    parameter under the object's name, so a caller can send any keys and
+    indices. Magento declares its search criteria as
+    `searchCriteria[filterGroups][0][filters][0][field]` and so on, which
+    allow one filter and one sort order; collapsed, `searchCriteria` takes
+    every filter group, filter and sort order Magento does. `required` is for
+    an API that refuses a request without the object, though its spec makes
+    every key optional, as Magento's does. Returns the objects collapsed."""
+    if not objects:
+        return set()
+    if not isinstance(objects, dict):
+        sys.exit("query_objects maps each object's name to the description of its input")
+    options = {name: query_object_option(value) for name, value in objects.items()}
+    collapsed = set()
+    for owner in (item, op):
+        if "parameters" not in owner:
+            continue
+        kept, made = [], {}
+        for parameter in owner["parameters"]:
+            resolved = deref(spec, parameter)
+            name = str(resolved.get("name", ""))
+            prefix = name.split("[", 1)[0]
+            if resolved.get("in") != "query" or "[" not in name or prefix not in options:
+                kept.append(parameter)
+                continue
+            if prefix not in made:
+                description, required = options[prefix]
+                made[prefix] = {
+                    "name": prefix,
+                    "in": "query",
+                    "description": description,
+                    **({"required": True} if required else {}),
+                    "style": "deepObject",
+                    "explode": True,
+                    "schema": {"type": "object", "additionalProperties": True},
+                }
+                kept.append(made[prefix])
+            if resolved.get("required"):
+                made[prefix]["required"] = True
+            collapsed.add(prefix)
+        owner["parameters"] = kept
+    return collapsed
 
 
 def drop_no_content_body(spec: dict, op: dict) -> None:
@@ -1271,6 +1341,7 @@ NAME_LISTS = {
     "pinned_path_parameters": "are no path parameter",
     "omit_parameters": "are no header or query parameter",
     "read_operations": "are none",
+    "query_objects": "start no query parameter",
 }
 
 
@@ -1285,7 +1356,8 @@ def check_used(options: dict, used: dict) -> None:
 def slice_spec(spec: dict, operation_ids: list, model_names: dict = None, body_envelopes: list = (),
                connection_headers: list = (), connection_parameters: list = (),
                pinned_path_parameters: list = (), omit_parameters: list = (),
-               read_operations: list = (), connection_path_prefix: str = None) -> dict:
+               read_operations: list = (), connection_path_prefix: str = None,
+               query_objects: dict = ()) -> dict:
     """Keep the listed operations and every component they reference.
 
     openapi-generator's FILTER normalizer drops unlisted operations but still
@@ -1296,7 +1368,8 @@ def slice_spec(spec: dict, operation_ids: list, model_names: dict = None, body_e
                "connection_parameters": connection_parameters,
                "pinned_path_parameters": pinned_path_parameters,
                "omit_parameters": omit_parameters,
-               "read_operations": read_operations}
+               "read_operations": read_operations,
+               "query_objects": query_objects}
     sliced, used = slice_one(spec, operation_ids, operation_ids[0], model_names or {},
                              connection_path_prefix=connection_path_prefix, **options)
     check_used(options, used)
@@ -1326,6 +1399,11 @@ def slice_specs(specs: list, config: dict, reads: list = ()) -> dict:
     else:
         sliced = merge_slices(slices)
         check_names(sliced, [op for source, _ in specs for op in source["operations"]], model_names)
+    if config.get("operation_names"):
+        listed = [op for source, _ in specs for op in source["operations"]]
+        rename_operations(sliced, config["operation_names"], listed)
+        names = operation_names(config)
+        check_names(sliced, [names.get(op, op) for op in listed], model_names)
     make_optional(sliced, config.get("optional_fields") or {})
     retype_titled(sliced, config.get("title_types") or {})
     retype_fields(sliced, config.get("field_types") or {})
@@ -1452,6 +1530,62 @@ def unexplode_query_arrays(sliced: dict) -> None:
         sys.exit("comma_separated_query_arrays: no listed operation has an array query parameter")
 
 
+OPERATION_NAME = re.compile(r"[a-z][A-Za-z0-9]*")
+
+
+def operation_name_entries(names) -> dict:
+    """`operation_names`, each entry as `{name, description?}`: a bare name, or
+    a mapping that also gives the capability's description."""
+    if not isinstance(names, dict):
+        sys.exit("operation_names maps a listed operationId to the name it is generated under")
+    entries = {}
+    for vendor, entry in names.items():
+        entry = {"name": entry} if not isinstance(entry, dict) else entry
+        description = entry.get("description")
+        if (set(entry) - {"name", "description"}
+                or (description is not None and (not isinstance(description, str) or not description.strip()))):
+            sys.exit(f"operation_names: `{vendor}` takes a name, or `{{name: …, description: …}}`")
+        entries[vendor] = entry
+    return entries
+
+
+def operation_names(config: dict) -> dict:
+    """The vendor's operationId -> the one it is generated under."""
+    return {vendor: entry.get("name") for vendor, entry in
+            operation_name_entries(config.get("operation_names") or {}).items()}
+
+
+def rename_operations(sliced: dict, names: dict, listed: list) -> None:
+    """`operation_names`: the vendor's operationId -> ours, which names the
+    capability (`getOrder` is `get-order`), its function and, without a
+    summary of the vendor's, its label ("Get Order"). Magento derives its ids
+    from the path (`GetV1OrdersId`) and writes no summaries. An entry may also
+    give the capability's description, where the vendor's says something else
+    (Magento's update of a product reads "Create product") or nothing.
+    `operations:` and the other options name the vendor's ids, as the spec
+    does."""
+    entries = operation_name_entries(names)
+    unknown = sorted(set(entries) - set(listed))
+    if unknown:
+        sys.exit(f"operation_names {unknown} are not in operations")
+    bad = sorted(str(entry.get("name")) for entry in entries.values()
+                 if not OPERATION_NAME.fullmatch(str(entry.get("name"))))
+    if bad:
+        sys.exit(f"operation_names {bad} are not camelCase names (like `getOrder`)")
+    final = [entries[op]["name"] if op in entries else op for op in listed]
+    twice = sorted({name for name in final if final.count(name) > 1})
+    if twice:
+        sys.exit(f"operation_names: {twice} would name two operations")
+    for item in sliced["paths"].values():
+        for method, op in item.items():
+            if method in HTTP_METHODS and op["operationId"] in entries:
+                entry = entries[op["operationId"]]
+                op["operationId"] = entry["name"]
+                op["x-runtara-summary"] = clean_text(op.get("summary") or humanize(op["operationId"]))
+                if entry.get("description"):
+                    op["description"] = entry["description"].strip()
+
+
 def make_optional(sliced: dict, fields: dict) -> None:
     """`optional_fields`: schema name -> fields the vendor's spec requires but its
     API does not (UPS's label recovery needs one of several keys; its spec
@@ -1469,7 +1603,8 @@ def make_optional(sliced: dict, fields: dict) -> None:
 
 def slice_one(spec: dict, operation_ids: list, first: str, model_names: dict, body_envelopes=(),
               connection_headers=(), connection_parameters=(), pinned_path_parameters=(),
-              omit_parameters=(), read_operations=(), connection_path_prefix=None) -> tuple:
+              omit_parameters=(), read_operations=(), connection_path_prefix=None,
+              query_objects=()) -> tuple:
     """The slice of one spec, and the listed names (`NAME_LISTS`) it used.
     `first` is the operation that carries the agent's module attributes."""
     check_path_prefix(connection_path_prefix)
@@ -1502,6 +1637,8 @@ def slice_one(spec: dict, operation_ids: list, first: str, model_names: dict, bo
                 spec, op, item, connection_parameters, ("header", "query"))
             used["omit_parameters"] |= drop_connection_parameters(
                 spec, op, item, omit_parameters, ("header", "query"))
+            # Before the check, which takes a collapsed object for a free-form query.
+            used["query_objects"] |= collapse_query_objects(spec, op, item, query_objects)
             used["body_envelopes"] |= check_operation(spec, path, method, op, item, body_envelopes)
             # A query sent as a POST (Zoho's COQL) changes nothing.
             if op["operationId"] in read_operations:
@@ -2141,7 +2278,8 @@ def drift(crate: Path) -> list:
     sliced = json.loads((crate / "spec.slice.json").read_text())
     problems = []
 
-    listed = set(operation_ids(config))
+    names = operation_names(config)
+    listed = {names.get(op, op) for op in operation_ids(config)}
     sliced_ops = {
         op["operationId"]
         for item in sliced["paths"].values()

@@ -1,0 +1,43 @@
+{
+  "addresses": [
+    {
+      "city": "Calder",
+      "country_id": "US",
+      "customer_id": 1,
+      "default_billing": true,
+      "default_shipping": true,
+      "firstname": "Veronica",
+      "id": 1,
+      "lastname": "Costello",
+      "postcode": "49628-7978",
+      "region": {
+        "region": "Michigan",
+        "region_code": "MI",
+        "region_id": 33
+      },
+      "region_id": 33,
+      "street": [
+        "6146 Honey Bluff Parkway"
+      ],
+      "telephone": "(555) 229-3326"
+    }
+  ],
+  "created_at": "2026-11-23 09:05:28",
+  "created_in": "Default Store View",
+  "default_billing": "1",
+  "default_shipping": "1",
+  "disable_auto_group_change": 0,
+  "dob": "1973-12-15",
+  "email": "roni_cost@example.com",
+  "extension_attributes": {
+    "is_subscribed": false
+  },
+  "firstname": "Veronica",
+  "gender": 2,
+  "group_id": 1,
+  "id": 1,
+  "lastname": "Costello",
+  "store_id": 1,
+  "updated_at": "2026-11-23 09:05:28",
+  "website_id": 1
+}
