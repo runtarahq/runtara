@@ -898,6 +898,17 @@ class ScalarAllOfTest(unittest.TestCase):
                                                                   {"description": "Inside."}]})
         self.assertEqual(self.field(sliced)["description"], "Beside.")
 
+    def test_an_enum_written_in_parts_is_inlined_where_it_is_used(self):
+        # Shippo's `CustomsDeclarationIncotermEnum`. Left a `$ref`, it would be
+        # rendered as a type the generated code does not declare.
+        sliced = self.sliced({"$ref": "#/components/schemas/IncotermEnum"}, {
+            "Incoterm": {"type": "string", "description": "The incoterm."},
+            "IncotermEnum": {"allOf": [{"$ref": "#/components/schemas/Incoterm"}, {"enum": ["DDP", "DAP"]}]},
+        })
+        self.assertEqual(self.field(sliced), {"type": "string", "description": "The incoterm.",
+                                              "enum": ["DDP", "DAP"]})
+        self.assertNotIn("IncotermEnum", sliced["components"]["schemas"])
+
     def test_an_allof_with_a_shape_of_its_own_stays(self):
         for field in (
             {"allOf": [{"$ref": "#/components/schemas/Address"}, {"description": "Billing."}]},
@@ -1931,6 +1942,16 @@ class InputNameTest(unittest.TestCase):
     def test_two_inputs_with_one_name_are_refused(self):
         spec = input_names_spec()
         spec["paths"]["/calls"]["get"]["parameters"][1]["x-runtara-input-name"] = "call_id"
+        with self.assertRaisesRegex(SystemExit, "two inputs"):
+            self.slice(spec)
+
+    def test_a_read_only_body_field_is_no_input(self):
+        # It is never sent, so it does not collide with the input of its name.
+        spec = input_names_spec()
+        properties = spec["paths"]["/calls"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]
+        properties["call_id"] = {"type": "string", "readOnly": True}
+        self.slice(spec)
+        del properties["call_id"]["readOnly"]
         with self.assertRaisesRegex(SystemExit, "two inputs"):
             self.slice(spec)
 

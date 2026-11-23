@@ -957,6 +957,11 @@ def inline_refs(sliced: dict, spec: dict) -> None:
         if ref.count("/") > 3:
             return resolve(spec, ref)
         schema = schemas.get(ref.rsplit("/", 1)[1]) if ref.startswith("#/components/schemas/") else None
+        # An enum written in parts is one too: Shippo's `CustomsDeclarationIncotermEnum`
+        # is an `allOf` of the incoterm string and its values.
+        scalar = scalar_all_of(sliced, schema) if isinstance(schema, dict) else None
+        if scalar is not None:
+            schema = {**scalar, **{key: value for key, value in schema.items() if key != "allOf"}}
         if isinstance(schema, dict) and "enum" in schema and schema.get("type") != "object":
             return schema
         return None
@@ -1227,7 +1232,10 @@ def check_input_names(sliced: dict) -> None:
             fields = [deref(sliced, p) for p in [*item.get("parameters", []), *op.get("parameters", [])]]
             for media in (deref(sliced, op.get("requestBody") or {}).get("content") or {}).values():
                 properties = deref(sliced, media.get("schema") or {}).get("properties") or {}
-                fields += [{"name": name, **prop} for name, prop in properties.items()]
+                # A read-only field is never sent, so it is no input: Jira's
+                # comment `id` beside the comment's `{id}` in the path.
+                fields += [{"name": name, **prop} for name, prop in properties.items()
+                           if not prop.get("readOnly")]
                 break
             seen = set()
             for field in fields:

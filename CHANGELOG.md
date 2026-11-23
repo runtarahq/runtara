@@ -1954,6 +1954,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`connector_gen` fetches the Jira and Shippo agents again.** `fetch`
+  counted a request body's read-only fields as inputs, so Jira's
+  `updateComment`, whose comment `id` is read-only beside the `{id}` in its
+  path, stopped with "two inputs are named `id`". And an enum written as an
+  `allOf` of a scalar and its values (Shippo's customs `incoterm`,
+  `contents_type`, `eel_pfc`, `b13a_filing_option`, `non_delivery_option`)
+  was inlined nowhere, so its fields rendered as a type the generated code
+  does not declare; they are now strings that list their values. Both rules
+  postdate the agents, and `check` does not fetch, so no committed agent was
+  affected.
+
 - **A server on a seal of its own keeps it when its certificate is
   renewed.** With `RUNTARA_SEAL_MODE=mtls` the server read `ca.pem`,
   `tls.pem` and `tls.key` from `RUNTARA_SEAL_TLS_DIR` once, at its start.
