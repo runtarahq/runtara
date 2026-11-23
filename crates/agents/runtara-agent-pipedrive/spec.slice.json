@@ -635,6 +635,19 @@
                     "type": "string",
                     "x-runtara-label": "Archive Time"
                   },
+                  "channel": {
+                    "description": "The ID of Marketing channel this deal was created from. Provided value must be one of the channels configured for your company. You can fetch allowed values with <a href=\"https://developers.pipedrive.com/docs/api/v1/DealFields#getDealField\" target=\"_blank\" rel=\"noopener noreferrer\">GET /v1/dealFields</a>.",
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer",
+                    "x-runtara-label": "Channel"
+                  },
+                  "channel_id": {
+                    "description": "The optional ID to further distinguish the Marketing channel.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Channel ID"
+                  },
                   "close_time": {
                     "description": "The date and time of closing the deal. Can only be set if deal status is won or lost.",
                     "type": "string",
@@ -662,11 +675,6 @@
                     "type": "boolean",
                     "x-runtara-label": "Is Archived"
                   },
-                  "is_deleted": {
-                    "description": "Whether the deal is deleted or not",
-                    "type": "boolean",
-                    "x-runtara-label": "Is Deleted"
-                  },
                   "label_ids": {
                     "description": "The IDs of labels assigned to the deal",
                     "items": {
@@ -692,6 +700,12 @@
                     "nullable": true,
                     "type": "integer",
                     "x-runtara-label": "Organization"
+                  },
+                  "origin_id": {
+                    "description": "The optional ID to further distinguish the origin of the deal - e.g. Which API integration created this deal. If omitted, `origin_id` will be set to null.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Origin ID"
                   },
                   "owner_id": {
                     "description": "The ID of the user who owns the deal",
@@ -1533,6 +1547,19 @@
                     "type": "string",
                     "x-runtara-label": "Archive Time"
                   },
+                  "channel": {
+                    "description": "The ID of Marketing channel this deal was created from. Provided value must be one of the channels configured for your company. You can fetch allowed values with <a href=\"https://developers.pipedrive.com/docs/api/v1/DealFields#getDealField\" target=\"_blank\" rel=\"noopener noreferrer\">GET /v1/dealFields</a>.",
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer",
+                    "x-runtara-label": "Channel"
+                  },
+                  "channel_id": {
+                    "description": "The optional ID to further distinguish the Marketing channel.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Channel ID"
+                  },
                   "close_time": {
                     "description": "The date and time of closing the deal. Can only be set if deal status is won or lost.",
                     "type": "string",
@@ -1561,7 +1588,7 @@
                     "x-runtara-label": "Is Archived"
                   },
                   "is_deleted": {
-                    "description": "Whether the deal is deleted or not",
+                    "description": "Only used to restore a previously deleted deal. The only accepted value is `false`; omit the field otherwise.",
                     "type": "boolean",
                     "x-runtara-label": "Is Deleted"
                   },

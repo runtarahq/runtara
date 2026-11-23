@@ -7,7 +7,7 @@ agent:
   error_prefix: PIPEDRIVE
 spec:
   url: https://developers.pipedrive.com/docs/api/v1/openapi-v2.yaml
-  sha256: 2b0fb0de3cad7a37158528034f85942e6b22a0a0649d9c811e0676e7c040955d
+  sha256: 9b885686eb08d505e1a339aaf3e15fb20f0b93155c5f45f876092e4502f6ee68
 labels:
   org_id: Organization
 operations:

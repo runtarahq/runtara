@@ -32,6 +32,28 @@ pub struct AddDealRequest {
     )]
     pub archive_time: Option<Option<String>>,
     #[field(
+        display_name = r##"Channel"##,
+        description = r##"The ID of Marketing channel this deal was created from. Provided value must be one of the channels configured for your company. You can fetch allowed values with <a href="https://developers.pipedrive.com/docs/api/v1/DealFields#getDealField" target="_blank" rel="noopener noreferrer">GET /v1/dealFields</a>."##
+    )]
+    #[serde(
+        rename = "channel",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub channel: Option<Option<i64>>,
+    #[field(
+        display_name = r##"Channel ID"##,
+        description = r##"The optional ID to further distinguish the Marketing channel."##
+    )]
+    #[serde(
+        rename = "channel_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub channel_id: Option<Option<String>>,
+    #[field(
         display_name = r##"Close Time"##,
         description = r##"The date and time of closing the deal. Can only be set if deal status is won or lost."##
     )]
@@ -78,16 +100,6 @@ pub struct AddDealRequest {
     )]
     pub is_archived: Option<bool>,
     #[field(
-        display_name = r##"Is Deleted"##,
-        description = r##"Whether the deal is deleted or not"##
-    )]
-    #[serde(
-        rename = "is_deleted",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub is_deleted: Option<bool>,
-    #[field(
         display_name = r##"Label IDs"##,
         description = r##"The IDs of labels assigned to the deal"##
     )]
@@ -120,6 +132,17 @@ pub struct AddDealRequest {
         deserialize_with = "kit::nullable"
     )]
     pub org_id: Option<Option<i64>>,
+    #[field(
+        display_name = r##"Origin ID"##,
+        description = r##"The optional ID to further distinguish the origin of the deal - e.g. Which API integration created this deal. If omitted, `origin_id` will be set to null."##
+    )]
+    #[serde(
+        rename = "origin_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub origin_id: Option<Option<String>>,
     #[field(
         display_name = r##"Owner ID"##,
         description = r##"The ID of the user who owns the deal"##
@@ -611,6 +634,28 @@ pub struct UpdateDealRequest {
     )]
     pub archive_time: Option<Option<String>>,
     #[field(
+        display_name = r##"Channel"##,
+        description = r##"The ID of Marketing channel this deal was created from. Provided value must be one of the channels configured for your company. You can fetch allowed values with <a href="https://developers.pipedrive.com/docs/api/v1/DealFields#getDealField" target="_blank" rel="noopener noreferrer">GET /v1/dealFields</a>."##
+    )]
+    #[serde(
+        rename = "channel",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub channel: Option<Option<i64>>,
+    #[field(
+        display_name = r##"Channel ID"##,
+        description = r##"The optional ID to further distinguish the Marketing channel."##
+    )]
+    #[serde(
+        rename = "channel_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub channel_id: Option<Option<String>>,
+    #[field(
         display_name = r##"Close Time"##,
         description = r##"The date and time of closing the deal. Can only be set if deal status is won or lost."##
     )]
@@ -658,7 +703,7 @@ pub struct UpdateDealRequest {
     pub is_archived: Option<bool>,
     #[field(
         display_name = r##"Is Deleted"##,
-        description = r##"Whether the deal is deleted or not"##
+        description = r##"Only used to restore a previously deleted deal. The only accepted value is `false`; omit the field otherwise."##
     )]
     #[serde(
         rename = "is_deleted",
@@ -1140,6 +1185,28 @@ pub struct AddDealInput {
     )]
     pub archive_time: Option<Option<String>>,
     #[field(
+        display_name = r##"Channel"##,
+        description = r##"The ID of Marketing channel this deal was created from. Provided value must be one of the channels configured for your company. You can fetch allowed values with <a href="https://developers.pipedrive.com/docs/api/v1/DealFields#getDealField" target="_blank" rel="noopener noreferrer">GET /v1/dealFields</a>."##
+    )]
+    #[serde(
+        rename = "channel",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub channel: Option<Option<i64>>,
+    #[field(
+        display_name = r##"Channel ID"##,
+        description = r##"The optional ID to further distinguish the Marketing channel."##
+    )]
+    #[serde(
+        rename = "channel_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub channel_id: Option<Option<String>>,
+    #[field(
         display_name = r##"Close Time"##,
         description = r##"The date and time of closing the deal. Can only be set if deal status is won or lost."##
     )]
@@ -1186,16 +1253,6 @@ pub struct AddDealInput {
     )]
     pub is_archived: Option<bool>,
     #[field(
-        display_name = r##"Is Deleted"##,
-        description = r##"Whether the deal is deleted or not"##
-    )]
-    #[serde(
-        rename = "is_deleted",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub is_deleted: Option<bool>,
-    #[field(
         display_name = r##"Label IDs"##,
         description = r##"The IDs of labels assigned to the deal"##
     )]
@@ -1228,6 +1285,17 @@ pub struct AddDealInput {
         deserialize_with = "kit::nullable"
     )]
     pub org_id: Option<Option<i64>>,
+    #[field(
+        display_name = r##"Origin ID"##,
+        description = r##"The optional ID to further distinguish the origin of the deal - e.g. Which API integration created this deal. If omitted, `origin_id` will be set to null."##
+    )]
+    #[serde(
+        rename = "origin_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub origin_id: Option<Option<String>>,
     #[field(
         display_name = r##"Owner ID"##,
         description = r##"The ID of the user who owns the deal"##
@@ -1327,16 +1395,18 @@ impl AddDealInput {
         request.json_body(
             kit::Body::new()
                 .field_opt("archive_time", &self.archive_time)
+                .field_opt("channel", &self.channel)
+                .field_opt("channel_id", &self.channel_id)
                 .field_opt("close_time", &self.close_time)
                 .field_opt("currency", &self.currency)
                 .field_opt("custom_fields", &self.custom_fields)
                 .field_opt("expected_close_date", &self.expected_close_date)
                 .field_opt("is_archived", &self.is_archived)
-                .field_opt("is_deleted", &self.is_deleted)
                 .field_opt("label_ids", &self.label_ids)
                 .field_opt("lost_reason", &self.lost_reason)
                 .field_opt("lost_time", &self.lost_time)
                 .field_opt("org_id", &self.org_id)
+                .field_opt("origin_id", &self.origin_id)
                 .field_opt("owner_id", &self.owner_id)
                 .field_opt("person_id", &self.person_id)
                 .field_opt("pipeline_id", &self.pipeline_id)
@@ -1675,6 +1745,28 @@ pub struct UpdateDealInput {
     )]
     pub archive_time: Option<Option<String>>,
     #[field(
+        display_name = r##"Channel"##,
+        description = r##"The ID of Marketing channel this deal was created from. Provided value must be one of the channels configured for your company. You can fetch allowed values with <a href="https://developers.pipedrive.com/docs/api/v1/DealFields#getDealField" target="_blank" rel="noopener noreferrer">GET /v1/dealFields</a>."##
+    )]
+    #[serde(
+        rename = "channel",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub channel: Option<Option<i64>>,
+    #[field(
+        display_name = r##"Channel ID"##,
+        description = r##"The optional ID to further distinguish the Marketing channel."##
+    )]
+    #[serde(
+        rename = "channel_id",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "kit::nullable"
+    )]
+    pub channel_id: Option<Option<String>>,
+    #[field(
         display_name = r##"Close Time"##,
         description = r##"The date and time of closing the deal. Can only be set if deal status is won or lost."##
     )]
@@ -1722,7 +1814,7 @@ pub struct UpdateDealInput {
     pub is_archived: Option<bool>,
     #[field(
         display_name = r##"Is Deleted"##,
-        description = r##"Whether the deal is deleted or not"##
+        description = r##"Only used to restore a previously deleted deal. The only accepted value is `false`; omit the field otherwise."##
     )]
     #[serde(
         rename = "is_deleted",
@@ -1862,6 +1954,8 @@ impl UpdateDealInput {
         request.json_body(
             kit::Body::new()
                 .field_opt("archive_time", &self.archive_time)
+                .field_opt("channel", &self.channel)
+                .field_opt("channel_id", &self.channel_id)
                 .field_opt("close_time", &self.close_time)
                 .field_opt("currency", &self.currency)
                 .field_opt("custom_fields", &self.custom_fields)
