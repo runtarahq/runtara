@@ -14,7 +14,7 @@ specs:
       - getSingleTrackResponseUsingGET
   - name: Shipping
     url: https://raw.githubusercontent.com/UPS-API/api-documentation/main/Shipping.yaml
-    sha256: d84b53e5cb058fa767001cf0566cc10cb0c0c34dcbddb2b31fc7c790e4c57079
+    sha256: 1c4386eb61cc402632f865c8642a53fe4718bedb1de22b6af0d20d9e7cece846
     operations:
       - Shipment
       - VoidShipment
