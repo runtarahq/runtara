@@ -18,7 +18,7 @@ agent:
 graphql:
   schema:
     introspect: https://shopify.dev/admin-graphql-direct-proxy/2026-10
-    sha256: 39fb501bec66324774a5129db1afe7a4131a6572a1a67d2eb4e019ca0a9fb50d
+    sha256: 933d98776b643e22caba023672e60f1a0eb42c1312890ed6a004841636aca9eb
   # Relative to the connection's https://<shop>.myshopify.com. The agent sends
   # the version its types describe, whatever the connection's `api_version` says.
   path: /admin/api/2026-10/graphql.json
