@@ -31,6 +31,7 @@ runtara-agent-hubspot = { path = "../agents/runtara-agent-hubspot" }
 runtara-agent-quickbooks = { path = "../agents/runtara-agent-quickbooks" }
 runtara-agent-mailgun = { path = "../agents/runtara-agent-mailgun" }
 runtara-agent-jira = { path = "../agents/runtara-agent-jira" }
+runtara-agent-magento = { path = "../agents/runtara-agent-magento" }
 runtara-agent-mcp = { path = "../agents/runtara-agent-mcp" }
 runtara-agent-object-model = { path = "../agents/runtara-agent-object-model" }
 runtara-agent-openai = { path = "../agents/runtara-agent-openai" }

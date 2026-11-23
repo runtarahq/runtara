@@ -1,0 +1,21 @@
+{
+  "children_data": [
+    {
+      "children_data": [],
+      "id": 2,
+      "is_active": true,
+      "level": 1,
+      "name": "Default Category",
+      "parent_id": 1,
+      "position": 1,
+      "product_count": 1181
+    }
+  ],
+  "id": 1,
+  "is_active": null,
+  "level": 0,
+  "name": "Root Catalog",
+  "parent_id": 0,
+  "position": 0,
+  "product_count": 0
+}

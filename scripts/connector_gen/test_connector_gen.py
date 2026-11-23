@@ -1259,6 +1259,13 @@ class Swagger2Test(unittest.TestCase):
         self.assertEqual((ids["style"], ids["explode"]), ("form", True))
         self.assertNotIn("style", channel)
 
+    def test_a_parameter_keeps_its_input_name(self):
+        spec = self.spec()
+        spec["paths"]["/conversations.history"]["get"]["parameters"][0][cg.INPUT_NAME] = "conversation"
+        channel = cg.convert_swagger2(spec)["paths"]["/conversations.history"]["get"]["parameters"][0]
+        self.assertEqual(channel[cg.INPUT_NAME], "conversation")
+        self.assertNotIn(cg.INPUT_NAME, channel["schema"])
+
     def test_slices_like_an_openapi_3_spec(self):
         sliced = cg.slice_spec(self.spec(), ["post", "history"], connection_parameters=["token"])
         self.assertEqual(sliced["servers"], [{"url": "https://slack.com/api"}])
@@ -2143,6 +2150,141 @@ class ReadOperationsTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as raised:
             cg.slice_spec(self.spec(), ["query"], read_operations=["search"])
         self.assertIn("['search']", str(raised.exception))
+
+
+class QueryObjectsTest(unittest.TestCase):
+    """`query_objects`: one object a vendor declares as one query parameter per
+    key at fixed indices (Magento's `searchCriteria[filterGroups][0]…`)."""
+
+    DESCRIPTION = "Magento's search criteria."
+
+    @staticmethod
+    def spec() -> dict:
+        def query(name, type_="string", **extra):
+            return {"in": "query", "name": name, "schema": {"type": type_}, **extra}
+
+        return spec_with({"parameters": [
+            query("searchCriteria[filterGroups][0][filters][0][field]", description="Field"),
+            query("searchCriteria[filterGroups][0][filters][0][value]"),
+            query("fields"),
+            query("searchCriteria[pageSize]", "integer"),
+        ]}, method="get")
+
+    def test_the_bracketed_parameters_become_one_free_form_object(self):
+        sliced = cg.slice_spec(self.spec(), ["op"], query_objects={"searchCriteria": self.DESCRIPTION})
+        parameters = operation(sliced, "op")["parameters"]
+        self.assertEqual([p["name"] for p in parameters], ["searchCriteria", "fields"])
+        self.assertEqual(parameters[0], {
+            "name": "searchCriteria", "in": "query", "description": self.DESCRIPTION,
+            "style": "deepObject", "explode": True,
+            "schema": {"type": "object", "additionalProperties": True},
+            cg.FREE_FORM_QUERY: True,
+        })
+
+    def test_a_required_key_makes_the_object_required(self):
+        spec = self.spec()
+        spec["paths"]["/x"]["get"]["parameters"][3]["required"] = True
+        sliced = cg.slice_spec(spec, ["op"], query_objects={"searchCriteria": self.DESCRIPTION})
+        self.assertTrue(operation(sliced, "op")["parameters"][0]["required"])
+
+    def test_the_connector_can_require_an_object_the_spec_leaves_optional(self):
+        optional = cg.slice_spec(self.spec(), ["op"], query_objects={"searchCriteria": self.DESCRIPTION})
+        self.assertNotIn("required", operation(optional, "op")["parameters"][0])
+        required = cg.slice_spec(self.spec(), ["op"], query_objects={
+            "searchCriteria": {"description": self.DESCRIPTION, "required": True}})
+        parameter = operation(required, "op")["parameters"][0]
+        self.assertTrue(parameter["required"])
+        self.assertEqual(parameter["description"], self.DESCRIPTION)
+
+    def test_an_object_no_parameter_starts_fails(self):
+        with self.assertRaises(SystemExit) as raised:
+            cg.slice_spec(self.spec(), ["op"], query_objects={"searchCriteria": "d", "filter": "d"})
+        self.assertIn("['filter'] start no query parameter", str(raised.exception))
+
+    def test_each_object_needs_a_description(self):
+        for value in ("", {"required": True}, {"description": "d", "required": "yes"}, {"description": "d", "x": 1}):
+            with self.subTest(value=value), self.assertRaises(SystemExit) as raised:
+                cg.slice_spec(self.spec(), ["op"], query_objects={"searchCriteria": value})
+            self.assertIn("description", str(raised.exception))
+
+
+class NoSuccessResponseTest(unittest.TestCase):
+    """An operation that declares no 2xx response (Magento's save of source
+    items: only 400, 401 and `default`) answers with no declared body, not
+    with its error's shape."""
+
+    def test_it_gets_a_200_without_a_body(self):
+        error = {"description": "error", "content": {"application/json": {
+            "schema": {"$ref": "#/components/schemas/Error"}}}}
+        spec = spec_with({"responses": {"400": error, "default": error}},
+                         {"Error": {"type": "object", "properties": {"message": {"type": "string"}}}})
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            responses = operation(cg.slice_spec(spec, ["op"]), "op")["responses"]
+        self.assertEqual(responses["200"], {"description": "OK"})
+        self.assertEqual(set(responses), {"200", "400", "default"})
+        # Said, so that a spec whose success is its `default` is noticed.
+        self.assertIn("note: op: declares no 2xx response", printed.getvalue())
+
+    def test_a_declared_success_is_left_alone(self):
+        responses = operation(cg.slice_spec(spec_with({}), ["op"]), "op")["responses"]
+        self.assertEqual(set(responses), {"204"})
+
+
+class OperationNamesTest(unittest.TestCase):
+    """`operation_names`: the name an operation is generated under, for a
+    vendor whose operationIds are derived from paths (Magento's
+    `GetV1OrdersId`)."""
+
+    @staticmethod
+    def spec() -> dict:
+        ok = {"responses": {"200": {"description": "ok"}}}
+        return {"openapi": "3.0.1", "info": {"title": "t", "version": "1"}, "paths": {
+            "/V1/orders/{id}": {"get": {"operationId": "GetV1OrdersId", **ok}},
+            "/V1/orders": {"get": {"operationId": "GetV1Orders", "summary": "Lists orders.", **ok}},
+        }}
+
+    def sliced(self, names: dict) -> dict:
+        return cg.slice_specs([({"operations": ["GetV1OrdersId", "GetV1Orders"]}, self.spec())],
+                              {"operation_names": names})
+
+    def test_a_renamed_operation_takes_its_label_from_the_new_name(self):
+        sliced = self.sliced({"GetV1OrdersId": "getOrder", "GetV1Orders": "searchOrders"})
+        self.assertEqual(operation(sliced, "getOrder")["x-runtara-summary"], "Get Order")
+        # The vendor's own summary stays the label.
+        self.assertEqual(operation(sliced, "searchOrders")["x-runtara-summary"], "Lists orders.")
+
+    def test_unlisted_bad_and_clashing_names_fail(self):
+        for names, message in [
+            ({"GetV1Invoices": "getInvoice"}, "['GetV1Invoices'] are not in operations"),
+            ({"GetV1OrdersId": "get_order"}, "not camelCase"),
+            ({"GetV1OrdersId": "GetV1Orders"}, "not camelCase"),
+            ({"GetV1OrdersId": "orders", "GetV1Orders": "orders"}, "['orders'] would name two operations"),
+        ]:
+            with self.subTest(names=names), self.assertRaises(SystemExit) as raised:
+                self.sliced(names)
+            self.assertIn(message, str(raised.exception))
+
+    def test_an_entry_may_also_describe_the_operation(self):
+        sliced = self.sliced({"GetV1OrdersId": {"name": "getOrder", "description": " Reads one order. "},
+                              "GetV1Orders": {"name": "searchOrders"}})
+        order = operation(sliced, "getOrder")
+        self.assertEqual((order["x-runtara-summary"], order["description"]), ("Get Order", "Reads one order."))
+        self.assertNotIn("description", operation(sliced, "searchOrders"))
+        for entry in ({"name": "getOrder", "summary": "x"}, {"name": "getOrder", "description": ""}):
+            with self.subTest(entry=entry), self.assertRaises(SystemExit) as raised:
+                self.sliced({"GetV1OrdersId": entry})
+            self.assertIn("takes a name", str(raised.exception))
+
+    def test_check_reads_the_listed_operations_under_their_new_names(self):
+        names = {"GetV1OrdersId": {"name": "getOrder", "description": "Reads one order."}}
+        with tempfile.TemporaryDirectory() as tmp:
+            crate = Path(tmp)
+            (crate / "connector.yaml").write_text(yaml.safe_dump({
+                "spec": {"path": "unused", "sha256": "unused"},
+                "operations": ["GetV1OrdersId", "GetV1Orders"], "operation_names": names}))
+            cg.write_json(crate / "spec.slice.json", self.sliced(names))
+            self.assertEqual(cg.drift(crate), [])
 
 
 class PropertyNameTest(unittest.TestCase):

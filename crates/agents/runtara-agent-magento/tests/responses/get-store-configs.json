@@ -1,0 +1,20 @@
+[
+  {
+    "base_currency_code": "USD",
+    "base_link_url": "https://magento.test/",
+    "base_media_url": "https://magento.test/media/",
+    "base_static_url": "https://magento.test/static/version1795424792/",
+    "base_url": "https://magento.test/",
+    "code": "default",
+    "default_display_currency_code": "USD",
+    "id": 1,
+    "locale": "en_US",
+    "secure_base_link_url": "https://magento.test/",
+    "secure_base_media_url": "https://magento.test/media/",
+    "secure_base_static_url": "https://magento.test/static/version1795424792/",
+    "secure_base_url": "https://magento.test/",
+    "timezone": "America/New_York",
+    "website_id": 1,
+    "weight_unit": "lbs"
+  }
+]

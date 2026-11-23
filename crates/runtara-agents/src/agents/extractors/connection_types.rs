@@ -1976,6 +1976,134 @@ impl HttpConnectionExtractor for BigCommerceExtractor {
 }
 
 // ============================================================================
+// Magento / Adobe Commerce Connection Type
+// ============================================================================
+
+/// The base URL of a Magento store, which its REST API is under: the store's
+/// own address (`https://shop.example.com`), or with the path the store lives
+/// under (`https://example.com/shop`, `https://example.com/index.php` without
+/// URL rewrites). A trailing `/` and an API path pasted after it
+/// (`/rest/V1/…`) are dropped. Requests go to `<base>/rest/all/V1/…`, and the
+/// proxy keeps them under the base.
+///
+/// Every store is its own host, so the host is the user's to choose. Only
+/// `http(s)://host[:port][/path]` passes: no user, query, fragment, `.` or `..`
+/// segment, and a path of URL-safe characters, so the value names one place
+/// and nothing else. Whether plain HTTP or a private address may be reached is
+/// the deployment's to allow, when the connection is saved and when a request
+/// is sent.
+pub fn magento_base_url(store_url: &str) -> Result<String, String> {
+    let raw = store_url.trim();
+    let invalid = || {
+        format!(
+            "Invalid Magento store URL `{raw}`: use the store's address, e.g. https://shop.example.com or https://example.com/shop"
+        )
+    };
+    let (scheme, rest) = raw.split_once("://").ok_or_else(invalid)?;
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "https" && scheme != "http" {
+        return Err(invalid());
+    }
+    let (authority, path) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    let host = host.to_ascii_lowercase();
+    let host_ok = !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        });
+    let port_ok = port.is_none_or(|port| {
+        port.len() <= 5
+            && port.bytes().all(|b| b.is_ascii_digit())
+            && port.parse::<u32>().is_ok_and(|n| (1..=65535).contains(&n))
+    });
+    let mut path = path.trim_end_matches('/').to_string();
+    // An API path pasted after the store's address: `/rest`, `/rest/V1/…`.
+    if let Some(at) = path
+        .find("/rest/")
+        .or_else(|| path.ends_with("/rest").then(|| path.len() - "/rest".len()))
+    {
+        path.truncate(at);
+    }
+    let path_ok = path
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"-._~/".contains(&b))
+        && path
+            .split('/')
+            .skip(1)
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..");
+    if !(host_ok && port_ok && path_ok) {
+        return Err(invalid());
+    }
+    let port = port.map(|port| format!(":{port}")).unwrap_or_default();
+    Ok(format!("{scheme}://{host}{port}{path}"))
+}
+
+/// Parameters for a Magento / Adobe Commerce integration's access token
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "magento_access_token",
+    display_name = "Magento / Adobe Commerce",
+    description = "Connect to a Magento Open Source or Adobe Commerce store with the access token of an integration",
+    category = "ecommerce",
+    auth_type = "api_key"
+)]
+pub struct MagentoAccessTokenParams {
+    /// The store's address
+    #[field(
+        display_name = "Store URL",
+        description = "The store's address, as in Stores → Configuration → General → Web → Base URLs: https://shop.example.com, or with the path the store lives under (https://example.com/shop). Steps reach its REST API under <store URL>/rest/all/V1, Magento's global scope",
+        placeholder = "https://shop.example.com",
+        is_url
+    )]
+    pub store_url: String,
+
+    /// An integration's access token
+    #[field(
+        display_name = "Access Token",
+        description = "The Access Token of an integration, from System → Extensions → Integrations in the store's admin (activate the integration to see it). The integration's API resources decide what steps can read and change. Magento takes it as a Bearer token only when Stores → Configuration → Services → OAuth → Consumer Settings → \"Allow OAuth Access Tokens to be used as standalone Bearer tokens\" is Yes",
+        secret
+    )]
+    pub access_token: String,
+}
+
+/// HTTP extractor for Magento connections.
+pub struct MagentoExtractor;
+
+impl HttpConnectionExtractor for MagentoExtractor {
+    fn integration_id(&self) -> &'static str {
+        "magento_access_token"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        let p: MagentoAccessTokenParams = serde_json::from_value(params.clone())
+            .map_err(|e| format!("Invalid magento_access_token connection parameters: {}", e))?;
+
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            format!("Bearer {}", p.access_token.trim()),
+        );
+
+        Ok(HttpConnectionConfig {
+            headers,
+            query_parameters: HashMap::new(),
+            url_prefix: magento_base_url(&p.store_url)?,
+            rate_limit_config: None,
+        })
+    }
+}
+
+// ============================================================================
 // Zendesk Connection Types
 // ============================================================================
 

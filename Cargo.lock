@@ -4867,6 +4867,7 @@ dependencies = [
  "runtara-agent-http",
  "runtara-agent-hubspot",
  "runtara-agent-jira",
+ "runtara-agent-magento",
  "runtara-agent-mailgun",
  "runtara-agent-mcp",
  "runtara-agent-object-model",
@@ -5060,6 +5061,18 @@ dependencies = [
  "serde_json",
  "syn 2.0.117",
  "trybuild",
+]
+
+[[package]]
+name = "runtara-agent-magento"
+version = "11.0.2"
+dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.58.0",
 ]
 
 [[package]]

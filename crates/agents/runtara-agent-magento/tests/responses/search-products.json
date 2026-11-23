@@ -1,0 +1,286 @@
+{
+  "items": [
+    {
+      "attribute_set_id": 9,
+      "created_at": "2026-11-23 09:05:08",
+      "custom_attributes": [
+        {
+          "attribute_code": "image",
+          "value": "/m/h/mh01-gray_main_1.jpg"
+        },
+        {
+          "attribute_code": "small_image",
+          "value": "/m/h/mh01-gray_main_1.jpg"
+        },
+        {
+          "attribute_code": "thumbnail",
+          "value": "/m/h/mh01-gray_main_1.jpg"
+        },
+        {
+          "attribute_code": "options_container",
+          "value": "container2"
+        },
+        {
+          "attribute_code": "msrp_display_actual_price_type",
+          "value": "0"
+        },
+        {
+          "attribute_code": "url_key",
+          "value": "chaz-kangeroo-hoodie"
+        },
+        {
+          "attribute_code": "required_options",
+          "value": "0"
+        },
+        {
+          "attribute_code": "has_options",
+          "value": "1"
+        },
+        {
+          "attribute_code": "tax_class_id",
+          "value": "2"
+        },
+        {
+          "attribute_code": "category_ids",
+          "value": [
+            "15",
+            "36",
+            "2"
+          ]
+        },
+        {
+          "attribute_code": "description",
+          "value": "<p>Ideal for cold-weather training or work outdoors, the Chaz Hoodie promises superior warmth with every wear. Thick material blocks out the wind as ribbed cuffs and bottom band seal in body heat.</p>\n<p>&bull; Two-tone gray heather hoodie.<br />&bull; Drawstring-adjustable hood. <br />&bull; Machine wash/dry.</p>"
+        },
+        {
+          "attribute_code": "material",
+          "value": "158"
+        },
+        {
+          "attribute_code": "pattern",
+          "value": "194"
+        },
+        {
+          "attribute_code": "climate",
+          "value": "201,203,204,207,209"
+        },
+        {
+          "attribute_code": "eco_collection",
+          "value": "1"
+        },
+        {
+          "attribute_code": "performance_fabric",
+          "value": "0"
+        },
+        {
+          "attribute_code": "erin_recommends",
+          "value": "0"
+        },
+        {
+          "attribute_code": "new",
+          "value": "0"
+        },
+        {
+          "attribute_code": "sale",
+          "value": "1"
+        }
+      ],
+      "extension_attributes": {
+        "category_links": [
+          {
+            "category_id": "15",
+            "position": -16
+          },
+          {
+            "category_id": "36",
+            "position": -16
+          },
+          {
+            "category_id": "2",
+            "position": -16
+          }
+        ],
+        "configurable_product_links": [
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          54,
+          55,
+          56,
+          57,
+          58,
+          59,
+          60,
+          61
+        ],
+        "configurable_product_options": [
+          {
+            "attribute_id": "93",
+            "id": 3,
+            "label": "Color",
+            "position": 1,
+            "product_id": 62,
+            "values": [
+              {
+                "value_index": 49
+              },
+              {
+                "value_index": 52
+              },
+              {
+                "value_index": 56
+              }
+            ]
+          },
+          {
+            "attribute_id": "144",
+            "id": 2,
+            "label": "Size",
+            "position": 0,
+            "product_id": 62,
+            "values": [
+              {
+                "value_index": 166
+              },
+              {
+                "value_index": 167
+              },
+              {
+                "value_index": 168
+              },
+              {
+                "value_index": 169
+              },
+              {
+                "value_index": 170
+              }
+            ]
+          }
+        ],
+        "website_ids": [
+          1
+        ]
+      },
+      "id": 62,
+      "media_gallery_entries": [
+        {
+          "disabled": false,
+          "file": "/m/h/mh01-gray_main_1.jpg",
+          "id": 78,
+          "label": "",
+          "media_type": "image",
+          "position": 1,
+          "types": [
+            "image",
+            "small_image",
+            "thumbnail"
+          ]
+        },
+        {
+          "disabled": false,
+          "file": "/m/h/mh01-gray_alt1_1.jpg",
+          "id": 79,
+          "label": "",
+          "media_type": "image",
+          "position": 2,
+          "types": []
+        },
+        {
+          "disabled": false,
+          "file": "/m/h/mh01-gray_back_1.jpg",
+          "id": 80,
+          "label": "",
+          "media_type": "image",
+          "position": 3,
+          "types": []
+        }
+      ],
+      "name": "Chaz Kangeroo Hoodie",
+      "options": [],
+      "price": 0,
+      "product_links": [
+        {
+          "link_type": "related",
+          "linked_product_sku": "MS12",
+          "linked_product_type": "configurable",
+          "position": 4,
+          "sku": "MH01"
+        },
+        {
+          "link_type": "related",
+          "linked_product_sku": "MS06",
+          "linked_product_type": "configurable",
+          "position": 3,
+          "sku": "MH01"
+        },
+        {
+          "link_type": "related",
+          "linked_product_sku": "MP06",
+          "linked_product_type": "configurable",
+          "position": 1,
+          "sku": "MH01"
+        },
+        {
+          "link_type": "related",
+          "linked_product_sku": "MP11",
+          "linked_product_type": "configurable",
+          "position": 2,
+          "sku": "MH01"
+        },
+        {
+          "link_type": "crosssell",
+          "linked_product_sku": "24-UG06",
+          "linked_product_type": "simple",
+          "position": 4,
+          "sku": "MH01"
+        },
+        {
+          "link_type": "crosssell",
+          "linked_product_sku": "24-WG081-gray",
+          "linked_product_type": "simple",
+          "position": 1,
+          "sku": "MH01"
+        },
+        {
+          "link_type": "crosssell",
+          "linked_product_sku": "24-WG085_Group",
+          "linked_product_type": "grouped",
+          "position": 2,
+          "sku": "MH01"
+        },
+        {
+          "link_type": "crosssell",
+          "linked_product_sku": "24-WG080",
+          "linked_product_type": "bundle",
+          "position": 3,
+          "sku": "MH01"
+        }
+      ],
+      "sku": "MH01",
+      "status": 1,
+      "tier_prices": [],
+      "type_id": "configurable",
+      "updated_at": "2026-11-23 09:05:08",
+      "visibility": 4
+    }
+  ],
+  "search_criteria": {
+    "filter_groups": [
+      {
+        "filters": [
+          {
+            "condition_type": "eq",
+            "field": "type_id",
+            "value": "configurable"
+          }
+        ]
+      }
+    ],
+    "page_size": 1
+  },
+  "total_count": 147
+}
