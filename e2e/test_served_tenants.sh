@@ -176,6 +176,14 @@ api_post() {
         ${2:+-d "$2"} "${API}$1"
 }
 
+# A connection is saved with its secrets sealed: the server takes none
+# readable. $1 is the create request, written as it was before that.
+connection_post() {
+    local headers=() i
+    for ((i = 1; i < ${#AUTH[@]}; i += 2)); do headers+=(--header "${AUTH[$i]}"); done
+    python3 "${SCRIPT_DIR}/sealed_connection.py" --api "${API}" ${headers[@]+"${headers[@]}"} "$1"
+}
+
 # Create a workflow, save its graph, compile it; echoes the workflow id.
 create_and_compile() {
     local name="$1" graph="$2"
@@ -657,7 +665,7 @@ echo "  the second tenant is held to one workflow; the primary is not; each read
 #-------------------------------------------------------------------------
 print_step "6. OAuth callbacks and connection events belong to the connection's tenant..."
 AUTH=(-H "Authorization: Bearer ${SECOND_KEY}")
-RESP=$(api_post /connections '{"title":"B OAuth","integrationId":"http_oauth2_authorization_code","connectionParameters":{"auth_url":"http://127.0.0.1:9/authorize","token_url":"http://127.0.0.1:9/token","client_id":"cid","client_secret":"csec","base_url":"https://api.example.com"}}')
+RESP=$(connection_post '{"title":"B OAuth","integrationId":"http_oauth2_authorization_code","connectionParameters":{"auth_url":"http://127.0.0.1:9/authorize","token_url":"http://127.0.0.1:9/token","client_id":"cid","client_secret":"csec","base_url":"https://api.example.com"}}')
 AUTH=()
 B_CONN=$(echo "${RESP}" | jq -r '.connection_id // .connectionId // empty')
 [ -n "${B_CONN}" ] || { print_error "the second tenant could not create an OAuth connection: ${RESP}"; exit 1; }

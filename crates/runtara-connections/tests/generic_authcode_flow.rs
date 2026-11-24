@@ -411,9 +411,10 @@ async fn rule_e_endpoint_edit_clears_tokens_and_evicts_cache() {
         valid_until: None,
         is_default_file_storage: None,
         default_for: None,
+        sealed_secrets: None,
     };
     let dto = service
-        .update_connection("conn_rule_e", "tenant_gen", update)
+        .update_connection_entering("conn_rule_e", "tenant_gen", update)
         .await
         .expect("rule E update");
     assert_eq!(

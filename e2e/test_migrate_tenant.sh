@@ -82,6 +82,14 @@ AUTH=()
 api() { # METHOD PATH [BODY]
     curl -sS --max-time 900 -X "$1" -H "Content-Type: application/json" ${AUTH[@]+"${AUTH[@]}"} ${3:+-d "$3"} "${API}$2"
 }
+
+# A connection is saved with its secrets sealed: the server takes none
+# readable. $1 is the create request, written as it was before that.
+connection_post() {
+    local headers=() i
+    for ((i = 1; i < ${#AUTH[@]}; i += 2)); do headers+=(--header "${AUTH[$i]}"); done
+    python3 "${SCRIPT_DIR}/sealed_connection.py" --api "${API}" ${headers[@]+"${headers[@]}"} "$1"
+}
 http_status() { curl -sS -o /dev/null -w '%{http_code}' "$@"; }
 
 # start SIDE TENANT_ID [SERVED]: a server on SIDE's databases (DB_SIDE's,
@@ -162,7 +170,7 @@ until_status "${NAP_RUN}" suspended 30
 RESP=$(api POST /triggers "{\"workflow_id\": \"${ANSWER_WF}\", \"trigger_type\": \"HTTP\", \"active\": true}")
 TRIGGER=$(echo "${RESP}" | jq -r '.data.id // .id // empty')
 [ -n "${TRIGGER}" ] || { print_error "trigger create failed: ${RESP:0:300}"; exit 1; }
-RESP=$(api POST /connections '{"title":"Moved OAuth","integrationId":"http_oauth2_authorization_code","connectionParameters":{"auth_url":"http://127.0.0.1:9/authorize","token_url":"http://127.0.0.1:9/token","client_id":"moved-client","client_secret":"csec","base_url":"https://api.example.com"}}')
+RESP=$(connection_post '{"title":"Moved OAuth","integrationId":"http_oauth2_authorization_code","connectionParameters":{"auth_url":"http://127.0.0.1:9/authorize","token_url":"http://127.0.0.1:9/token","client_id":"moved-client","client_secret":"csec","base_url":"https://api.example.com"}}')
 CONN=$(echo "${RESP}" | jq -r '.connection_id // .connectionId // empty')
 [ -n "${CONN}" ] || { print_error "connection create failed: ${RESP:0:300}"; exit 1; }
 stop

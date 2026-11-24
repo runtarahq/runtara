@@ -165,7 +165,7 @@ impl Fixture {
         }))
         .unwrap();
         service
-            .update_connection(id, TENANT, request)
+            .update_connection_entering(id, TENANT, request)
             .await
             .expect("edit the connection");
         self.read(id).await

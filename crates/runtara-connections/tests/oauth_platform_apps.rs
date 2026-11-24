@@ -94,7 +94,33 @@ fn api(fixture: &Fixture, tenant: &'static str, oauth: OAuthOptions) -> Router {
     ))
 }
 
+/// A request as a caller makes it: a save has its secrets sealed first.
 async fn send(api: &Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+    let saves = (method == "POST" && uri == "/connections")
+        || (method == "PUT" && uri.starts_with("/connections/"));
+    let body = match body {
+        Some(body) if saves => body,
+        body => return send_as_it_is(api, method, uri, body).await,
+    };
+    let (status, answer) = runtara_connections::sealed::testing::save_as_a_caller(
+        |method, uri, body| async move {
+            let (status, answer) = send_as_it_is(api, &method, &uri, body).await;
+            (status.as_u16(), answer)
+        },
+        method,
+        uri,
+        body,
+    )
+    .await;
+    (StatusCode::from_u16(status).unwrap(), answer)
+}
+
+async fn send_as_it_is(
+    api: &Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
     let request = Request::builder()
         .method(method)
         .uri(uri)

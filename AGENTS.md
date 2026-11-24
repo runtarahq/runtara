@@ -82,6 +82,19 @@ scoped README files, examples.
   app's client secret: it is sealed as it is entered (`runtara-server
   oauth-apps put`) and kept in `platform_oauth_app`; no file, setting or
   host hands one over readable.
+- A caller never sends a connection's secret readable, and the engine never
+  reads one a caller entered. The caller asks for an offer with the request it
+  will save (`POST /connections/offer`, `/connections/{id}/offer`), seals the
+  secrets under it (the console with seal's WASM sealer, anything else with
+  `seal-sealer`; the e2e scripts with `e2e/sealed_connection.py`), and saves
+  the same request with the envelope; seal makes the stored values
+  (`SealedCredentials::offer`, `admit_parameters`). The offer and the save
+  derive the same policies from the same request (`prepare_create`,
+  `prepare_update` in `service/connections.rs`): what one checks or changes,
+  the other must. Do not add a route that takes a secret readable, or a check
+  at save that needs to read one. Only a command of the server's own
+  (`oauth-apps put`, `object-model set`) seals what it is given
+  (`seal_parameters`).
 - The platform supplies no object model database. A tenant's is a `postgres`
   connection of the tenant's, entered with `runtara-server object-model set`
   and sealed; do not add a database URL to the server's configuration for

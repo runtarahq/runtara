@@ -95,6 +95,12 @@ api_post() {
         -d "$2" "${API}$1"
 }
 
+# A connection is saved with its secrets sealed: the server takes none
+# readable. $1 is the create request, written as it was before that.
+connection_post() {
+    python3 "${SCRIPT_DIR}/sealed_connection.py" --api "${API}" "$1"
+}
+
 # Start (or restart, for the SIGTERM leg) runtara-server with identical env so
 # the wake scheduler and orphan recovery see the same DBs / data dir / Valkey.
 # RUNTARA_DEV_MODE=false keeps the graceful drain (debug builds skip it).
@@ -229,7 +235,7 @@ fi
 echo "  Schema ${SCHEMA_ID} ✓"
 
 print_step "Creating postgres connection..."
-RESP=$(api_post /connections "{
+RESP=$(connection_post "{
   \"title\": \"obm-sql-e2e store\",
   \"integrationId\": \"postgres\",
   \"connectionParameters\": {\"database_url\": \"${SERVER_DB_URL}?sslmode=disable\"}

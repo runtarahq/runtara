@@ -171,6 +171,147 @@ pub fn check_shared_key(
     }
 }
 
+/// A connection's parameters as a caller sends them: each readable secret
+/// replaced by the marker of one sealed where it was entered, and the
+/// secrets, by what the request calls them. A Postgres URL is split as a
+/// caller splits it: the password is the secret, and the URL without it goes
+/// beside it (`database_target`), for the service to check and store.
+pub fn enter(
+    integration_id: &str,
+    parameters: &Value,
+) -> (Value, std::collections::BTreeMap<String, String>) {
+    let mut parameters = parameters.clone();
+    let mut secrets = std::collections::BTreeMap::new();
+    if integration_id == "postgres"
+        && let Some((target, password)) = parameters[super::policy::PG_URL_FIELD]
+            .as_str()
+            .and_then(super::policy::without_password)
+    {
+        parameters[super::policy::PG_URL_FIELD] = super::entered();
+        parameters[super::policy::PG_TARGET_FIELD] = Value::String(target);
+        secrets.insert(super::policy::PG_URL_FIELD.to_owned(), password);
+    }
+    for name in super::policy::readable_secrets(integration_id, &parameters) {
+        let slot = match super::policy::extra_header_of(&name) {
+            Some(header) => parameters[super::policy::EXTRA_HEADERS_FIELD].get_mut(header),
+            None => parameters.get_mut(&name),
+        };
+        if let Some(slot) = slot
+            && let Some(secret) = slot.as_str().map(str::to_owned)
+        {
+            *slot = super::entered();
+            secrets.insert(name, secret);
+        }
+    }
+    (parameters, secrets)
+}
+
+/// The intake envelope of `secrets`, sealed under an offer as a caller seals
+/// them: `offer` and `fields` are those of the answer to an offer request.
+pub fn seal_under(
+    offer: &Value,
+    fields: &std::collections::BTreeMap<String, String>,
+    secrets: &std::collections::BTreeMap<String, String>,
+) -> Value {
+    let offer = seal_format::Offer::from_json(offer.to_string().as_bytes())
+        .expect("the offer is one seal made");
+    let members = secrets
+        .iter()
+        .map(|(name, secret)| {
+            let field = fields.get(name).unwrap_or(name);
+            (
+                seal_format::FieldName::new(field).expect("a field name"),
+                seal_format::intake::Value::Text(secret),
+            )
+        })
+        .collect();
+    let envelope = offer
+        .seal(&seal_format::intake::object(&members))
+        .expect("the secrets seal under the offer");
+    serde_json::to_value(envelope).expect("an envelope is JSON")
+}
+
+/// Saves a connection over HTTP as a caller does, for a test that has the
+/// secrets readable in `body` (a create request for `POST`, an update for
+/// `PUT`): marks each as entered, asks for an offer of the same request,
+/// seals the secrets under it, and saves. `send` makes one request and
+/// answers with its status and JSON body.
+///
+/// A refusal of the offer is returned as it came: it is what the caller
+/// would be told.
+pub async fn save_as_a_caller<F, Fut>(
+    send: F,
+    method: &str,
+    uri: &str,
+    mut body: Value,
+) -> (u16, Value)
+where
+    F: Fn(String, String, Option<Value>) -> Fut,
+    Fut: std::future::Future<Output = (u16, Value)>,
+{
+    let create = method.eq_ignore_ascii_case("POST");
+    let secrets = if create {
+        let integration_id = body["integrationId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        if body["connectionParameters"].is_object() {
+            let (parameters, secrets) = enter(&integration_id, &body["connectionParameters"]);
+            body["connectionParameters"] = parameters;
+            secrets
+        } else {
+            Default::default()
+        }
+    } else {
+        let (_, held) = send("GET".to_owned(), uri.to_owned(), None).await;
+        let integration_id = held["connection"]["integrationId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        // What the patch writes and sets, entered as one set of parameters,
+        // and put back where each came from.
+        let patch = &mut body["connectionParameterPatch"];
+        let written: serde_json::Map<String, Value> = ["write", "set"]
+            .iter()
+            .flat_map(|part| patch[*part].as_object().into_iter().flatten())
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        let (entered, secrets) = enter(&integration_id, &Value::Object(written));
+        for (name, value) in entered.as_object().into_iter().flatten() {
+            let part = if patch["write"].get(name).is_some() {
+                "write"
+            } else {
+                "set"
+            };
+            if patch.is_object() {
+                if !patch[part].is_object() {
+                    patch[part] = Value::Object(Default::default());
+                }
+                patch[part][name] = value.clone();
+            }
+        }
+        secrets
+    };
+    if secrets.is_empty() {
+        return send(method.to_owned(), uri.to_owned(), Some(body)).await;
+    }
+    let (status, offered) = send(
+        "POST".to_owned(),
+        format!("{uri}/offer"),
+        Some(body.clone()),
+    )
+    .await;
+    if status != 200 {
+        return (status, offered);
+    }
+    let fields = serde_json::from_value(offered["fields"].clone()).unwrap_or_default();
+    body["sealedSecrets"] = seal_under(&offered["offer"], &fields, &secrets);
+    if create {
+        body["connectionId"] = offered["connectionId"].clone();
+    }
+    send(method.to_owned(), uri.to_owned(), Some(body)).await
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

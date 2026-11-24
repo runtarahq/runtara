@@ -377,7 +377,10 @@ fn apply_connection_parameter_patch_to_meta(
                 "Connection field '{name}' is not write-only"
             )));
         }
-        if field.is_secret && value.as_str().is_none_or(|value| value.trim().is_empty()) {
+        if field.is_secret
+            && !crate::sealed::is_entered(value)
+            && value.as_str().is_none_or(|value| value.trim().is_empty())
+        {
             return Err(ServiceError::ValidationError(format!(
                 "Replacement secret '{name}' must be a non-blank string"
             )));
@@ -571,7 +574,7 @@ fn with_sealed_stand_ins(params: &serde_json::Value) -> serde_json::Value {
     let mut params = params.clone();
     if let Some(fields) = params.as_object_mut() {
         for value in fields.values_mut() {
-            if crate::sealed::is_sealed(value) {
+            if crate::sealed::is_sealed(value) || crate::sealed::is_entered(value) {
                 *value = serde_json::Value::String(SEALED_STAND_IN.into());
             }
             // A map of secrets holds a sealed value under each name.
@@ -581,13 +584,87 @@ fn with_sealed_stand_ins(params: &serde_json::Value) -> serde_json::Value {
                 .flatten()
                 .map(|(_, entry)| entry)
             {
-                if crate::sealed::is_sealed(entry) {
+                if crate::sealed::is_sealed(entry) || crate::sealed::is_entered(entry) {
                     *entry = serde_json::Value::String(SEALED_STAND_IN.into());
                 }
             }
         }
     }
     params
+}
+
+/// A request's parameters as its type's form is asked about them: a stand-in
+/// for each secret that is sealed, and without what is no field of the form.
+fn for_the_form(integration_id: &str, params: &serde_json::Value) -> serde_json::Value {
+    let mut params = with_sealed_stand_ins(params);
+    if integration_id == "postgres"
+        && let Some(fields) = params.as_object_mut()
+    {
+        // Where a sealed database password may go: entered beside it.
+        fields.remove(crate::sealed::policy::PG_TARGET_FIELD);
+    }
+    params
+}
+
+/// A secret is never sent readable: one in a request is refused.
+fn refuse_readable_secrets(
+    integration_id: &str,
+    params: &serde_json::Value,
+) -> Result<(), ServiceError> {
+    match crate::sealed::policy::readable_secrets(integration_id, params)
+        .into_iter()
+        .next()
+    {
+        Some(field) => Err(sealing_error(crate::sealed::SealingError::MustBeSealed {
+            field,
+        })),
+        None => Ok(()),
+    }
+}
+
+/// What an update's merged parameters have that the connection does not
+/// hold already: what the request supplied.
+fn supplied(merged: &serde_json::Value, held: &serde_json::Value) -> serde_json::Value {
+    let mut supplied = merged.clone();
+    if let Some(fields) = supplied.as_object_mut() {
+        fields.retain(|name, value| held.get(name) != Some(value));
+        // A map of secrets, entry by entry.
+        let extras = crate::sealed::policy::EXTRA_HEADERS_FIELD;
+        if let (Some(entries), Some(kept)) = (
+            fields
+                .get_mut(extras)
+                .and_then(serde_json::Value::as_object_mut),
+            held[extras].as_object(),
+        ) {
+            entries.retain(|name, value| kept.get(name) != Some(value));
+        }
+    }
+    supplied
+}
+
+/// Where a database password sealed where it was entered may go: the URL as
+/// it was typed, without the password, held to the rules of a whole URL and
+/// stored as the engine stores one.
+fn entered_database_target(value: &serde_json::Value) -> Result<serde_json::Value, ServiceError> {
+    use crate::sealed::policy::{PG_TARGET_FIELD, TargetRefused, target_as_entered};
+    match value.as_str().map(target_as_entered) {
+        Some(Ok(target)) => Ok(serde_json::Value::String(target)),
+        Some(Err(TargetRefused::HoldsThePassword)) => Err(ServiceError::ValidationError(format!(
+            "`{PG_TARGET_FIELD}` is the URL without its password: the password is sealed where \
+             it is entered"
+        ))),
+        _ => Err(ServiceError::ValidationError(format!(
+            "this connection's credentials cannot be stored: {}",
+            crate::sealed::policy::postgres_url_rules()
+        ))),
+    }
+}
+
+/// The id a new connection is saved with: the one its offer gave.
+fn offered_id(id: &str) -> Result<String, ServiceError> {
+    Uuid::parse_str(id)
+        .map(|id| id.to_string())
+        .map_err(|_| ServiceError::ValidationError("connectionId is not one an offer gave".into()))
 }
 
 /// A request may not supply a sealed value's marker: only what the connection
@@ -620,9 +697,12 @@ fn reject_supplied_markers(
 fn sealing_error(error: crate::sealed::SealingError) -> ServiceError {
     match error {
         crate::sealed::SealingError::SecretRequired { .. }
-        | crate::sealed::SealingError::CannotSeal { .. } => {
+        | crate::sealed::SealingError::CannotSeal { .. }
+        | crate::sealed::SealingError::MustBeSealed { .. }
+        | crate::sealed::SealingError::Intake(_) => {
             ServiceError::ValidationError(error.to_string())
         }
+        crate::sealed::SealingError::Stale => ServiceError::StaleOffer(error.to_string()),
         crate::sealed::SealingError::Seal(_) => {
             tracing::error!(%error, "could not seal connection credentials");
             ServiceError::DatabaseError("Could not seal the connection's credentials".to_string())
@@ -645,6 +725,30 @@ fn with_platform_app_stand_ins(params: Option<&serde_json::Value>) -> serde_json
         }
     }
     params
+}
+
+fn offer_response(
+    connection_id: String,
+    offered: Option<crate::sealed::Offered>,
+) -> Result<ConnectionOfferResponse, ServiceError> {
+    let Some(offered) = offered else {
+        return Ok(ConnectionOfferResponse {
+            success: true,
+            connection_id,
+            offer: None,
+            fields: Default::default(),
+            not_after: None,
+        });
+    };
+    let offer = serde_json::to_value(&offered.offer)
+        .map_err(|error| ServiceError::DatabaseError(error.to_string()))?;
+    Ok(ConnectionOfferResponse {
+        success: true,
+        connection_id,
+        offer: Some(offer),
+        fields: offered.fields,
+        not_after: Some(offered.not_after),
+    })
 }
 
 /// The platform app a request's `oauth_app` names: a non-empty string.
@@ -784,12 +888,248 @@ impl ConnectionService {
         Ok(())
     }
 
-    /// Create a new connection
+    /// Create a new connection. Its secrets come sealed
+    /// (`request.sealed_secrets`), under the offer [`Self::offer_for_create`]
+    /// made for this same request.
     pub async fn create_connection(
+        &self,
+        request: CreateConnectionRequest,
+        tenant_id: &str,
+    ) -> Result<String, ServiceError> {
+        let PreparedCreate {
+            mut request,
+            integration_id,
+            initial_status,
+            default_for,
+        } = self.prepare_create(request, tenant_id)?;
+
+        // Secrets sealed where they were entered are sealed for a connection:
+        // the one the offer named. Without any, the id is made here.
+        let enters = request
+            .connection_parameters
+            .as_ref()
+            .is_some_and(crate::sealed::has_entered_values);
+        let connection_id = match request.connection_id.take() {
+            Some(id) => {
+                let id = offered_id(&id)?;
+                if self
+                    .repository
+                    .get_by_id(&id, tenant_id)
+                    .await
+                    .map_err(|e| ServiceError::DatabaseError(e.to_string()))?
+                    .is_some()
+                {
+                    return Err(ServiceError::Conflict(
+                        "A connection with this id already exists".to_string(),
+                    ));
+                }
+                id
+            }
+            None if enters => {
+                return Err(ServiceError::ValidationError(
+                    "connectionId is required with secrets: the id the offer gave".to_string(),
+                ));
+            }
+            None => Uuid::new_v4().to_string(),
+        };
+
+        // seal makes the stored value of each secret, now that the
+        // connection they are bound to has an id. One seal cannot hold is
+        // refused: none is stored readable.
+        let intake = request.sealed_secrets.take();
+        if let Some(params) = request.connection_parameters.as_ref()
+            && let Some(stored) = self
+                .sealed
+                .admit_parameters(
+                    tenant_id,
+                    &connection_id,
+                    &integration_id,
+                    params,
+                    None,
+                    intake.as_ref(),
+                )
+                .await
+                .map_err(sealing_error)?
+        {
+            request.connection_parameters = Some(stored);
+        } else if intake.is_some() {
+            return Err(ServiceError::ValidationError(
+                "the request has an intake envelope and marks no secret as entered".to_string(),
+            ));
+        }
+
+        // Delegate to repository
+        self.repository
+            .create(
+                &request,
+                tenant_id,
+                &connection_id,
+                &initial_status,
+                &default_for,
+            )
+            .await
+            .map_err(|e| {
+                let error = e.to_string();
+                // Check for unique constraint violation on title
+                if error.contains("uc_connection_data_entity_title") {
+                    ServiceError::Conflict("Connection with this title already exists".to_string())
+                } else if error.contains("duplicate key") {
+                    // An id another tenant's connection has.
+                    ServiceError::Conflict("A connection with this id already exists".to_string())
+                } else {
+                    ServiceError::DatabaseError(error)
+                }
+            })?;
+
+        Ok(connection_id)
+    }
+
+    /// What to seal the secrets of a connection about to be created under,
+    /// and the id to create it with. `request` is the request that will be
+    /// saved, without its `sealedSecrets`.
+    pub async fn offer_for_create(
+        &self,
+        request: CreateConnectionRequest,
+        tenant_id: &str,
+    ) -> Result<ConnectionOfferResponse, ServiceError> {
+        let PreparedCreate {
+            mut request,
+            integration_id,
+            ..
+        } = self.prepare_create(request, tenant_id)?;
+        let connection_id = match request.connection_id.take() {
+            Some(id) => offered_id(&id)?,
+            None => Uuid::new_v4().to_string(),
+        };
+        let empty = serde_json::json!({});
+        let offer = self
+            .sealed
+            .offer(
+                tenant_id,
+                &connection_id,
+                &integration_id,
+                request.connection_parameters.as_ref().unwrap_or(&empty),
+            )
+            .await
+            .map_err(sealing_error)?;
+        offer_response(connection_id, offer)
+    }
+
+    /// What to seal the secrets an update enters under. `request` is the
+    /// request that will be saved, without its `sealedSecrets`.
+    pub async fn offer_for_update(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        request: UpdateConnectionRequest,
+    ) -> Result<ConnectionOfferResponse, ServiceError> {
+        let prepared = self.prepare_update(id, tenant_id, request).await?;
+        let empty = serde_json::json!({});
+        let offer = self
+            .sealed
+            .offer(
+                tenant_id,
+                id,
+                &prepared.integration_id,
+                prepared.effective_parameters.as_ref().unwrap_or(&empty),
+            )
+            .await
+            .map_err(sealing_error)?;
+        offer_response(id.to_string(), offer)
+    }
+
+    /// [`Self::create_connection`] as a caller makes it, for a test that has
+    /// the secrets readable: asks for an offer, seals them under it, and
+    /// saves.
+    #[cfg(any(test, feature = "test-util"))]
+    pub async fn create_connection_entering(
         &self,
         mut request: CreateConnectionRequest,
         tenant_id: &str,
     ) -> Result<String, ServiceError> {
+        let integration_id = request.integration_id.clone().unwrap_or_default();
+        let (parameters, secrets) = match request.connection_parameters.as_ref() {
+            Some(parameters) => crate::sealed::testing::enter(&integration_id, parameters),
+            None => return self.create_connection(request, tenant_id).await,
+        };
+        request.connection_parameters = Some(parameters);
+        if secrets.is_empty() {
+            return self.create_connection(request, tenant_id).await;
+        }
+        let asked: CreateConnectionRequest =
+            serde_json::from_value(serde_json::to_value(&request).expect("a request is JSON"))
+                .expect("a request reads back");
+        let offered = self.offer_for_create(asked, tenant_id).await?;
+        let offer = offered.offer.expect("secrets were entered");
+        request.connection_id = Some(offered.connection_id);
+        request.sealed_secrets = Some(crate::sealed::testing::seal_under(
+            &offer,
+            &offered.fields,
+            &secrets,
+        ));
+        self.create_connection(request, tenant_id).await
+    }
+
+    /// [`Self::update_connection`] as a caller makes it, for a test that has
+    /// the secrets readable: asks for an offer, seals them under it, and
+    /// saves.
+    #[cfg(any(test, feature = "test-util"))]
+    pub async fn update_connection_entering(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        mut request: UpdateConnectionRequest,
+    ) -> Result<ConnectionDto, ServiceError> {
+        let integration_id = self
+            .get_connection(id, tenant_id)
+            .await?
+            .integration_id
+            .unwrap_or_default();
+        let mut secrets = std::collections::BTreeMap::new();
+        if let Some(patch) = request.connection_parameter_patch.as_mut() {
+            // What the patch writes and sets, entered as one set of
+            // parameters, and put back where each came from.
+            let written: serde_json::Map<String, serde_json::Value> = patch
+                .write
+                .iter()
+                .chain(patch.set.iter())
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect();
+            let (entered, found) =
+                crate::sealed::testing::enter(&integration_id, &serde_json::Value::Object(written));
+            secrets = found;
+            for (name, value) in entered.as_object().into_iter().flatten() {
+                if patch.write.contains_key(name) {
+                    patch.write.insert(name.clone(), value.clone());
+                } else {
+                    patch.set.insert(name.clone(), value.clone());
+                }
+            }
+        }
+        if secrets.is_empty() {
+            return self.update_connection(id, tenant_id, request).await;
+        }
+        let asked: UpdateConnectionRequest =
+            serde_json::from_value(serde_json::to_value(&request).expect("a request is JSON"))
+                .expect("a request reads back");
+        let offered = self.offer_for_update(id, tenant_id, asked).await?;
+        let offer = offered.offer.expect("secrets were entered");
+        request.sealed_secrets = Some(crate::sealed::testing::seal_under(
+            &offer,
+            &offered.fields,
+            &secrets,
+        ));
+        self.update_connection(id, tenant_id, request).await
+    }
+
+    /// Checks a request to create a connection, and settles everything about
+    /// it but its id and its secrets. An offer and the save it is for both
+    /// start here, so that they derive the same from the same request.
+    fn prepare_create(
+        &self,
+        mut request: CreateConnectionRequest,
+        tenant_id: &str,
+    ) -> Result<PreparedCreate, ServiceError> {
         // Validation: title should not be empty
         if request.title.trim().is_empty() {
             return Err(ServiceError::ValidationError(
@@ -838,8 +1178,17 @@ impl ConnectionService {
             validate_rate_limit_config(cfg)?;
         }
 
-        if let Some(params) = request.connection_parameters.as_ref() {
+        if let Some(params) = request.connection_parameters.as_mut() {
             reject_supplied_markers(params, None)?;
+            refuse_readable_secrets(
+                request.integration_id.as_deref().unwrap_or_default(),
+                params,
+            )?;
+            if request.integration_id.as_deref() == Some("postgres")
+                && let Some(target) = params.get_mut(crate::sealed::policy::PG_TARGET_FIELD)
+            {
+                *target = entered_database_target(target)?;
+            }
         }
 
         // A platform OAuth app, named in the reserved `oauth_app`, stands in for
@@ -880,7 +1229,8 @@ impl ConnectionService {
                     request.connection_parameters.as_ref(),
                 )),
                 None => request.connection_parameters.clone(),
-            };
+            }
+            .map(|params| for_the_form(integration_id, &params));
             validate_create_connection_parameters(integration_id, checked.as_ref())?;
         }
         if let Some(app_id) = platform_app
@@ -936,41 +1286,12 @@ impl ConnectionService {
             }
         }
 
-        // Generate new connection ID
-        let connection_id = Uuid::new_v4().to_string();
-
-        // Seal the secrets, now that the connection they are bound to has an
-        // id. One seal cannot hold is refused: none is stored readable.
-        if let Some(params) = request.connection_parameters.as_ref()
-            && let Some(stored) = self
-                .sealed
-                .seal_parameters(tenant_id, &connection_id, &integration_id, params, None)
-                .await
-                .map_err(sealing_error)?
-        {
-            request.connection_parameters = Some(stored);
-        }
-
-        // Delegate to repository
-        self.repository
-            .create(
-                &request,
-                tenant_id,
-                &connection_id,
-                &initial_status,
-                &default_for,
-            )
-            .await
-            .map_err(|e| {
-                // Check for unique constraint violation on title
-                if e.to_string().contains("uc_connection_data_entity_title") {
-                    ServiceError::Conflict("Connection with this title already exists".to_string())
-                } else {
-                    ServiceError::DatabaseError(e.to_string())
-                }
-            })?;
-
-        Ok(connection_id)
+        Ok(PreparedCreate {
+            request,
+            integration_id,
+            initial_status,
+            default_for,
+        })
     }
 
     /// List connections with optional filters
@@ -1019,13 +1340,118 @@ impl ConnectionService {
         Ok(connection)
     }
 
-    /// Update a connection
+    /// Update a connection. Secrets it enters come sealed
+    /// (`request.sealed_secrets`), under the offer [`Self::offer_for_update`]
+    /// made for this same request.
     pub async fn update_connection(
         &self,
         id: &str,
         tenant_id: &str,
         request: UpdateConnectionRequest,
     ) -> Result<ConnectionDto, ServiceError> {
+        let PreparedUpdate {
+            mut request,
+            expected_version,
+            integration_id,
+            old_params,
+            mut effective_parameters,
+            effective_status,
+            default_for,
+            authorization_change_requires_reconnect,
+        } = self.prepare_update(id, tenant_id, request).await?;
+
+        // seal makes the stored value of each secret entered now. One left
+        // sealed stays as it is, unless the edit changes where it is sent or
+        // how: then it must be entered again.
+        let intake = request.sealed_secrets.take();
+        if let Some(merged) = effective_parameters.as_ref()
+            && let Some(stored) = self
+                .sealed
+                .admit_parameters(
+                    tenant_id,
+                    id,
+                    &integration_id,
+                    merged,
+                    Some(&old_params),
+                    intake.as_ref(),
+                )
+                .await
+                .map_err(sealing_error)?
+        {
+            effective_parameters = Some(stored);
+        } else if intake.is_some() {
+            return Err(ServiceError::ValidationError(
+                "the request has an intake envelope and marks no secret as entered".to_string(),
+            ));
+        }
+
+        // Execute update
+        let rows_affected = self
+            .repository
+            .update(
+                id,
+                tenant_id,
+                &request,
+                crate::repository::connections::ConnectionUpdateValues {
+                    parameters: effective_parameters.as_ref(),
+                    status: effective_status.as_ref(),
+                    default_for: default_for.as_deref(),
+                },
+                &expected_version,
+            )
+            .await
+            .map_err(|e| {
+                // Check for unique constraint violation on title
+                if e.to_string().contains("uc_connection_data_entity_title") {
+                    ServiceError::Conflict("Connection with this title already exists".to_string())
+                } else {
+                    ServiceError::DatabaseError(e.to_string())
+                }
+            })?;
+
+        if rows_affected == 0 {
+            return Err(ServiceError::Conflict(
+                "Connection changed since it was opened; review the latest version before saving"
+                    .to_string(),
+            ));
+        }
+
+        if authorization_change_requires_reconnect {
+            crate::auth::provider_auth::invalidate_connection_token_caches(
+                id,
+                &integration_id,
+                &old_params,
+            );
+        }
+        // A client-credentials token is kept under a key that leaves the
+        // secret out, so one minted with the old credentials would outlive
+        // the edit. Dropped, the next request mints with the edited ones. A
+        // patch that leaves the parameters as they were (compared sealed, so
+        // a secret entered again counts as a change) keeps the token.
+        if effective_parameters
+            .as_ref()
+            .is_some_and(|merged| merged != &old_params)
+            && crate::auth::provider_auth::is_client_credentials(
+                runtara_agents::registry::find_connection_type(&integration_id),
+            )
+        {
+            crate::auth::provider_auth::evict_connection_token_caches(id);
+        }
+
+        // Fetch and return updated connection
+        self.get_connection(id, tenant_id).await
+    }
+
+    /// Checks a request to update a connection and merges it with what the
+    /// connection holds: everything about the update but its secrets. An
+    /// offer and the save it is for both start here, so that they derive the
+    /// same from the same request.
+    async fn prepare_update(
+        &self,
+        id: &str,
+        tenant_id: &str,
+        request: UpdateConnectionRequest,
+    ) -> Result<PreparedUpdate, ServiceError> {
         // Validation: if title is provided, it should not be empty
         if let Some(ref title) = request.title {
             if title.trim().is_empty() {
@@ -1127,6 +1553,16 @@ impl ConnectionService {
         } else {
             old_params.clone()
         };
+        // Where a database password sealed where it was entered may go comes
+        // beside it, and is no field of the type's form.
+        let entered_target = match request.connection_parameter_patch.as_mut() {
+            Some(patch) if integration_id == "postgres" => patch
+                .set
+                .remove(crate::sealed::policy::PG_TARGET_FIELD)
+                .map(|target| entered_database_target(&target))
+                .transpose()?,
+            _ => None,
+        };
         let touched_parameter_fields: std::collections::HashSet<String> = request
             .connection_parameter_patch
             .as_ref()
@@ -1151,6 +1587,9 @@ impl ConnectionService {
         // that live in the preserved existing params.
         if let Some(merged) = effective_parameters.as_mut() {
             keep_sealed_extra_headers(merged, &old_params);
+            if let (Some(target), Some(fields)) = (entered_target, merged.as_object_mut()) {
+                fields.insert(crate::sealed::policy::PG_TARGET_FIELD.to_string(), target);
+            }
         }
         if let Some(merged) = effective_parameters.as_ref() {
             // A secret that stays sealed is the marker the connection holds.
@@ -1190,10 +1629,12 @@ impl ConnectionService {
                 merged.remove("client_secret");
             } else if old_app.is_some()
                 && ["client_id", "client_secret"].iter().any(|field| {
-                    merged
-                        .get(*field)
-                        .and_then(serde_json::Value::as_str)
-                        .is_none_or(|value| value == PLATFORM_APP_STAND_IN)
+                    merged.get(*field).is_none_or(|value| {
+                        !crate::sealed::is_entered(value)
+                            && value
+                                .as_str()
+                                .is_none_or(|value| value == PLATFORM_APP_STAND_IN)
+                    })
                 })
             {
                 return Err(ServiceError::ValidationError(
@@ -1203,6 +1644,11 @@ impl ConnectionService {
         }
         if let (Some(app_id), Some(merged)) = (&new_app, effective_parameters.as_ref()) {
             self.check_platform_app(tenant_id, &integration_id, app_id, merged)?;
+        }
+        // What the request supplies readable is refused; what the connection
+        // already holds is not the request's.
+        if let Some(merged) = effective_parameters.as_ref() {
+            refuse_readable_secrets(&integration_id, &supplied(merged, &old_params))?;
         }
 
         if let Some(ref default_for) = default_for {
@@ -1250,73 +1696,16 @@ impl ConnectionService {
             obj.remove(crate::service::oauth::PENDING_OAUTH_PARAM);
         }
 
-        // Seal secrets entered now. One left sealed stays as it is, unless the
-        // edit changes where it is sent or how: then it must be entered again.
-        if let Some(merged) = effective_parameters.as_ref()
-            && let Some(stored) = self
-                .sealed
-                .seal_parameters(tenant_id, id, &integration_id, merged, Some(&old_params))
-                .await
-                .map_err(sealing_error)?
-        {
-            effective_parameters = Some(stored);
-        }
-
-        // Execute update
-        let rows_affected = self
-            .repository
-            .update(
-                id,
-                tenant_id,
-                &request,
-                crate::repository::connections::ConnectionUpdateValues {
-                    parameters: effective_parameters.as_ref(),
-                    status: effective_status.as_ref(),
-                    default_for: default_for.as_deref(),
-                },
-                &expected_version,
-            )
-            .await
-            .map_err(|e| {
-                // Check for unique constraint violation on title
-                if e.to_string().contains("uc_connection_data_entity_title") {
-                    ServiceError::Conflict("Connection with this title already exists".to_string())
-                } else {
-                    ServiceError::DatabaseError(e.to_string())
-                }
-            })?;
-
-        if rows_affected == 0 {
-            return Err(ServiceError::Conflict(
-                "Connection changed since it was opened; review the latest version before saving"
-                    .to_string(),
-            ));
-        }
-
-        if authorization_change_requires_reconnect {
-            crate::auth::provider_auth::invalidate_connection_token_caches(
-                id,
-                &integration_id,
-                &old_params,
-            );
-        }
-        // A client-credentials token is kept under a key that leaves the
-        // secret out, so one minted with the old credentials would outlive
-        // the edit. Dropped, the next request mints with the edited ones. A
-        // patch that leaves the parameters as they were (compared sealed, so
-        // a secret entered again counts as a change) keeps the token.
-        if effective_parameters
-            .as_ref()
-            .is_some_and(|merged| merged != &old_params)
-            && crate::auth::provider_auth::is_client_credentials(
-                runtara_agents::registry::find_connection_type(&integration_id),
-            )
-        {
-            crate::auth::provider_auth::evict_connection_token_caches(id);
-        }
-
-        // Fetch and return updated connection
-        self.get_connection(id, tenant_id).await
+        Ok(PreparedUpdate {
+            request,
+            expected_version,
+            integration_id,
+            old_params,
+            effective_parameters,
+            effective_status,
+            default_for,
+            authorization_change_requires_reconnect,
+        })
     }
 
     /// Delete a connection
@@ -1495,7 +1884,32 @@ pub enum ServiceError {
     ValidationError(String),
     NotFound(String),
     Conflict(String),
+    /// The offer a request's secrets were sealed under no longer stands. The
+    /// caller asks for a new one and seals again.
+    StaleOffer(String),
     DatabaseError(String),
+}
+
+/// A request to create a connection, checked: everything but its id and its
+/// secrets.
+struct PreparedCreate {
+    request: CreateConnectionRequest,
+    integration_id: String,
+    initial_status: ConnectionStatus,
+    default_for: Vec<String>,
+}
+
+/// A request to update a connection, checked and merged with what the
+/// connection holds: everything but its secrets.
+struct PreparedUpdate {
+    request: UpdateConnectionRequest,
+    expected_version: String,
+    integration_id: String,
+    old_params: serde_json::Value,
+    effective_parameters: Option<serde_json::Value>,
+    effective_status: Option<ConnectionStatus>,
+    default_for: Option<Vec<String>>,
+    authorization_change_requires_reconnect: bool,
 }
 
 #[cfg(test)]

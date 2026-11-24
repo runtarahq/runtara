@@ -106,7 +106,7 @@ fn service(pool: &PgPool) -> ConnectionService {
 
 async fn create(svc: &ConnectionService, tenant: &str, body: serde_json::Value) -> String {
     let req: CreateConnectionRequest = serde_json::from_value(body).expect("valid request");
-    svc.create_connection(req, tenant)
+    svc.create_connection_entering(req, tenant)
         .await
         .expect("create connection")
 }
@@ -153,7 +153,7 @@ async fn update(svc: &ConnectionService, id: &str, tenant: &str, mut body: serde
     }
     let req: runtara_connections::types::UpdateConnectionRequest =
         serde_json::from_value(body).expect("valid update request");
-    svc.update_connection(id, tenant, req)
+    svc.update_connection_entering(id, tenant, req)
         .await
         .expect("update connection");
 }
@@ -194,7 +194,7 @@ async fn create_assigns_reconnection_status_for_unauthorized_oauth() {
         let request = serde_json::from_value::<CreateConnectionRequest>(unsafe_body);
         match request {
             Err(_) => {}
-            Ok(request) => assert!(svc.create_connection(request, "t").await.is_err()),
+            Ok(request) => assert!(svc.create_connection_entering(request, "t").await.is_err()),
         }
     }
 
@@ -315,7 +315,8 @@ async fn editing_params_applies_descriptor_owned_reauthorization() {
     }))
     .expect("valid stale update");
     assert!(matches!(
-        svc.update_connection(&id, "t", stale_request).await,
+        svc.update_connection_entering(&id, "t", stale_request)
+            .await,
         Err(runtara_connections::service::connections::ServiceError::Conflict(_))
     ));
 
@@ -370,7 +371,7 @@ async fn editing_params_applies_descriptor_owned_reauthorization() {
         }))
         .unwrap();
     assert!(matches!(
-        svc.update_connection(&g, "t", moved_alone).await,
+        svc.update_connection_entering(&g, "t", moved_alone).await,
         Err(runtara_connections::service::connections::ServiceError::ValidationError(_))
     ));
     assert_eq!(params_of(&fx.pool, &g).await, g1);
@@ -444,7 +445,7 @@ async fn title_only_update_preserves_absent_defaults_tokens_and_rejects_stale_ve
         }))
         .expect("valid stale title update");
     assert!(matches!(
-        svc.update_connection(&id, "t", stale).await,
+        svc.update_connection_entering(&id, "t", stale).await,
         Err(runtara_connections::service::connections::ServiceError::Conflict(_))
     ));
     assert_eq!(
@@ -566,7 +567,7 @@ async fn explicit_secret_replace_clear_and_forbidden_clear_are_enforced() {
         &before_forbidden["client_secret"]
     ));
     assert!(matches!(
-        svc.update_connection(&qb, "t", forbidden).await,
+        svc.update_connection_entering(&qb, "t", forbidden).await,
         Err(runtara_connections::service::connections::ServiceError::ValidationError(_))
     ));
     assert_eq!(params_of(&fx.pool, &qb).await, before_forbidden);

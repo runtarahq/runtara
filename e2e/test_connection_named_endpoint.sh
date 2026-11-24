@@ -114,6 +114,12 @@ api_post() {
         -d "$2" "${API}$1"
 }
 
+# A connection is saved with its secrets sealed: the server takes none
+# readable. $1 is the create request, written as it was before that.
+connection_post() {
+    python3 "${SCRIPT_DIR}/sealed_connection.py" --api "${API}" "$1"
+}
+
 # Execute the workflow with a URL + endpoint selector and return the terminal
 # status and error text in globals. The proxy's rejection surfaces in the
 # instance error, which is what every assertion below reads.
@@ -276,7 +282,7 @@ print(json.dumps({
 }))
 PY
 )
-RESP=$(api_post /connections "${CONN_PAYLOAD}")
+RESP=$(connection_post "${CONN_PAYLOAD}")
 CONN_ID=$(echo "${RESP}" | jq -r '.connectionId // .data.id // .id // empty')
 if [ -z "${CONN_ID}" ]; then
     print_error "Connection create failed: ${RESP}"

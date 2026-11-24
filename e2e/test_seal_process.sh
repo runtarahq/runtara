@@ -120,6 +120,12 @@ api_post() {
         ${2:+-d "$2"} "${API}$1"
 }
 
+# A connection is saved with its secrets sealed: the server takes none
+# readable. $1 is the create request, written as it was before that.
+connection_post() {
+    python3 "${SCRIPT_DIR}/sealed_connection.py" --api "${API}" "$1"
+}
+
 #-------------------------------------------------------------------------
 echo "==============================================================="
 echo "E2E Test: seal as a process of its own"
@@ -234,7 +240,7 @@ keys_in_database() { server_sql "SELECT count(*) FROM seal_wrapped_key"; }
 schemas_status() { curl -sS -o /dev/null -w '%{http_code}' "${API}/object-model/schemas?connectionId=$1"; }
 create_connection() {
     local resp id
-    resp=$(api_post /connections "{\"title\": \"$1\", \"integrationId\": \"postgres\", \"connectionParameters\": {\"database_url\": \"$2\"}}")
+    resp=$(connection_post "{\"title\": \"$1\", \"integrationId\": \"postgres\", \"connectionParameters\": {\"database_url\": \"$2\"}}")
     id=$(echo "${resp}" | jq -r '.connection_id // .connectionId // empty')
     [ -n "${id}" ] || { print_error "connection create failed"; exit 1; }
     echo "${id}"

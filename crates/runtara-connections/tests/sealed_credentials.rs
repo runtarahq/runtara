@@ -178,7 +178,9 @@ async fn patch(
         "connectionParameterPatch": patch,
     }))
     .unwrap();
-    service.update_connection(id, TENANT, request).await
+    service
+        .update_connection_entering(id, TENANT, request)
+        .await
 }
 
 fn is_validation(result: &Result<runtara_connections::ConnectionDto, ServiceError>) -> bool {
@@ -191,7 +193,7 @@ async fn a_sealable_connection_is_stored_sealed_and_says_so() {
     let service = fixture.service(Some(fixture.sealed()));
 
     let id = service
-        .create_connection(bearer("api", "https://api.example.com/v1"), TENANT)
+        .create_connection_entering(bearer("api", "https://api.example.com/v1"), TENANT)
         .await
         .unwrap();
 
@@ -264,7 +266,7 @@ async fn a_secret_seal_cannot_hold_is_refused_and_nothing_is_stored() {
         ),
     ] {
         let error = service
-            .create_connection(request, TENANT)
+            .create_connection_entering(request, TENANT)
             .await
             .expect_err("a secret seal cannot hold is not stored");
         let ServiceError::ValidationError(message) = error else {
@@ -282,7 +284,7 @@ async fn a_secret_seal_cannot_hold_is_refused_and_nothing_is_stored() {
     // An edit that would leave a sealed secret with nowhere to go is refused
     // too, and the connection stays as it was.
     let id = service
-        .create_connection(bearer("api", "https://api.example.com/v1"), TENANT)
+        .create_connection_entering(bearer("api", "https://api.example.com/v1"), TENANT)
         .await
         .unwrap();
     let before = fixture.row(&id).await;
@@ -312,7 +314,10 @@ async fn a_secret_seal_cannot_hold_is_refused_and_nothing_is_stored() {
         },
     }))
     .unwrap();
-    let id = service.create_connection(none, TENANT).await.unwrap();
+    let id = service
+        .create_connection_entering(none, TENANT)
+        .await
+        .unwrap();
     assert_eq!(fixture.row(&id).await.0, "cipher");
 }
 
@@ -371,7 +376,7 @@ async fn ai_provider_channel_and_mcp_connections_are_stored_sealed() {
         }))
         .unwrap();
         let id = service
-            .create_connection(request, TENANT)
+            .create_connection_entering(request, TENANT)
             .await
             .unwrap_or_else(|error| panic!("{integration_id}: {error:?}"));
 
@@ -397,7 +402,10 @@ async fn ai_provider_channel_and_mcp_connections_are_stored_sealed() {
         "connectionParameters": {"url": "https://mcp.example.com/mcp", "auth_mode": "none"},
     }))
     .unwrap();
-    let id = service.create_connection(request, TENANT).await.unwrap();
+    let id = service
+        .create_connection_entering(request, TENANT)
+        .await
+        .unwrap();
     assert_eq!(fixture.row(&id).await.0, "cipher");
 }
 
@@ -406,7 +414,7 @@ async fn an_edit_keeps_the_sealed_secret_unless_it_moves_the_destination() {
     let fixture = Fixture::new().await;
     let service = fixture.service(Some(fixture.sealed()));
     let id = service
-        .create_connection(bearer("api", "https://api.example.com/v1"), TENANT)
+        .create_connection_entering(bearer("api", "https://api.example.com/v1"), TENANT)
         .await
         .unwrap();
     let (_, original) = fixture.row(&id).await;
@@ -464,11 +472,11 @@ async fn a_request_cannot_supply_a_sealed_values_marker() {
     let sealed = fixture.sealed();
     let service = fixture.service(Some(sealed));
     let id = service
-        .create_connection(bearer("one", "https://api.example.com/v1"), TENANT)
+        .create_connection_entering(bearer("one", "https://api.example.com/v1"), TENANT)
         .await
         .unwrap();
     let other = service
-        .create_connection(bearer("two", "https://api.example.com/v1"), TENANT)
+        .create_connection_entering(bearer("two", "https://api.example.com/v1"), TENANT)
         .await
         .unwrap();
     let (_, others) = fixture.row(&other).await;
@@ -481,7 +489,7 @@ async fn a_request_cannot_supply_a_sealed_values_marker() {
             "connectionParameters": {"token": others["token"], "base_url": "https://api.example.com/v1"},
         }))
         .unwrap();
-        let created = service.create_connection(request, TENANT).await;
+        let created = service.create_connection_entering(request, TENANT).await;
         assert!(
             matches!(created, Err(ServiceError::ValidationError(_))),
             "{created:?}"
@@ -500,15 +508,15 @@ async fn two_instances_seal_a_tenants_connections_to_the_same_key() {
     let second = fixture.service(Some(fixture.sealed()));
 
     let one = first
-        .create_connection(bearer("one", "https://api.example.com/v1"), TENANT)
+        .create_connection_entering(bearer("one", "https://api.example.com/v1"), TENANT)
         .await
         .unwrap();
     let two = second
-        .create_connection(bearer("two", "https://api.example.com/v1"), TENANT)
+        .create_connection_entering(bearer("two", "https://api.example.com/v1"), TENANT)
         .await
         .unwrap();
     let elsewhere = second
-        .create_connection(
+        .create_connection_entering(
             bearer("three", "https://api.example.com/v1"),
             "auth0|globex",
         )
@@ -737,11 +745,11 @@ async fn a_leaving_tenants_keys_are_destroyed_and_its_secrets_with_them() {
     let sealed = fixture.sealed();
     let service = fixture.service(Some(sealed.clone()));
     let leaving = service
-        .create_connection(bearer("api", "https://api.example.com/v1"), TENANT)
+        .create_connection_entering(bearer("api", "https://api.example.com/v1"), TENANT)
         .await
         .unwrap();
     let staying = service
-        .create_connection(
+        .create_connection_entering(
             bearer("theirs", "https://api.example.com/v1"),
             "other-tenant",
         )
@@ -921,7 +929,10 @@ async fn an_mcp_connections_extra_headers_are_stored_sealed() {
         },
     }))
     .unwrap();
-    let id = service.create_connection(request, TENANT).await.unwrap();
+    let id = service
+        .create_connection_entering(request, TENANT)
+        .await
+        .unwrap();
 
     let (format, stored) = fixture.row(&id).await;
     assert_eq!(format, "seal");

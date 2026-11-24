@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from test_dsl_p1_fixes import RUN, call, compile_latest, edge, execute, fin, graph, imm, op, ref, run  # noqa: E402
+from test_dsl_p1_fixes import RUN, call, compile_latest, create_connection, edge, execute, fin, graph, imm, op, ref, run  # noqa: E402
 
 RESULTS = []
 
@@ -83,7 +83,7 @@ def check_graph_shapes():
         check(f"{label}: save rejects with {code}", status == 400 and got == [code], {"status": status, "codes": got})
 
     # B6: two conditioned onError edges on an AiAgent save and compile.
-    status, body = call("POST", "/connections", {
+    status, body = create_connection({
         "title": f"rf-bedrock-{RUN}", "integrationId": "aws_credentials",
         "connectionParameters": {"aws_access_key_id": "AKIATESTONLY", "aws_secret_access_key": "test-not-real",
                                  "aws_region": "us-east-1"}})
