@@ -110,18 +110,25 @@ fn only_a_read_is_retried() {
 }
 
 #[test]
-fn a_refund_the_gateway_refuses_is_no_unknown_outcome() {
-    // WooCommerce deletes the refund again, then answers 500.
-    let body = r#"{"code":"woocommerce_rest_cannot_create_order_refund","message":"The payment gateway for this order does not support automatic refunds.","data":500}"#;
-    let err = decode::<Value>("POST", response(500, body, &[])).unwrap_err();
-    assert_eq!(err.code, "WOOCOMMERCE_REQUEST_FAILED");
-    assert_eq!(err.category, "permanent");
-    assert!(err.message.contains("automatic refunds"), "{}", err.message);
-    // Any other 500 of a write may have been carried out.
-    let body =
-        r#"{"code":"woocommerce_rest_cannot_create","message":"Error","data":{"status":500}}"#;
-    let err = decode::<Value>("POST", response(500, body, &[])).unwrap_err();
-    assert_eq!(err.code, "WOOCOMMERCE_OUTCOME_UNKNOWN");
+fn a_refund_answered_with_a_500_may_have_been_made() {
+    // WooCommerce gives the same code and status to a refund the gateway
+    // cannot make at all and to one whose gateway call failed, which may have
+    // returned the money already; either way the step is not sent again.
+    for message in [
+        "The payment gateway for this order does not support automatic refunds.",
+        "An error occurred while attempting to create the refund using the payment gateway API.",
+    ] {
+        let body = json!({
+            "code": "woocommerce_rest_cannot_create_order_refund",
+            "message": message,
+            "data": 500,
+        })
+        .to_string();
+        let err = decode::<Value>("POST", response(500, &body, &[])).unwrap_err();
+        assert_eq!(err.code, "WOOCOMMERCE_OUTCOME_UNKNOWN", "{message}");
+        assert_eq!(err.category, "permanent", "{message}");
+        assert!(err.message.contains(message), "{}", err.message);
+    }
 }
 
 #[test]

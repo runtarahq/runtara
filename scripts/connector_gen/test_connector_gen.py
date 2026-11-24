@@ -1063,6 +1063,21 @@ class FieldTypesTest(unittest.TestCase):
         image = record["properties"]["lines"]["items"]["properties"]["image"]
         self.assertEqual(image["properties"]["id"], {"description": "Any id."})
 
+    def test_a_dotted_component_name_and_a_property_called_items_are_reached(self):
+        sliced = {"components": {"schemas": {
+            "Order.Line": {"type": "object", "properties": {"id": {"type": "integer"}}},
+            "Cart": {"type": "object", "properties": {
+                "items": {"type": "object", "properties": {"sku": {"type": "integer"}}},
+                "lines": {"type": "array", "items": {"type": "object", "properties": {"sku": {"type": "integer"}}}},
+            }},
+        }}}
+        cg.retype_fields(sliced, {"Order.Line": {"id": "string"}, "Cart.items": {"sku": "string"},
+                                  "Cart.lines.items": {"sku": "string"}})
+        schemas = sliced["components"]["schemas"]
+        self.assertEqual(schemas["Order.Line"]["properties"]["id"], {"type": "string"})
+        self.assertEqual(schemas["Cart"]["properties"]["items"]["properties"]["sku"], {"type": "string"})
+        self.assertEqual(schemas["Cart"]["properties"]["lines"]["items"]["properties"]["sku"], {"type": "string"})
+
     def test_an_unknown_schema_or_property_fails(self):
         for field_types, named in (({"Reply": {"id": "string"}}, "`Reply`"),
                                    ({"Record": {"id": "string", "note": "string"}}, "['note']"),

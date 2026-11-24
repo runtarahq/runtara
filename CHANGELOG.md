@@ -32,9 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not a read and gets no answer, a 5xx or an answer it cannot read fails with
   `WOOCOMMERCE_OUTCOME_UNKNOWN` instead of being sent again: WooCommerce has
   no idempotency key, and an update sent twice adds its new line items again.
-  A refund the payment gateway refuses, which WooCommerce answers with a 500
-  once it has deleted it again, is `WOOCOMMERCE_REQUEST_FAILED`. Only a GET is
-  retried. A list in the query is sent as PHP reads one
+  That includes a refund answered with a 500: WooCommerce gives the same
+  answer to one the payment gateway cannot make and to one whose gateway call
+  failed after the money may have been returned. Only a GET, or a request
+  refused with a 429, is retried. A list in the query is sent as PHP reads one
   (`status[0]=…`). An unknown id is `WOOCOMMERCE_NOT_FOUND`, and an error
   says which argument WooCommerce refused and why. Lists answer the page's
   records: a page of fewer than `per_page` is the last.

@@ -1441,17 +1441,12 @@ def retype_fields(sliced: dict, fields: dict) -> None:
     spec should have given it}, for a field `input_types` cannot reach, such as
     one inside the items of a request-body array. Zoho's spec types a record's
     `$append_values` as a string; its API takes an object. A schema written
-    inside another is named by the path to it, through `properties` and
-    `items`: WooCommerce's `shop_order.line_items.items.image` is the image of
-    an order's line item."""
+    inside another is named by the path to it (see `named_schema`):
+    WooCommerce's `shop_order.line_items.items.image` is the image of an
+    order's line item."""
     schemas = sliced["components"].get("schemas", {})
     for schema, types in fields.items():
-        name, *inner = schema.split(".")
-        node = schemas.get(name, {})
-        for step in inner:
-            node = deref(sliced, node)
-            node = node.get("items", {}) if step == "items" else (node.get("properties") or {}).get(step, {})
-        properties = deref(sliced, node).get("properties")
+        properties = deref(sliced, named_schema(sliced, schemas, schema)).get("properties")
         if properties is None:
             sys.exit(f"field_types: `{schema}` is no schema with properties in spec.slice.json")
         unknown = sorted(set(types) - set(properties))
@@ -1459,6 +1454,25 @@ def retype_fields(sliced: dict, fields: dict) -> None:
             sys.exit(f"field_types: `{schema}` in spec.slice.json has no properties {unknown}")
         for name, new in types.items():
             properties[name] = retyped_schema(deref(sliced, properties[name]), new)
+
+
+def named_schema(sliced: dict, schemas: dict, key: str) -> dict:
+    """The schema a `field_types` key names: the component of that name, or
+    else the one reached from a component by the path after its name, a
+    property at each step. `items` is an array's items where the schema at
+    that step is an array, and a property of that name anywhere else (a cart's
+    `items`). `{}` when the path leads nowhere."""
+    if key in schemas:
+        return schemas[key]
+    name, *steps = key.split(".")
+    node = schemas.get(name, {})
+    for step in steps:
+        node = deref(sliced, node)
+        kind = node.get("type")
+        array = kind == "array" or (isinstance(kind, list) and "array" in kind) or (
+            kind is None and "items" in node and "properties" not in node)
+        node = (node.get("items") if step == "items" and array else (node.get("properties") or {}).get(step)) or {}
+    return node
 
 
 def retype_inputs(sliced: dict, types: dict) -> None:

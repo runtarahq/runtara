@@ -13,9 +13,13 @@
 //! outcome is unknown: WooCommerce has no idempotency key, and sending an
 //! order, a refund or a note again after a timeout or a 5xx makes a second
 //! one. An update (PUT) is no safer: line items, coupons or meta data it
-//! carries without an id are added again. Only a GET is sent again. A write
+//! carries without an id are added again. Only a GET is sent again, and a
+//! request refused with a 429, which the store never carried out. A write
 //! whose answer cannot be read counts as unknown too, because it may have been
-//! carried out. See [`outcome_unknown`].
+//! carried out. So does a refund answered with a 500: WooCommerce answers one
+//! the payment gateway cannot make at all with the same code as one whose
+//! gateway call failed, maybe after the money was returned. See
+//! [`outcome_unknown`].
 //!
 //! WordPress habits the schema does not state: an error answers
 //! `{"code": "woocommerce_rest_…", "message": "…", "data": {"status": 404}}`,
@@ -480,8 +484,7 @@ pub fn woocommerce_error_message(body: &[u8]) -> Option<String> {
 ///   `<PREFIX>_NOT_FOUND` (no order, product or customer with that id, or no
 ///   such route), 429 is transient (something in front of the store refused
 ///   the request), a 5xx is transient for a read and [`outcome_unknown`]
-///   otherwise (but for a refusal WooCommerce answers with a 500, such as a
-///   refund the payment gateway cannot make), and the rest are permanent.
+///   otherwise, and the rest are permanent.
 /// - An empty 2xx body decodes as JSON `null`, so an operation without a
 ///   response body returns `Value::Null`.
 /// - A 2xx body that is not JSON (text, binary) decodes as a JSON string of its
@@ -505,9 +508,6 @@ pub fn decode<T: DeserializeOwned>(
                 .with_retry_after_ms(retry_after_ms(&response.headers)),
             500..=599 if is_read(method) => {
                 AgentError::transient(format!("{prefix}_UPSTREAM_ERROR"), message)
-            }
-            500..=599 if refused(&response.body) => {
-                AgentError::permanent(format!("{prefix}_REQUEST_FAILED"), message)
             }
             500..=599 => outcome_unknown(prefix, message),
             401 | 403 => AgentError::permanent(
@@ -573,15 +573,6 @@ fn record_id(body: &Value) -> Option<String> {
         Value::Number(id) => Some(id.to_string()),
         _ => None,
     }
-}
-
-/// WooCommerce errors answered with a 5xx that say nothing was done. A refund
-/// the payment gateway refuses ("does not support automatic refunds") is
-/// deleted again before the 500 is answered.
-const REFUSED_WITH_A_5XX: &[&str] = &["woocommerce_rest_cannot_create_order_refund"];
-
-fn refused(body: &[u8]) -> bool {
-    response_code(body).is_some_and(|code| REFUSED_WITH_A_5XX.contains(&code.as_str()))
 }
 
 /// The `code` of a WordPress REST error body.

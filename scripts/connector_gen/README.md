@@ -347,7 +347,10 @@ field_types:
 ```
 
 A schema written inside another, with no name of its own, is named by the
-path to it through `properties` and `items`. WooCommerce's schema types the
+path to it from a component: a property at each step, but for `items` where
+the schema there is an array, which steps into its items (a property called
+`items` is reached where the schema is no array). A key that is a component's
+whole name, dots and all, names that component. WooCommerce's schema types the
 `id` of a line item's image an integer, and the store sends 37, `"50"` or 0;
 a schema without a type takes any value:
 
