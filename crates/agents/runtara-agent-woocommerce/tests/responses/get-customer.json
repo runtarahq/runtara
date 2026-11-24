@@ -1,0 +1,72 @@
+{
+  "id": 3,
+  "date_created": "2026-11-24T09:48:31",
+  "date_created_gmt": "2026-11-24T09:48:31",
+  "date_modified": "2026-11-24T09:48:31",
+  "date_modified_gmt": "2026-11-24T09:48:31",
+  "email": "runtara-qa+1795513711@example.com",
+  "first_name": "Runtara",
+  "last_name": "QA",
+  "role": "customer",
+  "username": "runtara-qa1795513711",
+  "billing": {
+    "first_name": "Runtara",
+    "last_name": "QA",
+    "company": "",
+    "address_1": "1 Test St",
+    "address_2": "",
+    "city": "San Francisco",
+    "postcode": "94103",
+    "country": "US",
+    "state": "CA",
+    "email": "runtara-qa+1795513711@example.com",
+    "phone": ""
+  },
+  "shipping": {
+    "first_name": "Runtara",
+    "last_name": "QA",
+    "company": "",
+    "address_1": "1 Test St",
+    "address_2": "",
+    "city": "San Francisco",
+    "postcode": "94103",
+    "country": "US",
+    "state": "CA",
+    "phone": ""
+  },
+  "is_paying_customer": true,
+  "avatar_url": "https://secure.gravatar.com/avatar/d5f247328a7a7462b26f9517f53289bbc0dc8d48f406fae5817ccc5f58d75284?s=96&d=mm&r=g",
+  "meta_data": [
+    {
+      "id": 46,
+      "key": "default_password_nag",
+      "value": "1"
+    },
+    {
+      "id": 64,
+      "key": "wc_last_active",
+      "value": "1795513711"
+    }
+  ],
+  "_links": {
+    "self": [
+      {
+        "href": "https://localhost:8091/wp-json/wc/v3/customers/3",
+        "targetHints": {
+          "allow": [
+            "GET",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE"
+          ]
+        }
+      }
+    ],
+    "collection": [
+      {
+        "href": "https://localhost:8091/wp-json/wc/v3/customers"
+      }
+    ]
+  }
+}

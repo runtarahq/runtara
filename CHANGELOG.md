@@ -13,6 +13,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **WooCommerce agent, generated from the REST schema a store serves.**
+  Twenty-four capabilities: list, read, create, update and delete orders
+  (status changes cover holding, cancelling and completing them), list and add
+  their notes, and list, read and create their refunds (by amount and by line
+  item, through the payment gateway or recorded only, restocking or not);
+  list, read, create, update and delete products, list, read, create and
+  update their variations, and list product categories; list, read, create and
+  update customers. WooCommerce publishes no spec: the agent is generated from
+  what a stock WooCommerce 11.3.1 store answers at
+  `/wp-json/wc/v3?context=help`, kept in the crate with one addition (a
+  refund's `line_items`, which the endpoint takes though its schema marks them
+  read-only). The new `woocommerce_api_key` connection type takes the site's
+  address (with the path WordPress lives under, if any), a REST API key's
+  consumer key and its secret, sent as HTTP Basic under that address to
+  `<store>/wp-json/wc/v3`; WooCommerce reads a key over HTTPS only. It is
+  limited by default to 5 requests/s with a burst of 10. A request that is
+  not a read and gets no answer, a 5xx or an answer it cannot read fails with
+  `WOOCOMMERCE_OUTCOME_UNKNOWN` instead of being sent again: WooCommerce has
+  no idempotency key, and an update sent twice adds its new line items again.
+  A refund the payment gateway refuses, which WooCommerce answers with a 500
+  once it has deleted it again, is `WOOCOMMERCE_REQUEST_FAILED`. Only a GET is
+  retried. A list in the query is sent as PHP reads one
+  (`status[0]=…`). An unknown id is `WOOCOMMERCE_NOT_FOUND`, and an error
+  says which argument WooCommerce refused and why. Lists answer the page's
+  records: a page of fewer than `per_page` is the last.
+  Not covered: OAuth 1.0a signed requests (WooCommerce over plain HTTP), a key
+  sent in the query string for hosts that drop the `Authorization` header,
+  batch endpoints, coupons, webhooks, and filtering variations by attribute.
+
+- **`connector_gen` reads a WordPress site's REST index.** A spec with
+  `format: wordpress` is the index a site serves of a REST namespace
+  (`/wp-json/<namespace>?context=help`), turned into OpenAPI 3.1 by
+  `wordpress_source.py`: route patterns become typed path parameters, a
+  GET's or DELETE's arguments the query and a POST's or PUT's a JSON body,
+  WordPress's own types JSON Schema's, and each operation is named after its
+  path (`listOrderRefunds`). A request body takes no defaults, since some are
+  the site's own settings. `field_types` also reaches a schema written inside
+  another, by the path to it (`shop_order.line_items.items.image`). The
+  existing generated agents are unchanged.
+
 - **Magento / Adobe Commerce agent, generated from Magento's REST schema.**
   Twenty-nine capabilities: search and read orders, comment on, hold, unhold
   and cancel them, invoice, ship (with tracking), add a track to a shipment

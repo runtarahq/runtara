@@ -192,6 +192,12 @@
     "fnv1a64": "24f2b23d6e481f2e"
   },
   {
+    "integrationId": "woocommerce_api_key",
+    "fieldCount": 3,
+    "serializedBytes": 1613,
+    "fnv1a64": "ee40755a4c8e1853"
+  },
+  {
     "integrationId": "xero_oauth",
     "fieldCount": 5,
     "serializedBytes": 1852,

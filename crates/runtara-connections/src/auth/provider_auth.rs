@@ -1,7 +1,7 @@
 use runtara_agents::extractors::connection_types::{
     GEMINI_API_BASE_URL, SHIPPO_API_BASE_URL, SHIPPO_API_VERSION, ZENDESK_DEFAULT_SCOPE,
     bigcommerce_base_url, connection_environment, jira_base_url, magento_base_url, paypal_base_url,
-    ups_base_url, zendesk_base_url,
+    ups_base_url, woocommerce_base_url, zendesk_base_url,
 };
 use runtara_agents::registry::find_connection_type;
 use runtara_dsl::agent_meta::{OAuthConfig, TokenEndpointAuth};
@@ -263,6 +263,14 @@ pub(crate) fn describe_connection_auth(
             azure_signing: None,
             deferred_auth: None,
         },
+        // WooCommerce: as Magento, every store is a host of its own, the
+        // address the user gives; an invalid one leaves no base URL.
+        "woocommerce_api_key" => ConnectionAuthDescriptor {
+            base_url: woocommerce_store_url(params),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: None,
+        },
         // Zendesk: every account has its own host. An invalid subdomain leaves no
         // base URL, so a credentialed request fails closed at the proxy's pin step.
         "zendesk_client_credentials" => ConnectionAuthDescriptor {
@@ -485,6 +493,10 @@ pub(crate) fn bigcommerce_store_url(params: &Value) -> Option<String> {
 
 pub(crate) fn magento_store_url(params: &Value) -> Option<String> {
     magento_base_url(params["store_url"].as_str()?).ok()
+}
+
+pub(crate) fn woocommerce_store_url(params: &Value) -> Option<String> {
+    woocommerce_base_url(params["store_url"].as_str()?).ok()
 }
 
 fn zendesk_account_url(params: &Value) -> Option<String> {
@@ -1305,6 +1317,35 @@ mod tests {
             descriptor.base_url.as_deref(),
             Some("https://example.com/shop")
         );
+    }
+
+    #[test]
+    fn woocommerce_pins_the_stores_address() {
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "woocommerce_api_key",
+            &json!({
+                "store_url": "https://example.com/shop/wp-json/wc/v3/",
+                "consumer_key": "ck_abc",
+                "consumer_secret": "cs_secret"
+            }),
+            &mut headers,
+        );
+        // The credential is seal's to attach.
+        assert!(!headers.contains_key("Authorization"));
+        assert_eq!(
+            descriptor.base_url.as_deref(),
+            Some("https://example.com/shop")
+        );
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "woocommerce_api_key",
+            &json!({"store_url": "https://shop.example.com?x=1", "consumer_key": "ck_abc"}),
+            &mut headers,
+        );
+        assert_eq!(descriptor.base_url, None);
     }
 
     #[test]

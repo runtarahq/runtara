@@ -1,0 +1,195 @@
+[
+  {
+    "id": 1,
+    "date_created": "2026-11-24T09:47:10",
+    "date_created_gmt": "2026-11-24T09:47:10",
+    "date_modified": null,
+    "date_modified_gmt": null,
+    "email": "admin@example.com",
+    "first_name": "",
+    "last_name": "",
+    "role": "administrator",
+    "username": "admin",
+    "billing": {
+      "first_name": "",
+      "last_name": "",
+      "company": "",
+      "address_1": "",
+      "address_2": "",
+      "city": "",
+      "postcode": "",
+      "country": "",
+      "state": "",
+      "email": "",
+      "phone": ""
+    },
+    "shipping": {
+      "first_name": "",
+      "last_name": "",
+      "company": "",
+      "address_1": "",
+      "address_2": "",
+      "city": "",
+      "postcode": "",
+      "country": "",
+      "state": "",
+      "phone": ""
+    },
+    "is_paying_customer": false,
+    "avatar_url": "https://secure.gravatar.com/avatar/258d8dc916db8cea2cafb6c3cd0cb0246efe061421dbd83ec3a350428cabda4f?s=96&d=mm&r=g",
+    "meta_data": [],
+    "_links": {
+      "self": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/customers/1",
+          "targetHints": {
+            "allow": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH"
+            ]
+          }
+        }
+      ],
+      "collection": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/customers"
+        }
+      ]
+    }
+  },
+  {
+    "id": 3,
+    "date_created": "2026-11-24T09:48:31",
+    "date_created_gmt": "2026-11-24T09:48:31",
+    "date_modified": "2026-11-24T09:48:31",
+    "date_modified_gmt": "2026-11-24T09:48:31",
+    "email": "runtara-qa+1795513711@example.com",
+    "first_name": "Runtara",
+    "last_name": "QA",
+    "role": "customer",
+    "username": "runtara-qa1795513711",
+    "billing": {
+      "first_name": "Runtara",
+      "last_name": "QA",
+      "company": "",
+      "address_1": "1 Test St",
+      "address_2": "",
+      "city": "San Francisco",
+      "postcode": "94103",
+      "country": "US",
+      "state": "CA",
+      "email": "runtara-qa+1795513711@example.com",
+      "phone": ""
+    },
+    "shipping": {
+      "first_name": "Runtara",
+      "last_name": "QA",
+      "company": "",
+      "address_1": "1 Test St",
+      "address_2": "",
+      "city": "San Francisco",
+      "postcode": "94103",
+      "country": "US",
+      "state": "CA",
+      "phone": ""
+    },
+    "is_paying_customer": true,
+    "avatar_url": "https://secure.gravatar.com/avatar/d5f247328a7a7462b26f9517f53289bbc0dc8d48f406fae5817ccc5f58d75284?s=96&d=mm&r=g",
+    "meta_data": [
+      {
+        "id": 46,
+        "key": "default_password_nag",
+        "value": "1"
+      },
+      {
+        "id": 64,
+        "key": "wc_last_active",
+        "value": "1795513711"
+      }
+    ],
+    "_links": {
+      "self": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/customers/3",
+          "targetHints": {
+            "allow": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ]
+          }
+        }
+      ],
+      "collection": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/customers"
+        }
+      ]
+    }
+  },
+  {
+    "id": 2,
+    "date_created": "2026-11-24T09:47:36",
+    "date_created_gmt": "2026-11-24T09:47:36",
+    "date_modified": null,
+    "date_modified_gmt": null,
+    "email": "info@woocommerce.com",
+    "first_name": "",
+    "last_name": "",
+    "role": "subscriber",
+    "username": "shopmanager",
+    "billing": {
+      "first_name": "",
+      "last_name": "",
+      "company": "",
+      "address_1": "",
+      "address_2": "",
+      "city": "",
+      "postcode": "",
+      "country": "",
+      "state": "",
+      "email": "",
+      "phone": ""
+    },
+    "shipping": {
+      "first_name": "",
+      "last_name": "",
+      "company": "",
+      "address_1": "",
+      "address_2": "",
+      "city": "",
+      "postcode": "",
+      "country": "",
+      "state": "",
+      "phone": ""
+    },
+    "is_paying_customer": false,
+    "avatar_url": "https://secure.gravatar.com/avatar/c7781a3c13bcc86b57064b9539ec22da52fd5ef1902fbc020d0a4a8595b14ea0?s=96&d=mm&r=g",
+    "meta_data": [],
+    "_links": {
+      "self": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/customers/2",
+          "targetHints": {
+            "allow": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ]
+          }
+        }
+      ],
+      "collection": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/customers"
+        }
+      ]
+    }
+  }
+]

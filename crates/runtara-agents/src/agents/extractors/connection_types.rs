@@ -1993,16 +1993,24 @@ impl HttpConnectionExtractor for BigCommerceExtractor {
 /// the deployment's to allow, when the connection is saved and when a request
 /// is sent.
 pub fn magento_base_url(store_url: &str) -> Result<String, String> {
-    let raw = store_url.trim();
-    let invalid = || {
+    store_base_url(store_url, "/rest").ok_or_else(|| {
         format!(
-            "Invalid Magento store URL `{raw}`: use the store's address, e.g. https://shop.example.com or https://example.com/shop"
+            "Invalid Magento store URL `{}`: use the store's address, e.g. https://shop.example.com or https://example.com/shop",
+            store_url.trim()
         )
-    };
-    let (scheme, rest) = raw.split_once("://").ok_or_else(invalid)?;
+    })
+}
+
+/// The base URL of a store that is a host of its own (see
+/// [`magento_base_url`]): `http(s)://host[:port][/path]`, without a trailing
+/// `/` or the API path (`api_path`, and anything after it) a user may paste
+/// after the store's address. None for anything else.
+fn store_base_url(store_url: &str, api_path: &str) -> Option<String> {
+    let raw = store_url.trim();
+    let (scheme, rest) = raw.split_once("://")?;
     let scheme = scheme.to_ascii_lowercase();
     if scheme != "https" && scheme != "http" {
-        return Err(invalid());
+        return None;
     }
     let (authority, path) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
     let (host, port) = match authority.rsplit_once(':') {
@@ -2028,10 +2036,10 @@ pub fn magento_base_url(store_url: &str) -> Result<String, String> {
     });
     let mut path = path.trim_end_matches('/').to_string();
     // An API path pasted after the store's address: `/rest`, `/rest/V1/…`.
-    if let Some(at) = path
-        .find("/rest/")
-        .or_else(|| path.ends_with("/rest").then(|| path.len() - "/rest".len()))
-    {
+    if let Some(at) = path.find(&format!("{api_path}/")).or_else(|| {
+        path.ends_with(api_path)
+            .then(|| path.len() - api_path.len())
+    }) {
         path.truncate(at);
     }
     let path_ok = path
@@ -2042,10 +2050,10 @@ pub fn magento_base_url(store_url: &str) -> Result<String, String> {
             .skip(1)
             .all(|segment| !segment.is_empty() && segment != "." && segment != "..");
     if !(host_ok && port_ok && path_ok) {
-        return Err(invalid());
+        return None;
     }
     let port = port.map(|port| format!(":{port}")).unwrap_or_default();
-    Ok(format!("{scheme}://{host}{port}{path}"))
+    Some(format!("{scheme}://{host}{port}{path}"))
 }
 
 /// Parameters for a Magento / Adobe Commerce integration's access token
@@ -2098,6 +2106,97 @@ impl HttpConnectionExtractor for MagentoExtractor {
             headers,
             query_parameters: HashMap::new(),
             url_prefix: magento_base_url(&p.store_url)?,
+            rate_limit_config: None,
+        })
+    }
+}
+
+// ============================================================================
+// WooCommerce Connection Type
+// ============================================================================
+
+/// The base URL of a WooCommerce store, which its REST API is under: the
+/// WordPress site's address (`https://shop.example.com`), or with the path
+/// WordPress lives under (`https://example.com/shop`). A trailing `/` and an
+/// API path pasted after it (`/wp-json/wc/v3/…`) are dropped. Requests go to
+/// `<base>/wp-json/wc/v3/…`, and the proxy keeps them under the base. What
+/// passes is what [`magento_base_url`] lets pass.
+pub fn woocommerce_base_url(store_url: &str) -> Result<String, String> {
+    store_base_url(store_url, "/wp-json").ok_or_else(|| {
+        format!(
+            "Invalid WooCommerce store URL `{}`: use the site's address, e.g. https://shop.example.com or https://example.com/shop",
+            store_url.trim()
+        )
+    })
+}
+
+/// Parameters for a WooCommerce REST API key
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "woocommerce_api_key",
+    display_name = "WooCommerce",
+    description = "Connect to a WooCommerce store with a REST API key (consumer key and secret)",
+    category = "ecommerce",
+    auth_type = "api_key"
+)]
+pub struct WooCommerceApiKeyParams {
+    /// The WordPress site's address
+    #[field(
+        display_name = "Store URL",
+        description = "The site's address, as in WordPress → Settings → General → Site Address: https://shop.example.com, or with the path WordPress lives under (https://example.com/shop). Steps reach the WooCommerce REST API under <store URL>/wp-json/wc/v3, which needs Settings → Permalinks to be anything but Plain. Use HTTPS: WooCommerce accepts a key over HTTPS only",
+        placeholder = "https://shop.example.com",
+        is_url
+    )]
+    pub store_url: String,
+
+    /// The REST API key's consumer key
+    #[field(
+        display_name = "Consumer Key",
+        description = "The Consumer key (ck_…) of a REST API key, from WooCommerce → Settings → Advanced → REST API → Add key. The key's user and its permissions (Read or Read/Write) decide what steps can read and change",
+        placeholder = "ck_…",
+        is_required
+    )]
+    pub consumer_key: String,
+
+    /// The REST API key's consumer secret
+    #[field(
+        display_name = "Consumer Secret",
+        description = "The Consumer secret (cs_…) WooCommerce shows once, when the key is generated",
+        secret,
+        is_required
+    )]
+    pub consumer_secret: String,
+}
+
+/// HTTP extractor for WooCommerce connections.
+pub struct WooCommerceExtractor;
+
+impl HttpConnectionExtractor for WooCommerceExtractor {
+    fn integration_id(&self) -> &'static str {
+        "woocommerce_api_key"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        let p: WooCommerceApiKeyParams = serde_json::from_value(params.clone())
+            .map_err(|e| format!("Invalid woocommerce_api_key connection parameters: {}", e))?;
+
+        // HTTP Basic with `consumer_key:consumer_secret`, as WooCommerce reads
+        // a key over HTTPS. Both are trimmed, as a pasted value often ends in a
+        // newline.
+        let credentials = format!("{}:{}", p.consumer_key.trim(), p.consumer_secret.trim());
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            format!(
+                "Basic {}",
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, credentials)
+            ),
+        );
+
+        Ok(HttpConnectionConfig {
+            headers,
+            query_parameters: HashMap::new(),
+            url_prefix: woocommerce_base_url(&p.store_url)?,
             rate_limit_config: None,
         })
     }

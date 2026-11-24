@@ -1,0 +1,93 @@
+{
+  "id": 34,
+  "type": "variation",
+  "date_created": "2019-01-16T13:01:55",
+  "date_created_gmt": "2019-01-16T13:01:55",
+  "date_modified": "2026-11-24T09:54:04",
+  "date_modified_gmt": "2026-11-24T09:54:04",
+  "description": "<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vestibulum sagittis orci ac odio dictum tincidunt. Donec ut metus leo. Class aptent taciti sociosqu ad litora torquent per conubia nostra, per inceptos himenaeos. Sed luctus, dui eu sagittis sodales, nulla nibh sagittis augue, vel porttitor diam enim non metus. Vestibulum aliquam augue neque. Phasellus tincidunt odio eget ullamcorper efficitur. Cras placerat ut turpis pellentesque vulputate. Nam sed consequat tortor. Curabitur finibus sapien dolor. Ut eleifend tellus nec erat pulvinar dignissim. Nam non arcu purus. Vivamus et massa massa.</p>\n",
+  "permalink": "https://localhost:8091/product/hoodie/?attribute_pa_color=blue&attribute_logo=Yes",
+  "sku": "woo-hoodie-blue-logo",
+  "global_unique_id": "",
+  "price": "45",
+  "regular_price": "45",
+  "sale_price": "",
+  "date_on_sale_from": null,
+  "date_on_sale_from_gmt": null,
+  "date_on_sale_to": null,
+  "date_on_sale_to_gmt": null,
+  "on_sale": false,
+  "status": "publish",
+  "purchasable": true,
+  "virtual": false,
+  "downloadable": false,
+  "downloads": [],
+  "download_limit": 0,
+  "download_expiry": 0,
+  "tax_status": "taxable",
+  "tax_class": "",
+  "manage_stock": true,
+  "stock_quantity": 6,
+  "stock_status": "instock",
+  "backorders": "no",
+  "backorders_allowed": false,
+  "backordered": false,
+  "low_stock_amount": null,
+  "weight": "1.5",
+  "dimensions": {
+    "length": "10",
+    "width": "8",
+    "height": "3"
+  },
+  "shipping_class": "",
+  "shipping_class_id": 0,
+  "image": null,
+  "gallery_image_ids": [],
+  "attributes": [
+    {
+      "id": 1,
+      "name": "color",
+      "slug": "pa_color",
+      "option": "Blue"
+    },
+    {
+      "id": 0,
+      "name": "Logo",
+      "slug": "logo",
+      "option": "Yes"
+    }
+  ],
+  "menu_order": 0,
+  "meta_data": [],
+  "name": "Blue, Yes",
+  "parent_id": 11,
+  "customs_commodity_code": null,
+  "customs_country_of_origin": null,
+  "customs_description": null,
+  "_links": {
+    "self": [
+      {
+        "href": "https://localhost:8091/wp-json/wc/v3/products/11/variations/34",
+        "targetHints": {
+          "allow": [
+            "GET",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE"
+          ]
+        }
+      }
+    ],
+    "collection": [
+      {
+        "href": "https://localhost:8091/wp-json/wc/v3/products/11/variations"
+      }
+    ],
+    "up": [
+      {
+        "href": "https://localhost:8091/wp-json/wc/v3/products/11"
+      }
+    ]
+  }
+}

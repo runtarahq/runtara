@@ -1,0 +1,226 @@
+[
+  {
+    "id": 25,
+    "name": "Accessories",
+    "slug": "accessories",
+    "parent": 0,
+    "description": "",
+    "display": "default",
+    "image": null,
+    "menu_order": 0,
+    "count": 5,
+    "_links": {
+      "self": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/products/categories/25",
+          "targetHints": {
+            "allow": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ]
+          }
+        }
+      ],
+      "collection": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/products/categories"
+        }
+      ]
+    }
+  },
+  {
+    "id": 28,
+    "name": "Clothing",
+    "slug": "clothing",
+    "parent": 0,
+    "description": "",
+    "display": "default",
+    "image": null,
+    "menu_order": 0,
+    "count": 1,
+    "_links": {
+      "self": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/products/categories/28",
+          "targetHints": {
+            "allow": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ]
+          }
+        }
+      ],
+      "collection": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/products/categories"
+        }
+      ]
+    }
+  },
+  {
+    "id": 29,
+    "name": "Decor",
+    "slug": "decor",
+    "parent": 0,
+    "description": "",
+    "display": "default",
+    "image": null,
+    "menu_order": 0,
+    "count": 1,
+    "_links": {
+      "self": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/products/categories/29",
+          "targetHints": {
+            "allow": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ]
+          }
+        }
+      ],
+      "collection": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/products/categories"
+        }
+      ]
+    }
+  },
+  {
+    "id": 23,
+    "name": "Hoodies",
+    "slug": "hoodies",
+    "parent": 0,
+    "description": "",
+    "display": "default",
+    "image": null,
+    "menu_order": 0,
+    "count": 3,
+    "_links": {
+      "self": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/products/categories/23",
+          "targetHints": {
+            "allow": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ]
+          }
+        }
+      ],
+      "collection": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/products/categories"
+        }
+      ]
+    }
+  },
+  {
+    "id": 27,
+    "name": "Music",
+    "slug": "music",
+    "parent": 0,
+    "description": "",
+    "display": "default",
+    "image": null,
+    "menu_order": 0,
+    "count": 2,
+    "_links": {
+      "self": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/products/categories/27",
+          "targetHints": {
+            "allow": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ]
+          }
+        }
+      ],
+      "collection": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/products/categories"
+        }
+      ]
+    }
+  },
+  {
+    "id": 22,
+    "name": "Tshirts",
+    "slug": "tshirts",
+    "parent": 0,
+    "description": "",
+    "display": "default",
+    "image": null,
+    "menu_order": 0,
+    "count": 5,
+    "_links": {
+      "self": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/products/categories/22",
+          "targetHints": {
+            "allow": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ]
+          }
+        }
+      ],
+      "collection": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/products/categories"
+        }
+      ]
+    }
+  },
+  {
+    "id": 15,
+    "name": "Uncategorized",
+    "slug": "uncategorized",
+    "parent": 0,
+    "description": "",
+    "display": "default",
+    "image": null,
+    "menu_order": 0,
+    "count": 0,
+    "_links": {
+      "self": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/products/categories/15",
+          "targetHints": {
+            "allow": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ]
+          }
+        }
+      ],
+      "collection": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/products/categories"
+        }
+      ]
+    }
+  }
+]

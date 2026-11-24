@@ -1040,7 +1040,9 @@ class FieldTypesTest(unittest.TestCase):
         }, "components": {"schemas": {"Record": {"type": "object", "properties": {
             "$append_values": {"type": "string", "maxLength": 10, "examples": ["true"],
                                "description": "Append values."},
-            "id": {"type": "string"}}}}}}
+            "id": {"type": "string"},
+            "lines": {"type": "array", "items": {"type": "object", "properties": {
+                "image": {"type": "object", "properties": {"id": {"type": "integer"}}}}}}}}}}}
 
     def slice(self, field_types: dict) -> dict:
         return cg.slice_specs([({"operations": ["update"]}, self.spec())], {"field_types": field_types})
@@ -1054,9 +1056,18 @@ class FieldTypesTest(unittest.TestCase):
         record = self.slice({"Record": {"id": "integer"}})["components"]["schemas"]["Record"]
         self.assertEqual(record["properties"]["id"], {"type": "integer"})
 
+    def test_a_schema_inside_another_is_named_by_its_path(self):
+        # WooCommerce's `shop_order.line_items.items.image`.
+        record = self.slice({"Record.lines.items.image": {"id": {"description": "Any id."}}})[
+            "components"]["schemas"]["Record"]
+        image = record["properties"]["lines"]["items"]["properties"]["image"]
+        self.assertEqual(image["properties"]["id"], {"description": "Any id."})
+
     def test_an_unknown_schema_or_property_fails(self):
         for field_types, named in (({"Reply": {"id": "string"}}, "`Reply`"),
-                                   ({"Record": {"id": "string", "note": "string"}}, "['note']")):
+                                   ({"Record": {"id": "string", "note": "string"}}, "['note']"),
+                                   ({"Record.lines.items.photo": {"id": "string"}}, "`Record.lines.items.photo`"),
+                                   ({"Record.lines.image": {"id": "string"}}, "`Record.lines.image`")):
             with self.subTest(named), self.assertRaises(SystemExit) as raised:
                 self.slice(field_types)
             self.assertIn(named, str(raised.exception))
@@ -2494,6 +2505,221 @@ class CustomCapabilitiesRenderTest(unittest.TestCase):
         message = self.refusal({"function": "list_everything", "input": "ListEverythingInput",
                                 "outputs": ["ListEverythingOutput", "Item"]})
         self.assertIn("the output struct `Item` is named like a generated output type", message)
+
+
+# ---------------------------------------------------------------------------
+# WordPress REST APIs (wordpress_source.py)
+# ---------------------------------------------------------------------------
+
+import wordpress_source as wp  # noqa: E402
+
+
+def wordpress_index() -> dict:
+    """A namespace's index as WordPress serves it with `?context=help`."""
+    order_schema = {
+        "$schema": "http://json-schema.org/draft-04/schema#", "title": "shop_order", "type": "object",
+        "properties": {
+            "id": {"type": "integer", "context": ["view", "edit"], "readonly": True},
+            "date_paid": {"type": ["null", "string"], "format": "date-time", "context": ["view"]},
+            "date_created": {"type": "date-time", "context": ["view"]},
+            "total": {"type": "string"},
+            "prices_include_tax": {"type": "bool"},
+            "value": {"type": "mixed"},
+            "price": {"type": ["number", "string"]},
+            "meta_data": {"type": "array", "items": {"type": "object", "properties": []}},
+        },
+    }
+    order_args = {
+        "currency": {"type": "string", "default": "USD", "enum": ["USD", "EUR"], "required": False},
+        "status": {"type": "string", "default": "pending", "required": False},
+        "line_items": {"type": "array", "items": {"type": "object", "properties": {
+            "product_id": {"type": "integer", "required": True}, "quantity": {"type": "integer"}}}},
+        "customer_id": {"type": "integer", "required": True},
+    }
+    return {
+        "namespace": "wc/v3",
+        "routes": {
+            "/wc/v3": {"namespace": "wc/v3", "methods": ["GET"], "endpoints": [{"methods": ["GET"], "args": {}}]},
+            "/wc/v3/orders": {"methods": ["GET", "POST"], "schema": order_schema, "endpoints": [
+                {"methods": ["GET"], "args": {
+                    "page": {"type": "integer", "default": 1, "minimum": 1, "required": False},
+                    "context": {"type": "string", "enum": ["view", "edit"], "default": "view"},
+                    "status": {"type": "array", "default": "any", "items": {"type": "string"}},
+                    "include": {"type": "array", "default": [], "items": {"type": "integer"}},
+                    "dates_are_gmt": {"type": "boolean", "default": False},
+                }},
+                {"methods": ["POST"], "args": order_args},
+            ]},
+            "/wc/v3/orders/(?P<id>[\\d]+)": {"methods": ["GET", "POST", "PUT", "PATCH", "DELETE"],
+                                              "schema": order_schema, "endpoints": [
+                {"methods": ["GET"], "args": {"id": {"type": "integer", "description": "The order's ID."}}},
+                {"methods": ["POST", "PUT", "PATCH"], "args": {"id": {"type": "integer"}, **order_args}},
+                {"methods": ["DELETE"], "args": {"id": {"type": "integer"},
+                                                 "force": {"type": "boolean", "default": False}}},
+            ]},
+            "/wc/v3/orders/batch": {"methods": ["POST", "PUT", "PATCH"], "schema": {
+                "title": "batch", "type": "object", "properties": {"create": {"type": "array"}}},
+                "endpoints": [{"methods": ["POST", "PUT", "PATCH"], "args": {"create": {"type": "array"}}}]},
+            "/wc/v3/orders/(?P<order_id>[\\d]+)/notes/(?P<id>[\\d]+)": {"methods": ["GET"], "schema": {
+                "title": "order_note", "type": "object", "properties": {"note": {"type": "string"}}},
+                "endpoints": [{"methods": ["GET"], "args": []}]},
+            "/wc/v3/settings/batch": {"methods": ["POST"], "endpoints": [{"methods": ["POST"], "args": {}}]},
+            "/wc/v3/settings/(?P<group_id>[\\w-]+)/batch": {"methods": ["POST"],
+                                                             "endpoints": [{"methods": ["POST"], "args": {}}]},
+            "/wc/v3/system_status/tools/(.+)": {"methods": ["GET"], "endpoints": [{"methods": ["GET"]}]},
+            "/wp/v2/posts": {"methods": ["GET"], "endpoints": [{"methods": ["GET"], "args": {}}]},
+        },
+    }
+
+
+class WordPressSourceTest(unittest.TestCase):
+    """`format: wordpress`: a namespace's index as OpenAPI."""
+
+    def setUp(self):
+        with contextlib.redirect_stdout(io.StringIO()) as self.notes:
+            self.spec = wp.openapi_spec(wordpress_index())
+
+    def op(self, method: str, path: str) -> dict:
+        return self.spec["paths"][path][method]
+
+    def test_paths_are_relative_to_the_namespace(self):
+        self.assertEqual(self.spec["servers"], [{"url": "/wp-json/wc/v3"}])
+        self.assertEqual(sorted(self.spec["paths"]), [
+            "/orders", "/orders/batch", "/orders/{id}", "/orders/{order_id}/notes/{id}",
+            "/settings/batch", "/settings/{group_id}/batch"])
+        # The namespace's own index, another namespace, and a group without a name.
+        self.assertIn("note: skipped route `/wc/v3/system_status/tools/(.+)`", self.notes.getvalue())
+
+    def test_path_parameters_take_the_type_of_their_pattern(self):
+        note = self.op("get", "/orders/{order_id}/notes/{id}")
+        self.assertEqual([(p["name"], p["in"], p["required"], p["schema"]) for p in note["parameters"]],
+                         [("order_id", "path", True, {"type": "integer"}),
+                          ("id", "path", True, {"type": "integer"})])
+        batch = self.op("post", "/settings/{group_id}/batch")
+        self.assertEqual(batch["parameters"][0]["schema"], {"type": "string"})
+        order = self.op("get", "/orders/{id}")
+        self.assertEqual(order["parameters"][0]["description"], "The order's ID.")
+
+    def test_an_update_is_a_put_and_a_batch_a_post(self):
+        self.assertEqual(sorted(self.spec["paths"]["/orders/{id}"]), ["delete", "get", "put"])
+        self.assertEqual(sorted(self.spec["paths"]["/orders/batch"]), ["post"])
+
+    def test_operations_are_named_after_the_path(self):
+        names = {(method, path): op["operationId"]
+                 for path, item in self.spec["paths"].items() for method, op in item.items()}
+        self.assertEqual(names, {
+            ("get", "/orders"): "listOrders",
+            ("post", "/orders"): "createOrder",
+            ("get", "/orders/{id}"): "getOrder",
+            ("put", "/orders/{id}"): "updateOrder",
+            ("delete", "/orders/{id}"): "deleteOrder",
+            ("post", "/orders/batch"): "batchOrders",
+            ("get", "/orders/{order_id}/notes/{id}"): "getOrderNote",
+            # Two that would share a name: the one with parameters is named after them.
+            ("post", "/settings/batch"): "batchSettings",
+            ("post", "/settings/{group_id}/batch"): "batchSettingsByGroupId",
+        })
+
+    def test_reads_and_deletes_take_their_arguments_in_the_query(self):
+        listing = {p["name"]: p for p in self.op("get", "/orders")["parameters"]}
+        self.assertEqual(listing["page"]["schema"], {"type": "integer", "minimum": 1, "default": 1})
+        self.assertNotIn("required", listing["page"])
+        self.assertEqual(listing["context"]["schema"], {"type": "string", "enum": ["view", "edit"], "default": "view"})
+        # A default that does not fit its type is dropped.
+        self.assertEqual(listing["status"]["schema"], {"type": "array", "items": {"type": "string"}})
+        self.assertEqual(listing["include"]["schema"], {"type": "array", "default": [], "items": {"type": "integer"}})
+        delete = {p["name"]: p for p in self.op("delete", "/orders/{id}")["parameters"]}
+        self.assertEqual(delete["force"]["schema"], {"type": "boolean", "default": False})
+
+    def test_writes_take_a_json_body_without_defaults(self):
+        for method, path in (("post", "/orders"), ("put", "/orders/{id}")):
+            body = self.op(method, path)["requestBody"]
+            self.assertTrue(body["required"])
+            schema = body["content"]["application/json"]["schema"]
+            self.assertEqual(sorted(schema["properties"]), ["currency", "customer_id", "line_items", "status"])
+            self.assertEqual(schema["required"], ["customer_id"])
+            # The store's own currency is no default of a step's.
+            self.assertEqual(schema["properties"]["currency"], {"type": "string", "enum": ["USD", "EUR"]})
+            self.assertEqual(schema["properties"]["status"], {"type": "string"})
+            self.assertEqual(schema["properties"]["line_items"]["items"]["required"], ["product_id"])
+        self.assertNotIn("parameters", self.op("post", "/orders"))
+
+    def test_wordpress_types_become_json_schema_types(self):
+        order = self.spec["components"]["schemas"]["shop_order"]
+        self.assertNotIn("$schema", order)
+        properties = order["properties"]
+        self.assertEqual(properties["id"], {"type": "integer", "readOnly": True})
+        self.assertEqual(properties["date_paid"], {"type": ["string", "null"], "format": "date-time"})
+        self.assertEqual(properties["date_created"], {"type": "string", "format": "date-time"})
+        self.assertEqual(properties["prices_include_tax"], {"type": "boolean"})
+        self.assertEqual(properties["value"], {})
+        self.assertEqual(properties["price"], {})
+        self.assertEqual(properties["meta_data"], {"type": "array", "items": {"type": "object"}})
+
+    def test_a_collection_answers_a_list_and_a_create_201(self):
+        ref = {"$ref": "#/components/schemas/shop_order"}
+        answer = lambda method, path: self.op(method, path)["responses"]
+        self.assertEqual(answer("get", "/orders"), {"200": {"description": "OK", "content": {
+            "application/json": {"schema": {"type": "array", "items": ref}}}}})
+        self.assertEqual(answer("post", "/orders"), {"201": {"description": "Created", "content": {
+            "application/json": {"schema": ref}}}})
+        for method in ("get", "put", "delete"):
+            self.assertEqual(answer(method, "/orders/{id}")["200"]["content"]["application/json"]["schema"], ref)
+        self.assertEqual(list(answer("post", "/orders/batch")), ["200"])
+        self.assertEqual(answer("post", "/settings/batch"), {"200": {"description": "OK"}})
+
+    def test_the_converted_spec_slices(self):
+        sliced = cg.slice_specs([({"operations": ["listOrders", "createOrder", "getOrderNote"]}, self.spec)], {})
+        self.assertEqual(sorted(sliced["paths"]), ["/orders", "/orders/{order_id}/notes/{id}"])
+        self.assertEqual(sorted(sliced["components"]["schemas"]), ["order_note", "shop_order"])
+
+    def test_an_index_that_is_none_or_without_schemas_fails(self):
+        index = wordpress_index()
+        for route in index["routes"].values():
+            route.pop("schema", None)
+        for document, said in (({"openapi": "3.1.0"}, "`namespace` and `routes`"), (index, "?context=help")):
+            with self.subTest(said), self.assertRaises(SystemExit) as raised:
+                wp.openapi_spec(document)
+            self.assertIn(said, str(raised.exception))
+
+    def test_two_operations_that_still_share_a_name_fail(self):
+        # `/orders/{id}/notes` and `/order/{id}/notes` are both `listOrderNotesById`.
+        index = wordpress_index()
+        for owner in ("orders", "order"):
+            index["routes"][f"/wc/v3/{owner}/(?P<id>[\\d]+)/notes"] = {
+                "methods": ["GET"], "endpoints": [{"methods": ["GET"], "args": {}}]}
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            wp.openapi_spec(index)
+        self.assertIn("would both be", str(raised.exception))
+
+
+class WordPressFetchTest(unittest.TestCase):
+    """`fetch` converts a pinned index that says `format: wordpress`."""
+
+    def crate(self, root: Path, fmt: str) -> Path:
+        raw = json.dumps(wordpress_index()).encode()
+        (root / "index.json").write_bytes(raw)
+        (root / "connector.yaml").write_text(yaml.safe_dump({
+            "agent": {"id": "shop", "name": "Shop", "description": "Shop.", "integration_id": "shop_key",
+                      "error_prefix": "SHOP"},
+            "spec": {"path": "index.json", "sha256": hashlib.sha256(raw).hexdigest(), "format": fmt},
+            "operations": ["listOrders", "deleteOrder"],
+        }))
+        return root
+
+    def test_fetch_slices_the_converted_index(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            crate = self.crate(Path(tmp), "wordpress")
+            cg.fetch(crate)
+            sliced = json.loads((crate / "spec.slice.json").read_text())
+        self.assertEqual(sliced["servers"], [{"url": "/wp-json/wc/v3"}])
+        self.assertEqual({op["operationId"] for item in sliced["paths"].values() for op in item.values()},
+                         {"listOrders", "deleteOrder"})
+
+    def test_an_unknown_format_fails(self):
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(SystemExit) as raised:
+            cg.fetch(self.crate(Path(tmp), "drupal"))
+        self.assertIn("spec format `drupal`", str(raised.exception))
 
 
 # ---------------------------------------------------------------------------
