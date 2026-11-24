@@ -500,6 +500,20 @@ pub struct CreateConnectionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "defaultFor")]
     pub default_for: Option<Vec<String>>,
+    /// The id the connection will have: the one an offer gave
+    /// (`POST /connections/offer`). Required when the request enters a
+    /// secret, since the secrets were sealed for that connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "connectionId")]
+    pub connection_id: Option<String>,
+    /// The secrets this request enters, sealed under the offer made for it:
+    /// one envelope holding a JSON object of field name to value. A secret is
+    /// never sent readable: its field in `connectionParameters` holds
+    /// `{"$entered": true}` and its value is in here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "sealedSecrets")]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<Object>))]
+    pub sealed_secrets: Option<serde_json::Value>,
 }
 
 /// Explicit descriptor-aware connection parameter operations.
@@ -544,6 +558,37 @@ pub struct UpdateConnectionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "defaultFor")]
     pub default_for: Option<Vec<String>>,
+    /// The secrets this request enters, sealed under the offer made for it
+    /// (`POST /connections/{id}/offer`). A secret is never sent readable: its
+    /// field in the patch holds `{"$entered": true}` and its value is in here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<Object>))]
+    pub sealed_secrets: Option<serde_json::Value>,
+}
+
+/// What to seal a request's secrets under, before it is saved.
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionOfferResponse {
+    pub success: bool,
+    /// The connection the secrets are sealed for. For a new connection, the
+    /// id to save it with (`connectionId`).
+    pub connection_id: String,
+    /// seal's offer, to pass to the sealer as it is: `public_key`, `kid`,
+    /// `keyset`, `item`, `field` and `policy`. Null if the request marks no
+    /// secret as entered, and then it is saved with no `sealedSecrets`.
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<Object>))]
+    pub offer: Option<serde_json::Value>,
+    /// Each secret the request marks as entered, with the name to give it
+    /// in the object that is sealed. They are the same, except that an MCP
+    /// connection's extra header `extra_headers.<name>` has a name made for
+    /// it.
+    #[serde(default)]
+    pub fields: std::collections::BTreeMap<String, String>,
+    /// When the offer stops being taken, in seconds since the Unix epoch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_after: Option<u64>,
 }
 
 /// Response for listing connections

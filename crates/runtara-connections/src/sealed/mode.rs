@@ -7,16 +7,17 @@
 //! over mutual TLS, seal alone holds them: this process can ask seal to use a
 //! credential, toward the destination sealed into it, and cannot read one.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use seal_client::{
-    ClientTls, ConnectRequest, Info, Mode, PgStream, PresignRequest, PublicKeyInfo, SealClient,
-    SealError, SendRequest, SendResponse, VerifyRequest, WrappedKey, Zeroizing,
+    AdmitRequest, ClientTls, ConnectRequest, Info, Mode, PgStream, PresignRequest, PublicKeyInfo,
+    SealClient, SealError, SendRequest, SendResponse, VerifyRequest, WrappedKey, Zeroizing,
 };
-use seal_format::KeysetId;
+use seal_format::{Envelope, FieldName, KeysetId};
 
 /// `in_process` (the default), `unix` or `mtls`.
 pub const MODE_ENV: &str = "RUNTARA_SEAL_MODE";
@@ -302,6 +303,13 @@ impl SealClient for FollowingCertificates {
         self.client().verify(request).await
     }
 
+    async fn admit(
+        &self,
+        request: AdmitRequest,
+    ) -> Result<BTreeMap<FieldName, Envelope>, SealError> {
+        self.client().admit(request).await
+    }
+
     async fn connect_pg(&self, request: ConnectRequest) -> Result<PgStream, SealError> {
         self.client().connect_pg(request).await
     }
@@ -426,6 +434,9 @@ mod tests {
             Ok(Zeroizing::new(self.0.clone()))
         }
         async fn verify(&self, _: VerifyRequest) -> Result<bool, SealError> {
+            unreachable!()
+        }
+        async fn admit(&self, _: AdmitRequest) -> Result<BTreeMap<FieldName, Envelope>, SealError> {
             unreachable!()
         }
         async fn connect_pg(&self, _: ConnectRequest) -> Result<PgStream, SealError> {

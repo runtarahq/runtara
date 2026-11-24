@@ -25,6 +25,9 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sealed_connection  # noqa: E402
+
 BASE = os.environ.get("RUNTARA_API_URL", "http://127.0.0.1:7041/api/runtime").rstrip("/")
 RUN = uuid.uuid4().hex[:8]
 
@@ -46,6 +49,15 @@ def call(method, path, body=None, timeout=180):
             return error.code, json.loads(raw)
         except ValueError:
             return error.code, raw.decode(errors="replace")
+
+
+def create_connection(body, timeout=180):
+    """Creates a connection as an API client must: its secrets sealed first."""
+    status, raw = sealed_connection.save(sealed_connection.Api(BASE, [], timeout), body)
+    try:
+        return status, json.loads(raw)
+    except ValueError:
+        return status, raw
 
 
 def ref(path):
@@ -349,7 +361,7 @@ def check_conditions():
 
 
 def check_rate_limited_default(refusing_port):
-    status, body = call("POST", "/connections", {
+    status, body = create_connection({
         "title": f"p1-n2-refusing-{RUN}", "integrationId": "shopify_access_token",
         "connectionParameters": {"shop_domain": f"127.0.0.1:{refusing_port}",
                                  "access_token": "test-token-not-real"}})
@@ -373,7 +385,7 @@ def check_rate_limited_default(refusing_port):
 
 
 def check_tool_loop_retries(converse_port):
-    status, body = call("POST", "/connections", {
+    status, body = create_connection({
         "title": f"p1-a11-converse-{RUN}", "integrationId": "aws_credentials",
         "connectionParameters": {"aws_access_key_id": "AKIATESTONLY", "aws_secret_access_key": "test-not-real",
                                  "aws_region": "us-east-1", "endpoint": f"http://127.0.0.1:{converse_port}"}})

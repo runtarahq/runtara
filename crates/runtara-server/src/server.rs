@@ -129,6 +129,8 @@ use runtime_client::RuntimeClient;
         api::handlers::csv_import_export::import_csv,
         // Connection endpoints (served by runtara-connections crate)
         runtara_connections::handler::connections::create_connection_handler,
+        runtara_connections::handler::connections::offer_for_create_handler,
+        runtara_connections::handler::connections::offer_for_update_handler,
         runtara_connections::handler::connections::list_connections_handler,
         runtara_connections::handler::connections::get_connection_handler,
         runtara_connections::handler::connections::get_connection_metadata_handler,
@@ -385,6 +387,7 @@ use runtime_client::RuntimeClient;
             runtara_connections::types::ListConnectionsResponse,
             runtara_connections::types::CreateConnectionRequest,
             runtara_connections::types::CreateConnectionResponse,
+            runtara_connections::types::ConnectionOfferResponse,
             runtara_connections::types::UpdateConnectionRequest,
             runtara_connections::types::DeleteConnectionResponse,
             runtara_connections::types::ConnectionCategory,

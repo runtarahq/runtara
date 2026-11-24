@@ -38,6 +38,18 @@ pub use seal_client::{ErrorCode as SealErrorCode, SealError};
 /// The key of a sealed value's marker.
 pub const SEALED_MARKER: &str = "$sealed";
 
+/// The key of the marker a request has in place of a secret that was sealed
+/// where it was entered: `{"$entered": true}`. The secret itself is in the
+/// request's intake envelope, under the field's name. Never stored.
+pub const ENTERED_MARKER: &str = "$entered";
+
+/// How long an offer may be sealed under and saved, in seconds. Shorter than
+/// seal's own limit (`limits.max_intake_lifetime`, 15 minutes by default).
+pub const OFFER_LIFETIME_SECONDS: u64 = 5 * 60;
+
+/// How many secrets one save may enter: what one intake envelope holds.
+pub const MAX_ENTERED_SECRETS: usize = seal_format::policy::MAX_INTAKE_OUTPUTS;
+
 /// A key source that is told which tenant a keyset is for before a key is
 /// made for it.
 pub trait TenantKeySource: KeySource {
@@ -64,9 +76,36 @@ pub enum SealingError {
     /// why, in words for whoever entered them.
     #[error("this connection's credentials cannot be stored: {reason}")]
     CannotSeal { reason: String },
+    /// A secret arrived readable. One is sealed where it is entered, under an
+    /// offer, and never sent as it is.
+    #[error(
+        "`{field}` must be sealed where it is entered: ask for an offer, seal the secrets \
+         under it, and save the envelope"
+    )]
+    MustBeSealed { field: String },
+    /// The request names secrets as entered and has no intake envelope, or
+    /// has an envelope and names none.
+    #[error("{0}")]
+    Intake(String),
+    /// The offer the secrets were sealed under no longer stands: it is past
+    /// its time, or the connection's other fields are not the ones it was
+    /// made for. A new offer is needed, and the secrets sealed again.
+    #[error("the offer these secrets were sealed under no longer stands: ask for a new one")]
+    Stale,
     /// seal refused or failed. Never includes a value.
     #[error("sealing failed: {0}")]
     Seal(String),
+}
+
+/// Where a connection's secrets come from as it is saved.
+#[derive(Clone, Copy)]
+pub enum Entered<'a> {
+    /// Entered at the engine itself (a command of the server's): readable
+    /// here, and sealed here.
+    Here,
+    /// Sent by a caller: each sealed where it was entered, in this intake
+    /// envelope if the request has one. A readable secret is refused.
+    Sealed(Option<&'a Value>),
 }
 
 /// A response from a request sent with sealed credentials.
@@ -255,6 +294,7 @@ impl SealedCredentials {
     }
 
     /// The parameters to store for a connection, with each secret sealed.
+    /// The secrets are readable here: they were entered at the engine.
     ///
     /// `Ok(None)` means the parameters hold no secret, and are stored as they
     /// are. A secret is stored sealed or not at all: parameters with one seal
@@ -273,12 +313,272 @@ impl SealedCredentials {
         parameters: &Value,
         stored: Option<&Value>,
     ) -> Result<Option<Value>, SealingError> {
+        self.store_parameters(
+            tenant_id,
+            connection_id,
+            integration_id,
+            parameters,
+            stored,
+            Entered::Here,
+        )
+        .await
+    }
+
+    /// The parameters to store for a connection a caller saves, as
+    /// [`Self::seal_parameters`] gives them, with each secret the request
+    /// marks as entered ([`ENTERED_MARKER`]) taken from `intake`: the
+    /// envelope sealed under the offer made for these parameters
+    /// ([`Self::offer`]). seal makes the stored values; nothing here reads a
+    /// secret, and a readable one is refused.
+    pub async fn admit_parameters(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        integration_id: &str,
+        parameters: &Value,
+        stored: Option<&Value>,
+        intake: Option<&Value>,
+    ) -> Result<Option<Value>, SealingError> {
+        self.store_parameters(
+            tenant_id,
+            connection_id,
+            integration_id,
+            parameters,
+            stored,
+            Entered::Sealed(intake),
+        )
+        .await
+    }
+
+    /// What to seal a connection's entered secrets under: the tenant's key,
+    /// the connection, and an intake policy that lets each secret become the
+    /// one value these parameters call for and no other. It holds nothing
+    /// secret. `Ok(None)` if the parameters mark no secret as entered.
+    ///
+    /// Nothing is kept: the save derives the same policies again from the
+    /// parameters it is given, and seal refuses it if they differ.
+    pub async fn offer(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        integration_id: &str,
+        parameters: &Value,
+    ) -> Result<Option<Offered>, SealingError> {
+        let parameters = &policy::prepared(integration_id, parameters);
+        let outputs = self.entered(integration_id, parameters)?;
+        if outputs.is_empty() {
+            return Ok(None);
+        }
+        let fields = outputs
+            .iter()
+            .map(|entered| (entered.name.clone(), entered.field.as_str().to_owned()))
+            .collect();
+        let (keyset, kid, public) = self.sealing_key(tenant_id).await.map_err(seal_failed)?;
+        let not_after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| SealingError::Seal("the clock is before 1970".to_owned()))?
+            .as_secs()
+            + OFFER_LIFETIME_SECONDS;
+        let outputs = outputs
+            .into_iter()
+            .map(|entered| (entered.field, entered.policy))
+            .collect();
+        let offer = seal_format::Offer::for_intake(
+            public,
+            kid,
+            keyset,
+            item(connection_id)?,
+            &outputs,
+            not_after,
+        )
+        .map_err(|error| SealingError::Seal(error.to_string()))?;
+        Ok(Some(Offered {
+            offer,
+            fields,
+            not_after,
+        }))
+    }
+
+    /// Each secret `parameters` mark as entered, with the policy it is to be
+    /// sealed under. The parameters are as [`policy::prepared`] leaves them.
+    fn entered(
+        &self,
+        integration_id: &str,
+        parameters: &Value,
+    ) -> Result<Vec<EnteredSecret>, SealingError> {
+        let Some(fields) = parameters.as_object() else {
+            return Ok(Vec::new());
+        };
+        let extras = (integration_id == "mcp")
+            .then(|| fields.get(policy::EXTRA_HEADERS_FIELD))
+            .flatten()
+            .and_then(Value::as_object);
+        let named: Vec<&String> = fields
+            .iter()
+            .filter(|(_, value)| is_entered(value))
+            .map(|(name, _)| name)
+            .collect();
+        let headers: Vec<&String> = extras
+            .into_iter()
+            .flatten()
+            .filter(|(_, value)| is_entered(value))
+            .map(|(header, _)| header)
+            .collect();
+        if named.is_empty() && headers.is_empty() {
+            return Ok(Vec::new());
+        }
+        if named.len() + headers.len() > MAX_ENTERED_SECRETS {
+            return Err(SealingError::Intake(format!(
+                "one save enters at most {MAX_ENTERED_SECRETS} secrets: save these in parts"
+            )));
+        }
+        let cannot = || SealingError::CannotSeal {
+            reason: policy::why_unsealable(integration_id, parameters, &self.allowances),
+        };
+        let policies =
+            policy::policies(integration_id, parameters, &self.allowances).ok_or_else(cannot)?;
+        let mut entered = Vec::new();
+        for name in named {
+            let policy = policies.get(name).ok_or_else(|| SealingError::CannotSeal {
+                reason: format!("`{name}` is a secret this connection has no use for"),
+            })?;
+            entered.push(EnteredSecret {
+                field: field_name(name)?,
+                name: name.clone(),
+                policy: policy.clone(),
+            });
+        }
+        for header in headers {
+            let policy = policy::extra_header_policy(parameters, header, &self.allowances)
+                .ok_or_else(cannot)?;
+            entered.push(EnteredSecret {
+                field: field_name(&policy::extra_header_field(header))?,
+                name: policy::extra_header_parameter(header),
+                policy,
+            });
+        }
+        Ok(entered)
+    }
+
+    /// Has seal turn an intake envelope into the stored value of each
+    /// entered secret: its marker, by the field seal knows it as.
+    async fn admit(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        entered: &[EnteredSecret],
+        intake: &Value,
+    ) -> Result<BTreeMap<FieldName, Value>, SealingError> {
+        let envelope: Envelope = serde_json::from_value(intake.clone()).map_err(|_| {
+            SealingError::Intake("the intake envelope is not a sealed value".to_owned())
+        })?;
+        let keyset = match &self.keys {
+            Some(keys) => keys.expect_tenant(tenant_id),
+            None => keys::keyset_for_tenant(tenant_id),
+        };
+        let outputs = entered
+            .iter()
+            .map(|entered| {
+                (
+                    entered.field.clone(),
+                    seal_client::AdmitOutput {
+                        policy: entered.policy.clone(),
+                        // Whoever entered it says it is there.
+                        optional: false,
+                    },
+                )
+            })
+            .collect();
+        let admitted = self
+            .client
+            .admit(seal_client::AdmitRequest {
+                keyset,
+                item: item(connection_id)?,
+                envelope,
+                outputs,
+            })
+            .await
+            .map_err(|error| match error.code {
+                SealErrorCode::IntakeStale => SealingError::Stale,
+                SealErrorCode::IntakeInvalid => SealingError::Intake(
+                    "the intake envelope does not hold every secret the request marks as \
+                     entered, each as text"
+                        .to_owned(),
+                ),
+                // Sealed for another connection or tenant, or not an intake.
+                SealErrorCode::PolicyDenied
+                | SealErrorCode::OpenFailed
+                | SealErrorCode::KeysetUnknown => SealingError::Intake(
+                    "the intake envelope was not sealed under an offer for this connection"
+                        .to_owned(),
+                ),
+                _ => seal_failed(error),
+            })?;
+        entered
+            .iter()
+            .map(|entered| {
+                let envelope = admitted.get(&entered.field).ok_or_else(|| {
+                    SealingError::Seal("seal left out a value it was asked for".to_owned())
+                })?;
+                Ok((
+                    entered.field.clone(),
+                    marker(envelope, &policy_fingerprint(&entered.policy)?)?,
+                ))
+            })
+            .collect()
+    }
+
+    async fn store_parameters(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+        integration_id: &str,
+        parameters: &Value,
+        stored: Option<&Value>,
+        source: Entered<'_>,
+    ) -> Result<Option<Value>, SealingError> {
         // What is sealed of a connection may be part of what was entered.
         let prepared = policy::prepared(integration_id, parameters);
         let parameters = &prepared;
         let Some(fields) = parameters.as_object() else {
             return Ok(None);
         };
+
+        // Secrets sealed where they were entered: seal makes their values.
+        let entered = self.entered(integration_id, parameters)?;
+        let mut admitted = match (source, entered.is_empty()) {
+            (Entered::Here, true) | (Entered::Sealed(None), true) => BTreeMap::new(),
+            (Entered::Here, false) => {
+                return Err(SealingError::Intake(format!(
+                    "`{}` is marked as entered, and this takes secrets as they are",
+                    entered[0].name
+                )));
+            }
+            (Entered::Sealed(Some(_)), true) => {
+                return Err(SealingError::Intake(
+                    "the request has an intake envelope and marks no secret as entered".to_owned(),
+                ));
+            }
+            (Entered::Sealed(None), false) => {
+                return Err(SealingError::Intake(format!(
+                    "`{}` is marked as entered, and the request has no intake envelope",
+                    entered[0].name
+                )));
+            }
+            (Entered::Sealed(Some(intake)), false) => {
+                self.admit(tenant_id, connection_id, &entered, intake)
+                    .await?
+            }
+        };
+        // A readable secret is sealed here if it was entered here, or if the
+        // connection holds it readable already. One a caller sends is refused.
+        let readable = |field: &str, held: bool| match source {
+            Entered::Sealed(_) if !held => Err(SealingError::MustBeSealed {
+                field: field.to_owned(),
+            }),
+            _ => Ok(()),
+        };
+
         let kept: Vec<&String> = fields
             .iter()
             .filter(|(_, value)| is_sealed(value))
@@ -307,7 +607,11 @@ impl SealedCredentials {
         for (field, policy) in &policies {
             let fingerprint = policy_fingerprint(policy)?;
             match fields.get(field) {
-                Some(Value::String(secret)) if !secret.is_empty() => {
+                Some(value @ Value::String(secret)) if !secret.is_empty() => {
+                    readable(
+                        field,
+                        stored.and_then(|stored| stored.get(field)) == Some(value),
+                    )?;
                     if key.is_none() {
                         key = Some(self.sealing_key(tenant_id).await.map_err(seal_failed)?);
                     }
@@ -316,6 +620,12 @@ impl SealedCredentials {
                         field.clone(),
                         seal_one(key, connection_id, field, secret, policy)?,
                     );
+                }
+                Some(value) if is_entered(value) => {
+                    let value = admitted.remove(&field_name(field)?).ok_or_else(|| {
+                        SealingError::Seal(format!("`{field}` was entered and not admitted"))
+                    })?;
+                    sealed.insert(field.clone(), value);
                 }
                 Some(value) if is_sealed(value) => {
                     let unchanged = stored.and_then(|stored| stored.get(field)) == Some(value)
@@ -350,6 +660,11 @@ impl SealedCredentials {
                     })?;
                 match value {
                     Value::String(secret) if !secret.is_empty() => {
+                        readable(
+                            &parameter,
+                            held.and_then(|held| held[header.as_str()].as_str())
+                                == Some(secret.as_str()),
+                        )?;
                         if key.is_none() {
                             key = Some(self.sealing_key(tenant_id).await.map_err(seal_failed)?);
                         }
@@ -361,6 +676,15 @@ impl SealedCredentials {
                             secret,
                             &policy,
                         )?;
+                    }
+                    entered if is_entered(entered) => {
+                        *entered = admitted
+                            .remove(&field_name(&policy::extra_header_field(header))?)
+                            .ok_or_else(|| {
+                                SealingError::Seal(format!(
+                                    "`{parameter}` was entered and not admitted"
+                                ))
+                            })?;
                     }
                     kept if is_sealed(kept) => {
                         let unchanged = held.map(|held| &held[header.as_str()]) == Some(&*kept)
@@ -380,6 +704,12 @@ impl SealedCredentials {
             return Err(SealingError::CannotSeal {
                 reason: format!("`{field}` is a secret this connection has no use for"),
             });
+        }
+        // Nor is a marker of an entered secret ever stored.
+        if has_entered_values(&sealed) {
+            return Err(SealingError::Seal(
+                "a secret marked as entered was not sealed".to_owned(),
+            ));
         }
         Ok(Some(sealed))
     }
@@ -1318,6 +1648,53 @@ fn seal_one(
     let envelope = seal_format::seal(public, kid, binding, secret.as_bytes(), policy)
         .map_err(|error| SealingError::Seal(error.to_string()))?;
     marker(&envelope, &policy_fingerprint(policy)?)
+}
+
+/// One secret a request marks as entered.
+struct EnteredSecret {
+    /// The field seal knows it as: what it is named in the intake envelope,
+    /// and what its stored value is bound to.
+    field: FieldName,
+    /// What the request calls it: the parameter, or `extra_headers.<name>`
+    /// for an MCP connection's extra header.
+    name: String,
+    policy: Policy,
+}
+
+/// What a request's secrets are sealed under.
+#[derive(Debug)]
+pub struct Offered {
+    /// seal's offer, for the sealer.
+    pub offer: seal_format::Offer,
+    /// Each secret the request marks as entered, by what the request calls
+    /// it, with the name it has in the object that is sealed. The two are the
+    /// same but for an MCP connection's extra headers.
+    pub fields: BTreeMap<String, String>,
+    /// When seal stops taking it, in seconds since the Unix epoch.
+    pub not_after: u64,
+}
+
+/// The marker a request has in place of a secret sealed where it was entered.
+pub fn entered() -> Value {
+    json!({ ENTERED_MARKER: true })
+}
+
+/// Whether a parameter's value marks a secret as entered.
+pub fn is_entered(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.len() == 1 && object.get(ENTERED_MARKER) == Some(&Value::Bool(true))
+    })
+}
+
+/// Whether any of a connection's parameters marks a secret as entered.
+pub fn has_entered_values(parameters: &Value) -> bool {
+    parameters.as_object().is_some_and(|fields| {
+        fields.values().any(is_entered)
+            || fields
+                .get(policy::EXTRA_HEADERS_FIELD)
+                .and_then(Value::as_object)
+                .is_some_and(|extras| extras.values().any(is_entered))
+    })
 }
 
 /// Whether a parameter's value is a sealed value's marker.

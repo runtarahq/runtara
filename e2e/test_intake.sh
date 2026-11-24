@@ -143,6 +143,12 @@ trap cleanup EXIT
 api_post() {
     curl -sS --max-time "${3:-120}" -X POST -H "Content-Type: application/json" -d "$2" "${API}$1"
 }
+
+# A connection is saved with its secrets sealed: the server takes none
+# readable. $1 is the create request, written as it was before that.
+connection_post() {
+    python3 "${SCRIPT_DIR}/sealed_connection.py" --api "${API}" "$1"
+}
 http_status() { curl -sS -o /dev/null --max-time 60 -w '%{http_code}' "$@"; }
 healthy() { [ "$(http_status "http://127.0.0.1:$1/health" 2>/dev/null || true)" = "200" ]; }
 valkey() { docker exec "${VALKEY_CONTAINER}" valkey-cli --raw "$@"; }
@@ -448,7 +454,7 @@ print_success "the synchronous trigger ran the workflow through intake and answe
 #-------------------------------------------------------------------------
 print_step "4. A signed webhook is checked by intake from the trigger's row..."
 SIGNING_KEY="key-$(openssl rand -hex 16)"
-RESP=$(api_post /connections "{\"title\":\"Mail\",\"integrationId\":\"mailgun\",\"connectionParameters\":{\"api_key\":\"key-$(openssl rand -hex 8)\",\"domain\":\"mg.example.com\",\"region\":\"us\",\"webhook_signing_key\":\"${SIGNING_KEY}\"}}")
+RESP=$(connection_post "{\"title\":\"Mail\",\"integrationId\":\"mailgun\",\"connectionParameters\":{\"api_key\":\"key-$(openssl rand -hex 8)\",\"domain\":\"mg.example.com\",\"region\":\"us\",\"webhook_signing_key\":\"${SIGNING_KEY}\"}}")
 CONN=$(echo "${RESP}" | jq -r '.connection_id // .connectionId // empty')
 [ -n "${CONN}" ] || { print_error "the Mailgun connection was not made: ${RESP}"; exit 1; }
 RESP=$(api_post /triggers "{\"workflow_id\": \"${WF}\", \"trigger_type\": \"HTTP\", \"active\": true, \"configuration\": {\"connection_id\": \"${CONN}\"}}")
@@ -484,7 +490,7 @@ print_success "a webhook signed with the connection's key was queued; one signed
 #-------------------------------------------------------------------------
 print_step "4b. A synchronous trigger, checked as its connection type declares, answered by its workflow..."
 SLACK_SECRET="secret-$(openssl rand -hex 16)"
-RESP=$(api_post /connections "{\"title\":\"Chat\",\"integrationId\":\"slack_bot\",\"connectionParameters\":{\"bot_token\":\"xoxb-$(openssl rand -hex 8)\",\"signing_secret\":\"${SLACK_SECRET}\"}}")
+RESP=$(connection_post "{\"title\":\"Chat\",\"integrationId\":\"slack_bot\",\"connectionParameters\":{\"bot_token\":\"xoxb-$(openssl rand -hex 8)\",\"signing_secret\":\"${SLACK_SECRET}\"}}")
 SLACK_CONN=$(echo "${RESP}" | jq -r '.connection_id // .connectionId // empty')
 [ -n "${SLACK_CONN}" ] || { print_error "the Slack connection was not made: ${RESP}"; exit 1; }
 # Answers with what it was sent and a header it was handed.

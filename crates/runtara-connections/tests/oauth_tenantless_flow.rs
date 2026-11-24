@@ -465,40 +465,53 @@ async fn the_tenant_path_callback_completes_a_flow_with_its_cookie() {
 async fn new_authorization_code_connections_get_the_tenantless_callback() {
     let fixture = Fixture::start().await;
     let api = api_for(&fixture, "acme");
-    let response = api
-        .clone()
-        .oneshot(
-            Request::post("/connections")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({
-                        "title": "Generic",
-                        "integrationId": "http_oauth2_authorization_code",
-                        "connectionParameters": {
-                            "auth_url": "https://auth.example.com/authorize",
-                            "token_url": "https://auth.example.com/token",
-                            "client_id": "cid",
-                            "client_secret": "csec",
-                            "base_url": "https://api.example.com"
-                        }
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
+    // As a caller saves it: the client secret sealed where it is entered.
+    let (status, created): (u16, serde_json::Value) =
+        runtara_connections::sealed::testing::save_as_a_caller(
+            |method, uri, body| {
+                let api = api.clone();
+                async move {
+                    let response = api
+                        .oneshot(
+                            Request::builder()
+                                .method(method.as_str())
+                                .uri(uri)
+                                .header(header::CONTENT_TYPE, "application/json")
+                                .body(
+                                    body.map_or_else(Body::empty, |body| {
+                                        Body::from(body.to_string())
+                                    }),
+                                )
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    let status = response.status().as_u16();
+                    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                        .await
+                        .unwrap();
+                    (
+                        status,
+                        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+                    )
+                }
+            },
+            "POST",
+            "/connections",
+            json!({
+                "title": "Generic",
+                "integrationId": "http_oauth2_authorization_code",
+                "connectionParameters": {
+                    "auth_url": "https://auth.example.com/authorize",
+                    "token_url": "https://auth.example.com/token",
+                    "client_id": "cid",
+                    "client_secret": "csec",
+                    "base_url": "https://api.example.com"
+                }
+            }),
         )
-        .await
-        .unwrap();
-    let status = response.status();
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    assert_eq!(
-        status,
-        StatusCode::CREATED,
-        "{}",
-        String::from_utf8_lossy(&body)
-    );
-    let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        .await;
+    assert_eq!(status, 201, "{created}");
     let id = created["connectionId"]
         .as_str()
         .or(created["id"].as_str())

@@ -6292,8 +6292,8 @@ checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
 
 [[package]]
 name = "seal"
-version = "0.2.0"
-source = "git+https://github.com/runtarahq/seal?rev=b1732715e8bb7ca05ad8653b48c701ddfe0efead#b1732715e8bb7ca05ad8653b48c701ddfe0efead"
+version = "0.3.1"
+source = "git+https://github.com/runtarahq/seal?rev=2153bf766eab17fd9043d2cfdda3cd1e1e40bc9b#2153bf766eab17fd9043d2cfdda3cd1e1e40bc9b"
 dependencies = [
  "bytes",
  "clap",
@@ -6325,8 +6325,8 @@ dependencies = [
 
 [[package]]
 name = "seal-broker"
-version = "0.2.0"
-source = "git+https://github.com/runtarahq/seal?rev=b1732715e8bb7ca05ad8653b48c701ddfe0efead#b1732715e8bb7ca05ad8653b48c701ddfe0efead"
+version = "0.3.1"
+source = "git+https://github.com/runtarahq/seal?rev=2153bf766eab17fd9043d2cfdda3cd1e1e40bc9b#2153bf766eab17fd9043d2cfdda3cd1e1e40bc9b"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -6356,8 +6356,8 @@ dependencies = [
 
 [[package]]
 name = "seal-client"
-version = "0.2.0"
-source = "git+https://github.com/runtarahq/seal?rev=b1732715e8bb7ca05ad8653b48c701ddfe0efead#b1732715e8bb7ca05ad8653b48c701ddfe0efead"
+version = "0.3.1"
+source = "git+https://github.com/runtarahq/seal?rev=2153bf766eab17fd9043d2cfdda3cd1e1e40bc9b#2153bf766eab17fd9043d2cfdda3cd1e1e40bc9b"
 dependencies = [
  "async-trait",
  "bytes",
@@ -6381,21 +6381,22 @@ dependencies = [
 
 [[package]]
 name = "seal-format"
-version = "0.2.0"
-source = "git+https://github.com/runtarahq/seal?rev=b1732715e8bb7ca05ad8653b48c701ddfe0efead#b1732715e8bb7ca05ad8653b48c701ddfe0efead"
+version = "0.3.1"
+source = "git+https://github.com/runtarahq/seal?rev=2153bf766eab17fd9043d2cfdda3cd1e1e40bc9b#2153bf766eab17fd9043d2cfdda3cd1e1e40bc9b"
 dependencies = [
  "base64 0.23.1",
  "hpke",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "url",
  "zeroize",
 ]
 
 [[package]]
 name = "seal-keys"
-version = "0.2.0"
-source = "git+https://github.com/runtarahq/seal?rev=b1732715e8bb7ca05ad8653b48c701ddfe0efead#b1732715e8bb7ca05ad8653b48c701ddfe0efead"
+version = "0.3.1"
+source = "git+https://github.com/runtarahq/seal?rev=2153bf766eab17fd9043d2cfdda3cd1e1e40bc9b#2153bf766eab17fd9043d2cfdda3cd1e1e40bc9b"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -6423,8 +6424,8 @@ dependencies = [
 
 [[package]]
 name = "seal-proto"
-version = "0.2.0"
-source = "git+https://github.com/runtarahq/seal?rev=b1732715e8bb7ca05ad8653b48c701ddfe0efead#b1732715e8bb7ca05ad8653b48c701ddfe0efead"
+version = "0.3.1"
+source = "git+https://github.com/runtarahq/seal?rev=2153bf766eab17fd9043d2cfdda3cd1e1e40bc9b#2153bf766eab17fd9043d2cfdda3cd1e1e40bc9b"
 dependencies = [
  "prost",
  "protox",

@@ -1393,3 +1393,481 @@ fn seal_waits_as_long_as_the_host_lets_a_request_wait() {
         std::time::Duration::from_secs(600)
     );
 }
+
+// ---- Secrets sealed where they are entered ---------------------------------
+
+/// What a caller does with secrets it enters: marks each in the parameters,
+/// asks for an offer, seals them under it, and saves with the envelope.
+async fn entered_and_saved(
+    sealed: &SealedCredentials,
+    connection: &str,
+    integration_id: &str,
+    readable: &Value,
+) -> Result<Value, SealingError> {
+    let (mut parameters, secrets) = testing::enter(integration_id, readable);
+    // As the service takes a database's target from a caller.
+    if let Some(target) = parameters
+        .get(policy::PG_TARGET_FIELD)
+        .and_then(Value::as_str)
+    {
+        parameters[policy::PG_TARGET_FIELD] =
+            json!(policy::target_as_entered(target).expect("a target"));
+    }
+    let offered = sealed
+        .offer(TENANT, connection, integration_id, &parameters)
+        .await?
+        .expect("a secret was entered");
+    let intake = testing::seal_under(
+        &serde_json::to_value(&offered.offer).unwrap(),
+        &offered.fields,
+        &secrets,
+    );
+    sealed
+        .admit_parameters(
+            TENANT,
+            connection,
+            integration_id,
+            &parameters,
+            None,
+            Some(&intake),
+        )
+        .await
+        .map(|stored| stored.expect("the connection is sealed"))
+}
+
+#[tokio::test]
+async fn a_secret_sealed_where_it_was_entered_is_stored_and_sent_by_seal() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/orders"))
+        .and(header("authorization", format!("Bearer {SECRET}").as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_string("orders"))
+        .mount(&server)
+        .await;
+    let sealed = sealed_for(&server);
+
+    let stored = entered_and_saved(&sealed, CONNECTION, "http_bearer", &bearer_params(&server))
+        .await
+        .unwrap();
+
+    assert!(is_sealed(&stored["token"]));
+    assert!(!has_entered_values(&stored));
+    assert!(!without_sealed(&stored).to_string().contains(SECRET));
+    // What seal made is what sealing here makes: the same policy.
+    let here = seal(&sealed, CONNECTION, &bearer_params(&server)).await;
+    assert_eq!(
+        stored["token"][SEALED_MARKER]["policy"],
+        here["token"][SEALED_MARKER]["policy"]
+    );
+    let response = sealed
+        .send(
+            TENANT,
+            CONNECTION,
+            "http_bearer",
+            &stored,
+            get(format!("{}/api/orders", server.uri())),
+        )
+        .await
+        .unwrap();
+    assert_eq!(text(response).await, "orders");
+}
+
+#[tokio::test]
+async fn a_readable_secret_from_a_caller_is_refused() {
+    let server = MockServer::start().await;
+    let sealed = sealed_for(&server);
+
+    let error = sealed
+        .admit_parameters(
+            TENANT,
+            CONNECTION,
+            "http_bearer",
+            &bearer_params(&server),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&error, SealingError::MustBeSealed { field } if field == "token"),
+        "{error}"
+    );
+    assert!(!error.to_string().contains(SECRET));
+}
+
+#[tokio::test]
+async fn an_offer_names_the_connection_and_one_policy_for_each_secret() {
+    let server = MockServer::start().await;
+    let sealed = sealed_for(&server);
+    let (parameters, _) = testing::enter("http_bearer", &bearer_params(&server));
+
+    let offered = sealed
+        .offer(TENANT, CONNECTION, "http_bearer", &parameters)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let offer = serde_json::to_value(&offered.offer).unwrap();
+    assert_eq!(offer["keyset"], TENANT);
+    assert_eq!(offer["item"], CONNECTION);
+    assert_eq!(offer["field"], seal_format::INTAKE_FIELD);
+    assert_eq!(
+        offer["policy"]["intake"]["outputs"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        ["token"]
+    );
+    assert_eq!(
+        offered.fields.get("token").map(String::as_str),
+        Some("token")
+    );
+    assert!(!offer.to_string().contains(SECRET));
+
+    // Parameters that enter no secret need no offer.
+    assert!(
+        sealed
+            .offer(
+                TENANT,
+                CONNECTION,
+                "http_bearer",
+                &json!({"base_url": "https://api.example.com"})
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn secrets_sealed_for_one_destination_are_not_stored_for_another() {
+    let server = MockServer::start().await;
+    let sealed = sealed_for(&server);
+    let (parameters, secrets) = testing::enter("http_bearer", &bearer_params(&server));
+    let offered = sealed
+        .offer(TENANT, CONNECTION, "http_bearer", &parameters)
+        .await
+        .unwrap()
+        .unwrap();
+    let intake = testing::seal_under(
+        &serde_json::to_value(&offered.offer).unwrap(),
+        &offered.fields,
+        &secrets,
+    );
+
+    // The envelope, saved beside another base URL: a captured request with
+    // its destination changed.
+    let mut moved = parameters.clone();
+    moved["base_url"] = json!(format!("{}/elsewhere", server.uri()));
+    let error = sealed
+        .admit_parameters(
+            TENANT,
+            CONNECTION,
+            "http_bearer",
+            &moved,
+            None,
+            Some(&intake),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, SealingError::Stale), "{error}");
+
+    // Nor for another connection, or another tenant.
+    let other = "0b0e2c1a-58a1-4f0e-8f0b-1d4d6f1f3a55";
+    let error = sealed
+        .admit_parameters(
+            TENANT,
+            other,
+            "http_bearer",
+            &parameters,
+            None,
+            Some(&intake),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, SealingError::Intake(_)), "{error}");
+    let error = sealed
+        .admit_parameters(
+            "another-tenant",
+            CONNECTION,
+            "http_bearer",
+            &parameters,
+            None,
+            Some(&intake),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, SealingError::Intake(_)), "{error}");
+
+    // As it was offered, it is stored.
+    sealed
+        .admit_parameters(
+            TENANT,
+            CONNECTION,
+            "http_bearer",
+            &parameters,
+            None,
+            Some(&intake),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn an_envelope_and_the_secrets_marked_as_entered_go_together() {
+    let server = MockServer::start().await;
+    let sealed = sealed_for(&server);
+    let (parameters, secrets) = testing::enter("http_bearer", &bearer_params(&server));
+    let offered = sealed
+        .offer(TENANT, CONNECTION, "http_bearer", &parameters)
+        .await
+        .unwrap()
+        .unwrap();
+    let offer = serde_json::to_value(&offered.offer).unwrap();
+    let intake = testing::seal_under(&offer, &offered.fields, &secrets);
+
+    // Marked as entered, and no envelope.
+    let error = sealed
+        .admit_parameters(TENANT, CONNECTION, "http_bearer", &parameters, None, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, SealingError::Intake(_)), "{error}");
+
+    // An envelope, and nothing marked as entered.
+    let error = sealed
+        .admit_parameters(
+            TENANT,
+            CONNECTION,
+            "http_bearer",
+            &json!({"base_url": parameters["base_url"]}),
+            None,
+            Some(&intake),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, SealingError::Intake(_)), "{error}");
+
+    // An envelope that leaves out a secret marked as entered.
+    let empty = testing::seal_under(&offer, &offered.fields, &Default::default());
+    let error = sealed
+        .admit_parameters(
+            TENANT,
+            CONNECTION,
+            "http_bearer",
+            &parameters,
+            None,
+            Some(&empty),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, SealingError::Intake(_)), "{error}");
+
+    // What is not an envelope at all.
+    let error = sealed
+        .admit_parameters(
+            TENANT,
+            CONNECTION,
+            "http_bearer",
+            &parameters,
+            None,
+            Some(&json!({"token": SECRET})),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, SealingError::Intake(_)), "{error}");
+    assert!(!error.to_string().contains(SECRET));
+
+    // A stored value is no intake envelope: it cannot be given a new policy.
+    let stored = seal(&sealed, CONNECTION, &bearer_params(&server)).await;
+    let error = sealed
+        .admit_parameters(
+            TENANT,
+            CONNECTION,
+            "http_bearer",
+            &parameters,
+            None,
+            Some(&stored["token"][SEALED_MARKER]["envelope"]),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, SealingError::Intake(_)), "{error}");
+
+    // A secret entered at the engine is readable there, and a marker is not
+    // a secret.
+    let error = sealed
+        .seal_parameters(TENANT, CONNECTION, "http_bearer", &parameters, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, SealingError::Intake(_)), "{error}");
+}
+
+#[tokio::test]
+async fn an_update_enters_one_secret_and_keeps_another_sealed() {
+    let server = MockServer::start().await;
+    let sealed = sealed_for(&server);
+    let readable = json!({"bot_token": "xoxb-first", "signing_secret": SECRET});
+    let stored = entered_and_saved(&sealed, CONNECTION, "slack_bot", &readable)
+        .await
+        .unwrap();
+    assert!(is_sealed(&stored["bot_token"]) && is_sealed(&stored["signing_secret"]));
+
+    // The token is entered again; the signing secret stays as it is held.
+    let mut merged = stored.clone();
+    merged["bot_token"] = entered();
+    let offered = sealed
+        .offer(TENANT, CONNECTION, "slack_bot", &merged)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(offered.fields.keys().collect::<Vec<_>>(), ["bot_token"]);
+    let intake = testing::seal_under(
+        &serde_json::to_value(&offered.offer).unwrap(),
+        &offered.fields,
+        &[("bot_token".to_owned(), "xoxb-second".to_owned())].into(),
+    );
+    let updated = sealed
+        .admit_parameters(
+            TENANT,
+            CONNECTION,
+            "slack_bot",
+            &merged,
+            Some(&stored),
+            Some(&intake),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(updated["signing_secret"], stored["signing_secret"]);
+    assert!(is_sealed(&updated["bot_token"]));
+    assert_ne!(updated["bot_token"], stored["bot_token"]);
+}
+
+#[tokio::test]
+async fn a_database_password_is_entered_beside_where_it_may_go() {
+    let server = MockServer::start().await;
+    let sealed = sealed_for(&server);
+    let url = format!("postgres://app:{SECRET}@db.example.com:5432/orders?sslmode=verify-full");
+
+    // A caller splits the URL: the password is the secret.
+    let (parameters, secrets) = testing::enter("postgres", &json!({"database_url": url}));
+    assert!(is_entered(&parameters["database_url"]));
+    assert_eq!(
+        secrets.get("database_url").map(String::as_str),
+        Some(SECRET)
+    );
+    assert!(!parameters.to_string().contains(SECRET));
+    // The URL goes beside it without the password, as it was typed, and is
+    // held to the rules of a whole one.
+    assert_eq!(
+        parameters["database_target"],
+        "postgres://app@db.example.com:5432/orders?sslmode=verify-full"
+    );
+    let target = policy::target_as_entered(parameters["database_target"].as_str().unwrap());
+    assert_eq!(
+        target.as_deref(),
+        Ok("postgres://app@db.example.com:5432/orders")
+    );
+    assert_eq!(
+        policy::target_as_entered(&url),
+        Err(policy::TargetRefused::HoldsThePassword)
+    );
+    for refused in [
+        // Does not say how its session is protected, or asks for what seal
+        // has no mode for.
+        "postgres://app@db.example.com/orders",
+        "postgres://app@db.example.com/orders?sslmode=prefer",
+        "postgres://app@db.example.com/orders?sslmode=require&options=x",
+        "https://app@db.example.com/orders?sslmode=require",
+        "postgres://db.example.com/orders?sslmode=require",
+    ] {
+        assert_eq!(
+            policy::target_as_entered(refused),
+            Err(policy::TargetRefused::NotATarget),
+            "{refused}"
+        );
+    }
+
+    let stored = entered_and_saved(
+        &sealed,
+        CONNECTION,
+        "postgres",
+        &json!({"database_url": url}),
+    )
+    .await
+    .unwrap();
+    assert!(is_sealed(&stored["database_url"]));
+    assert_eq!(stored["database_target"], target.unwrap());
+    // As the engine stores one entered at the server.
+    let here = sealed
+        .seal_parameters(
+            TENANT,
+            CONNECTION,
+            "postgres",
+            &json!({"database_url": url}),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored["database_target"], here["database_target"]);
+    assert_eq!(
+        stored["database_url"][SEALED_MARKER]["policy"],
+        here["database_url"][SEALED_MARKER]["policy"]
+    );
+}
+
+#[tokio::test]
+async fn an_mcp_connections_extra_headers_are_entered_under_names_the_offer_gives() {
+    let server = MockServer::start().await;
+    let sealed = sealed_for(&server);
+    let readable = json!({
+        "url": format!("{}/mcp", server.uri()),
+        "auth_mode": "bearer",
+        "bearer_token": SECRET,
+        "extra_headers": {"X-Tenant-Key": "header-CANARY"},
+    });
+    let (parameters, secrets) = testing::enter("mcp", &readable);
+    assert!(is_entered(&parameters["extra_headers"]["X-Tenant-Key"]));
+    assert_eq!(secrets.len(), 2);
+
+    let offered = sealed
+        .offer(TENANT, CONNECTION, "mcp", &parameters)
+        .await
+        .unwrap()
+        .unwrap();
+    let field = &offered.fields["extra_headers.X-Tenant-Key"];
+    assert_eq!(field, &policy::extra_header_field("X-Tenant-Key"));
+
+    let stored = entered_and_saved(&sealed, CONNECTION, "mcp", &readable)
+        .await
+        .unwrap();
+    assert!(is_sealed(&stored["bearer_token"]));
+    assert!(is_sealed(&stored["extra_headers"]["X-Tenant-Key"]));
+    let clear = without_sealed(&stored).to_string();
+    assert!(!clear.contains(SECRET) && !clear.contains("header-CANARY"));
+}
+
+#[tokio::test]
+async fn one_save_enters_no_more_secrets_than_an_envelope_holds() {
+    let server = MockServer::start().await;
+    let sealed = sealed_for(&server);
+    let headers: serde_json::Map<String, Value> = (0..=MAX_ENTERED_SECRETS)
+        .map(|n| (format!("X-Header-{n}"), entered()))
+        .collect();
+    let parameters = json!({
+        "url": format!("{}/mcp", server.uri()),
+        "auth_mode": "none",
+        "extra_headers": headers,
+    });
+
+    let error = sealed
+        .offer(TENANT, CONNECTION, "mcp", &parameters)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, SealingError::Intake(_)), "{error}");
+}

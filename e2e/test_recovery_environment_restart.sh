@@ -83,6 +83,12 @@ api_post() {
     curl -sS --max-time "${3:-60}" -X POST -H "Content-Type: application/json" -d "$2" "${API}$1"
 }
 
+# A connection is saved with its secrets sealed: the server takes none
+# readable. $1 is the create request, written as it was before that.
+connection_post() {
+    python3 "${SCRIPT_DIR}/sealed_connection.py" --api "${API}" "$1"
+}
+
 cleanup() {
     if [ -n "${SERVER_PID}" ] && kill -0 "${SERVER_PID}" 2>/dev/null; then
         kill -9 "${SERVER_PID}" 2>/dev/null || true
@@ -200,7 +206,7 @@ ROW_TABLE=$(psql_quiet -d "${TEST_DB_SERVER}" -c "SELECT tablename FROM pg_table
 echo "  Schema ${SCHEMA_ID}, table ${ROW_TABLE} ✓"
 
 print_step "Creating postgres connection..."
-RESP=$(api_post /connections "{\"title\": \"rec-e2e store\", \"integrationId\": \"postgres\", \"connectionParameters\": {\"database_url\": \"${SERVER_DB_URL}?sslmode=disable\"}}")
+RESP=$(connection_post "{\"title\": \"rec-e2e store\", \"integrationId\": \"postgres\", \"connectionParameters\": {\"database_url\": \"${SERVER_DB_URL}?sslmode=disable\"}}")
 CONN_ID=$(echo "${RESP}" | jq -r '.connection_id // .connectionId // empty')
 [ -n "${CONN_ID}" ] || { print_error "Connection create failed: ${RESP}"; exit 1; }
 echo "  Connection ${CONN_ID} ✓"

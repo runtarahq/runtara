@@ -73,6 +73,12 @@ psql_quiet() {
 api_post() {
     curl -sS --max-time "${3:-60}" -X POST -H "Content-Type: application/json" -d "$2" "${API}$1"
 }
+
+# A connection is saved with its secrets sealed: the server takes none
+# readable. $1 is the create request, written as it was before that.
+connection_post() {
+    python3 "${SCRIPT_DIR}/sealed_connection.py" --api "${API}" "$1"
+}
 # Send a request and echo "<http status> <body>".
 api_status() {
     local method="$1" path="$2" data="${3-}" body status
@@ -206,7 +212,7 @@ print_step "Starting runtara-server on :${TEST_PORT_PUBLIC} (tenant ${TENANT})..
 start_server
 
 print_step "Creating an OpenAI connection to the stand-in..."
-RESP=$(api_post /connections "$(jq -nc --arg base "http://127.0.0.1:${PROVIDER_PORT}/v1" '{
+RESP=$(connection_post "$(jq -nc --arg base "http://127.0.0.1:${PROVIDER_PORT}/v1" '{
     title: "stand-in model", integrationId: "openai_api_key",
     connectionParameters: { api_key: "sk-stand-in", base_url: $base } }')")
 CONN=$(echo "${RESP}" | jq -r '.connectionId // .data.id // .id // empty')

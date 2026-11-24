@@ -88,6 +88,12 @@ api_post() {
         -d "$2" "${API}$1"
 }
 
+# A connection is saved with its secrets sealed: the server takes none
+# readable. $1 is the create request, written as it was before that.
+connection_post() {
+    python3 "${SCRIPT_DIR}/sealed_connection.py" --api "${API}" "$1"
+}
+
 #-------------------------------------------------------------------------
 echo "==============================================================="
 echo "E2E Test: query-instances by id reference (direct-wasm engine)"
@@ -187,7 +193,7 @@ fi
 echo "  Schema ${SCHEMA_ID} ✓"
 
 print_step "Creating postgres connection for the object-model agent..."
-RESP=$(api_post /connections "{
+RESP=$(connection_post "{
   \"title\": \"obm-id-e2e store\",
   \"integrationId\": \"postgres\",
   \"connectionParameters\": {\"database_url\": \"${SERVER_DB_URL}?sslmode=disable\"}

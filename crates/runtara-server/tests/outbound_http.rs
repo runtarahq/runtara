@@ -191,7 +191,7 @@ async fn mtls_fixture() -> MtlsFixture {
 }
 
 #[tokio::test]
-async fn a_mismatched_mtls_key_is_refused_when_the_connection_is_saved() {
+async fn an_mtls_connections_certificates_are_checked_at_save_and_its_key_is_sealed() {
     allow_local_egress_for_this_test_binary();
     init_server_config();
     let pool = test_pool().await;
@@ -213,39 +213,71 @@ async fn a_mismatched_mtls_key_is_refused_when_the_connection_is_saved() {
         runtara_connections::sealed::SealedCredentials::for_tests(),
     );
 
-    // The create path exercises the exact public descriptor and save-time
-    // Rustls build. A syntactically valid but mismatched certificate/key pair
-    // must fail before it can be persisted.
-    let mismatched = service
-        .create_connection(
-            CreateConnectionRequest {
-                title: format!("mTLS mismatch {tenant_id}"),
-                connection_subtype: None,
-                connection_parameters: Some(json!({
-                    "base_url": base_url.clone(),
-                    "client_certificate_pem": client_certificate_pem.clone(),
-                    "client_private_key_pem": KeyPair::generate()
-                        .expect("different client key")
-                        .serialize_pem(),
-                    "server_ca_pem": server_ca_pem.clone(),
-                })),
-                integration_id: Some("http_mtls".to_string()),
-                rate_limit_config: None,
-                valid_until: None,
-                is_default_file_storage: None,
-                default_for: None,
-            },
+    let request = |title: &str, certificate: String, key: String| CreateConnectionRequest {
+        title: format!("{title} {tenant_id}"),
+        connection_subtype: None,
+        connection_parameters: Some(json!({
+            "base_url": base_url.clone(),
+            "client_certificate_pem": certificate,
+            "client_private_key_pem": key,
+            "server_ca_pem": server_ca_pem.clone(),
+        })),
+        integration_id: Some("http_mtls".to_string()),
+        rate_limit_config: None,
+        valid_until: None,
+        is_default_file_storage: None,
+        default_for: None,
+        connection_id: None,
+        sealed_secrets: None,
+    };
+    let another_key = || {
+        KeyPair::generate()
+            .expect("different client key")
+            .serialize_pem()
+    };
+
+    // The certificates are not secret, and are still checked as the
+    // connection is saved: one that is no certificate is refused.
+    let unreadable = service
+        .create_connection_entering(
+            request(
+                "mTLS no certificate",
+                "-----BEGIN CERTIFICATE-----\nnot a certificate\n-----END CERTIFICATE-----\n"
+                    .to_string(),
+                another_key(),
+            ),
             &tenant_id,
         )
         .await;
-    let mismatch_error = mismatched.expect_err("mismatched mTLS key must be rejected");
-    let ServiceError::ValidationError(mismatch_message) = mismatch_error else {
-        panic!("certificate/key mismatch should be a validation error");
-    };
     assert!(
-        mismatch_message.contains("mTLS client could not be initialized"),
-        "certificate/key mismatch should fail while building Rustls config"
+        matches!(unreadable, Err(ServiceError::ValidationError(_))),
+        "a certificate that does not parse must be refused: {unreadable:?}"
     );
+
+    // The private key arrives sealed, so the engine cannot check it against
+    // the certificate: a key that does not match is stored, sealed, and seal
+    // refuses it when it is first used.
+    let mismatched = service
+        .create_connection_entering(
+            request(
+                "mTLS mismatch",
+                client_certificate_pem.clone(),
+                another_key(),
+            ),
+            &tenant_id,
+        )
+        .await
+        .expect("a sealed key is not checked against its certificate at save");
+    let stored: serde_json::Value = sqlx::query_scalar(
+        "SELECT connection_parameters FROM connection_data_entity WHERE id = $1",
+    )
+    .bind(&mismatched)
+    .fetch_one(&pool)
+    .await
+    .expect("the connection is stored");
+    assert!(runtara_connections::sealed::is_sealed(
+        &stored["client_private_key_pem"]
+    ));
     // A valid pair is saved sealed, and seal presents it: see
     // `native_outbound_has_seal_present_a_sealed_client_certificate`.
     server.abort();
@@ -310,7 +342,7 @@ async fn real_http_component_uses_stored_credentials_without_internal_listener()
         runtara_connections::sealed::SealedCredentials::for_tests(),
     );
     let connection_id = connections
-        .create_connection(
+        .create_connection_entering(
             CreateConnectionRequest {
                 title: format!("Synthetic outbound fixture {tenant}"),
                 connection_subtype: None,
@@ -322,6 +354,8 @@ async fn real_http_component_uses_stored_credentials_without_internal_listener()
                 valid_until: None,
                 is_default_file_storage: None,
                 default_for: None,
+                connection_id: None,
+                sealed_secrets: None,
             },
             &tenant,
         )
@@ -516,7 +550,7 @@ async fn synthetic_connection(
         compatibility(),
         runtara_connections::sealed::SealedCredentials::for_tests(),
     )
-    .create_connection(
+    .create_connection_entering(
         CreateConnectionRequest {
             title: format!("Outbound {integration} {}", Uuid::new_v4()),
             integration_id: Some(integration.into()),
@@ -526,6 +560,8 @@ async fn synthetic_connection(
             valid_until: None,
             is_default_file_storage: None,
             default_for: None,
+            connection_id: None,
+            sealed_secrets: None,
         },
         tenant,
     )
@@ -1035,7 +1071,7 @@ async fn native_outbound_sends_a_sealed_connections_request_through_seal() -> an
         compatibility(),
         sealed.clone(),
     )
-    .create_connection(
+    .create_connection_entering(
         CreateConnectionRequest {
             title: format!("Sealed outbound {}", Uuid::new_v4()),
             integration_id: Some("http_bearer".into()),
@@ -1048,6 +1084,8 @@ async fn native_outbound_sends_a_sealed_connections_request_through_seal() -> an
             valid_until: None,
             is_default_file_storage: None,
             default_for: None,
+            connection_id: None,
+            sealed_secrets: None,
         },
         &tenant,
     )
@@ -1167,7 +1205,7 @@ async fn native_outbound_has_seal_sign_a_sealed_storage_connections_request() ->
         compatibility(),
         sealed.clone(),
     )
-    .create_connection(
+    .create_connection_entering(
         CreateConnectionRequest {
             title: format!("Sealed storage {}", Uuid::new_v4()),
             integration_id: Some("azure_blob_storage".into()),
@@ -1182,6 +1220,8 @@ async fn native_outbound_has_seal_sign_a_sealed_storage_connections_request() ->
             valid_until: None,
             is_default_file_storage: None,
             default_for: None,
+            connection_id: None,
+            sealed_secrets: None,
         },
         &tenant,
     )
@@ -1292,7 +1332,7 @@ async fn a_sealed_storage_connections_presigned_url_comes_from_seal() -> anyhow:
                 compatibility(),
                 sealed.unwrap_or_else(runtara_connections::sealed::SealedCredentials::for_tests),
             )
-            .create_connection(
+            .create_connection_entering(
                 CreateConnectionRequest {
                     title: format!("Presign {}", Uuid::new_v4()),
                     integration_id: Some("azure_blob_storage".into()),
@@ -1302,6 +1342,8 @@ async fn a_sealed_storage_connections_presigned_url_comes_from_seal() -> anyhow:
                     valid_until: None,
                     is_default_file_storage: None,
                     default_for: None,
+                    connection_id: None,
+                    sealed_secrets: None,
                 },
                 &tenant,
             )
@@ -1464,7 +1506,7 @@ async fn native_outbound_has_seal_present_a_sealed_client_certificate() -> anyho
         sealed.clone(),
     );
     let connection_id = service
-        .create_connection(
+        .create_connection_entering(
             CreateConnectionRequest {
                 title: format!("Sealed mTLS {tenant_id}"),
                 connection_subtype: None,
@@ -1479,6 +1521,8 @@ async fn native_outbound_has_seal_present_a_sealed_client_certificate() -> anyho
                 valid_until: None,
                 is_default_file_storage: None,
                 default_for: None,
+                connection_id: None,
+                sealed_secrets: None,
             },
             &tenant_id,
         )
@@ -1505,7 +1549,7 @@ async fn native_outbound_has_seal_present_a_sealed_client_certificate() -> anyho
         .expect("a connection has an edit projection")
         .version;
     service
-        .update_connection(
+        .update_connection_entering(
             &connection_id,
             &tenant_id,
             serde_json::from_value(json!({
@@ -1614,7 +1658,7 @@ async fn native_outbound_presents_a_token_got_with_a_sealed_client_secret() -> a
         compatibility(),
         sealed.clone(),
     )
-    .create_connection(
+    .create_connection_entering(
         CreateConnectionRequest {
             title: format!("Sealed client {}", Uuid::new_v4()),
             integration_id: Some("http_oauth2_client_credentials".into()),
@@ -1629,6 +1673,8 @@ async fn native_outbound_presents_a_token_got_with_a_sealed_client_secret() -> a
             valid_until: None,
             is_default_file_storage: None,
             default_for: None,
+            connection_id: None,
+            sealed_secrets: None,
         },
         &tenant,
     )
@@ -1776,7 +1822,7 @@ async fn native_outbound_hands_on_a_streamed_answer_as_it_arrives() -> anyhow::R
         compatibility(),
         sealed.clone(),
     )
-    .create_connection(
+    .create_connection_entering(
         CreateConnectionRequest {
             title: format!("Streamed {}", Uuid::new_v4()),
             integration_id: Some("http_bearer".into()),
@@ -1789,6 +1835,8 @@ async fn native_outbound_hands_on_a_streamed_answer_as_it_arrives() -> anyhow::R
             valid_until: None,
             is_default_file_storage: None,
             default_for: None,
+            connection_id: None,
+            sealed_secrets: None,
         },
         &tenant,
     )

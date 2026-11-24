@@ -465,6 +465,13 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         ("POST", "/api/runtime/object-model/instances/schema/{name}/import-csv") => DatabaseCreate,
         // ── Connections (matched on full and nest-relative templates) ────
         ("POST", "/api/runtime/connections") | ("POST", "/connections") => ConnectionCreate,
+        // What to seal a save's secrets under: asked by whoever may make the save.
+        ("POST", "/api/runtime/connections/offer") | ("POST", "/connections/offer") => {
+            ConnectionCreate
+        }
+        ("POST", "/api/runtime/connections/{id}/offer") | ("POST", "/connections/{id}/offer") => {
+            ConnectionUpdate
+        }
         ("GET", "/api/runtime/connections") | ("GET", "/connections") => ConnectionRead,
         ("GET", "/api/runtime/connections/{id}") | ("GET", "/connections/{id}") => ConnectionRead,
         ("GET", "/api/runtime/connections/{id}/metadata")

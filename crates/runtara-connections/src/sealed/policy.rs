@@ -156,6 +156,7 @@ pub fn telegram_webhook_secret_policy(
         definitions: BTreeMap::new(),
         shared: false,
         verify: Some(Verify::Equals),
+        intake: None,
     };
     policy.validate().ok()?;
     Some(policy)
@@ -280,6 +281,14 @@ fn percent_decoded(value: &str) -> Option<String> {
 /// in the query, since seal, not the URL, decides how the session is opened.
 fn split_postgres_url(url: &str) -> Option<(String, String)> {
     let parsed = url::Url::parse(url.trim()).ok()?;
+    let password = percent_decoded(parsed.password()?).filter(|password| !password.is_empty())?;
+    Some((target_of(&parsed)?, password))
+}
+
+/// The target of a Postgres URL: where it logs in and as whom, with how the
+/// session is protected, as it is stored. `None` for a URL seal cannot log
+/// in for. Whether the URL has a password is not its concern.
+fn target_of(parsed: &url::Url) -> Option<String> {
     if !matches!(parsed.scheme(), "postgres" | "postgresql") {
         return None;
     }
@@ -288,7 +297,6 @@ fn split_postgres_url(url: &str) -> Option<(String, String)> {
         .filter(|host| !host.is_empty())?
         .to_ascii_lowercase();
     let user = Some(parsed.username()).filter(|user| !user.is_empty())?;
-    let password = percent_decoded(parsed.password()?).filter(|password| !password.is_empty())?;
     let database = parsed
         .path()
         .strip_prefix('/')
@@ -305,16 +313,55 @@ fn split_postgres_url(url: &str) -> Option<(String, String)> {
     }
     let port = parsed.port().unwrap_or(5432);
     let target = format!("postgres://{user}@{host}:{port}/{database}");
-    Some((
-        match protection {
-            PgProtection::Verified => target,
-            // The mode stays with the target: it is part of what the
-            // password is sealed for.
-            PgProtection::Unverified => format!("{target}?sslmode=require"),
-            PgProtection::Plaintext => format!("{target}?sslmode=disable"),
-        },
-        password,
-    ))
+    Some(match protection {
+        PgProtection::Verified => target,
+        // The mode stays with the target: it is part of what the
+        // password is sealed for.
+        PgProtection::Unverified => format!("{target}?sslmode=require"),
+        PgProtection::Plaintext => format!("{target}?sslmode=disable"),
+    })
+}
+
+/// Why a Postgres target a caller entered is not taken.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TargetRefused {
+    /// It holds the password, which is entered sealed and nowhere else.
+    HoldsThePassword,
+    /// It is not a URL seal can log in for.
+    NotATarget,
+}
+
+/// The stored target of a Postgres connection whose password was sealed
+/// where it was entered. A caller sends the URL as it was typed, without its
+/// password: the same rules hold for it as for a whole URL entered at the
+/// engine ([`prepared`]), so it says how its session is protected.
+pub fn target_as_entered(url_without_password: &str) -> Result<String, TargetRefused> {
+    let parsed =
+        url::Url::parse(url_without_password.trim()).map_err(|_| TargetRefused::NotATarget)?;
+    if parsed.password().is_some() {
+        return Err(TargetRefused::HoldsThePassword);
+    }
+    target_of(&parsed).ok_or(TargetRefused::NotATarget)
+}
+
+/// A Postgres URL as a caller sends it: without its password, and the
+/// password. `None` for what is no URL with a password.
+pub fn without_password(url: &str) -> Option<(String, String)> {
+    let mut parsed = url::Url::parse(url.trim()).ok()?;
+    let password = percent_decoded(parsed.password()?).filter(|password| !password.is_empty())?;
+    parsed.set_password(None).ok()?;
+    Some((parsed.to_string(), password))
+}
+
+/// What is wrong with a Postgres connection seal cannot hold, in words for
+/// whoever entered it.
+pub fn postgres_url_rules() -> String {
+    format!(
+        "`{PG_URL_FIELD}` must be a postgres:// URL with a user, a password and a \
+         database, and nothing in its query but `sslmode=verify-full`, \
+         `sslmode=require`, or `sslmode=disable` for a host this deployment lets be \
+         reached without TLS"
+    )
 }
 
 /// The database of a sealed Postgres connection, from its stored target.
@@ -352,6 +399,9 @@ pub fn prepared(integration_id: &str, params: &Value) -> Value {
     match fields.get(PG_URL_FIELD) {
         // Still sealed: its target stays with it.
         Some(sealed) if super::is_sealed(sealed) => {}
+        // Sealed where it was entered: the password alone, and the target
+        // came with it.
+        Some(entered) if super::is_entered(entered) => {}
         Some(Value::String(url)) => match split_postgres_url(url) {
             Some((target, password)) => {
                 fields.insert(PG_URL_FIELD.to_owned(), Value::String(password));
@@ -581,9 +631,12 @@ fn stored_as(params: &Value, name: &'static str, alias: &'static str) -> &'stati
     }
 }
 
-/// Whether a connection holds a parameter, readable or sealed.
+/// Whether a connection holds a parameter: readable, sealed, or sealed where
+/// it was entered and on its way in.
 fn holds(params: &Value, name: &str) -> bool {
-    filled(params, name).is_some() || super::is_sealed(&params[name])
+    filled(params, name).is_some()
+        || super::is_sealed(&params[name])
+        || super::is_entered(&params[name])
 }
 
 /// An AWS secret access key, which signs each request (SigV4), and the
@@ -1114,6 +1167,7 @@ fn token_policy(
         definitions: rules.definitions,
         shared: false,
         verify: None,
+        intake: None,
     })
 }
 
@@ -1149,6 +1203,7 @@ fn authorized_client_policy(
         definitions: rules.definitions,
         shared,
         verify: None,
+        intake: None,
     })
 }
 
@@ -1176,6 +1231,7 @@ fn client_secret_policy(grant: &TokenGrant, allowances: &Allowances) -> Option<P
         )]),
         shared: false,
         verify: None,
+        intake: None,
     })
 }
 
@@ -1529,6 +1585,7 @@ pub fn extra_header_policy(
         definitions: BTreeMap::new(),
         shared: false,
         verify: None,
+        intake: None,
     };
     policy.validate().ok()?;
     Some(policy)
@@ -1597,12 +1654,7 @@ pub fn why_unsealable(integration_id: &str, params: &Value, allowances: &Allowan
         return format!("`{integration_id}` is not a connection type this deployment knows");
     }
     if integration_id == "postgres" {
-        return format!(
-            "`{PG_URL_FIELD}` must be a postgres:// URL with a user, a password and a \
-             database, and nothing in its query but `sslmode=verify-full`, \
-             `sslmode=require`, or `sslmode=disable` for a host this deployment lets be \
-             reached without TLS"
-        );
+        return postgres_url_rules();
     }
     if integration_id == "http_api_key"
         && let Err(problem) = runtara_dsl::derived_connection::header_value_format(params)
@@ -1787,12 +1839,14 @@ pub fn policies(
                 definitions: BTreeMap::new(),
                 shared: false,
                 verify: Some(Verify::Hmac { hash: *hash }),
+                intake: None,
             },
             Usage::VerifyToken => Policy {
                 rules: Vec::new(),
                 definitions: BTreeMap::new(),
                 shared: false,
                 verify: Some(Verify::Equals),
+                intake: None,
             },
             Usage::Postgres(target) => {
                 // From its JSON form: a mode this build's seal does not have
@@ -1835,6 +1889,7 @@ pub fn policies(
                     definitions: BTreeMap::new(),
                     shared: false,
                     verify: None,
+                    intake: None,
                 }
             }
             Usage::Token(role, tokens) => {
@@ -1892,6 +1947,7 @@ pub fn policies(
                     definitions: BTreeMap::new(),
                     shared: false,
                     verify: None,
+                    intake: None,
                 }
             }
             Usage::Send {
@@ -1922,6 +1978,7 @@ pub fn policies(
                     definitions: BTreeMap::new(),
                     shared: false,
                     verify: None,
+                    intake: None,
                 }
             }
         };

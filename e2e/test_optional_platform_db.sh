@@ -90,6 +90,12 @@ api_post() {
         ${2:+-d "$2"} "${API}$1"
 }
 
+# A connection is saved with its secrets sealed: the server takes none
+# readable. $1 is the create request, written as it was before that.
+connection_post() {
+    python3 "${SCRIPT_DIR}/sealed_connection.py" --api "${API}" "$1"
+}
+
 # Create a workflow, save its graph, compile it; echoes the workflow id.
 create_and_compile() {
     local name="$1" graph="$2"
@@ -214,9 +220,14 @@ api_post_status() {
         -H "Content-Type: application/json" ${2:+-d "$2"} "${API}$1" \
         | awk '{code=$NF; $NF=""; print code" "$0}'
 }
+# The same for a connection, saved with its secrets sealed.
+connection_post_status() {
+    python3 "${SCRIPT_DIR}/sealed_connection.py" --api "${API}" --status "$1" \
+        | awk '{line[NR]=$0} END {printf "%s", line[NR]; for (i = 1; i < NR; i++) printf " %s", line[i]; print ""}'
+}
 create_connection() {
     local resp id
-    resp=$(api_post /connections "{\"title\": \"$1\", \"integrationId\": \"postgres\", \"connectionParameters\": {\"database_url\": \"$2\"}}")
+    resp=$(connection_post "{\"title\": \"$1\", \"integrationId\": \"postgres\", \"connectionParameters\": {\"database_url\": \"$2\"}}")
     id=$(echo "${resp}" | jq -r '.connection_id // .connectionId // empty')
     [ -n "${id}" ] || { print_error "connection create failed: ${resp}"; exit 1; }
     echo "${id}"
@@ -247,10 +258,10 @@ OUT=$(api_post_status "/object-model/schemas?connectionId=${LOOPBACK}" "${SCHEMA
 case "${OUT}" in 2??\ *) print_error "loopback address not refused: ${OUT}"; exit 1 ;; esac
 # A session with no TLS is only for a host the deployment allows it for:
 # such a connection is not stored at all.
-OUT=$(api_post_status /connections "{\"title\": \"plain\", \"integrationId\": \"postgres\", \"connectionParameters\": {\"database_url\": \"${TENANT_DB_URL}?sslmode=disable\"}}")
+OUT=$(connection_post_status "{\"title\": \"plain\", \"integrationId\": \"postgres\", \"connectionParameters\": {\"database_url\": \"${TENANT_DB_URL}?sslmode=disable\"}}")
 case "${OUT}" in 4??\ *"without TLS"*) ;; *) print_error "a plaintext session to a host not allowed it was not refused: ${OUT}"; exit 1 ;; esac
 # Nor is one whose URL does not say how its session is protected.
-OUT=$(api_post_status /connections "{\"title\": \"unsaid\", \"integrationId\": \"postgres\", \"connectionParameters\": {\"database_url\": \"${TENANT_DB_URL}\"}}")
+OUT=$(connection_post_status "{\"title\": \"unsaid\", \"integrationId\": \"postgres\", \"connectionParameters\": {\"database_url\": \"${TENANT_DB_URL}\"}}")
 case "${OUT}" in 4??\ *"sslmode"*) ;; *) print_error "a URL with no sslmode was not refused: ${OUT}"; exit 1 ;; esac
 echo "  metadata and loopback connections refused; plaintext and unprotected URLs not stored ✓"
 

@@ -31,7 +31,7 @@ use crate::types::*;
     responses(
         (status = 201, description = "Connection created successfully", body = CreateConnectionResponse),
         (status = 400, description = "Invalid request", body = ErrorResponse),
-        (status = 409, description = "Connection with this title already exists", body = ErrorResponse),
+        (status = 409, description = "Connection with this title already exists, or `OFFER_STALE`: the offer its secrets were sealed under no longer stands", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "connections-controller"
@@ -116,8 +116,158 @@ pub async fn create_connection_handler(
                 "message": msg
             })),
         )),
+        Err(ServiceError::StaleOffer(msg)) => Err(stale_offer(msg)),
         Err(ServiceError::NotFound(_)) => unreachable!("Create should not return NotFound"),
     }
+}
+
+/// The answer to a save whose secrets were sealed under an offer that no
+/// longer stands: a conflict the caller settles by asking for a new offer
+/// and sealing again, told from any other by its `error`.
+fn stale_offer(message: String) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "success": false,
+            "error": "OFFER_STALE",
+            "message": message
+        })),
+    )
+}
+
+fn offer_error(error: ServiceError) -> (StatusCode, Json<Value>) {
+    let (status, message) = match error {
+        ServiceError::ValidationError(message) => (StatusCode::BAD_REQUEST, message),
+        ServiceError::NotFound(message) => (StatusCode::NOT_FOUND, message),
+        ServiceError::Conflict(message) => (StatusCode::CONFLICT, message),
+        ServiceError::StaleOffer(message) => return stale_offer(message),
+        ServiceError::DatabaseError(message) => {
+            tracing::error!(error = %message, "could not make an offer");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to make an offer".to_string(),
+            )
+        }
+    };
+    (
+        status,
+        Json(json!({
+            "success": false,
+            "error": message,
+            "message": message
+        })),
+    )
+}
+
+/// What to seal a new connection's secrets under
+///
+/// Takes the request that will create the connection, with `{"$entered":
+/// true}` in place of each secret and no `sealedSecrets`. Answers with seal's
+/// offer and the id the connection will have. The secrets are sealed under
+/// the offer as one JSON object of field name to value, and the same request
+/// is then saved with that envelope as `sealedSecrets` and the id as
+/// `connectionId`.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    post,
+    path = "/api/runtime/connections/offer",
+    request_body = CreateConnectionRequest,
+    responses(
+        (status = 200, description = "The offer to seal the secrets under", body = ConnectionOfferResponse),
+        (status = 400, description = "Invalid request, or a secret sent readable", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "connections-controller"
+))]
+#[allow(clippy::too_many_arguments)] // axum extractors
+pub async fn offer_for_create_handler(
+    crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
+    State(pool): State<PgPool>,
+    State(cipher): State<Arc<dyn CredentialCipher>>,
+    State(compatibility): State<Arc<IntegrationCompatibility>>,
+    State(oauth): State<crate::config::OAuthOptions>,
+    State(agent_access): State<Arc<dyn crate::config::AgentAccess>>,
+    State(sealed): State<Arc<crate::sealed::SealedCredentials>>,
+    Json(payload): Json<CreateConnectionRequest>,
+) -> Result<Json<ConnectionOfferResponse>, (StatusCode, Json<Value>)> {
+    // As create: a type an agent declared exists only for its tenants.
+    if let Some(integration_id) = payload.integration_id.as_deref()
+        && runtara_agents::derived::find(integration_id).is_some()
+        && !crate::config::connection_type_offered(
+            agent_access.as_ref(),
+            &tenant_id,
+            integration_id,
+        )
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "success": false,
+                "error": "CONNECTION_TYPE_NOT_FOUND",
+                "message": format!("Connection type '{integration_id}' not found")
+            })),
+        ));
+    }
+    if payload.sealed_secrets.is_some() {
+        return Err(offer_error(ServiceError::ValidationError(
+            "an offer is asked for before the secrets are sealed: leave sealedSecrets out"
+                .to_string(),
+        )));
+    }
+    let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
+    let service = ConnectionService::new(repository, compatibility, sealed).with_oauth(&oauth);
+    service
+        .offer_for_create(payload, &tenant_id)
+        .await
+        .map(Json)
+        .map_err(offer_error)
+}
+
+/// What to seal the secrets an update enters under
+///
+/// Takes the request that will update the connection, with `{"$entered":
+/// true}` in place of each secret and no `sealedSecrets`. The secrets are
+/// sealed under the offer as one JSON object of field name to value, and the
+/// same request is then saved with that envelope as `sealedSecrets`.
+#[cfg_attr(feature = "utoipa", utoipa::path(
+    post,
+    path = "/api/runtime/connections/{id}/offer",
+    request_body = UpdateConnectionRequest,
+    params(
+        ("id" = String, Path, description = "Connection ID")
+    ),
+    responses(
+        (status = 200, description = "The offer to seal the secrets under", body = ConnectionOfferResponse),
+        (status = 400, description = "Invalid request, or a secret sent readable", body = ErrorResponse),
+        (status = 404, description = "Connection not found", body = ErrorResponse),
+        (status = 409, description = "Connection changed since it was opened", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "connections-controller"
+))]
+#[allow(clippy::too_many_arguments)] // axum extractors
+pub async fn offer_for_update_handler(
+    crate::tenant::TenantId(tenant_id): crate::tenant::TenantId,
+    State(pool): State<PgPool>,
+    State(cipher): State<Arc<dyn CredentialCipher>>,
+    State(compatibility): State<Arc<IntegrationCompatibility>>,
+    State(oauth): State<crate::config::OAuthOptions>,
+    State(sealed): State<Arc<crate::sealed::SealedCredentials>>,
+    Path(id): Path<String>,
+    Json(payload): Json<UpdateConnectionRequest>,
+) -> Result<Json<ConnectionOfferResponse>, (StatusCode, Json<Value>)> {
+    if payload.sealed_secrets.is_some() {
+        return Err(offer_error(ServiceError::ValidationError(
+            "an offer is asked for before the secrets are sealed: leave sealedSecrets out"
+                .to_string(),
+        )));
+    }
+    let repository = Arc::new(ConnectionRepository::new(pool, cipher.clone()));
+    let service = ConnectionService::new(repository, compatibility, sealed).with_oauth(&oauth);
+    service
+        .offer_for_update(&id, &tenant_id, payload)
+        .await
+        .map(Json)
+        .map_err(offer_error)
 }
 
 /// List all connections for a tenant
@@ -322,7 +472,7 @@ pub async fn resolve_connection_resource_handler(
     responses(
         (status = 200, description = "Connection updated successfully", body = ConnectionResponse),
         (status = 404, description = "Connection not found", body = ErrorResponse),
-        (status = 409, description = "Connection changed or title already exists", body = ErrorResponse),
+        (status = 409, description = "Connection changed or title already exists, or `OFFER_STALE`: the offer its secrets were sealed under no longer stands", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     tag = "connections-controller"
@@ -371,6 +521,7 @@ pub async fn update_connection_handler(
                 "message": msg
             })),
         )),
+        Err(ServiceError::StaleOffer(msg)) => Err(stale_offer(msg)),
         Err(ServiceError::DatabaseError(msg)) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({

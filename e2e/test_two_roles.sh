@@ -142,6 +142,12 @@ trap cleanup EXIT
 api_post() {
     curl -sS --max-time "${3:-60}" -X POST -H "Content-Type: application/json" -d "$2" "${API}$1"
 }
+
+# A connection is saved with its secrets sealed: the server takes none
+# readable. $1 is the create request, written as it was before that.
+connection_post() {
+    python3 "${SCRIPT_DIR}/sealed_connection.py" --api "${API}" "$1"
+}
 http_status() { curl -sS -o /dev/null --max-time 30 -w '%{http_code}' "$@"; }
 healthy() { [ "$(http_status "http://127.0.0.1:$1/health" 2>/dev/null || true)" = "200" ]; }
 
@@ -729,7 +735,7 @@ print_success "runs went to both executors ($(placed_by 0) and $(placed_by 1)), 
 
 # --- 4 ------------------------------------------------------------------
 print_step "4. A connection is made through the API, sealed by seal, and used..."
-RESP=$(api_post /connections "{\"title\": \"two roles\", \"integrationId\": \"postgres\", \"connectionParameters\": {\"database_url\": \"${SERVER_DB_URL}?sslmode=disable\"}}")
+RESP=$(connection_post "{\"title\": \"two roles\", \"integrationId\": \"postgres\", \"connectionParameters\": {\"database_url\": \"${SERVER_DB_URL}?sslmode=disable\"}}")
 CONN=$(echo "${RESP}" | jq -r '.connection_id // .connectionId // empty')
 [ -n "${CONN}" ] || { print_error "connection create failed"; exit 1; }
 [ "$(http_status "${API}/object-model/schemas?connectionId=${CONN}")" = "200" ] \
@@ -749,7 +755,7 @@ PROVIDER_LOG="${WORK_DIR}/provider.jsonl"
 python3 "${SCRIPT_DIR}/stand_in_model_provider.py" "${PROVIDER_PORT}" "${PROVIDER_LOG}" &
 PROVIDER_PID=$!
 for _ in {1..20}; do (echo > /dev/tcp/127.0.0.1/${PROVIDER_PORT}) 2>/dev/null && break; sleep 0.25; done
-RESP=$(api_post /connections "$(jq -nc --arg base "http://127.0.0.1:${PROVIDER_PORT}/v1" '{
+RESP=$(connection_post "$(jq -nc --arg base "http://127.0.0.1:${PROVIDER_PORT}/v1" '{
     title: "stand-in model", integrationId: "openai_api_key",
     connectionParameters: { api_key: "sk-stand-in", base_url: $base } }')")
 MODEL=$(echo "${RESP}" | jq -r '.connection_id // .connectionId // empty')

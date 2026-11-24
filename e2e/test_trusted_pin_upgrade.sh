@@ -112,6 +112,12 @@ api_post() {
     curl -sS --max-time "${3:-60}" -X POST -H "Content-Type: application/json" -d "$2" "${API}$1"
 }
 
+# A connection is saved with its secrets sealed: the server takes none
+# readable. $1 is the create request, written as it was before that.
+connection_post() {
+    python3 "${SCRIPT_DIR}/sealed_connection.py" --api "${API}" "$1"
+}
+
 stop_server() {
     if [ -n "${SERVER_PID}" ]; then
         kill "${SERVER_PID}" 2>/dev/null || true
@@ -271,7 +277,7 @@ print_step "Starting runtara-server on :${TEST_PORT_PUBLIC}..."
 start_server
 
 print_step "Creating a synthetic S3 connection..."
-RESP=$(api_post /connections '{"title":"trusted-pin-e2e","integrationId":"s3_compatible","connectionParameters":{"endpoint":"https://storage.example.test","access_key_id":"e2e-access","secret_access_key":"e2e-synthetic-secret","region":"us-east-1"}}')
+RESP=$(connection_post '{"title":"trusted-pin-e2e","integrationId":"s3_compatible","connectionParameters":{"endpoint":"https://storage.example.test","access_key_id":"e2e-access","secret_access_key":"e2e-synthetic-secret","region":"us-east-1"}}')
 CONN=$(echo "${RESP}" | jq -r '.data.id // .id // .connectionId // empty')
 [ -n "${CONN}" ] || { print_error "Connection create failed: ${RESP}"; exit 1; }
 

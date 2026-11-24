@@ -196,7 +196,10 @@ for i in $(seq 0 $((TENANTS_COUNT - 1))); do
         || { print_error "${tenant}: compile failed: $(echo "${resp}" | head -c 300)"; exit 1; }
     WFS[$i]="${wf}"
     ext="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${EXT_PREFIX}_${i}?sslmode=disable"
-    resp=$(as -X POST -d "{\"title\":\"own-${i}\",\"integrationId\":\"postgres\",\"connectionParameters\":{\"database_url\":\"${ext}\"}}" "${API}/connections")
+    # Saved with its password sealed: the server takes none readable.
+    resp=$(python3 "${SCRIPT_DIR}/sealed_connection.py" --api "${API}" --timeout 900 \
+        --header "Authorization: Bearer ${KEYS[$i]}" \
+        "{\"title\":\"own-${i}\",\"integrationId\":\"postgres\",\"connectionParameters\":{\"database_url\":\"${ext}\"}}")
     conn=$(echo "${resp}" | jq -r '.connection_id // .connectionId // empty')
     [ -n "${conn}" ] || { print_error "${tenant}: connection create failed: $(echo "${resp}" | sed -E 's#postgres(ql)?://[^ "]*#<url>#g' | head -c 300)"; exit 1; }
     CONNS[$i]="${conn}"

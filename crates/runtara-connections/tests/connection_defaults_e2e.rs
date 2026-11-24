@@ -162,6 +162,8 @@ fn create_request(
         valid_until: None,
         is_default_file_storage: None,
         default_for: default_for.map(|values| values.into_iter().map(str::to_string).collect()),
+        connection_id: None,
+        sealed_secrets: None,
     }
 }
 
@@ -172,7 +174,7 @@ async fn default_connection_moves_between_compatible_object_model_connections() 
     let (repo, service) = service(fixture.pool.clone());
 
     let first_id = service
-        .create_connection(
+        .create_connection_entering(
             create_request(
                 "Object Model Postgres A",
                 "postgres",
@@ -183,7 +185,7 @@ async fn default_connection_moves_between_compatible_object_model_connections() 
         .await
         .expect("create first default postgres connection");
     let second_id = service
-        .create_connection(
+        .create_connection_entering(
             create_request(
                 "Object Model Postgres B",
                 "postgres",
@@ -232,7 +234,7 @@ async fn create_applies_default_rate_limit_for_known_integration() {
     // No rate_limit_config supplied → the create path should snapshot the
     // per-integration default (SYN-493).
     let id = service
-        .create_connection(
+        .create_connection_entering(
             create_request("Stripe Live", "stripe_api_key", None),
             tenant_id,
         )
@@ -266,7 +268,7 @@ async fn create_preserves_explicit_rate_limit_over_default() {
         max_wait_ms: 1000,
     });
     let id = service
-        .create_connection(request, tenant_id)
+        .create_connection_entering(request, tenant_id)
         .await
         .expect("create stripe connection with explicit limit");
 
@@ -298,7 +300,7 @@ async fn create_leaves_opt_out_integration_without_rate_limit() {
         "base_url": "https://api.example.com",
     }));
     let id = service
-        .create_connection(request, tenant_id)
+        .create_connection_entering(request, tenant_id)
         .await
         .expect("create generic bearer connection");
 
@@ -328,7 +330,7 @@ async fn create_rejects_a_zero_rate_limit() {
         max_retries: 3,
         max_wait_ms: 60000,
     });
-    let result = service.create_connection(request, tenant_id).await;
+    let result = service.create_connection_entering(request, tenant_id).await;
     assert!(
         result.is_err(),
         "creating a connection with requests_per_second=0 must be rejected"
@@ -344,12 +346,12 @@ async fn object_storage_default_bridges_legacy_file_storage_flag() {
     let mut s3_request = create_request("S3 Storage", "s3_compatible", None);
     s3_request.is_default_file_storage = Some(true);
     let s3_id = service
-        .create_connection(s3_request, tenant_id)
+        .create_connection_entering(s3_request, tenant_id)
         .await
         .expect("create s3 default");
 
     let azure_id = service
-        .create_connection(
+        .create_connection_entering(
             create_request(
                 "Azure Blob Storage",
                 "azure_blob_storage",
@@ -382,7 +384,7 @@ async fn stale_update_cannot_move_default_assignments_or_file_storage_flag() {
     let (repo, service) = service(fixture.pool.clone());
 
     let first_id = service
-        .create_connection(
+        .create_connection_entering(
             create_request(
                 "Default storage",
                 "s3_compatible",
@@ -393,7 +395,7 @@ async fn stale_update_cannot_move_default_assignments_or_file_storage_flag() {
         .await
         .expect("create initial default");
     let second_id = service
-        .create_connection(
+        .create_connection_entering(
             create_request("Candidate storage", "azure_blob_storage", None),
             tenant_id,
         )
@@ -410,7 +412,7 @@ async fn stale_update_cannot_move_default_assignments_or_file_storage_flag() {
     }))
     .unwrap();
     service
-        .update_connection(&second_id, tenant_id, rename)
+        .update_connection_entering(&second_id, tenant_id, rename)
         .await
         .expect("concurrent rename");
 
@@ -422,7 +424,7 @@ async fn stale_update_cannot_move_default_assignments_or_file_storage_flag() {
     .unwrap();
     assert!(matches!(
         service
-            .update_connection(&second_id, tenant_id, stale)
+            .update_connection_entering(&second_id, tenant_id, stale)
             .await,
         Err(runtara_connections::service::connections::ServiceError::Conflict(_))
     ));
@@ -456,7 +458,7 @@ async fn failed_default_create_rolls_back_singleton_and_mapping_changes() {
     let (repo, service) = service(fixture.pool.clone());
 
     let existing_id = service
-        .create_connection(
+        .create_connection_entering(
             create_request(
                 "Existing default storage",
                 "s3_compatible",
@@ -474,7 +476,7 @@ async fn failed_default_create_rolls_back_singleton_and_mapping_changes() {
     );
     assert!(
         service
-            .create_connection(duplicate, tenant_id)
+            .create_connection_entering(duplicate, tenant_id)
             .await
             .is_err()
     );

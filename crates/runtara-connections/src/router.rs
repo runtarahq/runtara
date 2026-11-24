@@ -19,6 +19,14 @@ pub fn connections_router(config: ConnectionsConfig) -> Router {
             get(handler::connections::list_connections_handler),
         )
         .route(
+            "/connections/offer",
+            post(handler::connections::offer_for_create_handler),
+        )
+        .route(
+            "/connections/{id}/offer",
+            post(handler::connections::offer_for_update_handler),
+        )
+        .route(
             "/connections/{id}",
             get(handler::connections::get_connection_handler),
         )

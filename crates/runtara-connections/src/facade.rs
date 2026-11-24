@@ -1204,6 +1204,8 @@ pub async fn set_default_connection(
         valid_until: None,
         is_default_file_storage: None,
         default_for: None,
+        connection_id: None,
+        sealed_secrets: None,
     };
     repo.create(
         &request,

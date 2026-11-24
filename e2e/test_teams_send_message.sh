@@ -104,6 +104,12 @@ api_post() {
         -d "$2" "${API}$1"
 }
 
+# A connection is saved with its secrets sealed: the server takes none
+# readable. $1 is the create request, written as it was before that.
+connection_post() {
+    python3 "${SCRIPT_DIR}/sealed_connection.py" --api "${API}" "$1"
+}
+
 # Mint a signed endpoint ref matching api::services::endpoint_ref's wire format:
 #   base64url(kid).base64url(compact-json).base64url(hmac_sha256(kid.payload))
 # Field order MUST match the EndpointBinding struct (serde declaration order).
@@ -267,7 +273,7 @@ print(json.dumps({
 }))
 PY
 )
-RESP=$(api_post /connections "${CONN_PAYLOAD}")
+RESP=$(connection_post "${CONN_PAYLOAD}")
 CONN_ID=$(echo "${RESP}" | jq -r '.connectionId // .data.id // .id // empty')
 if [ -z "${CONN_ID}" ]; then
     print_error "Connection create failed: ${RESP}"; tail -30 "${TEST_LOG}"; exit 1

@@ -227,7 +227,7 @@ async fn object_model_routes_schemas_to_selected_connection_database() {
         runtara_connections::sealed::SealedCredentials::for_tests(),
     );
     let alternate_connection_id = connection_service
-        .create_connection(
+        .create_connection_entering(
             CreateConnectionRequest {
                 title: "Alternate Object Model DB".to_string(),
                 connection_subtype: None,
@@ -239,6 +239,8 @@ async fn object_model_routes_schemas_to_selected_connection_database() {
                 valid_until: None,
                 is_default_file_storage: None,
                 default_for: None,
+                connection_id: None,
+                sealed_secrets: None,
             },
             tenant_id,
         )
@@ -323,7 +325,7 @@ async fn object_model_routes_schemas_to_selected_connection_database() {
         1
     );
     let wrong_type = connection_service
-        .create_connection(
+        .create_connection_entering(
             CreateConnectionRequest {
                 title: "Non-database connection".into(),
                 connection_subtype: None,
@@ -335,6 +337,8 @@ async fn object_model_routes_schemas_to_selected_connection_database() {
                 valid_until: None,
                 is_default_file_storage: None,
                 default_for: None,
+                connection_id: None,
+                sealed_secrets: None,
             },
             tenant_id,
         )
