@@ -136,20 +136,20 @@ def enter(integration_id, secret, parameters):
 
 
 def seal(offered, secrets):
-    """The intake envelope of `secrets`, sealed under the offer."""
+    """The intake envelope of `secrets`, sealed under the offer.
+
+    The secrets go to `seal-sealer` on its standard input, as the one JSON
+    object an intake envelope holds, and are never written to a file.
+    """
+    # Each under the name the offer gives it in the object that is sealed.
+    members = {offered["fields"].get(name, name): value for name, value in secrets.items()}
     with tempfile.TemporaryDirectory() as work:
-        os.chmod(work, 0o700)
         offer = os.path.join(work, "offer.json")
         with open(offer, "w") as out:
             json.dump(offered["offer"], out)
-        command = [seal_sealer(), "--offer", offer]
-        for number, (name, value) in enumerate(sorted(secrets.items())):
-            held = os.path.join(work, f"secret-{number}")
-            with open(held, "w") as out:
-                out.write(value)
-            # The name the offer gives the secret in the object that is sealed.
-            command += ["--text", f"{offered['fields'].get(name, name)}={held}"]
-        sealed = subprocess.run(command, check=True, capture_output=True, text=True)
+        sealed = subprocess.run(
+            [seal_sealer(), "--offer", offer, "--secret", "-"],
+            input=json.dumps(members), check=True, capture_output=True, text=True)
         return json.loads(sealed.stdout)
 
 
