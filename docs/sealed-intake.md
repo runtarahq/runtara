@@ -25,6 +25,11 @@ Instead, a caller:
 4. **Saves the same request**, with the envelope as `sealedSecrets`, and for a new
    connection the id the offer gave as `connectionId`.
 
+Which fields those are is the connection type's `sealedFields`
+(`GET /connections/types/{id}`). It is not every field the form marks secret: a
+certificate or a client's id is kept off the screen and still sent as it is. Besides
+those, each value of an MCP connection's `extra_headers` is sent sealed.
+
 The offer's answer:
 
 ```json

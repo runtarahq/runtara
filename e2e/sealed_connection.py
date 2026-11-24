@@ -89,13 +89,12 @@ class Api:
 
 
 def secret_fields(api, integration_id):
-    """The names of the connection type's secret fields."""
+    """The names of the connection type's fields that are sent sealed."""
     status, body = api.send(
         "GET", "/connections/types/" + urllib.parse.quote(integration_id, safe=""))
     if status != 200:
         return set()
-    fields = json.loads(body)["connectionType"]["formDefinition"]["fields"]
-    return {name for name, field in fields.items() if field.get("secret")}
+    return set(json.loads(body)["connectionType"]["sealedFields"])
 
 
 def split_postgres_url(url):

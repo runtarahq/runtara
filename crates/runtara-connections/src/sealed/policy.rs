@@ -1530,6 +1530,17 @@ pub fn injected_headers(integration_id: &str, params: &Value) -> Vec<String> {
 /// are, and they are stored as they are.
 const PUBLIC_SECRET_FIELDS: &[&str] = &["client_certificate_pem", "server_ca_pem", "client_id"];
 
+/// The fields of a connection type that a caller sends sealed, and that are
+/// refused readable: those it marks secret, but for the public ones. What a
+/// caller is told, so that it need not know which those are.
+pub fn sealed_fields(meta: &runtara_dsl::agent_meta::ConnectionTypeMeta) -> Vec<String> {
+    meta.fields
+        .iter()
+        .filter(|field| field.is_secret && !PUBLIC_SECRET_FIELDS.contains(&field.name))
+        .map(|field| field.name.to_owned())
+        .collect()
+}
+
 /// The parameter of an MCP connection that holds the extra headers each of
 /// its requests carries. Any of them may be a credential, so each value is a
 /// secret: sealed for the connection's server, and attached by seal.
@@ -1609,12 +1620,8 @@ pub fn readable_secrets(integration_id: &str, params: &Value) -> Vec<String> {
             .cloned()
             .collect();
     };
-    let mut names: Vec<&str> = meta
-        .fields
-        .iter()
-        .filter(|field| field.is_secret && !PUBLIC_SECRET_FIELDS.contains(&field.name))
-        .map(|field| field.name)
-        .collect();
+    let sealed = sealed_fields(meta);
+    let mut names: Vec<&str> = sealed.iter().map(String::as_str).collect();
     names.extend([
         ACCESS_TOKEN_FIELD,
         REFRESH_TOKEN_FIELD,

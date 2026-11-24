@@ -981,6 +981,12 @@ pub struct ConnectionTypeDto {
     /// Connection-domain behavior keyed by canonical form field name.
     pub field_behaviors:
         std::collections::HashMap<String, runtara_dsl::agent_meta::ConnectionFieldBehavior>,
+    /// The fields a caller sends sealed: each is saved as `{"$entered": true}`
+    /// with its value in `sealedSecrets`, and refused readable. Not every
+    /// field the form marks secret is one: a certificate or a client's id is
+    /// kept off the screen and still sent as it is. Besides these, each value
+    /// of an MCP connection's `extra_headers` is sent sealed.
+    pub sealed_fields: Vec<String>,
     /// Default rate limit configuration for this connection type (if applicable)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_rate_limit_config: Option<RateLimitConfigDto>,

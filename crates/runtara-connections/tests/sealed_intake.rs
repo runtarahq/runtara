@@ -399,3 +399,55 @@ async fn a_database_password_is_sealed_and_the_rest_of_its_url_is_checked() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
     assert!(!answer.to_string().contains(SECRET), "{answer}");
 }
+
+#[tokio::test]
+async fn a_connection_type_says_which_fields_are_sent_sealed() {
+    let fixture = Fixture::start().await;
+    let api = api_for(&fixture, "acme");
+    let sealed_fields = |described: &Value| -> Vec<String> {
+        let mut names: Vec<String> =
+            serde_json::from_value(described["connectionType"]["sealedFields"].clone()).unwrap();
+        names.sort();
+        names
+    };
+
+    // A certificate is marked secret to keep it off the screen, and is sent
+    // as it is: only the key is sealed.
+    let (status, mtls) = send(&api, "GET", "/connections/types/http_mtls", None).await;
+    assert_eq!(status, StatusCode::OK, "{mtls}");
+    assert_eq!(sealed_fields(&mtls), ["client_private_key_pem"]);
+    let form = &mtls["connectionType"]["formDefinition"]["fields"];
+    assert_eq!(form["client_certificate_pem"]["secret"], true, "{form}");
+
+    // So is a client's id.
+    let (_, oauth) = send(
+        &api,
+        "GET",
+        "/connections/types/http_oauth2_authorization_code",
+        None,
+    )
+    .await;
+    assert_eq!(sealed_fields(&oauth), ["client_secret"]);
+
+    // Saved as the type says: the certificates readable, the key sealed.
+    // What the type lists is exactly what a readable value is refused for.
+    let (status, slack) = send(&api, "GET", "/connections/types/slack_bot", None).await;
+    assert_eq!(status, StatusCode::OK);
+    for field in sealed_fields(&slack) {
+        let mut parameters =
+            json!({"bot_token": {"$entered": true}, "signing_secret": {"$entered": true}});
+        parameters[&field] = json!("readable-CANARY");
+        let (status, answer) = send(
+            &api,
+            "POST",
+            "/connections/offer",
+            Some(json!({"title": "Chat", "integrationId": "slack_bot", "connectionParameters": parameters})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: {answer}");
+        assert!(
+            answer.to_string().contains("must be sealed"),
+            "{field}: {answer}"
+        );
+    }
+}
