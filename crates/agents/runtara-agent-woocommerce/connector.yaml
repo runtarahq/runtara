@@ -1,0 +1,190 @@
+# Input to scripts/connector_gen/connector_gen.py; see its README.md.
+agent:
+  id: woocommerce
+  name: WooCommerce
+  description: >-
+    WooCommerce stores — orders, notes and refunds; products, variations and
+    categories; customers.
+  integration_id: woocommerce_api_key
+  error_prefix: WOOCOMMERCE
+# WooCommerce publishes no spec: a store describes its REST API itself, at
+# `/wp-json/wc/v3?context=help` (`format: wordpress`). This is what a stock
+# WooCommerce 11.3.1 on WordPress 7.1.5 serves, pretty-printed and otherwise as
+# served, but for one change: a refund's `line_items`, which the refunds
+# endpoint takes though its schema marks the property read-only (as WooCommerce
+# says, for backward compatibility), is added to its create arguments.
+# The connection's base URL is the site's address; every generated path goes
+# under `/wp-json/wc/v3`.
+spec:
+  path: woocommerce-11.3.1-schema.json
+  sha256: 15fdf88ad80678a7fca5538d97b85812fc374ce5942e948652e9b141f0147a9e
+  format: wordpress
+# Where WooCommerce's schema says otherwise than its store sends:
+# `shipping_class_id` is declared a string, and is 0, 3, …; a line item's image
+# has an `id` of 37, "50" or 0, and a `src` that is a URL, "" or false (an image
+# whose attachment is gone).
+field_types:
+  product:
+    shipping_class_id: {type: integer, format: int64}
+  product_variation:
+    shipping_class_id: {type: integer, format: int64}
+  shop_order.line_items.items.image:
+    id: {description: "The image's ID, a number or a string."}
+    src: {description: "The image's URL, or false when the image is gone."}
+# The variations list filters by attribute terms with a list of objects in the
+# query (`attributes[0][attribute]=pa_color&attributes[0][term]=blue`), which a
+# step cannot send.
+omit_parameters:
+  - attributes
+# WordPress writes no summaries; the steps' descriptions are written here.
+operation_names:
+  listOrders:
+    name: listOrders
+    description: >-
+      Lists orders, newest first, a page at a time (`per_page` up to 100,
+      `page` from 1), by `status`, `customer`, `product`, dates (`after`,
+      `before`, `modified_after`, …) or `search`. A page of fewer than
+      `per_page` orders is the last.
+  getOrder:
+    name: getOrder
+    description: >-
+      Reads an order by its ID: its line items, billing and shipping, shipping
+      lines, fees, coupons, refunds and meta data.
+  createOrder:
+    name: createOrder
+    description: >-
+      Creates an order. Line items name a `product_id` (with the `variation_id`
+      of a variation) and a `quantity`; WooCommerce works out the prices and
+      totals. The order is pending unless `status` says otherwise; `set_paid`
+      true marks it paid, and its payment method moves it on (to processing,
+      or for cash on delivery to completed).
+  updateOrder:
+    name: updateOrder
+    description: >-
+      Updates an order with the fields given. A new `status` (processing,
+      on-hold, completed, cancelled, refunded, failed, …) changes it as the
+      store's admin would, with the store's emails. A line item, shipping line,
+      fee or coupon given without an `id` is added; with an `id`, changed.
+  deleteOrder:
+    name: deleteOrder
+    description: >-
+      Moves an order to the trash, or with `force` true deletes it for good.
+      Answers the order as it was.
+  listOrderNotes:
+    name: listOrderNotes
+    description: >-
+      Lists an order's notes: those shown to the customer (`type` customer),
+      internal ones, or any.
+  createOrderNote:
+    name: createOrderNote
+    description: >-
+      Adds a note to an order. With `customer_note` true the customer sees it
+      and is emailed it.
+  listOrderRefunds:
+    name: listOrderRefunds
+    description: Lists an order's refunds.
+  getOrderRefund:
+    name: getOrderRefund
+    description: Reads one refund of an order.
+  createOrderRefund:
+    name: createOrderRefund
+    description: >-
+      Refunds an order: the `amount`, and the `line_items` it is for (each the
+      order line item's `id`, `quantity` and `refund_total`). With
+      `api_refund` true, WooCommerce's default, the payment gateway returns the
+      money, and a gateway that cannot (cash on delivery, say) refuses the
+      refund; false records a refund made elsewhere. `api_restock` (true by
+      default) puts the items back in stock.
+  listProducts:
+    name: listProducts
+    description: >-
+      Lists products a page at a time (`per_page` up to 100, `page` from 1), by
+      `sku`, `type`, `status`, `category`, `tag`, `stock_status`, `on_sale`,
+      price, dates or `search`. A page of fewer than `per_page` products is
+      the last.
+  getProduct:
+    name: getProduct
+    description: >-
+      Reads a product by its ID. A variable product lists its variations' IDs
+      (`variations`); Get Product Variation reads each.
+  createProduct:
+    name: createProduct
+    description: >-
+      Creates a product: `type` simple (the default), variable, grouped or
+      external, with its `regular_price` (prices are strings, "19.99"), `sku`,
+      stock (`manage_stock`, `stock_quantity`), `categories`, `images` and
+      `attributes`.
+  updateProduct:
+    name: updateProduct
+    description: >-
+      Updates a product with the fields given: prices (`regular_price`,
+      `sale_price`), stock (`manage_stock`, `stock_quantity`, `stock_status`)
+      or any other.
+  deleteProduct:
+    name: deleteProduct
+    description: >-
+      Moves a product to the trash, or with `force` true deletes it for good.
+      Answers the product as it was.
+  listProductVariations:
+    name: listProductVariations
+    description: Lists the variations of a variable product, a page at a time.
+  getProductVariation:
+    name: getProductVariation
+    description: Reads one variation of a variable product.
+  createProductVariation:
+    name: createProductVariation
+    description: >-
+      Adds a variation to a variable product: its `attributes` (each the
+      product attribute's `id` or `name`, and the `option` chosen), price, SKU
+      and stock.
+  updateProductVariation:
+    name: updateProductVariation
+    description: >-
+      Updates a variation of a variable product with the fields given: price,
+      SKU or stock (`manage_stock`, `stock_quantity`), say.
+  listProductCategories:
+    name: listProductCategories
+    description: >-
+      Lists product categories, a page at a time: their IDs are what a
+      product's `categories` take.
+  listCustomers:
+    name: listCustomers
+    description: >-
+      Lists customers (users of the role `customer`, unless `role` says
+      otherwise) a page at a time, by `email` or `search`.
+  getCustomer:
+    name: getCustomer
+    description: Reads a customer by their ID, with billing and shipping addresses.
+  createCustomer:
+    name: createCustomer
+    description: >-
+      Creates a customer account. Only `email` is required; a `username` and a
+      `password` left out are made up as the store's account settings say.
+  updateCustomer:
+    name: updateCustomer
+    description: Updates a customer with the fields given.
+operations:
+  - listOrders
+  - getOrder
+  - createOrder
+  - updateOrder
+  - deleteOrder
+  - listOrderNotes
+  - createOrderNote
+  - listOrderRefunds
+  - getOrderRefund
+  - createOrderRefund
+  - listProducts
+  - getProduct
+  - createProduct
+  - updateProduct
+  - deleteProduct
+  - listProductVariations
+  - getProductVariation
+  - createProductVariation
+  - updateProductVariation
+  - listProductCategories
+  - listCustomers
+  - getCustomer
+  - createCustomer
+  - updateCustomer

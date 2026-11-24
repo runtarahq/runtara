@@ -4888,6 +4888,7 @@ dependencies = [
  "runtara-agent-transform",
  "runtara-agent-ups",
  "runtara-agent-utils",
+ "runtara-agent-woocommerce",
  "runtara-agent-xero",
  "runtara-agent-xlsx",
  "runtara-agent-xml",
@@ -5358,6 +5359,18 @@ dependencies = [
  "rand 0.8.6",
  "runtara-agent-macro",
  "runtara-dsl",
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.58.0",
+]
+
+[[package]]
+name = "runtara-agent-woocommerce"
+version = "11.0.2"
+dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
+ "runtara-http",
  "serde",
  "serde_json",
  "wit-bindgen 0.58.0",

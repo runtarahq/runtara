@@ -1,0 +1,219 @@
+[
+  {
+    "id": 8,
+    "author": "WooCommerce",
+    "date_created": "2026-11-24T09:48:31",
+    "date_created_gmt": "2026-11-24T09:48:31",
+    "note": "Email \"Refunded order\" failed to send: Could not instantiate mail function..",
+    "customer_note": false,
+    "_links": {
+      "self": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36/notes/8",
+          "targetHints": {
+            "allow": [
+              "GET",
+              "DELETE"
+            ]
+          }
+        }
+      ],
+      "collection": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36/notes"
+        }
+      ],
+      "up": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36"
+        }
+      ]
+    }
+  },
+  {
+    "id": 7,
+    "author": "WooCommerce",
+    "date_created": "2026-11-24T09:48:31",
+    "date_created_gmt": "2026-11-24T09:48:31",
+    "note": "Item #35 stock increased from 8 to 9.",
+    "customer_note": false,
+    "_links": {
+      "self": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36/notes/7",
+          "targetHints": {
+            "allow": [
+              "GET",
+              "DELETE"
+            ]
+          }
+        }
+      ],
+      "collection": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36/notes"
+        }
+      ],
+      "up": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36"
+        }
+      ]
+    }
+  },
+  {
+    "id": 6,
+    "author": "WooCommerce",
+    "date_created": "2026-11-24T09:48:31",
+    "date_created_gmt": "2026-11-24T09:48:31",
+    "note": "Email \"New order\" failed to send: Could not instantiate mail function..",
+    "customer_note": false,
+    "_links": {
+      "self": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36/notes/6",
+          "targetHints": {
+            "allow": [
+              "GET",
+              "DELETE"
+            ]
+          }
+        }
+      ],
+      "collection": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36/notes"
+        }
+      ],
+      "up": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36"
+        }
+      ]
+    }
+  },
+  {
+    "id": 5,
+    "author": "WooCommerce",
+    "date_created": "2026-11-24T09:48:31",
+    "date_created_gmt": "2026-11-24T09:48:31",
+    "note": "Order status changed from Pending payment to Completed.",
+    "customer_note": false,
+    "_links": {
+      "self": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36/notes/5",
+          "targetHints": {
+            "allow": [
+              "GET",
+              "DELETE"
+            ]
+          }
+        }
+      ],
+      "collection": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36/notes"
+        }
+      ],
+      "up": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36"
+        }
+      ]
+    }
+  },
+  {
+    "id": 4,
+    "author": "WooCommerce",
+    "date_created": "2026-11-24T09:48:31",
+    "date_created_gmt": "2026-11-24T09:48:31",
+    "note": "Email \"Completed order\" failed to send: Could not instantiate mail function..",
+    "customer_note": false,
+    "_links": {
+      "self": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36/notes/4",
+          "targetHints": {
+            "allow": [
+              "GET",
+              "DELETE"
+            ]
+          }
+        }
+      ],
+      "collection": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36/notes"
+        }
+      ],
+      "up": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36"
+        }
+      ]
+    }
+  },
+  {
+    "id": 3,
+    "author": "WooCommerce",
+    "date_created": "2026-11-24T09:48:31",
+    "date_created_gmt": "2026-11-24T09:48:31",
+    "note": "Stock levels reduced: Runtara QA mug 1795513711 (10&rarr;8)",
+    "customer_note": false,
+    "_links": {
+      "self": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36/notes/3",
+          "targetHints": {
+            "allow": [
+              "GET",
+              "DELETE"
+            ]
+          }
+        }
+      ],
+      "collection": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36/notes"
+        }
+      ],
+      "up": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36"
+        }
+      ]
+    }
+  },
+  {
+    "id": 2,
+    "author": "WooCommerce",
+    "date_created": "2026-11-24T09:48:31",
+    "date_created_gmt": "2026-11-24T09:48:31",
+    "note": "Created by the runtara smoke test.",
+    "customer_note": false,
+    "_links": {
+      "self": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36/notes/2",
+          "targetHints": {
+            "allow": [
+              "GET",
+              "DELETE"
+            ]
+          }
+        }
+      ],
+      "collection": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36/notes"
+        }
+      ],
+      "up": [
+        {
+          "href": "https://localhost:8091/wp-json/wc/v3/orders/36"
+        }
+      ]
+    }
+  }
+]

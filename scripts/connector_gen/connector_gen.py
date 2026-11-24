@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Generate an agent crate's `src/generated.rs` from the vendor's OpenAPI spec,
-or from its GraphQL schema and the crate's operations (`graphql_source.py`).
+from its GraphQL schema and the crate's operations (`graphql_source.py`), or
+from the REST index a WordPress site serves (`wordpress_source.py`).
 
 Every generated agent crate carries a `connector.yaml` (see README.md). Commands,
 where CRATE is an agent crate directory such as
@@ -1439,10 +1440,13 @@ def retype_fields(sliced: dict, fields: dict) -> None:
     """`field_types`: schema name -> {property: the type or schema the vendor's
     spec should have given it}, for a field `input_types` cannot reach, such as
     one inside the items of a request-body array. Zoho's spec types a record's
-    `$append_values` as a string; its API takes an object."""
+    `$append_values` as a string; its API takes an object. A schema written
+    inside another is named by the path to it (see `named_schema`):
+    WooCommerce's `shop_order.line_items.items.image` is the image of an
+    order's line item."""
     schemas = sliced["components"].get("schemas", {})
     for schema, types in fields.items():
-        properties = schemas.get(schema, {}).get("properties")
+        properties = deref(sliced, named_schema(sliced, schemas, schema)).get("properties")
         if properties is None:
             sys.exit(f"field_types: `{schema}` is no schema with properties in spec.slice.json")
         unknown = sorted(set(types) - set(properties))
@@ -1450,6 +1454,25 @@ def retype_fields(sliced: dict, fields: dict) -> None:
             sys.exit(f"field_types: `{schema}` in spec.slice.json has no properties {unknown}")
         for name, new in types.items():
             properties[name] = retyped_schema(deref(sliced, properties[name]), new)
+
+
+def named_schema(sliced: dict, schemas: dict, key: str) -> dict:
+    """The schema a `field_types` key names: the component of that name, or
+    else the one reached from a component by the path after its name, a
+    property at each step. `items` is an array's items where the schema at
+    that step is an array, and a property of that name anywhere else (a cart's
+    `items`). `{}` when the path leads nowhere."""
+    if key in schemas:
+        return schemas[key]
+    name, *steps = key.split(".")
+    node = schemas.get(name, {})
+    for step in steps:
+        node = deref(sliced, node)
+        kind = node.get("type")
+        array = kind == "array" or (isinstance(kind, list) and "array" in kind) or (
+            kind is None and "items" in node and "properties" not in node)
+        node = (node.get("items") if step == "items" and array else (node.get("properties") or {}).get(step)) or {}
+    return node
 
 
 def retype_inputs(sliced: dict, types: dict) -> None:
@@ -2036,6 +2059,21 @@ def download(source: dict, crate: Path) -> bytes:
     return raw
 
 
+def source_spec(source: dict, crate: Path) -> dict:
+    """The OpenAPI document of one source: its spec as pinned, or what a spec
+    of another `format` describes, converted. `wordpress`: the index a
+    WordPress site serves of a REST namespace (`wordpress_source.py`)."""
+    spec = load_spec(download(source, crate))
+    kind = source.get("format", "openapi")
+    if kind == "wordpress":
+        import wordpress_source
+
+        return wordpress_source.openapi_spec(spec)
+    if kind != "openapi":
+        sys.exit(f"spec format `{kind}` is not one of `openapi` and `wordpress`")
+    return spec
+
+
 def fetch(crate: Path) -> None:
     config = load_config(crate)
     if "graphql" in config:
@@ -2044,8 +2082,7 @@ def fetch(crate: Path) -> None:
         spec, queries = graphql_source.openapi_spec(config, crate)
         sliced = slice_specs([(spec_sources(config)[0], spec)], config, queries)
     else:
-        sliced = slice_specs([(source, load_spec(download(source, crate))) for source in spec_sources(config)],
-                             config)
+        sliced = slice_specs([(source, source_spec(source, crate)) for source in spec_sources(config)], config)
     describe_fields(sliced, config.get("labels") or {})
     write_json(crate / "spec.slice.json", sliced)
     fixtures = crate / "tests" / "fixtures"

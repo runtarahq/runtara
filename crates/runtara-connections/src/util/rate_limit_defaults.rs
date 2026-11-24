@@ -246,6 +246,16 @@ pub fn get_default_rate_limit_config(integration_id: &str) -> Option<RateLimitCo
             max_retries: 3,
             max_wait_ms: 60000,
         }),
+        // WooCommerce sets no API limit either, and a store is WordPress on a
+        // PHP server that also serves its shoppers: the same 5 req/s with
+        // burst 10 as Magento, and a 429 from a host's own limiter is retried.
+        "woocommerce_api_key" => Some(RateLimitConfigDto {
+            requests_per_second: 5,
+            burst_size: 10,
+            retry_on_limit: true,
+            max_retries: 3,
+            max_wait_ms: 60000,
+        }),
         // Mailgun: per-plan sending/API limits vary; 5 req/s with burst 10 is a
         // conservative floor that suits transactional sending without 429s.
         "mailgun" => Some(RateLimitConfigDto {
@@ -390,6 +400,14 @@ mod tests {
     #[test]
     fn test_magento_defaults() {
         let config = get_default_rate_limit_config("magento_access_token").unwrap();
+        assert_eq!(config.requests_per_second, 5);
+        assert_eq!(config.burst_size, 10);
+        assert!(config.retry_on_limit);
+    }
+
+    #[test]
+    fn test_woocommerce_defaults() {
+        let config = get_default_rate_limit_config("woocommerce_api_key").unwrap();
         assert_eq!(config.requests_per_second, 5);
         assert_eq!(config.burst_size, 10);
         assert!(config.retry_on_limit);

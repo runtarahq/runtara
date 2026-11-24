@@ -1129,6 +1129,113 @@ fn test_magento_connection_type_is_registered() {
 }
 
 // ============================================================================
+// WooCommerceExtractor Tests
+// ============================================================================
+
+#[test]
+fn test_woocommerce_extractor_sends_the_key_as_basic_auth_to_the_store() {
+    let config = extract_http_config(
+        "woocommerce_api_key",
+        &json!({
+            "store_url": "https://shop.example.com/",
+            "consumer_key": " ck_abc\n",
+            "consumer_secret": "cs_secret\n"
+        }),
+        None,
+    )
+    .expect("Should extract config");
+
+    // base64("ck_abc:cs_secret")
+    assert_eq!(
+        config.headers.get("Authorization"),
+        Some(&"Basic Y2tfYWJjOmNzX3NlY3JldA==".to_string())
+    );
+    assert_eq!(config.url_prefix, "https://shop.example.com");
+}
+
+#[test]
+fn test_woocommerce_extractor_refuses_an_invalid_store_url() {
+    let err = extract_http_config(
+        "woocommerce_api_key",
+        &json!({
+            "store_url": "https://shop.example.com/?rest_route=/wc/v3",
+            "consumer_key": "ck_abc",
+            "consumer_secret": "cs_secret"
+        }),
+        None,
+    )
+    .expect_err("a store URL with a query should fail");
+    assert!(err.contains("WooCommerce store URL"), "{err}");
+    let err = extract_http_config("woocommerce_api_key", &json!({}), None)
+        .expect_err("missing parameters should fail");
+    assert!(err.contains("woocommerce_api_key"), "{err}");
+}
+
+#[test]
+fn test_woocommerce_base_url_is_the_sites_address() {
+    use connection_types::woocommerce_base_url;
+    for (input, expected) in [
+        ("https://shop.example.com", "https://shop.example.com"),
+        (" https://Shop.Example.com/ ", "https://shop.example.com"),
+        ("https://example.com/shop/", "https://example.com/shop"),
+        ("http://localhost:8091", "http://localhost:8091"),
+        // An API path pasted after the address.
+        (
+            "https://shop.example.com/wp-json",
+            "https://shop.example.com",
+        ),
+        (
+            "https://shop.example.com/wp-json/wc/v3/orders",
+            "https://shop.example.com",
+        ),
+        (
+            "https://example.com/shop/wp-json/wc/v3/",
+            "https://example.com/shop",
+        ),
+        // A path that only starts like one stays.
+        (
+            "https://example.com/wp-jsonish",
+            "https://example.com/wp-jsonish",
+        ),
+        // Magento's API path is a path like any other here.
+        ("https://example.com/rest", "https://example.com/rest"),
+    ] {
+        assert_eq!(
+            woocommerce_base_url(input).as_deref(),
+            Ok(expected),
+            "{input:?}"
+        );
+    }
+    for input in [
+        "",
+        "shop.example.com",
+        "https://user:pass@shop.example.com",
+        "https://shop.example.com/?rest_route=/wc/v3/orders",
+        "https://shop.example.com/a/../b",
+        "https://[::1]",
+    ] {
+        assert!(
+            woocommerce_base_url(input).is_err(),
+            "{input:?} was accepted"
+        );
+    }
+}
+
+#[test]
+fn test_woocommerce_connection_type_is_registered() {
+    assert!(get_http_extractor_ids().contains(&"woocommerce_api_key"));
+    let meta = crate::registry::find_connection_type("woocommerce_api_key")
+        .expect("woocommerce_api_key is in the static registry");
+    assert_eq!(meta.display_name, "WooCommerce");
+    let field = |name: &str| meta.fields.iter().find(|f| f.name == name).unwrap();
+    assert!(field("consumer_secret").is_secret);
+    // The key is the Basic user, which seal is given as it is.
+    assert!(!field("consumer_key").is_secret);
+    assert!(!field("store_url").is_secret);
+    assert!(field("store_url").is_url);
+}
+
+// ============================================================================
 // Jira Extractor Tests
 // ============================================================================
 

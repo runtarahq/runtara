@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 use crate::auth::provider_auth::{
     bigcommerce_store_url, first_string_param, jira_account_url, magento_store_url,
     normalize_endpoint, openai_proxy_base_url, resolve_azure_blob_base_url, resolve_named_endpoint,
+    woocommerce_store_url,
 };
 
 /// Destinations a deployment lets credentials go to that seal refuses by
@@ -1345,6 +1346,20 @@ fn secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
         ),
         // Sent only under the store's own address, a host the user names.
         "magento_access_token" => one("access_token", &magento_store_url(params)?, bearer()),
+        // HTTP Basic, the consumer key as its user, under the store's own
+        // address. A key with a `:` could not be read back from the header,
+        // and one with whitespace inside is no key WooCommerce made.
+        "woocommerce_api_key" => {
+            let consumer_key = filled(params, "consumer_key")?.trim();
+            if consumer_key.contains(':') || consumer_key.contains(char::is_whitespace) {
+                return None;
+            }
+            one(
+                "consumer_secret",
+                &woocommerce_store_url(params)?,
+                basic(consumer_key),
+            )
+        }
         "jira_api_token" => one(
             "api_token",
             &jira_account_url(params)?,
@@ -1738,6 +1753,7 @@ pub const SEALABLE_TYPES: &[&str] = &[
     "shippo_api_token",
     "bigcommerce_api_token",
     "magento_access_token",
+    "woocommerce_api_key",
     "jira_api_token",
     "telegram_bot",
     "slack_bot",
@@ -2063,6 +2079,17 @@ mod tests {
                 json!({"header": {"name": "Authorization", "format": "Bearer {}"}}),
             ),
             (
+                "woocommerce_api_key",
+                json!({
+                    "consumer_key": " ck_abc\n",
+                    "consumer_secret": "s",
+                    "store_url": "https://example.com/shop/wp-json/wc/v3/"
+                }),
+                "consumer_secret",
+                json!({"scheme": "https", "host": "example.com", "path_prefix": "/shop"}),
+                json!({"basic": {"username": {"literal": "ck_abc"}}}),
+            ),
+            (
                 "http_bearer",
                 json!({"token": "s", "base_url": "https://api.example.com/v2/"}),
                 "token",
@@ -2199,6 +2226,57 @@ mod tests {
     }
 
     #[test]
+    fn a_woocommerce_key_without_a_valid_store_or_key_is_not_sealed() {
+        for (store_url, consumer_key) in [
+            (json!("https://user@shop.example.com"), json!("ck_abc")),
+            (
+                json!("https://shop.example.com/?rest_route=/wc/v3"),
+                json!("ck_abc"),
+            ),
+            (json!("shop.example.com"), json!("ck_abc")),
+            (Value::Null, json!("ck_abc")),
+            (json!("https://shop.example.com"), json!("ck:abc")),
+            (json!("https://shop.example.com"), json!("ck abc")),
+            (json!("https://shop.example.com"), json!(" ")),
+            (json!("https://shop.example.com"), Value::Null),
+        ] {
+            let params = json!({
+                "consumer_key": consumer_key,
+                "consumer_secret": "s",
+                "store_url": store_url
+            });
+            assert_eq!(
+                policies("woocommerce_api_key", &params, &Allowances::default()),
+                None,
+                "{params}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_woocommerce_store_on_plain_http_is_sealed_only_where_the_deployment_allows_it() {
+        let params = json!({
+            "consumer_key": "ck_abc",
+            "consumer_secret": "s",
+            "store_url": "http://localhost:8091"
+        });
+        assert_eq!(
+            policies("woocommerce_api_key", &params, &Allowances::default()),
+            None
+        );
+        let allowances = Allowances {
+            private_hosts: vec!["localhost:8091".to_owned()],
+            plain_http_hosts: vec!["localhost".to_owned()],
+            ..Allowances::default()
+        };
+        let policy = policies("woocommerce_api_key", &params, &allowances).unwrap();
+        assert_eq!(
+            canonical(&policy["consumer_secret"])["rules"][0]["destination"],
+            json!({"scheme": "http", "host": "localhost", "port": 8091})
+        );
+    }
+
+    #[test]
     fn every_listed_type_is_one_the_registry_knows() {
         for integration_id in SEALABLE_TYPES {
             assert!(
@@ -2225,6 +2303,7 @@ mod tests {
             "client_id": "client", "client_secret": "s", "app_id": "app", "app_password": "s",
             "tenant_id": "tenant", "scope": "read", "subdomain": "acme", "store_hash": "abc123",
             "store_url": "https://shop.example.com",
+            "consumer_key": "ck_abc", "consumer_secret": "s",
             "token_url": "https://auth.example.com/token",
             "database_target": "postgres://app@db.example.com:5432/orders",
         });

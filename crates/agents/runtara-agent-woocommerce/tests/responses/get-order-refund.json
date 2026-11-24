@@ -1,0 +1,74 @@
+{
+  "id": 37,
+  "date_created": "2026-11-24T09:48:31",
+  "date_created_gmt": "2026-11-24T09:48:31",
+  "amount": "9.99",
+  "reason": "smoke test",
+  "refunded_by": 1,
+  "refunded_payment": false,
+  "meta_data": [
+    {
+      "id": 981,
+      "key": "_refund_type",
+      "value": "partial"
+    }
+  ],
+  "line_items": [
+    {
+      "id": 3,
+      "name": "Runtara QA mug 1795513711",
+      "product_id": 0,
+      "variation_id": 0,
+      "quantity": -1,
+      "tax_class": "",
+      "subtotal": "-9.99",
+      "subtotal_tax": "0.00",
+      "total": "-9.99",
+      "total_tax": "0.00",
+      "taxes": [],
+      "meta_data": [
+        {
+          "id": 25,
+          "key": "_refunded_item_id",
+          "value": "1",
+          "display_key": "_refunded_item_id",
+          "display_value": "1"
+        }
+      ],
+      "sku": null,
+      "global_unique_id": null,
+      "price": 9.99,
+      "image": {
+        "id": 0,
+        "src": ""
+      },
+      "parent_name": null
+    }
+  ],
+  "shipping_lines": [],
+  "tax_lines": [],
+  "fee_lines": [],
+  "_links": {
+    "self": [
+      {
+        "href": "https://localhost:8091/wp-json/wc/v3/orders/36/refunds/37",
+        "targetHints": {
+          "allow": [
+            "GET",
+            "DELETE"
+          ]
+        }
+      }
+    ],
+    "collection": [
+      {
+        "href": "https://localhost:8091/wp-json/wc/v3/orders/36/refunds"
+      }
+    ],
+    "up": [
+      {
+        "href": "https://localhost:8091/wp-json/wc/v3/orders/36"
+      }
+    ]
+  }
+}

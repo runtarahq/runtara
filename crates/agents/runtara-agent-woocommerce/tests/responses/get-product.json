@@ -1,0 +1,140 @@
+{
+  "id": 11,
+  "name": "Hoodie",
+  "slug": "hoodie",
+  "permalink": "https://localhost:8091/product/hoodie/",
+  "date_created": "2019-01-16T13:01:52",
+  "date_created_gmt": "2019-01-16T13:01:52",
+  "date_modified": "2026-11-24T09:54:04",
+  "date_modified_gmt": "2026-11-24T09:54:04",
+  "type": "variable",
+  "status": "publish",
+  "featured": false,
+  "catalog_visibility": "visible",
+  "description": "<p>Pellentesque habitant morbi tristique senectus et netus et malesuada fames ac turpis egestas. Vestibulum tortor quam, feugiat vitae, ultricies eget, tempor sit amet, ante. Donec eu libero sit amet quam egestas semper. Aenean ultricies mi vitae est. Mauris placerat eleifend leo.</p>\n",
+  "short_description": "<p>This is a variable product.</p>\n",
+  "sku": "woo-hoodie",
+  "price": "42",
+  "regular_price": "",
+  "sale_price": "",
+  "date_on_sale_from": null,
+  "date_on_sale_from_gmt": null,
+  "date_on_sale_to": null,
+  "date_on_sale_to_gmt": null,
+  "on_sale": true,
+  "purchasable": true,
+  "total_sales": 1,
+  "virtual": false,
+  "downloadable": false,
+  "downloads": [],
+  "download_limit": 0,
+  "download_expiry": 0,
+  "external_url": "",
+  "button_text": "",
+  "tax_status": "taxable",
+  "tax_class": "",
+  "manage_stock": false,
+  "stock_quantity": null,
+  "backorders": "no",
+  "backorders_allowed": false,
+  "backordered": false,
+  "low_stock_amount": null,
+  "sold_individually": false,
+  "weight": "1.5",
+  "dimensions": {
+    "length": "10",
+    "width": "8",
+    "height": "3"
+  },
+  "shipping_required": true,
+  "shipping_taxable": true,
+  "shipping_class": "",
+  "shipping_class_id": 0,
+  "reviews_allowed": true,
+  "average_rating": "0.00",
+  "rating_count": 0,
+  "upsell_ids": [],
+  "cross_sell_ids": [],
+  "parent_id": 0,
+  "purchase_note": "",
+  "categories": [
+    {
+      "id": 23,
+      "name": "Hoodies",
+      "slug": "hoodies"
+    }
+  ],
+  "brands": [],
+  "tags": [],
+  "images": [],
+  "attributes": [
+    {
+      "id": 1,
+      "name": "color",
+      "slug": "pa_color",
+      "position": 0,
+      "visible": true,
+      "variation": true,
+      "options": [
+        "Blue",
+        "Green",
+        "Red"
+      ]
+    },
+    {
+      "id": 0,
+      "name": "Logo",
+      "slug": "Logo",
+      "position": 1,
+      "visible": true,
+      "variation": true,
+      "options": [
+        "Yes",
+        "No"
+      ]
+    }
+  ],
+  "default_attributes": [],
+  "variations": [
+    34,
+    27,
+    28,
+    29
+  ],
+  "grouped_products": [],
+  "menu_order": 0,
+  "price_html": "<span class=\"woocommerce-Price-amount amount\" aria-hidden=\"true\"><bdi><span class=\"woocommerce-Price-currencySymbol\" translate=\"no\" dir=\"auto\">&#36;</span>42.00</bdi></span> <span aria-hidden=\"true\">&ndash;</span> <span class=\"woocommerce-Price-amount amount\" aria-hidden=\"true\"><bdi><span class=\"woocommerce-Price-currencySymbol\" translate=\"no\" dir=\"auto\">&#36;</span>45.00</bdi></span><span class=\"screen-reader-text\">Price range: &#36;42.00 through &#36;45.00</span>",
+  "related_ids": [
+    12,
+    19
+  ],
+  "meta_data": [],
+  "stock_status": "instock",
+  "has_options": true,
+  "post_password": "",
+  "global_unique_id": "",
+  "customs_commodity_code": null,
+  "customs_country_of_origin": null,
+  "customs_description": null,
+  "_links": {
+    "self": [
+      {
+        "href": "https://localhost:8091/wp-json/wc/v3/products/11",
+        "targetHints": {
+          "allow": [
+            "GET",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE"
+          ]
+        }
+      }
+    ],
+    "collection": [
+      {
+        "href": "https://localhost:8091/wp-json/wc/v3/products"
+      }
+    ]
+  }
+}

@@ -34,6 +34,7 @@ pub static CONNECTION_TYPES: &[&ConnectionTypeMeta] = &[
     &crate::extractors::connection_types::__CONNECTION_META_ShippoApiTokenParams,
     &crate::extractors::connection_types::__CONNECTION_META_BigCommerceApiTokenParams,
     &crate::extractors::connection_types::__CONNECTION_META_MagentoAccessTokenParams,
+    &crate::extractors::connection_types::__CONNECTION_META_WooCommerceApiKeyParams,
     &crate::extractors::connection_types::__CONNECTION_META_GeminiApiKeyParams,
     &crate::extractors::connection_types::__CONNECTION_META_ZendeskClientCredentialsParams,
     &crate::extractors::connection_types::__CONNECTION_META_JiraApiTokenParams,

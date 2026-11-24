@@ -346,6 +346,20 @@ field_types:
       additionalProperties: {type: boolean}
 ```
 
+A schema written inside another, with no name of its own, is named by the
+path to it from a component: a property at each step, but for `items` where
+the schema there is an array, which steps into its items (a property called
+`items` is reached where the schema is no array). A key that is a component's
+whole name, dots and all, names that component. WooCommerce's schema types the
+`id` of a line item's image an integer, and the store sends 37, `"50"` or 0;
+a schema without a type takes any value:
+
+```yaml
+field_types:
+  shop_order.line_items.items.image:
+    id: {description: "The image's ID, a number or a string."}
+```
+
 **The spec names a type in a title.** BigCommerce's specs write a number as
 `type: string` with the title `float` (a product's `price`, a transaction's
 `amount`), and its API sends and takes numbers there. Give the title the type
@@ -445,6 +459,60 @@ agent:
     - hubspot_private_app
     - hubspot_access_token
 ```
+
+## WordPress REST APIs
+
+WordPress publishes no OpenAPI, but every site describes its own REST API, and
+a plugin's (WooCommerce's `wc/v3`) the same way: `GET
+/wp-json/<namespace>?context=help` answers each route's regex path, the
+methods of its endpoints with their arguments, and the JSON schema of what it
+answers. Save that from a site that runs the plugin's version you want, keep it
+in the crate, and name it with `format: wordpress`:
+
+```yaml
+spec:
+  path: woocommerce-11.3.1-schema.json
+  sha256: 15fdf88a…
+  format: wordpress
+```
+
+```bash
+curl -sS 'https://shop.example.com/wp-json/wc/v3?context=help' | python3 -m json.tool --indent 2 --no-ensure-ascii > woocommerce-11.3.1-schema.json
+```
+
+`fetch` turns it into OpenAPI 3.1 (`wordpress_source.py`) before slicing:
+
+- `(?P<id>[\d]+)` in a route is the path parameter `{id}`: an integer when its
+  pattern is digits only, a string otherwise. A route with a group that has no
+  name is skipped, with a note.
+- A GET's or DELETE's arguments are query parameters, a POST's or PUT's a JSON
+  body; an argument's `required: true` is the body's `required`. Of POST, PUT
+  and PATCH, which WordPress lists for an update, only PUT is generated (POST
+  for a route ending in `/batch`).
+- WordPress's types are JSON Schema's: `date-time` is a string of that format,
+  `bool` boolean, `mixed` and a union of several types any value, `[T, "null"]`
+  nullable. `context` and callbacks are dropped, `readonly` is `readOnly`, and
+  a `default` or an `enum` value that does not fit its type is dropped.
+- A request body has no defaults: some are the site's own settings
+  (WooCommerce's order `currency` is the store's), and the site applies them to
+  a field left out anyway.
+- Each route's schema is a component named by its `title` (`shop_order`). A GET
+  of a route that does not end in a path parameter answers an array of it, and
+  a POST to one answers 201.
+- operationIds come from the path: `/orders` gives `listOrders` and
+  `createOrder`; `/orders/{id}` gives `getOrder`, `updateOrder` and
+  `deleteOrder`; `/orders/{order_id}/refunds` gives `listOrderRefunds` and
+  `createOrderRefund`; `/orders/batch` gives `batchOrders`. Of two that would
+  share a name, one with path parameters is named after them too
+  (`batchSettingsByGroupId`). WordPress writes no summaries: give the
+  capabilities' descriptions in `operation_names`.
+- The server is `/wp-json/<namespace>`: requests go to the connection's base
+  URL, the site's address, followed by it.
+
+What a route answers otherwise than its schema says (a schema bug of the
+plugin's) is fixed with `field_types`; an argument the site takes but does not
+declare is added to the saved index by hand, and connector.yaml says so, as
+`runtara-agent-woocommerce`'s does for a refund's `line_items`.
 
 ## GraphQL APIs
 
@@ -767,7 +835,8 @@ crates/agents/runtara-agent-<id>/
 ## Limits
 
 - OpenAPI 3.0 and Swagger 2.0 (3.1 features such as `type: "null"` are
-  rewritten where listed above), and GraphQL schemas with operations of ours.
+  rewritten where listed above), GraphQL schemas with operations of ours, and
+  WordPress REST namespaces as a site describes them.
 - A GraphQL operation selects one top-level field and is no subscription. The
   objects it returns are typed from what it selects, with every field
   optional. A top-level field that answers `null` is an error the kit reports,
