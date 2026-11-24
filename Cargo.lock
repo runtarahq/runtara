@@ -4790,7 +4790,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-ai-tools"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-ai",
@@ -4806,7 +4806,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-azure-blob-storage"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -4824,7 +4824,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-bedrock"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-ai",
@@ -4838,7 +4838,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-bigcommerce"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4850,7 +4850,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-bundle-emit"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "runtara-agent-ai-tools",
@@ -4899,7 +4899,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-compression"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
@@ -4913,7 +4913,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-control"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-control-contract",
@@ -4927,7 +4927,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-conversation"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4940,7 +4940,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-crypto"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "base64 0.22.1",
  "hmac 0.12.1",
@@ -4957,7 +4957,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-csv"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "base64 0.22.1",
  "csv",
@@ -4971,7 +4971,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-datetime"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -4985,7 +4985,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-ebay"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -4997,7 +4997,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-encoding"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "chardetng",
  "encoding_rs",
@@ -5008,7 +5008,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-http"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
@@ -5025,7 +5025,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-hubspot"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -5037,7 +5037,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-jira"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -5049,7 +5049,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-macro"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "darling 0.20.11",
  "proc-macro2",
@@ -5065,7 +5065,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-magento"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -5077,7 +5077,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-mailgun"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
@@ -5090,7 +5090,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-mcp"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -5104,7 +5104,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-object-model"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-database-contract",
@@ -5122,7 +5122,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-openai"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-ai",
@@ -5135,7 +5135,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-paypal"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -5147,7 +5147,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-pipedrive"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -5159,7 +5159,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-quickbooks"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -5171,7 +5171,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-s3-storage"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -5191,7 +5191,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-sharepoint"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
@@ -5204,7 +5204,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-shippo"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -5216,7 +5216,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-shopify"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -5228,7 +5228,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-slack"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
@@ -5242,7 +5242,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-slack-web-api"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -5254,7 +5254,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-sqs"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -5266,7 +5266,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-stripe"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -5278,7 +5278,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-suspension"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-wit",
  "wit-parser 0.247.0",
@@ -5286,7 +5286,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-teams"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -5299,7 +5299,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-text"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "base64 0.22.1",
  "minijinja",
@@ -5316,7 +5316,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-transform"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -5328,7 +5328,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-trusted"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-workflow-api",
  "runtara-workflow-sdk",
@@ -5341,7 +5341,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-ups"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -5353,7 +5353,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-utils"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "rand 0.8.6",
  "runtara-agent-macro",
@@ -5365,7 +5365,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-xero"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -5377,7 +5377,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-xlsx"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "base64 0.22.1",
  "calamine",
@@ -5390,7 +5390,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-xml"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "base64 0.22.1",
  "roxmltree",
@@ -5404,7 +5404,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-zendesk"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -5416,7 +5416,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agent-zoho-crm"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-agent-macro",
  "runtara-dsl",
@@ -5428,7 +5428,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-agents"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "base64 0.22.1",
  "runtara-agent-macro",
@@ -5440,7 +5440,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-ai"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-dsl",
  "runtara-http",
@@ -5452,7 +5452,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-api-component"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-workflow-api",
  "runtara-workflow-sdk",
@@ -5463,7 +5463,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-artifact-store"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -5482,7 +5482,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-compile-guest"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "flate2",
  "runtara-workflow-api",
@@ -5494,7 +5494,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-component-host"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5543,7 +5543,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-connections"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "async-trait",
@@ -5590,7 +5590,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-control-contract"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-dsl",
  "serde",
@@ -5599,7 +5599,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-core"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5616,7 +5616,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-database-contract"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5624,7 +5624,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-dsl"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "regex",
  "schemars 1.2.1",
@@ -5636,7 +5636,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-environment"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5678,7 +5678,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-executor"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "axum",
  "bytes",
@@ -5706,7 +5706,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-http"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-workflow-api",
  "runtara-workflow-sdk",
@@ -5719,7 +5719,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-object-model-core"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "chrono",
  "regex",
@@ -5731,7 +5731,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-object-store"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "chrono",
  "futures-util",
@@ -5749,7 +5749,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-run"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "bytes",
  "http",
@@ -5770,7 +5770,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-runner-delegate"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "async-trait",
  "runtara-environment",
@@ -5781,7 +5781,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-runner-executor"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -5806,7 +5806,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-server"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5888,7 +5888,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-store-postgres"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5906,14 +5906,14 @@ dependencies = [
 
 [[package]]
 name = "runtara-tenant-scope"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "runtara-text-parser"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "chrono",
  "regex",
@@ -5923,7 +5923,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-validation-wasm"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-dsl",
  "runtara-workflows",
@@ -5934,7 +5934,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-wit"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-control-contract",
  "wit-parser 0.247.0",
@@ -5942,7 +5942,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflow-api"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -5958,7 +5958,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflow-api-probe"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-workflow-api",
  "runtara-workflow-sdk",
@@ -5968,7 +5968,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflow-api-run"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-workflow-api",
  "runtara-workflow-sdk",
@@ -5978,7 +5978,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflow-sdk"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "runtara-workflow-api",
  "serde",
@@ -5988,7 +5988,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflow-stdlib"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "minijinja",
  "runtara-agent-suspension",
@@ -6000,7 +6000,7 @@ dependencies = [
 
 [[package]]
 name = "runtara-workflows"
-version = "11.0.2"
+version = "12.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
