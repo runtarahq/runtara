@@ -183,7 +183,7 @@ jobs:
     env:
       # The console release whose image and smoke suite run against the
       # bundle: console X.Y works with server X.Y and the minor on either side.
-      RUNTARA_FRONTEND_VERSION: 10.0.1
+      RUNTARA_FRONTEND_VERSION: 12.0.0
       SMOKE_API_BASE_URL: http://127.0.0.1:7001
       # The console runs in its own container (runtara-frontend's image) and
       # calls the server across origins.
