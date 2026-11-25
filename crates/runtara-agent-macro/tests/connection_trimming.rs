@@ -16,10 +16,10 @@ struct TrimmingParams {
     #[field(display_name = "Client ID", trim)]
     client_id: String,
 
-    #[field(display_name = "API Key", secret)]
+    #[field(display_name = "API Key", secret, trim)]
     api_key: String,
 
-    #[field(display_name = "Password", secret, keep_whitespace)]
+    #[field(display_name = "Password", secret)]
     password: String,
 }
 
@@ -33,12 +33,9 @@ fn trims(name: &str) -> bool {
 }
 
 #[test]
-fn a_secret_trims_unless_kept_and_a_readable_field_only_when_marked() {
-    assert!(trims("api_key"), "a secret trims by default");
-    assert!(
-        !trims("password"),
-        "`keep_whitespace` keeps a secret as typed"
-    );
+fn fields_trim_only_when_explicitly_marked() {
+    assert!(trims("api_key"), "`trim` opts a secret into normalization");
+    assert!(!trims("password"), "an unannotated secret is kept as typed");
     assert!(trims("client_id"), "`trim` trims a readable field");
     assert!(
         !trims("base_url"),

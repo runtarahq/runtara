@@ -879,7 +879,7 @@ pub struct ConnectionFieldMeta {
     /// credential (a client id, an account's email). A pasted value often
     /// ends in a newline or a space. The engine never reads a secret, so a
     /// secret is trimmed by whoever seals it; a readable value, by the server
-    /// when it is saved. Not set for what a person chose, like a password.
+    /// when it is saved. Opt-in via `trim`; unannotated fields preserve whitespace.
     pub trims: bool,
     /// Allowed values when this field is one-of a fixed set. `None` means
     /// free-form input; `Some(&[…])` makes the UI render a select. Values are

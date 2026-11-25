@@ -2302,29 +2302,19 @@ mod tests {
         assert!(!is_sealable_type("sftp"));
     }
 
-    /// A caller trims every sealed secret but those a person chose or that
-    /// span lines, which it seals as typed. One more of those is a choice to
-    /// make here, not a default a new connection type falls into.
     #[test]
-    fn every_sealed_secret_is_trimmed_but_the_ones_a_person_chose() {
-        let mut kept: Vec<String> = runtara_agents::registry::get_all_connection_types()
-            .flat_map(|meta| {
-                let trimmed = trimmed_fields(meta);
-                sealed_fields(meta)
-                    .into_iter()
-                    .filter(move |field| !trimmed.contains(field))
-                    .map(move |field| format!("{}.{field}", meta.integration_id))
-            })
-            .collect();
-        kept.sort();
-        assert_eq!(
-            kept,
-            [
-                "http_basic.password",
-                "http_mtls.client_private_key_pem",
-                "postgres.database_url",
-            ]
-        );
+    fn designated_tokens_trim_and_passwords_preserve_whitespace() {
+        for (integration_id, expected) in [
+            ("woocommerce_api_key", vec!["consumer_secret"]),
+            ("jira_api_token", vec!["api_token"]),
+            ("http_bearer", vec!["token"]),
+            ("http_basic", vec![]),
+            ("postgres", vec![]),
+            ("http_mtls", vec![]),
+        ] {
+            let meta = find_connection_type(integration_id).unwrap();
+            assert_eq!(trimmed_fields(meta), expected, "{integration_id}");
+        }
         // A readable field is never one a caller trims: the server does.
         let woocommerce = find_connection_type("woocommerce_api_key").unwrap();
         assert_eq!(trimmed_fields(woocommerce), ["consumer_secret"]);

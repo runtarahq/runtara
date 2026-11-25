@@ -22,7 +22,8 @@ struct HttpBearerParams {
     #[field(
         display_name = "Token",
         description = "Bearer token for authentication",
-        secret
+        secret,
+        trim
     )]
     token: String,
     /// Base URL prefix. Required + https-validated: the proxy pins every

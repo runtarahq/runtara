@@ -23,12 +23,7 @@ struct HttpBasicParams {
     username: String,
 
     /// Password
-    #[field(
-        display_name = "Password",
-        description = "Password",
-        secret,
-        keep_whitespace
-    )]
+    #[field(display_name = "Password", description = "Password", secret)]
     password: String,
 
     /// Base URL prefix. Required + https-validated: the proxy pins every

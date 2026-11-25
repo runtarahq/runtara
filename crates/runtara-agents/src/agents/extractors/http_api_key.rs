@@ -20,7 +20,7 @@ use std::collections::HashMap;
 )]
 struct HttpApiKeyParams {
     /// API key value
-    #[field(display_name = "API Key", description = "API key value", secret)]
+    #[field(display_name = "API Key", description = "API key value", secret, trim)]
     api_key: String,
     /// Header name for the API key (defaults to "X-API-Key")
     #[serde(default = "default_header_name")]

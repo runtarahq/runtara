@@ -849,12 +849,8 @@ struct ConnectionFieldArgs {
     /// Mark this field as a secret (password, API key, etc.)
     #[darling(default)]
     secret: bool,
-    /// Keep whitespace around a secret's value. A secret is trimmed unless
-    /// this is set: set it on one a person chose, such as a password.
-    #[darling(default)]
-    keep_whitespace: bool,
-    /// Trim whitespace around a readable field's value: one that is half of
-    /// a credential, such as a client id or an account's email.
+    /// Trim surrounding whitespace only when the field explicitly opts in.
+    /// Applies to readable fields and secrets before callers seal them.
     #[darling(default)]
     trim: bool,
     /// Allow an existing value to be removed through an explicit patch.
@@ -1161,7 +1157,7 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
             let order = f.order.unwrap_or(index as i32);
             let default_token = option_to_tokens(&f.default);
             let is_secret = f.secret;
-            let trims = f.trim || (is_secret && !f.keep_whitespace);
+            let trims = f.trim;
             let clearable = f.clearable;
             let requires_reauthorization = f.requires_reauthorization;
             let is_url = f.is_url;
@@ -1220,10 +1216,6 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
                 quote! { compile_error!("a clearable secret connection field must use `access = \"write\"`"); }
             } else if requires_reauthorization && f.access.as_deref() == Some("read") {
                 quote! { compile_error!("a read-only connection field cannot require reauthorization"); }
-            } else if f.keep_whitespace && !is_secret {
-                quote! { compile_error!("`keep_whitespace` is only valid on secret connection fields: a readable one is kept as it is unless it is marked `trim`"); }
-            } else if f.trim && is_secret {
-                quote! { compile_error!("`trim` is only valid on readable connection fields: a secret is trimmed unless it is marked `keep_whitespace`"); }
             } else {
                 quote! {}
             };

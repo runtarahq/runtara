@@ -30,14 +30,23 @@ Which fields those are is the connection type's `sealedFields`
 certificate or a client's id is kept off the screen and still sent as it is. Besides
 those, each value of an MCP connection's `extra_headers` is sent sealed.
 
-A caller trims the whitespace around each secret in the type's `trimmedFields` before
+A caller can trim the whitespace around each secret in the type's `trimmedFields` before
 sealing it: keys and tokens a provider issued, which a paste often leaves a newline or a
 space on. The server cannot trim what it cannot read, and seal attaches a secret exactly
 as it was sealed, so an untrimmed key fails every call it is sent with. The other sealed
 fields (a password a person chose, a private key) are sealed as typed. A readable field
 that is half of a credential, such as a client id or an account's email, is trimmed by
-the server when a request supplies it. A field's type says which it is: a secret trims
-unless it is marked `keep_whitespace`, a readable field only when it is marked `trim`.
+the server when a request supplies it. Both readable and secret fields preserve
+whitespace by default; only an explicit
+`#[field(..., trim)]` opts a field into normalization. Mark known keys and tokens,
+not passwords or arbitrary credential values.
+
+`e2e/sealed_connection.py` consumes `trimmedFields` on create and update. This
+runtara-only change does not require a frontend deployment: an unchanged console
+does not consume the new metadata and still seals secrets exactly as entered.
+Readable fields submitted by any caller benefit from server normalization. Secrets
+from clients that do not normalize them can still fail because of pasted whitespace.
+Existing sealed credentials are not repaired automatically.
 
 The offer's answer:
 

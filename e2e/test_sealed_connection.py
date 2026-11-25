@@ -35,10 +35,14 @@ class EnterTests(unittest.TestCase):
             self.assertEqual(secrets, {"consumer_secret": "cs_key"}, repr(typed))
             self.assertEqual(parameters["consumer_secret"], ENTERED)
 
-    def test_a_secret_that_is_not_trimmed_is_entered_as_typed(self):
-        parameters = {"username": "ops", "password": " correct horse \n"}
-        secrets, _ = module.enter("http_basic", {"password"}, parameters, set())
-        self.assertEqual(secrets, {"password": " correct horse \n"})
+    def test_an_unannotated_secret_is_entered_as_typed_by_default(self):
+        for integration_id, field in [("http_basic", "password"), ("future_type", "credential")]:
+            with self.subTest(integration_id=integration_id):
+                typed = " correct horse \n"
+                parameters = {field: typed}
+                secrets, _ = module.enter(integration_id, {field}, parameters)
+                self.assertEqual(secrets, {field: typed})
+                self.assertEqual(parameters[field], ENTERED)
 
     def test_a_trimmed_secret_of_whitespace_alone_is_left_blank(self):
         parameters = {"token": " \n"}
