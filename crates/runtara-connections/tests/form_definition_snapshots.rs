@@ -76,6 +76,41 @@ fn every_registered_connection_form_matches_the_stable_snapshot() {
     );
 }
 
+/// Which fields each type trims: the sealed ones a caller trims before
+/// sealing (`trimmedFields`), and the readable ones the server trims when a
+/// request supplies them. Trimming is opt-in (`#[field(..., trim)]`), so a
+/// field added to this list, or one dropped from it, is a choice to review.
+#[test]
+fn every_registered_connections_trimmed_fields_match_the_snapshot() {
+    let mut metadata = runtara_agents::registry::get_all_connection_types().collect::<Vec<_>>();
+    metadata.sort_by_key(|meta| meta.integration_id);
+    let trimmed = metadata
+        .into_iter()
+        .map(|meta| {
+            let sealed = runtara_connections::sealed::policy::sealed_fields(meta);
+            let readable = meta
+                .fields
+                .iter()
+                .filter(|field| field.trims && !sealed.iter().any(|name| name == field.name))
+                .map(|field| field.name)
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "integrationId": meta.integration_id,
+                "trimmedFields": runtara_connections::sealed::policy::trimmed_fields(meta),
+                "trimmedByTheServer": readable,
+            })
+        })
+        .collect::<Vec<_>>();
+    let actual = serde_json::to_string_pretty(&trimmed).unwrap();
+    let expected = include_str!("fixtures/connection_trimmed_fields.json").trim();
+    assert_snapshot(
+        "tests/fixtures/connection_trimmed_fields.json",
+        &actual,
+        expected,
+        "connection trimmed fields",
+    );
+}
+
 #[test]
 fn mcp_condition_heavy_form_has_a_readable_snapshot() {
     let meta = runtara_agents::registry::find_connection_type("mcp").unwrap();

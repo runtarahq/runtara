@@ -700,6 +700,7 @@ fn meta_to_dto(meta: &runtara_dsl::agent_meta::ConnectionTypeMeta) -> Connection
             .map(|field| (field.name.to_string(), field.behavior))
             .collect(),
         sealed_fields: crate::sealed::policy::sealed_fields(meta),
+        trimmed_fields: crate::sealed::policy::trimmed_fields(meta),
         form_definition: runtara_dsl::form::connection_form_definition(meta),
         default_rate_limit_config: get_default_rate_limit_config(meta.integration_id),
         oauth_config: meta.oauth_config.map(|c| OAuthConfigDto {

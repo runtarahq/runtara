@@ -622,6 +622,52 @@ fn refuse_readable_secrets(
     }
 }
 
+/// Trims each readable value a request supplies for a field its type trims
+/// (`ConnectionFieldMeta::trims`): the readable half of a credential, such as
+/// a client id or an account's email, which a paste often leaves a newline or
+/// a space on. A secret arrives sealed: only a caller that reads the type's
+/// `trimmedFields` trims it before sealing. Only what the request supplies is
+/// trimmed: a stored value stays as it is, so the policies its sealed secrets
+/// were sealed under stay the same.
+fn trim_supplied<'a>(
+    integration_id: &str,
+    supplied: impl IntoIterator<Item = (&'a String, &'a mut serde_json::Value)>,
+) {
+    let Some(meta) = runtara_agents::registry::find_connection_type(integration_id) else {
+        return;
+    };
+    for (name, value) in supplied {
+        let trims = meta
+            .fields
+            .iter()
+            .any(|field| field.trims && field.name == name.as_str());
+        if let (true, serde_json::Value::String(text)) = (trims, value) {
+            let trimmed = text.trim();
+            if trimmed.len() != text.len() {
+                *text = trimmed.to_owned();
+            }
+        }
+    }
+}
+
+/// Whether an edit leaves a field's value as the connection held it. For a
+/// field that trims, whitespace around the value is no difference: a value
+/// held from before it was trimmed, pasted again, names the same client.
+fn holds_the_same(
+    field: &runtara_dsl::agent_meta::ConnectionFieldMeta,
+    held: Option<&serde_json::Value>,
+    now: Option<&serde_json::Value>,
+) -> bool {
+    match (held, now) {
+        (Some(serde_json::Value::String(held)), Some(serde_json::Value::String(now)))
+            if field.trims =>
+        {
+            held.trim() == now.trim()
+        }
+        _ => held == now,
+    }
+}
+
 /// What an update's merged parameters have that the connection does not
 /// hold already: what the request supplied.
 fn supplied(merged: &serde_json::Value, held: &serde_json::Value) -> serde_json::Value {
@@ -1179,6 +1225,12 @@ impl ConnectionService {
         }
 
         if let Some(params) = request.connection_parameters.as_mut() {
+            if let Some(fields) = params.as_object_mut() {
+                trim_supplied(
+                    request.integration_id.as_deref().unwrap_or_default(),
+                    fields.iter_mut(),
+                );
+            }
             reject_supplied_markers(params, None)?;
             refuse_readable_secrets(
                 request.integration_id.as_deref().unwrap_or_default(),
@@ -1563,6 +1615,12 @@ impl ConnectionService {
                 .transpose()?,
             _ => None,
         };
+        if let Some(patch) = request.connection_parameter_patch.as_mut() {
+            trim_supplied(
+                &integration_id,
+                patch.set.iter_mut().chain(patch.write.iter_mut()),
+            );
+        }
         let touched_parameter_fields: std::collections::HashSet<String> = request
             .connection_parameter_patch
             .as_ref()
@@ -1669,7 +1727,11 @@ impl ConnectionService {
                         || meta.fields.iter().any(|field| {
                             touched_parameter_fields.contains(field.name)
                                 && field.behavior.requires_reauthorization
-                                && old_params.get(field.name) != merged_params.get(field.name)
+                                && !holds_the_same(
+                                    field,
+                                    old_params.get(field.name),
+                                    merged_params.get(field.name),
+                                )
                         })
                 })
             })
@@ -2245,6 +2307,7 @@ mod tests {
             order: 0,
             default_value: None,
             is_secret: false,
+            trims: false,
             enum_values: None,
             is_url: false,
             is_required: false,

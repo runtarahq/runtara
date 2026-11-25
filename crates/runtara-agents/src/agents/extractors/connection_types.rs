@@ -33,7 +33,8 @@ pub struct ShopifyAccessTokenParams {
         display_name = "Access Token",
         description = "Shopify Admin API access token (starts with shpat_)",
         placeholder = "shpat_xxxxxxxxxxxxx",
-        secret
+        secret,
+        trim
     )]
     pub access_token: String,
 
@@ -112,7 +113,8 @@ pub struct ShopifyClientCredentialsParams {
         display_name = "Client ID",
         description = "Shopify app Client ID from the app dashboard",
         placeholder = "your-client-id",
-        secret
+        secret,
+        trim
     )]
     pub client_id: String,
 
@@ -121,7 +123,8 @@ pub struct ShopifyClientCredentialsParams {
         display_name = "Client Secret",
         description = "Shopify app Client Secret from the app dashboard",
         placeholder = "your-client-secret",
-        secret
+        secret,
+        trim
     )]
     pub client_secret: String,
 
@@ -264,7 +267,8 @@ pub struct OpenAiApiKeyParams {
         display_name = "API Key",
         description = "OpenAI API key (starts with sk-)",
         placeholder = "sk-xxxxxxxxxxxxx",
-        secret
+        secret,
+        trim
     )]
     pub api_key: String,
 
@@ -342,7 +346,8 @@ pub struct GeminiApiKeyParams {
     #[field(
         display_name = "API Key",
         description = "API key from Google AI Studio (aistudio.google.com/apikey). Google's terms require a billed project for apps used in the EEA, Switzerland or the UK.",
-        secret
+        secret,
+        trim
     )]
     pub api_key: String,
 }
@@ -388,7 +393,8 @@ pub struct AwsCredentialsParams {
     #[field(
         display_name = "Access Key ID",
         description = "AWS Access Key ID",
-        placeholder = "AKIAIOSFODNN7EXAMPLE"
+        placeholder = "AKIAIOSFODNN7EXAMPLE",
+        trim
     )]
     #[serde(alias = "access_key_id")]
     pub aws_access_key_id: String,
@@ -397,7 +403,8 @@ pub struct AwsCredentialsParams {
     #[field(
         display_name = "Secret Access Key",
         description = "AWS Secret Access Key",
-        secret
+        secret,
+        trim
     )]
     #[serde(alias = "secret_access_key")]
     pub aws_secret_access_key: String,
@@ -417,7 +424,8 @@ pub struct AwsCredentialsParams {
     #[field(
         display_name = "Session Token",
         description = "Optional AWS session token for temporary credentials",
-        secret
+        secret,
+        trim
     )]
     pub aws_session_token: Option<String>,
 
@@ -468,7 +476,8 @@ pub struct TelegramBotParams {
         display_name = "Bot Token",
         description = "Telegram Bot API token obtained from @BotFather",
         placeholder = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
-        secret
+        secret,
+        trim
     )]
     pub bot_token: String,
 
@@ -480,7 +489,8 @@ pub struct TelegramBotParams {
         display_name = "Webhook Secret Token",
         description = "The secret_token you gave setWebhook (1-256 of A-Z, a-z, 0-9, _ and -). Webhook calls without it are refused.",
         placeholder = "a-long-random-token",
-        secret
+        secret,
+        trim
     )]
     pub webhook_secret: Option<String>,
 }
@@ -505,7 +515,8 @@ pub struct SlackBotParams {
         display_name = "Bot Token",
         description = "Slack Bot User OAuth Token from the app's OAuth & Permissions page",
         placeholder = "xoxb-xxxxxxxxxxxx-xxxxxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxx",
-        secret
+        secret,
+        trim
     )]
     pub bot_token: String,
 
@@ -514,7 +525,8 @@ pub struct SlackBotParams {
         display_name = "Signing Secret",
         description = "Signing Secret from the app's Basic Information page, used to verify webhook requests",
         placeholder = "a1b2c3d4e5f6...",
-        secret
+        secret,
+        trim
     )]
     pub signing_secret: String,
 }
@@ -537,7 +549,8 @@ pub struct TeamsBotParams {
     #[field(
         display_name = "App ID",
         description = "Microsoft App ID from the Azure Bot resource",
-        placeholder = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        placeholder = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+        trim
     )]
     pub app_id: String,
 
@@ -546,7 +559,8 @@ pub struct TeamsBotParams {
         display_name = "App Password",
         description = "Client secret from the Azure Bot resource's certificates & secrets",
         placeholder = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        secret
+        secret,
+        trim
     )]
     pub app_password: String,
 
@@ -612,7 +626,8 @@ pub struct MicrosoftEntraClientCredentialsParams {
     #[field(
         display_name = "Client ID",
         description = "Application (client) ID from the Microsoft Entra app registration",
-        placeholder = "00000000-0000-0000-0000-000000000000"
+        placeholder = "00000000-0000-0000-0000-000000000000",
+        trim
     )]
     pub client_id: String,
 
@@ -620,7 +635,8 @@ pub struct MicrosoftEntraClientCredentialsParams {
     #[field(
         display_name = "Client Secret",
         description = "Client secret from the Microsoft Entra app registration",
-        secret
+        secret,
+        trim
     )]
     pub client_secret: String,
 
@@ -744,7 +760,8 @@ pub struct MailgunParams {
         display_name = "API Key",
         description = "Mailgun API key (starts with key-)",
         placeholder = "key-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-        secret
+        secret,
+        trim
     )]
     pub api_key: String,
 
@@ -770,7 +787,8 @@ pub struct MailgunParams {
     #[field(
         display_name = "Webhook Signing Key",
         description = "Webhook signing key from Mailgun dashboard (for verifying inbound webhooks)",
-        secret
+        secret,
+        trim
     )]
     pub webhook_signing_key: Option<String>,
 }
@@ -842,7 +860,8 @@ pub struct HubSpotPrivateAppParams {
         display_name = "Client ID",
         description = "Client ID from your HubSpot app settings",
         placeholder = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-        requires_reauthorization
+        requires_reauthorization,
+        trim
     )]
     pub client_id: String,
 
@@ -852,6 +871,7 @@ pub struct HubSpotPrivateAppParams {
         description = "Client Secret from your HubSpot app settings",
         placeholder = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
         secret,
+        trim,
         requires_reauthorization
     )]
     pub client_secret: String,
@@ -936,7 +956,8 @@ pub struct QuickBooksOnlineParams {
     #[field(
         display_name = "Client ID",
         description = "Client ID from your Intuit app's keys",
-        requires_reauthorization
+        requires_reauthorization,
+        trim
     )]
     pub client_id: String,
 
@@ -945,6 +966,7 @@ pub struct QuickBooksOnlineParams {
         display_name = "Client Secret",
         description = "Client Secret from your Intuit app's keys",
         secret,
+        trim,
         requires_reauthorization
     )]
     pub client_secret: String,
@@ -1081,7 +1103,8 @@ pub struct XeroOAuthParams {
     #[field(
         display_name = "Client ID",
         description = "Client ID of your Xero web app (developer.xero.com, My Apps)",
-        requires_reauthorization
+        requires_reauthorization,
+        trim
     )]
     pub client_id: String,
 
@@ -1090,6 +1113,7 @@ pub struct XeroOAuthParams {
         display_name = "Client Secret",
         description = "Client secret generated for your Xero web app",
         secret,
+        trim,
         requires_reauthorization
     )]
     pub client_secret: String,
@@ -1195,7 +1219,8 @@ pub struct ZohoCrmOAuthParams {
     #[field(
         display_name = "Client ID",
         description = "Client ID of your server-based application in the Zoho API Console",
-        requires_reauthorization
+        requires_reauthorization,
+        trim
     )]
     pub client_id: String,
 
@@ -1204,6 +1229,7 @@ pub struct ZohoCrmOAuthParams {
         display_name = "Client Secret",
         description = "Client secret of your server-based application in the Zoho API Console",
         secret,
+        trim,
         requires_reauthorization
     )]
     pub client_secret: String,
@@ -1396,7 +1422,8 @@ pub struct EbayOAuthParams {
         display_name = "App ID (Client ID)",
         description = "App ID of your application's keyset for this environment, from Application \
                        Keys in the eBay Developer Program",
-        requires_reauthorization
+        requires_reauthorization,
+        trim
     )]
     pub client_id: String,
 
@@ -1405,6 +1432,7 @@ pub struct EbayOAuthParams {
         display_name = "Cert ID (Client Secret)",
         description = "Cert ID of your application's keyset for this environment",
         secret,
+        trim,
         requires_reauthorization
     )]
     pub client_secret: String,
@@ -1560,7 +1588,8 @@ pub struct HubSpotAccessTokenParams {
         display_name = "Access Token",
         description = "Static access token from your HubSpot developer project app",
         placeholder = "pat-eu1-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-        secret
+        secret,
+        trim
     )]
     pub access_token: String,
 }
@@ -1641,7 +1670,8 @@ pub struct S3CompatibleParams {
     #[field(
         display_name = "Access Key ID",
         description = "S3 access key ID for authentication",
-        placeholder = "minioadmin"
+        placeholder = "minioadmin",
+        trim
     )]
     pub access_key_id: String,
 
@@ -1650,7 +1680,8 @@ pub struct S3CompatibleParams {
         display_name = "Secret Access Key",
         description = "S3 secret access key for authentication",
         placeholder = "minioadmin",
-        secret
+        secret,
+        trim
     )]
     pub secret_access_key: String,
 
@@ -1701,7 +1732,8 @@ pub struct AzureBlobStorageParams {
     #[field(
         display_name = "Account Name",
         description = "Azure storage account name",
-        placeholder = "mystorageacct"
+        placeholder = "mystorageacct",
+        trim
     )]
     pub account_name: String,
 
@@ -1710,7 +1742,8 @@ pub struct AzureBlobStorageParams {
         display_name = "Account Key",
         description = "Storage account access key (primary or secondary)",
         placeholder = "base64-encoded key",
-        secret
+        secret,
+        trim
     )]
     pub account_key: String,
 
@@ -1755,7 +1788,8 @@ pub struct StripeApiKeyParams {
         display_name = "Secret Key",
         description = "Stripe secret API key (starts with sk_live_ or sk_test_)",
         placeholder = "sk_test_xxxxxxxxxxxxxxxxxxxx",
-        secret
+        secret,
+        trim
     )]
     pub secret_key: String,
 }
@@ -1805,7 +1839,8 @@ pub struct PipedriveApiTokenParams {
     #[field(
         display_name = "API Token",
         description = "Personal API token from Pipedrive: Settings → Personal preferences → API",
-        secret
+        secret,
+        trim
     )]
     pub api_token: String,
 }
@@ -1860,7 +1895,8 @@ pub struct ShippoApiTokenParams {
     #[field(
         display_name = "API Token",
         description = "API token from the API configuration page of the Shippo portal. A test token (starting `shippo_test_`) buys free test labels; a live token buys real ones",
-        secret
+        secret,
+        trim
     )]
     pub api_token: String,
 }
@@ -1946,7 +1982,8 @@ pub struct BigCommerceApiTokenParams {
     #[field(
         display_name = "Access Token",
         description = "Access token of a store-level API account, from Settings → API → Store-level API accounts in the store's control panel. The account's OAuth scopes decide what steps can read and change",
-        secret
+        secret,
+        trim
     )]
     pub access_token: String,
 }
@@ -2079,7 +2116,8 @@ pub struct MagentoAccessTokenParams {
     #[field(
         display_name = "Access Token",
         description = "The Access Token of an integration, from System → Extensions → Integrations in the store's admin (activate the integration to see it). The integration's API resources decide what steps can read and change. Magento takes it as a Bearer token only when Stores → Configuration → Services → OAuth → Consumer Settings → \"Allow OAuth Access Tokens to be used as standalone Bearer tokens\" is Yes",
-        secret
+        secret,
+        trim
     )]
     pub access_token: String,
 }
@@ -2154,7 +2192,8 @@ pub struct WooCommerceApiKeyParams {
         display_name = "Consumer Key",
         description = "The Consumer key (ck_…) of a REST API key, from WooCommerce → Settings → Advanced → REST API → Add key. The key's user and its permissions (Read or Read/Write) decide what steps can read and change",
         placeholder = "ck_…",
-        is_required
+        is_required,
+        trim
     )]
     pub consumer_key: String,
 
@@ -2163,6 +2202,7 @@ pub struct WooCommerceApiKeyParams {
         display_name = "Consumer Secret",
         description = "The Consumer secret (cs_…) WooCommerce shows once, when the key is generated",
         secret,
+        trim,
         is_required
     )]
     pub consumer_secret: String,
@@ -2181,8 +2221,9 @@ impl HttpConnectionExtractor for WooCommerceExtractor {
             .map_err(|e| format!("Invalid woocommerce_api_key connection parameters: {}", e))?;
 
         // HTTP Basic with `consumer_key:consumer_secret`, as WooCommerce reads
-        // a key over HTTPS. Both are trimmed, as a pasted value often ends in a
-        // newline.
+        // a key over HTTPS. Both are trimmed here. A sealed connection's
+        // header is made by seal under the connection's policy, not here: its
+        // secret is used exactly as it was sealed.
         let credentials = format!("{}:{}", p.consumer_key.trim(), p.consumer_secret.trim());
         let mut headers = HashMap::new();
         headers.insert(
@@ -2259,7 +2300,8 @@ pub struct ZendeskClientCredentialsParams {
     /// OAuth client identifier
     #[field(
         display_name = "Client ID",
-        description = "The Unique identifier of an OAuth client whose Client kind is Confidential: Admin Center → Apps and integrations → APIs → OAuth clients"
+        description = "The Unique identifier of an OAuth client whose Client kind is Confidential: Admin Center → Apps and integrations → APIs → OAuth clients",
+        trim
     )]
     pub client_id: String,
 
@@ -2267,7 +2309,8 @@ pub struct ZendeskClientCredentialsParams {
     #[field(
         display_name = "Client Secret",
         description = "The Secret of the same OAuth client",
-        secret
+        secret,
+        trim
     )]
     pub client_secret: String,
 
@@ -2365,7 +2408,9 @@ pub fn jira_base_url(site: &str, cloud_id: Option<&str>) -> Result<String, Strin
 }
 
 /// The `Authorization` value of a Jira API token: HTTP Basic with
-/// `email:api_token`. Both are trimmed, as a pasted value often ends in a newline.
+/// `email:api_token`. Both are trimmed here. A sealed connection's header is
+/// made by seal under the connection's policy, not here: its token is used
+/// exactly as it was sealed.
 pub fn jira_basic_auth(email: &str, api_token: &str) -> String {
     let credentials = format!("{}:{}", email.trim(), api_token.trim());
     format!(
@@ -2398,7 +2443,8 @@ pub struct JiraApiTokenParams {
         display_name = "Email",
         description = "Email of the Atlassian account that created the token. Steps act with that account's Jira permissions",
         placeholder = "user@example.com",
-        is_required
+        is_required,
+        trim
     )]
     pub email: String,
 
@@ -2407,6 +2453,7 @@ pub struct JiraApiTokenParams {
         display_name = "API Token",
         description = "API token from id.atlassian.com/manage-profile/security/api-tokens. Tokens last at most a year; replace it here before it expires",
         secret,
+        trim,
         is_required
     )]
     pub api_token: String,
@@ -2515,7 +2562,8 @@ pub struct UpsClientCredentialsParams {
     /// OAuth client identifier
     #[field(
         display_name = "Client ID",
-        description = "The Client ID of your app: developer.ups.com → Apps → your app"
+        description = "The Client ID of your app: developer.ups.com → Apps → your app",
+        trim
     )]
     pub client_id: String,
 
@@ -2523,7 +2571,8 @@ pub struct UpsClientCredentialsParams {
     #[field(
         display_name = "Client Secret",
         description = "The Client Secret of the same app",
-        secret
+        secret,
+        trim
     )]
     pub client_secret: String,
 }
@@ -2605,7 +2654,8 @@ pub struct PaypalClientCredentialsParams {
     /// OAuth client identifier
     #[field(
         display_name = "Client ID",
-        description = "The Client ID of your REST app: developer.paypal.com → Apps & Credentials → your app, in the same environment"
+        description = "The Client ID of your REST app: developer.paypal.com → Apps & Credentials → your app, in the same environment",
+        trim
     )]
     pub client_id: String,
 
@@ -2613,7 +2663,8 @@ pub struct PaypalClientCredentialsParams {
     #[field(
         display_name = "Secret",
         description = "The Secret of the same app",
-        secret
+        secret,
+        trim
     )]
     pub client_secret: String,
 }
@@ -2703,7 +2754,7 @@ pub struct McpConnectionParams {
     #[field(
         display_name = "Bearer Token",
         description = "Bearer token (when auth_mode = \"bearer\").",
-        secret,
+        secret, trim,
         clearable,
         visible = mcp_auth_is_bearer,
         required = mcp_auth_is_bearer
@@ -2725,7 +2776,7 @@ pub struct McpConnectionParams {
     #[field(
         display_name = "API Key",
         description = "API key value (when auth_mode = \"api_key\").",
-        secret,
+        secret, trim,
         clearable,
         visible = mcp_auth_is_api_key,
         required = mcp_auth_is_api_key
@@ -2847,14 +2898,15 @@ pub struct HttpOAuth2ClientCredentialsParams {
     pub token_url: String,
 
     /// OAuth2 client id
-    #[field(display_name = "Client ID", description = "OAuth2 client id")]
+    #[field(display_name = "Client ID", description = "OAuth2 client id", trim)]
     pub client_id: String,
 
     /// OAuth2 client secret
     #[field(
         display_name = "Client Secret",
         description = "OAuth2 client secret",
-        secret
+        secret,
+        trim
     )]
     pub client_secret: String,
 
@@ -2998,7 +3050,8 @@ pub struct HttpOAuth2AuthorizationCodeParams {
     #[field(
         display_name = "Client ID",
         description = "OAuth2 client id",
-        requires_reauthorization
+        requires_reauthorization,
+        trim
     )]
     pub client_id: String,
 
@@ -3007,6 +3060,7 @@ pub struct HttpOAuth2AuthorizationCodeParams {
         display_name = "Client Secret",
         description = "OAuth2 client secret",
         secret,
+        trim,
         requires_reauthorization
     )]
     pub client_secret: String,

@@ -849,6 +849,10 @@ struct ConnectionFieldArgs {
     /// Mark this field as a secret (password, API key, etc.)
     #[darling(default)]
     secret: bool,
+    /// Trim surrounding whitespace only when the field explicitly opts in.
+    /// Applies to readable fields and secrets before callers seal them.
+    #[darling(default)]
+    trim: bool,
     /// Allow an existing value to be removed through an explicit patch.
     #[darling(default)]
     clearable: bool,
@@ -1153,6 +1157,7 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
             let order = f.order.unwrap_or(index as i32);
             let default_token = option_to_tokens(&f.default);
             let is_secret = f.secret;
+            let trims = f.trim;
             let clearable = f.clearable;
             let requires_reauthorization = f.requires_reauthorization;
             let is_url = f.is_url;
@@ -1243,6 +1248,7 @@ pub fn derive_connection_params(input: TokenStream) -> TokenStream {
                     order: #order,
                     default_value: #default_token,
                     is_secret: #is_secret,
+                    trims: #trims,
                     enum_values: #enum_values_token,
                     is_url: #is_url,
                     is_required: #is_required,

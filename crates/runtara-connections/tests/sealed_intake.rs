@@ -451,3 +451,106 @@ async fn a_connection_type_says_which_fields_are_sent_sealed() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_caller_trims_what_it_seals_and_the_server_trims_what_it_reads() {
+    let fixture = Fixture::start().await;
+    let api = api_for(&fixture, "acme");
+    let trimmed_fields = |integration_id: &'static str| {
+        let api = api.clone();
+        async move {
+            let uri = format!("/connections/types/{integration_id}");
+            let (status, described) = send(&api, "GET", &uri, None).await;
+            assert_eq!(status, StatusCode::OK, "{described}");
+            let mut names: Vec<String> =
+                serde_json::from_value(described["connectionType"]["trimmedFields"].clone())
+                    .unwrap();
+            names.sort();
+            names
+        }
+    };
+
+    // A key or token a provider issued is listed for a caller to trim before
+    // sealing it; a password a person chose is not, and is sealed as typed.
+    assert_eq!(trimmed_fields("jira_api_token").await, ["api_token"]);
+    assert_eq!(
+        trimmed_fields("woocommerce_api_key").await,
+        ["consumer_secret"]
+    );
+    assert_eq!(trimmed_fields("http_bearer").await, ["token"]);
+    assert!(trimmed_fields("http_basic").await.is_empty());
+    assert!(trimmed_fields("postgres").await.is_empty());
+
+    // The readable half of the credential is trimmed by the server when a
+    // request supplies it: on create...
+    let (status, created) = save(
+        &api,
+        "POST",
+        "/connections",
+        json!({
+            "title": "Jira",
+            "integrationId": "jira_api_token",
+            "connectionParameters": {
+                "site": "acme", "email": " me@example.com \n", "api_token": SECRET
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["connectionId"].as_str().unwrap().to_owned();
+    let uri = format!("/connections/{id}");
+    let (stored, _) = fixture.stored(&id).await;
+    assert_eq!(stored["email"], "me@example.com", "{stored}");
+    assert!(is_sealed(&stored["api_token"]), "{stored}");
+
+    // ...and on an update. Pasted again with a newline, the same email leaves
+    // the token's policy as it was, so the token is kept and not asked again.
+    let (_, held) = send(&api, "GET", &uri, None).await;
+    let update = json!({
+        "version": held["connection"]["editProjection"]["version"],
+        "connectionParameterPatch": {"set": {"email": "me@example.com\n"}}
+    });
+    let (status, answer) = send(&api, "PUT", &uri, Some(update)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let (after, _) = fixture.stored(&id).await;
+    assert_eq!(after["email"], "me@example.com", "{after}");
+    assert_eq!(after["api_token"], stored["api_token"]);
+
+    // A value the connection already holds is left as it is, though its
+    // type trims it: only what a request supplies is trimmed.
+    let (status, created) = save(
+        &api,
+        "POST",
+        "/connections",
+        json!({
+            "title": "Shop",
+            "integrationId": "woocommerce_api_key",
+            "connectionParameters": {
+                "store_url": "https://shop.example.com",
+                "consumer_key": "ck_held",
+                "consumer_secret": SECRET
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["connectionId"].as_str().unwrap().to_owned();
+    let uri = format!("/connections/{id}");
+    sqlx::query(
+        "UPDATE connection_data_entity SET connection_parameters = \
+         jsonb_set(connection_parameters, '{consumer_key}', '\"ck_held \"') WHERE id = $1",
+    )
+    .bind(&id)
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+    let (_, held) = send(&api, "GET", &uri, None).await;
+    let update = json!({
+        "version": held["connection"]["editProjection"]["version"],
+        "connectionParameterPatch": {"set": {"store_url": "https://shop.example.com"}}
+    });
+    let (status, answer) = send(&api, "PUT", &uri, Some(update)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let (after, _) = fixture.stored(&id).await;
+    assert_eq!(after["consumer_key"], "ck_held ", "{after}");
+}

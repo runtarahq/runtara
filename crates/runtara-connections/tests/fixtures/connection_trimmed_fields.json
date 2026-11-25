@@ -1,0 +1,289 @@
+[
+  {
+    "integrationId": "aws_credentials",
+    "trimmedByTheServer": [
+      "aws_access_key_id"
+    ],
+    "trimmedFields": [
+      "aws_secret_access_key",
+      "aws_session_token"
+    ]
+  },
+  {
+    "integrationId": "azure_blob_storage",
+    "trimmedByTheServer": [
+      "account_name"
+    ],
+    "trimmedFields": [
+      "account_key"
+    ]
+  },
+  {
+    "integrationId": "bigcommerce_api_token",
+    "trimmedByTheServer": [],
+    "trimmedFields": [
+      "access_token"
+    ]
+  },
+  {
+    "integrationId": "ebay_oauth",
+    "trimmedByTheServer": [
+      "client_id"
+    ],
+    "trimmedFields": [
+      "client_secret"
+    ]
+  },
+  {
+    "integrationId": "gemini_api_key",
+    "trimmedByTheServer": [],
+    "trimmedFields": [
+      "api_key"
+    ]
+  },
+  {
+    "integrationId": "http_api_key",
+    "trimmedByTheServer": [],
+    "trimmedFields": [
+      "api_key"
+    ]
+  },
+  {
+    "integrationId": "http_basic",
+    "trimmedByTheServer": [],
+    "trimmedFields": []
+  },
+  {
+    "integrationId": "http_bearer",
+    "trimmedByTheServer": [],
+    "trimmedFields": [
+      "token"
+    ]
+  },
+  {
+    "integrationId": "http_mtls",
+    "trimmedByTheServer": [],
+    "trimmedFields": []
+  },
+  {
+    "integrationId": "http_oauth2_authorization_code",
+    "trimmedByTheServer": [
+      "client_id"
+    ],
+    "trimmedFields": [
+      "client_secret"
+    ]
+  },
+  {
+    "integrationId": "http_oauth2_client_credentials",
+    "trimmedByTheServer": [
+      "client_id"
+    ],
+    "trimmedFields": [
+      "client_secret"
+    ]
+  },
+  {
+    "integrationId": "hubspot_access_token",
+    "trimmedByTheServer": [],
+    "trimmedFields": [
+      "access_token"
+    ]
+  },
+  {
+    "integrationId": "hubspot_private_app",
+    "trimmedByTheServer": [
+      "client_id"
+    ],
+    "trimmedFields": [
+      "client_secret"
+    ]
+  },
+  {
+    "integrationId": "jira_api_token",
+    "trimmedByTheServer": [
+      "email"
+    ],
+    "trimmedFields": [
+      "api_token"
+    ]
+  },
+  {
+    "integrationId": "magento_access_token",
+    "trimmedByTheServer": [],
+    "trimmedFields": [
+      "access_token"
+    ]
+  },
+  {
+    "integrationId": "mailgun",
+    "trimmedByTheServer": [],
+    "trimmedFields": [
+      "api_key",
+      "webhook_signing_key"
+    ]
+  },
+  {
+    "integrationId": "mcp",
+    "trimmedByTheServer": [],
+    "trimmedFields": [
+      "bearer_token",
+      "api_key_value"
+    ]
+  },
+  {
+    "integrationId": "microsoft_entra_client_credentials",
+    "trimmedByTheServer": [
+      "client_id"
+    ],
+    "trimmedFields": [
+      "client_secret"
+    ]
+  },
+  {
+    "integrationId": "openai_api_key",
+    "trimmedByTheServer": [],
+    "trimmedFields": [
+      "api_key"
+    ]
+  },
+  {
+    "integrationId": "paypal_client_credentials",
+    "trimmedByTheServer": [
+      "client_id"
+    ],
+    "trimmedFields": [
+      "client_secret"
+    ]
+  },
+  {
+    "integrationId": "pipedrive_api_token",
+    "trimmedByTheServer": [],
+    "trimmedFields": [
+      "api_token"
+    ]
+  },
+  {
+    "integrationId": "postgres",
+    "trimmedByTheServer": [],
+    "trimmedFields": []
+  },
+  {
+    "integrationId": "quickbooks_online",
+    "trimmedByTheServer": [
+      "client_id"
+    ],
+    "trimmedFields": [
+      "client_secret"
+    ]
+  },
+  {
+    "integrationId": "s3_compatible",
+    "trimmedByTheServer": [
+      "access_key_id"
+    ],
+    "trimmedFields": [
+      "secret_access_key"
+    ]
+  },
+  {
+    "integrationId": "shippo_api_token",
+    "trimmedByTheServer": [],
+    "trimmedFields": [
+      "api_token"
+    ]
+  },
+  {
+    "integrationId": "shopify_access_token",
+    "trimmedByTheServer": [],
+    "trimmedFields": [
+      "access_token"
+    ]
+  },
+  {
+    "integrationId": "shopify_client_credentials",
+    "trimmedByTheServer": [
+      "client_id"
+    ],
+    "trimmedFields": [
+      "client_secret"
+    ]
+  },
+  {
+    "integrationId": "slack_bot",
+    "trimmedByTheServer": [],
+    "trimmedFields": [
+      "bot_token",
+      "signing_secret"
+    ]
+  },
+  {
+    "integrationId": "stripe_api_key",
+    "trimmedByTheServer": [],
+    "trimmedFields": [
+      "secret_key"
+    ]
+  },
+  {
+    "integrationId": "teams_bot",
+    "trimmedByTheServer": [
+      "app_id"
+    ],
+    "trimmedFields": [
+      "app_password"
+    ]
+  },
+  {
+    "integrationId": "telegram_bot",
+    "trimmedByTheServer": [],
+    "trimmedFields": [
+      "bot_token",
+      "webhook_secret"
+    ]
+  },
+  {
+    "integrationId": "ups_client_credentials",
+    "trimmedByTheServer": [
+      "client_id"
+    ],
+    "trimmedFields": [
+      "client_secret"
+    ]
+  },
+  {
+    "integrationId": "woocommerce_api_key",
+    "trimmedByTheServer": [
+      "consumer_key"
+    ],
+    "trimmedFields": [
+      "consumer_secret"
+    ]
+  },
+  {
+    "integrationId": "xero_oauth",
+    "trimmedByTheServer": [
+      "client_id"
+    ],
+    "trimmedFields": [
+      "client_secret"
+    ]
+  },
+  {
+    "integrationId": "zendesk_client_credentials",
+    "trimmedByTheServer": [
+      "client_id"
+    ],
+    "trimmedFields": [
+      "client_secret"
+    ]
+  },
+  {
+    "integrationId": "zoho_crm_oauth",
+    "trimmedByTheServer": [
+      "client_id"
+    ],
+    "trimmedFields": [
+      "client_secret"
+    ]
+  }
+]
