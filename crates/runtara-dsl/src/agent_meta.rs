@@ -878,8 +878,9 @@ pub struct ConnectionFieldMeta {
     /// trimmed: a key or token a provider issued, or the readable half of a
     /// credential (a client id, an account's email). A pasted value often
     /// ends in a newline or a space. The engine never reads a secret, so a
-    /// secret is trimmed by whoever seals it; a readable value, by the server
-    /// when it is saved. Opt-in via `trim`; unannotated fields preserve whitespace.
+    /// secret can be trimmed only by a caller that seals it and reads the
+    /// type's `trimmedFields`; a readable value is trimmed by the server when
+    /// it is saved. Opt-in via `trim`; unannotated fields preserve whitespace.
     pub trims: bool,
     /// Allowed values when this field is one-of a fixed set. `None` means
     /// free-form input; `Some(&[…])` makes the UI render a select. Values are

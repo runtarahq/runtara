@@ -625,10 +625,10 @@ fn refuse_readable_secrets(
 /// Trims each readable value a request supplies for a field its type trims
 /// (`ConnectionFieldMeta::trims`): the readable half of a credential, such as
 /// a client id or an account's email, which a paste often leaves a newline or
-/// a space on. A secret arrives sealed, and is trimmed by whoever sealed it
-/// (`trimmedFields`). Only what the request supplies is trimmed: a stored
-/// value stays as it is, so the policies its sealed secrets were sealed under
-/// stay the same.
+/// a space on. A secret arrives sealed: only a caller that reads the type's
+/// `trimmedFields` trims it before sealing. Only what the request supplies is
+/// trimmed: a stored value stays as it is, so the policies its sealed secrets
+/// were sealed under stay the same.
 fn trim_supplied<'a>(
     integration_id: &str,
     supplied: impl IntoIterator<Item = (&'a String, &'a mut serde_json::Value)>,
@@ -647,6 +647,24 @@ fn trim_supplied<'a>(
                 *text = trimmed.to_owned();
             }
         }
+    }
+}
+
+/// Whether an edit leaves a field's value as the connection held it. For a
+/// field that trims, whitespace around the value is no difference: a value
+/// held from before it was trimmed, pasted again, names the same client.
+fn holds_the_same(
+    field: &runtara_dsl::agent_meta::ConnectionFieldMeta,
+    held: Option<&serde_json::Value>,
+    now: Option<&serde_json::Value>,
+) -> bool {
+    match (held, now) {
+        (Some(serde_json::Value::String(held)), Some(serde_json::Value::String(now)))
+            if field.trims =>
+        {
+            held.trim() == now.trim()
+        }
+        _ => held == now,
     }
 }
 
@@ -1709,7 +1727,11 @@ impl ConnectionService {
                         || meta.fields.iter().any(|field| {
                             touched_parameter_fields.contains(field.name)
                                 && field.behavior.requires_reauthorization
-                                && old_params.get(field.name) != merged_params.get(field.name)
+                                && !holds_the_same(
+                                    field,
+                                    old_params.get(field.name),
+                                    merged_params.get(field.name),
+                                )
                         })
                 })
             })

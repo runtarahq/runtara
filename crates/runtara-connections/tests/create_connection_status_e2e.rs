@@ -617,3 +617,60 @@ async fn legacy_sftp_connection_remains_redacted_listable_and_deletable() {
             .is_empty()
     );
 }
+
+/// A client id held from before it was trimmed, with whitespace around it, is
+/// the same client when it is pasted again without it: the grant is kept. A
+/// different client id still needs a new authorization.
+#[tokio::test]
+async fn a_held_client_id_pasted_again_trimmed_keeps_the_grant() {
+    let fx = PgFixture::start().await;
+    let svc = service(&fx.pool);
+    let id = create(
+        &svc,
+        "t",
+        json!({
+            "title": "qb", "integrationId": "quickbooks_online",
+            "connectionParameters": {
+                "client_id": "QBCID", "client_secret": "QBSEC", "environment": "production"
+            }
+        }),
+    )
+    .await;
+    seed_provider_state(
+        &fx.pool,
+        &id,
+        "t",
+        &json!({
+            "client_id": "QBCID \n", "client_secret": "QBSEC", "environment": "production",
+            "realm_id": "123456789", "access_token": "at-live", "refresh_token": "rt-live"
+        }),
+    )
+    .await;
+
+    update(
+        &svc,
+        &id,
+        "t",
+        json!({"connectionParameterPatch": {"set": {"client_id": "QBCID"}, "write": {}, "clear": []}}),
+    )
+    .await;
+    let after = params_of(&fx.pool, &id).await;
+    assert_eq!(after["client_id"], "QBCID", "{after}");
+    assert!(after.get("access_token").is_some(), "{after}");
+    assert!(after.get("refresh_token").is_some(), "{after}");
+    assert_eq!(status_of(&fx.pool, &id).await, "ACTIVE");
+
+    update(
+        &svc,
+        &id,
+        "t",
+        // The secret is sent with the client's id, so a new client takes it again.
+        json!({"connectionParameterPatch": {
+            "set": {"client_id": "OTHER"}, "write": {"client_secret": "OTHERSEC"}, "clear": []
+        }}),
+    )
+    .await;
+    let after = params_of(&fx.pool, &id).await;
+    assert!(after.get("access_token").is_none(), "{after}");
+    assert_eq!(status_of(&fx.pool, &id).await, "REQUIRES_RECONNECTION");
+}

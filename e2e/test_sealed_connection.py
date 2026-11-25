@@ -7,6 +7,7 @@ import importlib.util
 import json
 from pathlib import Path
 import unittest
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location(
     "sealed_connection", Path(__file__).with_name("sealed_connection.py"))
@@ -24,6 +25,54 @@ class StandInApi:
 
     def send(self, method, path, body=None):
         return 200, json.dumps({"connectionType": self.connection_type})
+
+
+class RoutedApi:
+    """A server for `save`: a Jira connection type that trims its token, one
+    held connection, and offers. Records each request it is sent."""
+
+    def __init__(self):
+        self.sent = []
+
+    def send(self, method, path, body=None):
+        self.sent.append((method, path, json.loads(json.dumps(body))))
+        if path == "/connections/types/jira_api_token":
+            return 200, json.dumps({"connectionType": {
+                "sealedFields": ["api_token"], "trimmedFields": ["api_token"]}})
+        if method == "GET" and path == "/connections/held":
+            return 200, json.dumps({"connection": {"integrationId": "jira_api_token"}})
+        if path.endswith("/offer"):
+            return 200, json.dumps({
+                "connectionId": "offered", "offer": {}, "fields": {"api_token": "api_token"}})
+        return 200, "{}"
+
+
+class SaveTests(unittest.TestCase):
+    """`save` trims a listed secret before sealing, on create and update."""
+
+    def sealed_by(self, request, update=None):
+        api, sealed = RoutedApi(), {}
+        with mock.patch.object(module, "seal", lambda offered, secrets: sealed.update(secrets) or {}):
+            module.save(api, request, update)
+        return sealed, api.sent[-1][2]
+
+    def test_a_create_seals_a_listed_secret_trimmed(self):
+        sealed, saved = self.sealed_by({
+            "title": "Jira", "integrationId": "jira_api_token",
+            "connectionParameters": {"site": "acme", "email": "me@example.com ",
+                                     "api_token": " tok\n"}})
+        self.assertEqual(sealed, {"api_token": "tok"})
+        self.assertEqual(saved["connectionParameters"]["api_token"], ENTERED)
+        self.assertEqual(saved["connectionParameters"]["email"], "me@example.com ")
+
+    def test_an_update_seals_a_listed_secret_trimmed(self):
+        sealed, saved = self.sealed_by({
+            "version": "v1",
+            "connectionParameterPatch": {"write": {"api_token": "tok \r\n"},
+                                         "set": {"email": "me@example.com "}}}, update="held")
+        self.assertEqual(sealed, {"api_token": "tok"})
+        self.assertEqual(saved["connectionParameterPatch"]["write"]["api_token"], ENTERED)
+        self.assertEqual(saved["connectionParameterPatch"]["set"]["email"], "me@example.com ")
 
 
 class EnterTests(unittest.TestCase):

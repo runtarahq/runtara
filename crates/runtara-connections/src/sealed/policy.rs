@@ -1541,8 +1541,10 @@ pub fn injected_headers(integration_id: &str, params: &Value) -> Vec<String> {
 }
 
 /// Parameters a type marks secret to keep them out of the console, though
-/// they are public: a certificate, a client's id. seal is given them as they
-/// are, and they are stored as they are.
+/// they are public: a certificate, a client's id. They are sent and stored
+/// readable, not sealed, and seal is given them in a policy where one needs
+/// them. A certificate is stored as it is; a client's id is trimmed when its
+/// field is marked `trim`, as any readable field is.
 const PUBLIC_SECRET_FIELDS: &[&str] = &["client_certificate_pem", "server_ca_pem", "client_id"];
 
 /// The fields of a connection type that a caller sends sealed, and that are
@@ -1556,11 +1558,12 @@ pub fn sealed_fields(meta: &runtara_dsl::agent_meta::ConnectionTypeMeta) -> Vec<
         .collect()
 }
 
-/// The [`sealed_fields`] whose values a caller trims before sealing them:
+/// The [`sealed_fields`] whose values a caller can trim before sealing them:
 /// keys and tokens a provider issued, where whitespace around the value is
 /// never part of it (`ConnectionFieldMeta::trims`). The engine never reads a
-/// sealed value, so only whoever enters it can trim it. A secret a person
-/// chose, like a password, is not one of them, and is sealed as typed.
+/// sealed value, so only a caller that reads this list trims it; one that
+/// does not seals it as entered. A secret a person chose, like a password, is
+/// not one of them, and is sealed as typed.
 pub fn trimmed_fields(meta: &runtara_dsl::agent_meta::ConnectionTypeMeta) -> Vec<String> {
     let sealed = sealed_fields(meta);
     meta.fields

@@ -2221,9 +2221,9 @@ impl HttpConnectionExtractor for WooCommerceExtractor {
             .map_err(|e| format!("Invalid woocommerce_api_key connection parameters: {}", e))?;
 
         // HTTP Basic with `consumer_key:consumer_secret`, as WooCommerce reads
-        // a key over HTTPS. Both are trimmed, as their fields are where they
-        // are entered. A sealed connection's header is made by seal under the
-        // connection's policy, not here.
+        // a key over HTTPS. Both are trimmed here. A sealed connection's
+        // header is made by seal under the connection's policy, not here: its
+        // secret is used exactly as it was sealed.
         let credentials = format!("{}:{}", p.consumer_key.trim(), p.consumer_secret.trim());
         let mut headers = HashMap::new();
         headers.insert(
@@ -2408,9 +2408,9 @@ pub fn jira_base_url(site: &str, cloud_id: Option<&str>) -> Result<String, Strin
 }
 
 /// The `Authorization` value of a Jira API token: HTTP Basic with
-/// `email:api_token`. Both are trimmed, as their fields are where they are
-/// entered. A sealed connection's header is made by seal under the
-/// connection's policy, not here.
+/// `email:api_token`. Both are trimmed here. A sealed connection's header is
+/// made by seal under the connection's policy, not here: its token is used
+/// exactly as it was sealed.
 pub fn jira_basic_auth(email: &str, api_token: &str) -> String {
     let credentials = format!("{}:{}", email.trim(), api_token.trim());
     format!(

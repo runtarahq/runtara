@@ -13,10 +13,11 @@ the request it is about to save, seals the secrets under it with
 The request is written as it was before secrets were sealed: readable. This
 marks each secret field of the connection type as entered (`{"$entered":
 true}`), and nothing readable leaves this process. A secret of the type's
-`trimmedFields` (a key or token a provider issued) is trimmed first, as a
-client trims it: a pasted one often ends in a newline. A Postgres URL is split
-as a client splits it: the password is the secret, and the rest of the URL goes
-beside it as `database_target`.
+`trimmedFields` (a key or token a provider issued) is trimmed first: a pasted
+one often ends in a newline, and the server cannot trim a sealed value. A
+client that does not read `trimmedFields` seals it as entered. A Postgres URL
+is split as a client splits it: the password is the secret, and the rest of
+the URL goes beside it as `database_target`.
 
 To update, name the connection: `--update <id>` takes an update request
 (`{"version": ..., "connectionParameterPatch": {"write": {...}}}`).

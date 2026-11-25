@@ -470,8 +470,8 @@ async fn a_caller_trims_what_it_seals_and_the_server_trims_what_it_reads() {
         }
     };
 
-    // A key or token a provider issued is trimmed by whoever seals it; a
-    // password a person chose is sealed as typed.
+    // A key or token a provider issued is listed for a caller to trim before
+    // sealing it; a password a person chose is not, and is sealed as typed.
     assert_eq!(trimmed_fields("jira_api_token").await, ["api_token"]);
     assert_eq!(
         trimmed_fields("woocommerce_api_key").await,
