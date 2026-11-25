@@ -1342,6 +1342,9 @@ fn test_shopware_connection_type_is_registered() {
     assert!(!field("client_id").is_secret);
     assert!(!field("store_url").is_secret);
     assert!(field("store_url").is_url);
+    // Copied from Shopware's dialog, a key can end in a newline.
+    assert!(field("client_id").trims);
+    assert!(field("client_secret").trims);
 }
 
 // ============================================================================

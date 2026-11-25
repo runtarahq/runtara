@@ -1669,8 +1669,9 @@ OPAQUE_KEPT = ("description", "title", "deprecated", "nullable", "readOnly", "wr
 def make_records_opaque(spec: dict) -> set:
     """`opaque_records`: a property of a component schema that refers to
     another record, a component schema with an `id` of its own (directly, as
-    the one part of an `allOf`, or as an array's items or a map's values),
-    takes any JSON instead of that record's type. Shopware's entities refer to
+    the one part of an `allOf`, as the one part of an `anyOf` or `oneOf`
+    beside `{type: null}`, or as an array's items or a map's values), takes
+    any JSON instead of that record's type. Shopware's entities refer to
     one another and back (an order's deliveries each carry their order), so
     typed they are infinite, and hundreds of types; its API sends an
     association only when a search asks for it. A schema without an `id` (a
@@ -1678,21 +1679,40 @@ def make_records_opaque(spec: dict) -> set:
     typed. Returns the components whose properties changed."""
     schemas = (spec.get("components") or {}).get("schemas") or {}
 
-    def record(node) -> bool:
+    def referred(node) -> tuple:
+        """The `$ref` a schema stands for, and whether it may be null: a bare
+        `$ref`, the one part of an `allOf`, or the one part of an `anyOf` or
+        `oneOf` beside `{type: null}`, as 3.1 writes a nullable reference."""
         if not isinstance(node, dict):
-            return False
-        ref = node.get("$ref")
+            return None, False
+        if "$ref" in node:
+            return node["$ref"], False
         parts = node.get("allOf")
-        if ref is None and isinstance(parts, list) and len(parts) == 1 \
+        if isinstance(parts, list) and len(parts) == 1 \
                 and isinstance(parts[0], dict) and set(parts[0]) == {"$ref"}:
-            ref = parts[0]["$ref"]
+            return parts[0]["$ref"], False
+        for key in ("anyOf", "oneOf"):
+            parts = node.get(key)
+            if not isinstance(parts, list):
+                continue
+            refs = [part for part in parts if isinstance(part, dict) and set(part) == {"$ref"}]
+            nulls = [part for part in parts if part == {"type": "null"}]
+            if len(refs) == 1 and nulls and len(refs) + len(nulls) == len(parts):
+                return refs[0]["$ref"], True
+        return None, False
+
+    def record(node) -> bool:
+        ref, _ = referred(node)
         if not isinstance(ref, str) or not ref.startswith("#/components/schemas/") or ref.count("/") != 3:
             return False
         target = deref(spec, {"$ref": ref})
         return isinstance(target, dict) and "id" in (target.get("properties") or {})
 
     def opaque(node: dict) -> dict:
-        return {key: node[key] for key in OPAQUE_KEPT if key in node}
+        kept = {key: node[key] for key in OPAQUE_KEPT if key in node}
+        if referred(node)[1]:
+            kept["nullable"] = True
+        return kept
 
     def rewrite(node) -> bool:
         changed = False

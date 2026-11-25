@@ -2295,7 +2295,8 @@ pub struct ShopwareClientCredentialsParams {
         display_name = "Access Key ID",
         description = "The Access key ID (SWIA…) of an integration, from Settings → System → Integrations → Add integration. Its role (Administrator, or roles of the store's own) decides what steps can read and change",
         placeholder = "SWIA…",
-        is_required
+        is_required,
+        trim
     )]
     pub client_id: String,
 
@@ -2304,7 +2305,8 @@ pub struct ShopwareClientCredentialsParams {
         display_name = "Secret Access Key",
         description = "The integration's Secret access key, which Shopware shows once, when the integration is created",
         secret,
-        is_required
+        is_required,
+        trim
     )]
     pub client_secret: String,
 }

@@ -87,10 +87,11 @@ pub struct SearchEntitiesInput {
 
     #[field(
         display_name = "Total Count Mode",
-        description = "How `total` is counted: 1 counts every match; 0, the default, counts only this page's records; 2 counts as far as the next few pages."
+        description = "How `total` is counted, as in the other searches: `exact` counts every match (slower); `next-pages` counts only as far as the next pages; `none`, the default, counts only this page's records. Shopware reads a value it does not know as `none`.",
+        example = "exact"
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub total_count_mode: Option<i64>,
+    pub total_count_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]

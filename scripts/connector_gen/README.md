@@ -466,7 +466,9 @@ order has its deliveries, each delivery its order, and every record a dozen
 others. Typed, they are infinite (`E0072`), and hundreds of types. With
 `opaque_records`, a property of one schema that refers to another record (a
 component schema with an `id` of its own), directly, as the one part of an
-`allOf`, or as an array's items or a map's values, takes any JSON instead.
+`allOf`, as the one part of an `anyOf` or `oneOf` beside `{type: "null"}` (a
+nullable reference, which stays nullable), or as an array's items or a map's
+values, takes any JSON instead.
 What an operation refers to itself (a search's `data: [Order]`, a create's
 body) stays typed, and so does a schema without an `id` (a price), whatever it
 refers to. A record that nothing typed refers to any more is not sliced.

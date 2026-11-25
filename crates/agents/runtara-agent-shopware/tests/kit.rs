@@ -224,3 +224,44 @@ fn a_delete_answers_nothing() {
     let value: Value = decode("DELETE", "/api/product/1", response(204, "", &[])).unwrap();
     assert_eq!(value, Value::Null);
 }
+
+#[test]
+fn a_token_that_could_not_be_had_sent_nothing_to_the_store() {
+    // As the host's proxy answers when the token request fails.
+    let unavailable = r#"{"error":"Credential resolution failed","code":"CREDENTIAL_RESOLUTION_FAILED","permanent":false}"#;
+    for (method, path) in [("POST", "/api/product"), ("GET", "/api/order/1")] {
+        let err = decode::<Value>(method, path, response(502, unavailable, &[])).unwrap_err();
+        assert_eq!(
+            (err.code.as_str(), err.category),
+            ("SHOPWARE_AUTH_UNAVAILABLE", "transient"),
+            "{method} {path}"
+        );
+    }
+    let refused = r#"{"error":"Credential resolution failed","code":"CREDENTIAL_RESOLUTION_FAILED","permanent":true}"#;
+    let err = decode::<Value>("POST", "/api/product", response(401, refused, &[])).unwrap_err();
+    assert_eq!(
+        (err.code.as_str(), err.category),
+        ("SHOPWARE_UNAUTHORIZED", "permanent")
+    );
+    assert!(err.message.contains("Settings > System > Integrations"));
+}
+
+#[test]
+fn the_proxys_own_answers_are_not_shopwares() {
+    let missing = r#"{"error":"Connection 'c-1' not found","code":"CONNECTION_NOT_FOUND"}"#;
+    let err = decode::<Value>("GET", "/api/order/1", response(404, missing, &[])).unwrap_err();
+    assert_eq!(err.code, "SHOPWARE_MISSING_CONNECTION");
+
+    // Shopware answered: a write was carried out, a read can ask for less.
+    let large = r#"{"error":"Upstream response exceeds byte limit","code":"RESPONSE_TOO_LARGE"}"#;
+    let err = decode::<Value>("PATCH", "/api/product/1", response(413, large, &[])).unwrap_err();
+    assert_eq!(err.code, "SHOPWARE_OUTCOME_UNKNOWN");
+    let err = decode::<Value>("POST", "/api/search/order", response(413, large, &[])).unwrap_err();
+    assert_eq!(err.code, "SHOPWARE_RESPONSE_TOO_LARGE");
+
+    // An answer of Shopware's that happens to carry a `code` is Shopware's.
+    let shopware = r#"{"errors":[{"status":"404","code":"FRAMEWORK__RESOURCE_NOT_FOUND","detail":"gone"}],
+        "error":"x","code":"CONNECTION_NOT_FOUND"}"#;
+    let err = decode::<Value>("GET", "/api/order/1", response(404, shopware, &[])).unwrap_err();
+    assert_eq!(err.code, "SHOPWARE_NOT_FOUND");
+}

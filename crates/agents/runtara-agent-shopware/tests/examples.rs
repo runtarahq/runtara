@@ -196,7 +196,7 @@ fn a_search_posts_its_criteria() {
         "associations": {"lineItems": {}, "deliveries": {}},
         "limit": 5,
         "page": 2,
-        "total-count-mode": "1",
+        "total-count-mode": "exact",
     }))
     .unwrap();
     let request = input.request().unwrap();
@@ -211,7 +211,7 @@ fn a_search_posts_its_criteria() {
             "associations": {"lineItems": {}, "deliveries": {}},
             "limit": 5,
             "page": 2,
-            "total-count-mode": "1",
+            "total-count-mode": "exact",
         }))
     );
 }
@@ -421,7 +421,7 @@ fn any_record_is_searched_under_its_entity_name() {
         "filter": [{"type": "equals", "field": "typeId", "value": "8a243080f92e4c719546314b577cf82b"}],
         "includes": {"sales_channel": ["id", "name"]},
         "limit": 10,
-        "total_count_mode": 1,
+        "total_count_mode": "exact",
     }))
     .unwrap();
     let request = input.request().unwrap();
@@ -434,7 +434,7 @@ fn any_record_is_searched_under_its_entity_name() {
             "filter": [{"type": "equals", "field": "typeId", "value": "8a243080f92e4c719546314b577cf82b"}],
             "includes": {"sales_channel": ["id", "name"]},
             "limit": 10,
-            "total-count-mode": 1,
+            "total-count-mode": "exact",
         }))
     );
 }

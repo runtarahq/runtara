@@ -210,6 +210,15 @@
     ]
   },
   {
+    "integrationId": "shopware_client_credentials",
+    "trimmedByTheServer": [
+      "client_id"
+    ],
+    "trimmedFields": [
+      "client_secret"
+    ]
+  },
+  {
     "integrationId": "slack_bot",
     "trimmedByTheServer": [],
     "trimmedFields": [

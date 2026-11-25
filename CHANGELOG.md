@@ -26,15 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   JSON when a search asks for it with `associations`. The new
   `shopware_client_credentials` connection type takes the store's address
   (the Administration's, `…/admin`, works too) and an integration's access key
-  ID and secret access key; the token is requested from `<store>/api/oauth/token`
-  and lasts ten minutes. It is limited by default to 5 requests/s with a burst
-  of 10. Every request asks for plain JSON, and every create and update asks
+  ID and secret access key, both trimmed as they are saved (Shopware shows the
+  secret once, to be copied); the token is requested from
+  `<store>/api/oauth/token` and lasts ten minutes. It is limited by default to
+  5 requests/s with a burst of 10. Every request asks for plain JSON, and every create and update asks
   for the record back. A request that is not a read (a GET or a search) and
   gets no answer, a 5xx or an answer it cannot read fails with
   `SHOPWARE_OUTCOME_UNKNOWN` instead of being sent again; a create given an
-  `id` of its own can then be looked up. Only a read, or a request refused
-  with a 429, is retried. An unknown id is `SHOPWARE_NOT_FOUND`, an update of
-  one too, and an error names each field Shopware refused (`/0/taxId`).
+  `id` of its own can then be looked up. Only a read is retried, and a
+  request that never reached the store: one refused with a 429, or one the
+  host could not get a token for while the store could not be asked. An
+  unknown id is `SHOPWARE_NOT_FOUND`, an update of one too, and an error
+  names each field Shopware refused (`/0/taxId`).
   Not covered: the JSON:API format, the Store API, bulk writes
   (`_action/sync`), media uploads, documents, and webhooks.
 

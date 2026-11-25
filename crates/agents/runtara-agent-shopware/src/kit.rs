@@ -28,7 +28,8 @@
 //! again after a timeout or a 5xx makes a second record, or fails on the first
 //! one's number. An update is no safer: a line item or an address it carries
 //! without an `id` is added again. Only a read is sent again, and a request
-//! refused with a 429, which Shopware never carried out. A write whose answer
+//! Shopware never carried out: one refused with a 429, or one the host could
+//! get no access token for (see `proxy_error`). A write whose answer
 //! cannot be read counts as unknown too, because it may have been carried
 //! out. See [`outcome_unknown`].
 
@@ -451,8 +452,69 @@ fn error_codes(body: &[u8]) -> Vec<String> {
 /// be a create (`Expected command for "product" to be "UpdateCommand"`).
 const UPDATE_OF_NO_RECORD: &str = "FRAMEWORK__WRITE_TYPE_INTEND_ERROR";
 
+/// An error the host's proxy answered itself, not Shopware: its body has a
+/// `code` and an `error` of its own (and no `errors`). `None` for anything else.
+fn proxy_error(
+    response: &runtara_http::HttpResponse,
+    method: &str,
+    path: &str,
+    prefix: &str,
+) -> Option<AgentError> {
+    let body: Value = serde_json::from_slice(&response.body).ok()?;
+    if body.get("errors").is_some() || !body.get("error").is_some_and(Value::is_string) {
+        return None;
+    }
+    let status = response.status;
+    let said = body["error"].as_str().unwrap_or_default();
+    let message = format!("{prefix} HTTP {status} at {path}: {said}");
+    let err = match body.get("code")?.as_str()? {
+        // No token, so nothing was sent to Shopware: the store refused the
+        // integration's key (permanent), or could not be asked (worth trying
+        // again, a write too).
+        "CREDENTIAL_RESOLUTION_FAILED" => {
+            if body
+                .get("permanent")
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+            {
+                AgentError::permanent(
+                    format!("{prefix}_UNAUTHORIZED"),
+                    format!(
+                        "{message}. The store refused the connection's access key ID and secret \
+                         access key: check them in Settings > System > Integrations"
+                    ),
+                )
+            } else {
+                AgentError::transient(
+                    format!("{prefix}_AUTH_UNAVAILABLE"),
+                    format!(
+                        "{message}. No access token could be had, so nothing was sent to the store"
+                    ),
+                )
+            }
+        }
+        "CONNECTION_NOT_FOUND" => AgentError::permanent(
+            format!("{prefix}_MISSING_CONNECTION"),
+            format!("{message}. The step's connection does not exist"),
+        ),
+        // Shopware answered, so a write was carried out.
+        "RESPONSE_TOO_LARGE" if !is_read(method, path) => outcome_unknown(prefix, message),
+        "RESPONSE_TOO_LARGE" => AgentError::permanent(
+            format!("{prefix}_RESPONSE_TOO_LARGE"),
+            format!("{message}. Ask for less: a lower `limit`, or `includes`"),
+        ),
+        _ => return None,
+    };
+    Some(
+        err.with_attr("status_code", status.to_string())
+            .with_attr("path", path),
+    )
+}
+
 /// Turns a response into the capability's output.
 ///
+/// - An error the host's proxy answered itself (`proxy_error`) is told apart
+///   from Shopware's first: a failed token request sent nothing to Shopware.
 /// - A non-2xx status is an error, its message Shopware's
 ///   ([`shopware_error_message`]) when the body is one: 404 is
 ///   `<PREFIX>_NOT_FOUND` (no record with that id), and so is an update of a
@@ -472,6 +534,9 @@ pub fn decode<T: DeserializeOwned>(
 ) -> Result<T, AgentError> {
     let status = response.status;
     if !(200..300).contains(&status) {
+        if let Some(err) = proxy_error(response, method, path, prefix) {
+            return Err(err);
+        }
         let body: String = shopware_error_message(&response.body)
             .unwrap_or_else(|| String::from_utf8_lossy(&response.body).into_owned())
             .chars()

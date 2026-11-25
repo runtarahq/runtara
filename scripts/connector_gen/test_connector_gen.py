@@ -2342,6 +2342,9 @@ def records_spec(openapi: str = "3.0.1") -> dict:
             "billing": {"allOf": [{"$ref": "#/components/schemas/Address"}], "description": "Billed to"},
             "deliveries": {"type": "array", "items": {"$ref": "#/components/schemas/Delivery"}},
             "byChannel": {"type": "object", "additionalProperties": {"$ref": "#/components/schemas/Delivery"}},
+            "replacedBy": {"anyOf": [ref, {"type": "null"}], "description": "The order replacing it"},
+            "source": {"oneOf": [{"$ref": "#/components/schemas/Currency"},
+                                 {"$ref": "#/components/schemas/Address"}]},
             "prices": {"type": "array", "items": {"$ref": "#/components/schemas/Price"}},
         }},
         "Currency": {"type": "object", "properties": {"id": {"type": "string"}, "iso": {"type": "string"}}},
@@ -2367,12 +2370,17 @@ class OpaqueRecordsTest(unittest.TestCase):
         self.assertEqual(order["billing"], {"description": "Billed to"})
         self.assertEqual(order["deliveries"], {"type": "array", "items": {}})
         self.assertEqual(order["byChannel"], {"type": "object", "additionalProperties": {}})
+        # 3.1's nullable reference stays nullable.
+        self.assertEqual(order["replacedBy"], {"description": "The order replacing it", "nullable": True})
+        # One of several records is one of several shapes, as it was.
+        self.assertEqual(len(order["source"]["oneOf"]), 2)
         # A price has no id of its own: it stays a type, and what it refers to
         # is any JSON too.
         self.assertEqual(order["prices"]["items"], {"$ref": "#/components/schemas/Price"})
         self.assertEqual(schemas["Price"]["properties"]["currency"], {})
-        # Only what is still referred to is sliced.
-        self.assertEqual(sorted(schemas), ["Order", "Price", "UpdateOrderBody"])
+        # Only what is still referred to is sliced: the records a one-of names,
+        # but no delivery.
+        self.assertEqual(sorted(schemas), ["Address", "Currency", "Order", "Price", "UpdateOrderBody"])
         # What an operation refers to itself stays typed.
         response = operation(sliced, "createOrder")["responses"]["200"]["content"]["application/json"]
         self.assertEqual(response["schema"]["properties"]["data"], {"$ref": "#/components/schemas/Order"})
@@ -2487,6 +2495,7 @@ class RecordsRenderTest(unittest.TestCase):
     def test_references_to_records_are_raw_json(self):
         # Any JSON may be null: a step can clear what a record refers to.
         self.assertIn("pub currency: Option<Option<Value>>,", self.text)
+        self.assertIn("pub replaced_by: Option<Option<Value>>,", self.text)
         self.assertIn("pub deliveries: Option<Vec<Value>>,", self.text)
         self.assertIn("pub by_channel: Option<HashMap<String, Value>>,", self.text)
         self.assertIn("pub prices: Option<Vec<Price>>,", self.text)
