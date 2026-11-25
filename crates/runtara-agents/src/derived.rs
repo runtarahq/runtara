@@ -148,6 +148,7 @@ fn materialize(
             order: order as i32,
             default_value: None,
             is_secret: false,
+            trims: false,
             enum_values: None,
             is_url: false,
             is_required: true,

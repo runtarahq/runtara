@@ -153,6 +153,10 @@ jobs:
           python scripts/connector_gen/test_connector_gen.py
           python scripts/connector_gen/connector_gen.py check $(dirname crates/agents/*/connector.yaml)
 
+      # How the e2e scripts enter a connection's secrets: no server needed.
+      - name: Test the e2e sealing helper
+        run: python e2e/test_sealed_connection.py
+
       # The *-integration-tests features are empty markers that gate [[test]]
       # targets via required-features. Without them cargo silently drops those
       # targets, so ~78% of the LOC under tests/ was never linted or even

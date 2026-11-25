@@ -987,6 +987,13 @@ pub struct ConnectionTypeDto {
     /// kept off the screen and still sent as it is. Besides these, each value
     /// of an MCP connection's `extra_headers` is sent sealed.
     pub sealed_fields: Vec<String>,
+    /// The `sealedFields` a caller trims before sealing them: keys and tokens
+    /// a provider issued, which never begin or end with whitespace. A pasted
+    /// one often ends in a newline or a space, and the server cannot trim
+    /// what it cannot read. The others, like a password, are sealed as typed.
+    /// A readable field is trimmed by the server.
+    #[serde(default)]
+    pub trimmed_fields: Vec<String>,
     /// Default rate limit configuration for this connection type (if applicable)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_rate_limit_config: Option<RateLimitConfigDto>,

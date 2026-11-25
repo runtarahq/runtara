@@ -12,8 +12,10 @@ the request it is about to save, seals the secrets under it with
 
 The request is written as it was before secrets were sealed: readable. This
 marks each secret field of the connection type as entered (`{"$entered":
-true}`), and nothing readable leaves this process. A Postgres URL is split as
-a client splits it: the password is the secret, and the rest of the URL goes
+true}`), and nothing readable leaves this process. A secret of the type's
+`trimmedFields` (a key or token a provider issued) is trimmed first, as a
+client trims it: a pasted one often ends in a newline. A Postgres URL is split
+as a client splits it: the password is the secret, and the rest of the URL goes
 beside it as `database_target`.
 
 To update, name the connection: `--update <id>` takes an update request
@@ -89,12 +91,15 @@ class Api:
 
 
 def secret_fields(api, integration_id):
-    """The names of the connection type's fields that are sent sealed."""
+    """The names of the connection type's fields that are sent sealed, and of
+    those that are trimmed before they are sealed. A server that does not say
+    which to trim has none trimmed."""
     status, body = api.send(
         "GET", "/connections/types/" + urllib.parse.quote(integration_id, safe=""))
     if status != 200:
-        return set()
-    return set(json.loads(body)["connectionType"]["sealedFields"])
+        return set(), set()
+    connection_type = json.loads(body)["connectionType"]
+    return set(connection_type["sealedFields"]), set(connection_type.get("trimmedFields") or [])
 
 
 def split_postgres_url(url):
@@ -108,8 +113,11 @@ def split_postgres_url(url):
     return urllib.parse.unquote(parsed.password), target
 
 
-def enter(integration_id, secret, parameters):
+def enter(integration_id, secret, parameters, trimmed=frozenset()):
     """Marks each readable secret of `parameters` as entered, in place.
+
+    A secret named in `trimmed` is entered without the whitespace around it,
+    and one that is nothing but whitespace is left blank.
 
     Returns the secrets by the name the request has for them, and what is
     added beside them: a Postgres target.
@@ -117,6 +125,8 @@ def enter(integration_id, secret, parameters):
     secrets, beside = {}, {}
     for name in list(parameters):
         value = parameters[name]
+        if name in secret and name in trimmed and isinstance(value, str):
+            value = parameters[name] = value.strip()
         if name not in secret or not isinstance(value, str) or not value:
             continue
         if integration_id == "postgres" and name == PG_URL_FIELD:
@@ -161,7 +171,8 @@ def save(api, request, update=None):
         parameters = request.get("connectionParameters")
         if not isinstance(parameters, dict):
             return api.send(method, path, request)
-        secrets, beside = enter(integration_id, secret_fields(api, integration_id), parameters)
+        secret, trimmed = secret_fields(api, integration_id)
+        secrets, beside = enter(integration_id, secret, parameters, trimmed)
         parameters.update(beside)
     else:
         method, path = "PUT", "/connections/" + urllib.parse.quote(update, safe="")
@@ -170,9 +181,9 @@ def save(api, request, update=None):
             return status, held
         integration_id = json.loads(held)["connection"].get("integrationId") or ""
         patch = request.get("connectionParameterPatch") or {}
-        secret = secret_fields(api, integration_id)
-        secrets, beside = enter(integration_id, secret, patch.get("write") or {})
-        more, _ = enter(integration_id, secret, patch.get("set") or {})
+        secret, trimmed = secret_fields(api, integration_id)
+        secrets, beside = enter(integration_id, secret, patch.get("write") or {}, trimmed)
+        more, _ = enter(integration_id, secret, patch.get("set") or {}, trimmed)
         secrets.update(more)
         if beside:
             patch.setdefault("set", {}).update(beside)

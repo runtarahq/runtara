@@ -388,7 +388,8 @@ pub struct AwsCredentialsParams {
     #[field(
         display_name = "Access Key ID",
         description = "AWS Access Key ID",
-        placeholder = "AKIAIOSFODNN7EXAMPLE"
+        placeholder = "AKIAIOSFODNN7EXAMPLE",
+        trim
     )]
     #[serde(alias = "access_key_id")]
     pub aws_access_key_id: String,
@@ -537,7 +538,8 @@ pub struct TeamsBotParams {
     #[field(
         display_name = "App ID",
         description = "Microsoft App ID from the Azure Bot resource",
-        placeholder = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        placeholder = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+        trim
     )]
     pub app_id: String,
 
@@ -612,7 +614,8 @@ pub struct MicrosoftEntraClientCredentialsParams {
     #[field(
         display_name = "Client ID",
         description = "Application (client) ID from the Microsoft Entra app registration",
-        placeholder = "00000000-0000-0000-0000-000000000000"
+        placeholder = "00000000-0000-0000-0000-000000000000",
+        trim
     )]
     pub client_id: String,
 
@@ -842,7 +845,8 @@ pub struct HubSpotPrivateAppParams {
         display_name = "Client ID",
         description = "Client ID from your HubSpot app settings",
         placeholder = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-        requires_reauthorization
+        requires_reauthorization,
+        trim
     )]
     pub client_id: String,
 
@@ -936,7 +940,8 @@ pub struct QuickBooksOnlineParams {
     #[field(
         display_name = "Client ID",
         description = "Client ID from your Intuit app's keys",
-        requires_reauthorization
+        requires_reauthorization,
+        trim
     )]
     pub client_id: String,
 
@@ -1081,7 +1086,8 @@ pub struct XeroOAuthParams {
     #[field(
         display_name = "Client ID",
         description = "Client ID of your Xero web app (developer.xero.com, My Apps)",
-        requires_reauthorization
+        requires_reauthorization,
+        trim
     )]
     pub client_id: String,
 
@@ -1195,7 +1201,8 @@ pub struct ZohoCrmOAuthParams {
     #[field(
         display_name = "Client ID",
         description = "Client ID of your server-based application in the Zoho API Console",
-        requires_reauthorization
+        requires_reauthorization,
+        trim
     )]
     pub client_id: String,
 
@@ -1396,7 +1403,8 @@ pub struct EbayOAuthParams {
         display_name = "App ID (Client ID)",
         description = "App ID of your application's keyset for this environment, from Application \
                        Keys in the eBay Developer Program",
-        requires_reauthorization
+        requires_reauthorization,
+        trim
     )]
     pub client_id: String,
 
@@ -1611,7 +1619,8 @@ pub struct PostgresDatabaseParams {
         display_name = "Database URL",
         description = "PostgreSQL connection string (postgresql://user:pass@host:port/dbname)",
         placeholder = "postgresql://user:password@localhost:5432/dbname",
-        secret
+        secret,
+        keep_whitespace
     )]
     pub database_url: String,
 }
@@ -1641,7 +1650,8 @@ pub struct S3CompatibleParams {
     #[field(
         display_name = "Access Key ID",
         description = "S3 access key ID for authentication",
-        placeholder = "minioadmin"
+        placeholder = "minioadmin",
+        trim
     )]
     pub access_key_id: String,
 
@@ -1701,7 +1711,8 @@ pub struct AzureBlobStorageParams {
     #[field(
         display_name = "Account Name",
         description = "Azure storage account name",
-        placeholder = "mystorageacct"
+        placeholder = "mystorageacct",
+        trim
     )]
     pub account_name: String,
 
@@ -2154,7 +2165,8 @@ pub struct WooCommerceApiKeyParams {
         display_name = "Consumer Key",
         description = "The Consumer key (ck_…) of a REST API key, from WooCommerce → Settings → Advanced → REST API → Add key. The key's user and its permissions (Read or Read/Write) decide what steps can read and change",
         placeholder = "ck_…",
-        is_required
+        is_required,
+        trim
     )]
     pub consumer_key: String,
 
@@ -2181,8 +2193,9 @@ impl HttpConnectionExtractor for WooCommerceExtractor {
             .map_err(|e| format!("Invalid woocommerce_api_key connection parameters: {}", e))?;
 
         // HTTP Basic with `consumer_key:consumer_secret`, as WooCommerce reads
-        // a key over HTTPS. Both are trimmed, as a pasted value often ends in a
-        // newline.
+        // a key over HTTPS. Both are trimmed, as their fields are where they
+        // are entered. A sealed connection's header is made by seal under the
+        // connection's policy, not here.
         let credentials = format!("{}:{}", p.consumer_key.trim(), p.consumer_secret.trim());
         let mut headers = HashMap::new();
         headers.insert(
@@ -2259,7 +2272,8 @@ pub struct ZendeskClientCredentialsParams {
     /// OAuth client identifier
     #[field(
         display_name = "Client ID",
-        description = "The Unique identifier of an OAuth client whose Client kind is Confidential: Admin Center → Apps and integrations → APIs → OAuth clients"
+        description = "The Unique identifier of an OAuth client whose Client kind is Confidential: Admin Center → Apps and integrations → APIs → OAuth clients",
+        trim
     )]
     pub client_id: String,
 
@@ -2365,7 +2379,9 @@ pub fn jira_base_url(site: &str, cloud_id: Option<&str>) -> Result<String, Strin
 }
 
 /// The `Authorization` value of a Jira API token: HTTP Basic with
-/// `email:api_token`. Both are trimmed, as a pasted value often ends in a newline.
+/// `email:api_token`. Both are trimmed, as their fields are where they are
+/// entered. A sealed connection's header is made by seal under the
+/// connection's policy, not here.
 pub fn jira_basic_auth(email: &str, api_token: &str) -> String {
     let credentials = format!("{}:{}", email.trim(), api_token.trim());
     format!(
@@ -2398,7 +2414,8 @@ pub struct JiraApiTokenParams {
         display_name = "Email",
         description = "Email of the Atlassian account that created the token. Steps act with that account's Jira permissions",
         placeholder = "user@example.com",
-        is_required
+        is_required,
+        trim
     )]
     pub email: String,
 
@@ -2515,7 +2532,8 @@ pub struct UpsClientCredentialsParams {
     /// OAuth client identifier
     #[field(
         display_name = "Client ID",
-        description = "The Client ID of your app: developer.ups.com → Apps → your app"
+        description = "The Client ID of your app: developer.ups.com → Apps → your app",
+        trim
     )]
     pub client_id: String,
 
@@ -2605,7 +2623,8 @@ pub struct PaypalClientCredentialsParams {
     /// OAuth client identifier
     #[field(
         display_name = "Client ID",
-        description = "The Client ID of your REST app: developer.paypal.com → Apps & Credentials → your app, in the same environment"
+        description = "The Client ID of your REST app: developer.paypal.com → Apps & Credentials → your app, in the same environment",
+        trim
     )]
     pub client_id: String,
 
@@ -2847,7 +2866,7 @@ pub struct HttpOAuth2ClientCredentialsParams {
     pub token_url: String,
 
     /// OAuth2 client id
-    #[field(display_name = "Client ID", description = "OAuth2 client id")]
+    #[field(display_name = "Client ID", description = "OAuth2 client id", trim)]
     pub client_id: String,
 
     /// OAuth2 client secret
@@ -2998,7 +3017,8 @@ pub struct HttpOAuth2AuthorizationCodeParams {
     #[field(
         display_name = "Client ID",
         description = "OAuth2 client id",
-        requires_reauthorization
+        requires_reauthorization,
+        trim
     )]
     pub client_id: String,
 

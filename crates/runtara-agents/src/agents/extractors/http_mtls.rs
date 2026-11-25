@@ -47,6 +47,7 @@ struct HttpMtlsParams {
         display_name = "Client Private Key",
         description = "Unencrypted PEM private key (PKCS#8, RSA PKCS#1, or SEC1 EC)",
         secret,
+        keep_whitespace,
         control = "secret_textarea"
     )]
     client_private_key_pem: String,

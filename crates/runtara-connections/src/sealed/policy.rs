@@ -1556,6 +1556,20 @@ pub fn sealed_fields(meta: &runtara_dsl::agent_meta::ConnectionTypeMeta) -> Vec<
         .collect()
 }
 
+/// The [`sealed_fields`] whose values a caller trims before sealing them:
+/// keys and tokens a provider issued, where whitespace around the value is
+/// never part of it (`ConnectionFieldMeta::trims`). The engine never reads a
+/// sealed value, so only whoever enters it can trim it. A secret a person
+/// chose, like a password, is not one of them, and is sealed as typed.
+pub fn trimmed_fields(meta: &runtara_dsl::agent_meta::ConnectionTypeMeta) -> Vec<String> {
+    let sealed = sealed_fields(meta);
+    meta.fields
+        .iter()
+        .filter(|field| field.trims && sealed.iter().any(|name| name == field.name))
+        .map(|field| field.name.to_owned())
+        .collect()
+}
+
 /// The parameter of an MCP connection that holds the extra headers each of
 /// its requests carries. Any of them may be a credential, so each value is a
 /// secret: sealed for the connection's server, and attached by seal.
@@ -2286,6 +2300,48 @@ mod tests {
             assert!(is_sealable_type(integration_id));
         }
         assert!(!is_sealable_type("sftp"));
+    }
+
+    /// A caller trims every sealed secret but those a person chose or that
+    /// span lines, which it seals as typed. One more of those is a choice to
+    /// make here, not a default a new connection type falls into.
+    #[test]
+    fn every_sealed_secret_is_trimmed_but_the_ones_a_person_chose() {
+        let mut kept: Vec<String> = runtara_agents::registry::get_all_connection_types()
+            .flat_map(|meta| {
+                let trimmed = trimmed_fields(meta);
+                sealed_fields(meta)
+                    .into_iter()
+                    .filter(move |field| !trimmed.contains(field))
+                    .map(move |field| format!("{}.{field}", meta.integration_id))
+            })
+            .collect();
+        kept.sort();
+        assert_eq!(
+            kept,
+            [
+                "http_basic.password",
+                "http_mtls.client_private_key_pem",
+                "postgres.database_url",
+            ]
+        );
+        // A readable field is never one a caller trims: the server does.
+        let woocommerce = find_connection_type("woocommerce_api_key").unwrap();
+        assert_eq!(trimmed_fields(woocommerce), ["consumer_secret"]);
+        let readable = |integration_id: &str, name: &str| {
+            find_connection_type(integration_id)
+                .unwrap()
+                .fields
+                .iter()
+                .find(|field| field.name == name)
+                .unwrap()
+                .trims
+        };
+        assert!(readable("woocommerce_api_key", "consumer_key"));
+        assert!(readable("jira_api_token", "email"));
+        assert!(readable("http_oauth2_client_credentials", "client_id"));
+        assert!(!readable("http_basic", "username"));
+        assert!(!readable("woocommerce_api_key", "store_url"));
     }
 
     /// The secret's parameter is one the type marks secret, so that nothing
