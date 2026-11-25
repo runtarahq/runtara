@@ -7,7 +7,7 @@ import importlib.util
 import json
 from pathlib import Path
 import unittest
-from unittest import mock
+import unittest.mock
 
 spec = importlib.util.spec_from_file_location(
     "sealed_connection", Path(__file__).with_name("sealed_connection.py"))
@@ -52,7 +52,8 @@ class SaveTests(unittest.TestCase):
 
     def sealed_by(self, request, update=None):
         api, sealed = RoutedApi(), {}
-        with mock.patch.object(module, "seal", lambda offered, secrets: sealed.update(secrets) or {}):
+        with unittest.mock.patch.object(
+                module, "seal", lambda offered, secrets: sealed.update(secrets) or {}):
             module.save(api, request, update)
         return sealed, api.sent[-1][2]
 
