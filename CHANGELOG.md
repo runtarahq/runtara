@@ -13,6 +13,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Shopware agent, generated from Shopware's Admin API spec.** Seventeen
+  capabilities: search and read orders, update them and their deliveries
+  (tracking codes), and move an order, a delivery or a payment to another
+  state (process, complete, ship, paid, cancel, …); search, read, create
+  (variants too), update and delete products; search, read, create and update
+  customers; and Search Entities, a search of any of Shopware's records, which
+  finds the IDs a create needs (a tax, a currency, a sales channel, a country).
+  The agent is generated from the spec Shopware publishes for its 6.7.16.1
+  release (shopware/admin-api-reference), which is OpenAPI 3.2. What a record
+  refers to (an order's line items, deliveries and payments) comes back as
+  JSON when a search asks for it with `associations`. The new
+  `shopware_client_credentials` connection type takes the store's address
+  (the Administration's, `…/admin`, works too) and an integration's access key
+  ID and secret access key, both trimmed as they are saved (Shopware shows the
+  secret once, to be copied); the token is requested from
+  `<store>/api/oauth/token` and lasts ten minutes. It is limited by default to
+  5 requests/s with a burst of 10. Every request asks for plain JSON, and every create and update asks
+  for the record back. A request that is not a read (a GET or a search) and
+  gets no answer, a 5xx or an answer it cannot read fails with
+  `SHOPWARE_OUTCOME_UNKNOWN` instead of being sent again; a create given an
+  `id` of its own can then be looked up. Only a read is retried, and a
+  request that never reached the store: one refused with a 429, or one the
+  host could not get a token for while the store could not be asked. An
+  unknown id is `SHOPWARE_NOT_FOUND`, an update of one too, and an error
+  names each field Shopware refused (`/0/taxId`).
+  Not covered: the JSON:API format, the Store API, bulk writes
+  (`_action/sync`), media uploads, documents, and webhooks.
+
+- **`connector_gen` takes OpenAPI 3.2 specs, records that refer to one
+  another, and update bodies that repeat a path parameter.** A 3.2 spec is
+  rendered as 3.1 where the listed operations use nothing 3.2 added (`fetch`
+  names what they use otherwise). `opaque_records: true` makes a property
+  that refers to another record (a schema with an `id` of its own) any JSON,
+  so records that refer to one another and back are no infinite types.
+  `path_parameters_win: true` leaves out of a request body a field named like
+  a path parameter of the same operation (Shopware's `PATCH /product/{id}`),
+  giving the operation a copy of the body schema of its own. An
+  `operation_names` entry may give the step's `label`, which wins over the
+  vendor's summary. A `number` of `format: float` is an `f64`, not an `f32`
+  that would change a vendor's amounts. The existing generated agents are
+  unchanged.
+
 - **WooCommerce agent, generated from the REST schema a store serves.**
   Twenty-four capabilities: list, read, create, update and delete orders
   (status changes cover holding, cancelling and completing them), list and add

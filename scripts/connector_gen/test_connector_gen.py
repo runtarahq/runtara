@@ -2302,6 +2302,13 @@ class OperationNamesTest(unittest.TestCase):
                 self.sliced({"GetV1OrdersId": entry})
             self.assertIn("takes a name", str(raised.exception))
 
+    def test_an_entry_may_label_the_operation_over_the_vendors_summary(self):
+        sliced = self.sliced({"GetV1Orders": {"name": "searchOrders", "label": " Search Orders "}})
+        self.assertEqual(operation(sliced, "searchOrders")["x-runtara-summary"], "Search Orders")
+        with self.assertRaises(SystemExit) as raised:
+            self.sliced({"GetV1Orders": {"name": "searchOrders", "label": " "}})
+        self.assertIn("takes a name", str(raised.exception))
+
     def test_check_reads_the_listed_operations_under_their_new_names(self):
         names = {"GetV1OrdersId": {"name": "getOrder", "description": "Reads one order."}}
         with tempfile.TemporaryDirectory() as tmp:
@@ -2311,6 +2318,202 @@ class OperationNamesTest(unittest.TestCase):
                 "operations": ["GetV1OrdersId", "GetV1Orders"], "operation_names": names}))
             cg.write_json(crate / "spec.slice.json", self.sliced(names))
             self.assertEqual(cg.drift(crate), [])
+
+
+def records_spec(openapi: str = "3.0.1") -> dict:
+    """An API of records that refer to one another, as Shopware's do: an order
+    has a currency and deliveries, a delivery has its order, and a price is a
+    value with no `id`. The update takes the order's `id` in its path and in its
+    body; the create takes it in the body only."""
+    ref = {"$ref": "#/components/schemas/Order"}
+    ok = {"200": {"description": "ok", "content": {"application/json": {"schema": {
+        "type": "object", "properties": {"data": ref}}}}}}
+    body = {"content": {"application/json": {"schema": ref}}}
+    path_id = {"name": "id", "in": "path", "required": True, "schema": {"type": "string"}}
+    return {"openapi": openapi, "info": {"title": "t", "version": "1"}, "paths": {
+        "/order": {"post": {"operationId": "createOrder", "requestBody": body, "responses": ok}},
+        "/order/{id}": {"patch": {"operationId": "updateOrder", "parameters": [path_id],
+                                  "requestBody": body, "responses": ok}},
+    }, "components": {"schemas": {
+        "Order": {"type": "object", "required": ["id", "number"], "properties": {
+            "id": {"type": "string"},
+            "number": {"type": "string"},
+            "currency": {"$ref": "#/components/schemas/Currency", "description": "The order's currency"},
+            "billing": {"allOf": [{"$ref": "#/components/schemas/Address"}], "description": "Billed to"},
+            "deliveries": {"type": "array", "items": {"$ref": "#/components/schemas/Delivery"}},
+            "byChannel": {"type": "object", "additionalProperties": {"$ref": "#/components/schemas/Delivery"}},
+            "replacedBy": {"anyOf": [ref, {"type": "null"}], "description": "The order replacing it"},
+            "source": {"oneOf": [{"$ref": "#/components/schemas/Currency"},
+                                 {"$ref": "#/components/schemas/Address"}]},
+            "prices": {"type": "array", "items": {"$ref": "#/components/schemas/Price"}},
+        }},
+        "Currency": {"type": "object", "properties": {"id": {"type": "string"}, "iso": {"type": "string"}}},
+        "Address": {"type": "object", "properties": {"id": {"type": "string"}, "city": {"type": "string"}}},
+        "Delivery": {"type": "object", "properties": {"id": {"type": "string"}, "order": ref}},
+        "Price": {"type": "object", "properties": {"gross": {"type": "number", "format": "float"},
+                                                   "currency": {"$ref": "#/components/schemas/Currency"}}},
+    }}}
+
+
+def slice_records(spec: dict, **config) -> dict:
+    return cg.slice_specs([({"operations": ["createOrder", "updateOrder"]}, spec)], config)
+
+
+class OpaqueRecordsTest(unittest.TestCase):
+    """`opaque_records`: what one record refers to of another is any JSON."""
+
+    def test_references_to_records_are_any_json_and_values_stay_typed(self):
+        sliced = slice_records(records_spec(), opaque_records=True, path_parameters_win=True)
+        schemas = sliced["components"]["schemas"]
+        order = schemas["Order"]["properties"]
+        self.assertEqual(order["currency"], {"description": "The order's currency"})
+        self.assertEqual(order["billing"], {"description": "Billed to"})
+        self.assertEqual(order["deliveries"], {"type": "array", "items": {}})
+        self.assertEqual(order["byChannel"], {"type": "object", "additionalProperties": {}})
+        # 3.1's nullable reference stays nullable.
+        self.assertEqual(order["replacedBy"], {"description": "The order replacing it", "nullable": True})
+        # One of several records is one of several shapes, as it was.
+        self.assertEqual(len(order["source"]["oneOf"]), 2)
+        # A price has no id of its own: it stays a type, and what it refers to
+        # is any JSON too.
+        self.assertEqual(order["prices"]["items"], {"$ref": "#/components/schemas/Price"})
+        self.assertEqual(schemas["Price"]["properties"]["currency"], {})
+        # Only what is still referred to is sliced: the records a one-of names,
+        # but no delivery.
+        self.assertEqual(sorted(schemas), ["Address", "Currency", "Order", "Price", "UpdateOrderBody"])
+        # What an operation refers to itself stays typed.
+        response = operation(sliced, "createOrder")["responses"]["200"]["content"]["application/json"]
+        self.assertEqual(response["schema"]["properties"]["data"], {"$ref": "#/components/schemas/Order"})
+
+    def test_without_the_option_records_stay_typed(self):
+        sliced = slice_records(records_spec(), path_parameters_win=True)
+        self.assertIn("Delivery", sliced["components"]["schemas"])
+
+    def test_a_flag_that_changes_nothing_or_is_no_boolean_fails(self):
+        spec = records_spec()
+        for schema in spec["components"]["schemas"].values():
+            schema["properties"].pop("id", None)
+        with self.assertRaises(SystemExit) as raised:
+            cg.slice_specs([({"operations": ["createOrder"]}, spec)], {"opaque_records": True})
+        self.assertIn("opaque_records is true, but no schema", str(raised.exception))
+        with self.assertRaises(SystemExit) as raised:
+            slice_records(records_spec(), opaque_records="yes")
+        self.assertIn("true or false", str(raised.exception))
+
+
+class PathParametersWinTest(unittest.TestCase):
+    """`path_parameters_win`: a body field named like a path parameter is left
+    out, and the path's is the input."""
+
+    def test_the_update_gets_a_body_of_its_own_without_the_field(self):
+        sliced = slice_records(records_spec(), path_parameters_win=True)
+        schemas = sliced["components"]["schemas"]
+        update = operation(sliced, "updateOrder")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(update, {"$ref": "#/components/schemas/UpdateOrderBody"})
+        self.assertNotIn("id", schemas["UpdateOrderBody"]["properties"])
+        self.assertEqual(schemas["UpdateOrderBody"]["required"], ["number"])
+        # The create's body is the record's, `id` and all.
+        create = operation(sliced, "createOrder")["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(create, {"$ref": "#/components/schemas/Order"})
+        self.assertIn("id", schemas["Order"]["properties"])
+
+    def test_without_the_option_the_two_inputs_clash(self):
+        with self.assertRaises(SystemExit) as raised:
+            slice_records(records_spec())
+        self.assertIn("updateOrder: two inputs are named `id`", str(raised.exception))
+
+    def test_a_path_parameter_with_an_input_name_of_its_own_clashes_with_nothing(self):
+        spec = records_spec()
+        spec["paths"]["/order/{id}"]["patch"]["parameters"][0][cg.INPUT_NAME] = "order_id"
+        with self.assertRaises(SystemExit) as raised:
+            slice_records(spec, path_parameters_win=True)
+        self.assertIn("no listed operation's request body repeats", str(raised.exception))
+
+    def test_a_body_name_the_spec_has_already_fails(self):
+        spec = records_spec()
+        spec["components"]["schemas"]["UpdateOrderBody"] = {"type": "object"}
+        with self.assertRaises(SystemExit) as raised:
+            slice_records(spec, path_parameters_win=True)
+        self.assertIn("`UpdateOrderBody`, which is a schema of the spec's already", str(raised.exception))
+
+
+class OpenApi32Test(unittest.TestCase):
+    """A 3.2 spec is sliced as it is, and refused only where the slice uses what
+    3.2 added."""
+
+    def test_a_32_spec_that_uses_nothing_new_is_sliced(self):
+        spec = records_spec("3.2.0")
+        spec["$self"] = "https://example.com/openapi.json"
+        spec["tags"] = [{"name": "orders", "parent": "commerce", "kind": "nav"}]
+        sliced = slice_records(spec, path_parameters_win=True)
+        self.assertEqual(sliced["openapi"], "3.2.0")
+        self.assertNotIn("$self", sliced)
+
+    def test_what_32_added_in_the_slice_is_refused(self):
+        streamed = records_spec("3.2.0")
+        streamed["paths"]["/order"]["post"]["responses"]["200"]["content"] = {
+            "text/event-stream": {"itemSchema": {"type": "object"}}}
+        querystring = records_spec("3.2.0")
+        querystring["paths"]["/order"]["post"]["parameters"] = [
+            {"name": "q", "in": "querystring", "content": {"application/json": {"schema": {}}}}]
+        for spec, feature in ((streamed, "itemSchema"), (querystring, "in: querystring")):
+            with self.subTest(feature=feature), self.assertRaises(SystemExit) as raised:
+                slice_records(spec, path_parameters_win=True)
+            self.assertIn(feature, str(raised.exception))
+
+    def test_other_versions_are_refused(self):
+        with self.assertRaises(SystemExit) as raised:
+            slice_records(records_spec("4.0.0"), path_parameters_win=True)
+        self.assertIn("OpenAPI 4.0.0 is not supported", str(raised.exception))
+
+
+@unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
+class RecordsRenderTest(unittest.TestCase):
+    """A 3.2 spec of records renders: references to records are `Value`, and
+    the update takes its `id` from the path only."""
+
+    @classmethod
+    def setUpClass(cls):
+        with tempfile.TemporaryDirectory() as tmp:
+            crate = Path(tmp)
+            (crate / "connector.yaml").write_text(yaml.safe_dump({
+                "agent": {"id": "sample", "name": "Sample", "description": "Sample.",
+                          "integration_id": "sample_token", "error_prefix": "SAMPLE"},
+                "spec": {"url": "unused", "sha256": "unused"},
+                "operations": ["createOrder", "updateOrder"],
+                "opaque_records": True, "path_parameters_win": True,
+            }))
+            sliced = slice_records(records_spec("3.2.0"), opaque_records=True, path_parameters_win=True)
+            cg.describe_fields(sliced, {})
+            cg.write_json(crate / "spec.slice.json", sliced)
+            cls.text = cg.render(crate)
+            cls.flat = re.sub(r"\s+", " ", cls.text)
+
+    def section(self, start: str, end: str) -> str:
+        return self.flat[self.flat.index(start):][:self.flat[self.flat.index(start):].index(end)]
+
+    def test_references_to_records_are_raw_json(self):
+        # Any JSON may be null: a step can clear what a record refers to.
+        self.assertIn("pub currency: Option<Option<Value>>,", self.text)
+        self.assertIn("pub replaced_by: Option<Option<Value>>,", self.text)
+        self.assertIn("pub deliveries: Option<Vec<Value>>,", self.text)
+        self.assertIn("pub by_channel: Option<HashMap<String, Value>>,", self.text)
+        self.assertIn("pub prices: Option<Vec<Price>>,", self.text)
+        self.assertNotIn("pub struct Delivery", self.text)
+
+    def test_a_float_is_read_as_a_double(self):
+        # As an f32, Shopware's amount 2396.8 would be 2396.800048828125.
+        self.assertIn("pub gross: Option<f64>,", self.text)
+        self.assertNotIn("f32", self.text)
+
+    def test_the_update_takes_the_id_from_its_path_only(self):
+        update = self.section("pub struct UpdateOrderInput", "} #[capability(")
+        self.assertEqual(update.count("pub id: String,"), 1)
+        request = self.section("impl UpdateOrderInput", "} }")
+        self.assertIn('format!("/order/{id}", id = kit::encode_path(&self.id))', request)
+        self.assertNotIn('"id"', request)
+        create = self.section("impl CreateOrderInput", "} }")
+        self.assertIn('.field("id", &self.id)', create)
 
 
 class PropertyNameTest(unittest.TestCase):

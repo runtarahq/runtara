@@ -1,7 +1,7 @@
 use runtara_agents::extractors::connection_types::{
     GEMINI_API_BASE_URL, SHIPPO_API_BASE_URL, SHIPPO_API_VERSION, ZENDESK_DEFAULT_SCOPE,
     bigcommerce_base_url, connection_environment, jira_base_url, magento_base_url, paypal_base_url,
-    ups_base_url, woocommerce_base_url, zendesk_base_url,
+    shopware_base_url, ups_base_url, woocommerce_base_url, zendesk_base_url,
 };
 use runtara_agents::registry::find_connection_type;
 use runtara_dsl::agent_meta::{OAuthConfig, TokenEndpointAuth};
@@ -271,6 +271,15 @@ pub(crate) fn describe_connection_auth(
             azure_signing: None,
             deferred_auth: None,
         },
+        // Shopware: as WooCommerce, every store is a host of its own, the address
+        // the user gives, and its token endpoint is under it. An invalid one
+        // leaves no base URL and no token request.
+        "shopware_client_credentials" => ConnectionAuthDescriptor {
+            base_url: shopware_store_url(params),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: describe_shopware_client_credentials_auth(connection_id, params),
+        },
         // Zendesk: every account has its own host. An invalid subdomain leaves no
         // base URL, so a credentialed request fails closed at the proxy's pin step.
         "zendesk_client_credentials" => ConnectionAuthDescriptor {
@@ -497,6 +506,43 @@ pub(crate) fn magento_store_url(params: &Value) -> Option<String> {
 
 pub(crate) fn woocommerce_store_url(params: &Value) -> Option<String> {
     woocommerce_base_url(params["store_url"].as_str()?).ok()
+}
+
+pub(crate) fn shopware_store_url(params: &Value) -> Option<String> {
+    shopware_base_url(params["store_url"].as_str()?).ok()
+}
+
+/// Shopware mints client-credentials tokens on the store's own host
+/// (`<store>/api/oauth/token`) from a JSON body, with the integration's access
+/// key ID and secret access key. A token lasts as long as its `expires_in`
+/// says (ten minutes), and Shopware sends no refresh token.
+fn describe_shopware_client_credentials_auth(
+    connection_id: &str,
+    params: &Value,
+) -> Option<DeferredAuth> {
+    let base_url = shopware_store_url(params)?;
+    let client_id = params["client_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())?;
+    let client_secret = params["client_secret"].as_str()?;
+
+    Some(DeferredAuth::OAuth2ClientCredentials {
+        cache_key: token_cache::build_token_cache_key(
+            connection_id,
+            &["shopware_client_credentials", &base_url, client_id],
+        ),
+        token_url: format!("{base_url}/api/oauth/token"),
+        header_name: "Authorization".to_string(),
+        header_value_prefix: Some("Bearer ".to_string()),
+        request_body: TokenRequestBody::Json(serde_json::json!({
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+        })),
+        basic_auth: None,
+        default_ttl_seconds: DEFAULT_CLIENT_CREDENTIALS_TTL_SECONDS,
+    })
 }
 
 fn zendesk_account_url(params: &Value) -> Option<String> {
@@ -1649,6 +1695,68 @@ mod tests {
             let descriptor =
                 describe_connection_auth("conn-1", "jira_api_token", &params, &mut HashMap::new());
             assert_eq!(descriptor.base_url, None, "{params}");
+        }
+    }
+
+    #[test]
+    fn shopware_client_credentials_mint_a_bearer_token_on_the_store() {
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "shopware_client_credentials",
+            &json!({
+                "store_url": "https://example.com/shop/admin#/sw/dashboard/index",
+                "client_id": " SWIAEXAMPLE\n",
+                "client_secret": "csec"
+            }),
+            &mut headers,
+        );
+        assert!(headers.is_empty());
+        assert_eq!(
+            descriptor.base_url.as_deref(),
+            Some("https://example.com/shop")
+        );
+        match descriptor.deferred_auth {
+            Some(DeferredAuth::OAuth2ClientCredentials {
+                token_url,
+                header_name,
+                header_value_prefix,
+                request_body: TokenRequestBody::Json(body),
+                basic_auth,
+                ..
+            }) => {
+                assert_eq!(token_url, "https://example.com/shop/api/oauth/token");
+                assert_eq!(header_name, "Authorization");
+                assert_eq!(header_value_prefix.as_deref(), Some("Bearer "));
+                assert!(basic_auth.is_none());
+                assert_eq!(
+                    body,
+                    json!({
+                        "grant_type": "client_credentials",
+                        "client_id": "SWIAEXAMPLE",
+                        "client_secret": "csec",
+                    })
+                );
+            }
+            _ => panic!("expected a JSON client-credentials token request"),
+        }
+    }
+
+    #[test]
+    fn shopware_without_a_valid_store_or_key_id_requests_no_token() {
+        for params in [
+            json!({"store_url": "https://shop.example.com?x=1", "client_id": "SWIA", "client_secret": "s"}),
+            json!({"store_url": "shop.example.com", "client_id": "SWIA", "client_secret": "s"}),
+            json!({"store_url": "https://shop.example.com", "client_id": " ", "client_secret": "s"}),
+            json!({"store_url": "https://shop.example.com", "client_secret": "s"}),
+        ] {
+            let descriptor = describe_connection_auth(
+                "conn-1",
+                "shopware_client_credentials",
+                &params,
+                &mut HashMap::new(),
+            );
+            assert!(descriptor.deferred_auth.is_none(), "{params}");
         }
     }
 

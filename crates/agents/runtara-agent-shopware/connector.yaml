@@ -1,0 +1,224 @@
+# Input to scripts/connector_gen/connector_gen.py; see its README.md.
+agent:
+  id: shopware
+  name: Shopware
+  description: >-
+    Shopware 6 stores — orders, their deliveries and payments and the states
+    they move through; products; customers; and a search of any record.
+  integration_id: shopware_client_credentials
+  error_prefix: SHOPWARE
+# Shopware publishes its Admin API's spec in shopware/admin-api-reference,
+# regenerated for every release; this is 6.7.16.1's. It is OpenAPI 3.2, and the
+# operations used here need nothing 3.1 lacks. Its paths are relative to the
+# server `/api`, so a request goes to `<store URL>/api/…`.
+spec:
+  url: https://raw.githubusercontent.com/shopware/admin-api-reference/73f5570bd934b80ecfc41380a4d1bed5abc7dc9e/adminapi.json
+  sha256: e48b3a9a145ec11561734cabab163e29789dd282f6cb41f92ed62faa7f9a90cf
+# Shopware's records refer to one another, and back: typed, an order's
+# deliveries would each carry the order. Shopware sends what a record refers to
+# (an association) only when a search asks for it; a step reads it as JSON.
+opaque_records: true
+# `PATCH /product/{id}` takes the product's `id` in its path and in its body,
+# and keeps the path's.
+path_parameters_win: true
+# Every write answers 204 and no body unless `_response` asks for the record,
+# which the kit always does. `sw-include-search-info` is left at Shopware's
+# default, which includes a search's `total`.
+omit_parameters:
+  - _response
+  - sw-include-search-info
+# A search is a POST of its criteria.
+read_operations:
+  - searchOrder
+  - searchProduct
+  - searchCustomer
+# The spec's record schemas require what Shopware itself fills in, and are the
+# body of an update too, which takes only the fields it changes:
+# - a record's `id` is made up when a create leaves it out;
+# - a variant (`parentId`) inherits its parent's `name`, `taxId` and `price`;
+# - a customer's addresses may be given as objects (`defaultBillingAddress`)
+#   instead of the IDs of existing ones, and its `languageId` defaults to the
+#   store's.
+optional_fields:
+  Product: [id, taxId, price, name]
+  Customer: [id, languageId, defaultBillingAddressId, defaultShippingAddressId]
+  UpdateProductBody: [taxId, price, productNumber, stock, name]
+  UpdateCustomerBody:
+    - groupId
+    - salesChannelId
+    - languageId
+    - defaultBillingAddressId
+    - defaultShippingAddressId
+    - customerNumber
+    - firstName
+    - lastName
+    - email
+  UpdateOrderBody:
+    - billingAddressId
+    - currencyId
+    - languageId
+    - salesChannelId
+    - orderDateTime
+    - currencyFactor
+    - stateId
+    - itemRounding
+    - totalRounding
+  UpdateOrderDeliveryBody:
+    - orderId
+    - shippingOrderAddressId
+    - shippingMethodId
+    - stateId
+    - shippingDateEarliest
+    - shippingDateLatest
+# The spec gives a transition's `sendMail` no type.
+input_types:
+  sendMail: boolean
+# Shopware's summaries are its reference's ("Create a new Product
+# resources."); each step is named and described here.
+operation_names:
+  searchOrder:
+    name: searchOrders
+    label: Search Orders
+    description: >-
+      Searches orders with Shopware's search criteria: `filter` (as
+      `[{"type": "equals", "field": "orderNumber", "value": "10001"}]`, or a
+      `range` of `orderDateTime`), `sort`, `limit` and `page` (from 1), or
+      `ids`. What an order refers to comes back only when `associations` asks
+      for it: `{"lineItems": {}, "deliveries": {}, "transactions": {}}` for its
+      line items, its deliveries (with their tracking codes and state) and its
+      payments.
+  getOrder:
+    name: getOrder
+    label: Get Order
+    description: >-
+      Reads an order by its ID: its number, amounts, dates and the IDs of what
+      it refers to. Its line items, deliveries and payments come back only
+      from Search Orders with the order's ID in `ids` and `associations`.
+  updateOrder:
+    name: updateOrder
+    label: Update Order
+    description: >-
+      Updates an order with the fields given, such as its `customerComment`,
+      `affiliateCode` or `customFields`. Its state is changed by Transition
+      Order State.
+  orderStateTransition:
+    name: transitionOrderState
+    label: Transition Order State
+    description: >-
+      Moves an order to another state with a `transition`, as the
+      Administration does: from open, `process` (in progress) or `cancel`;
+      from in progress, `complete`. Shopware mails the customer as its flows
+      say, unless `sendMail` is false. Answers the order's new state, whose
+      `technicalName` is `in_progress`, `completed`, `cancelled`, … A
+      transition the order's state does not allow is refused, naming the ones
+      it does.
+  orderDeliveryStateTransition:
+    name: transitionDeliveryState
+    label: Transition Delivery State
+    description: >-
+      Moves a delivery of an order (its ID among the order's `deliveries`) to
+      another state with a `transition`, such as `ship` (shipped) or `cancel`.
+      Answers the delivery's new state (`technicalName`). A transition the
+      delivery's state does not allow is refused, naming the ones it does.
+  orderTransactionStateTransition:
+    name: transitionPaymentState
+    label: Transition Payment State
+    description: >-
+      Moves a payment of an order (its ID among the order's `transactions`) to
+      another state with a `transition`, such as `paid`, `refund` or `cancel`.
+      It records the payment's state; it moves no money. Answers the payment's
+      new state (`technicalName`). A transition the payment's state does not
+      allow is refused, naming the ones it does.
+  updateOrderDelivery:
+    name: updateOrderDelivery
+    label: Update Order Delivery
+    description: >-
+      Updates a delivery of an order (its ID among the order's `deliveries`)
+      with the fields given, such as its `trackingCodes`, a list that replaces
+      the delivery's.
+  searchProduct:
+    name: searchProducts
+    label: Search Products
+    description: >-
+      Searches products with Shopware's search criteria: `filter` (as
+      `[{"type": "equals", "field": "productNumber", "value": "SW10001"}]`),
+      `sort`, `limit` and `page` (from 1), or `ids`. A variant's `parentId` is
+      its product's; it inherits what it leaves empty. What a product refers
+      to comes back only when `associations` asks for it (`{"categories": {},
+      "media": {}}`).
+  getProduct:
+    name: getProduct
+    label: Get Product
+    description: >-
+      Reads a product or a variant by its ID. A variant leaves empty what it
+      inherits from its parent product.
+  createProduct:
+    name: createProduct
+    label: Create Product
+    description: >-
+      Creates a product: its `productNumber`, `stock`, `name`, `taxId` and
+      `price` (per currency, its `currencyId`, `gross`, `net` and `linked`;
+      Search Entities finds the `tax` and `currency` records). A variant gives
+      its product's ID as `parentId`, and inherits what it leaves out. An `id`
+      of your own (32 hex digits) lets a workflow look the product up when a
+      create's outcome is unknown.
+  updateProduct:
+    name: updateProduct
+    label: Update Product
+    description: >-
+      Updates a product or a variant with the fields given: `stock`, `price`,
+      `active`, `name` or any other.
+  deleteProduct:
+    name: deleteProduct
+    label: Delete Product
+    description: Deletes a product or a variant for good.
+  searchCustomer:
+    name: searchCustomers
+    label: Search Customers
+    description: >-
+      Searches customers with Shopware's search criteria: `filter` (as
+      `[{"type": "equals", "field": "email", "value": "jane@example.com"}]`),
+      `sort`, `limit` and `page` (from 1), or `ids`. Their addresses come back
+      only when `associations` asks for them (`{"addresses": {}}`).
+  getCustomer:
+    name: getCustomer
+    label: Get Customer
+    description: Reads a customer by their ID.
+  createCustomer:
+    name: createCustomer
+    label: Create Customer
+    description: >-
+      Creates a customer: their `customerNumber`, `firstName`, `lastName` and
+      `email`, the `groupId` and `salesChannelId` they belong to, and their
+      `defaultBillingAddress` and `defaultShippingAddress` (each with
+      `firstName`, `lastName`, `street`, `zipcode`, `city` and `countryId`).
+      Search Entities finds the `customer-group`, `sales-channel` and
+      `country` records.
+  updateCustomer:
+    name: updateCustomer
+    label: Update Customer
+    description: Updates a customer with the fields given.
+# A search of any of Shopware's records, written by hand in src/custom.rs: the
+# IDs a create needs (a tax, a currency, a sales channel, a country) are
+# records of their own.
+custom_capabilities:
+  - function: search_entities
+    input: SearchEntitiesInput
+    outputs: [SearchEntitiesOutput]
+operations:
+  - searchOrder
+  - getOrder
+  - updateOrder
+  - orderStateTransition
+  - orderDeliveryStateTransition
+  - orderTransactionStateTransition
+  - updateOrderDelivery
+  - searchProduct
+  - getProduct
+  - createProduct
+  - updateProduct
+  - deleteProduct
+  - searchCustomer
+  - getCustomer
+  - createCustomer
+  - updateCustomer

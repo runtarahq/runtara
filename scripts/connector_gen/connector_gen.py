@@ -39,7 +39,9 @@ REPO_ROOT = TOOL_DIR.parent.parent
 TEMPLATE_DIR = TOOL_DIR / "templates"
 
 # The stock Rust generator maps these to chrono/uuid types the agents don't
-# depend on; strings keep the wire value unchanged.
+# depend on; strings keep the wire value unchanged. A `number` of `format:
+# float` would be an `f32`, which reads Shopware's amount 2396.8 as
+# 2396.800048828125: a vendor's amounts would change on the way through.
 TYPE_MAPPINGS = {
     "UUID": "String",
     "URI": "String",
@@ -47,6 +49,7 @@ TYPE_MAPPINGS = {
     "DateTime": "String",
     "file": "Value",
     "binary": "Value",
+    "float": "f64",
 }
 
 # Types the generated file defines or imports. A schema whose generated name
@@ -1354,19 +1357,32 @@ NAME_LISTS = {
 }
 
 
+# The `connector.yaml` options that are true or false, and what `fetch` says
+# about one set to true that changes nothing.
+FLAGS = {
+    "opaque_records": "no schema of the listed operations refers to another record",
+    "path_parameters_win": "no listed operation's request body repeats one of its path parameters",
+}
+
+
 def check_used(options: dict, used: dict) -> None:
-    """A listed name that matched nothing is a typo or a stale entry."""
+    """A listed name that matched nothing is a typo or a stale entry, and a flag
+    set to true that changed nothing is stale."""
     for key, what in NAME_LISTS.items():
         unused = set(options.get(key) or ()) - used.get(key, set())
         if unused:
             sys.exit(f"{key} {sorted(unused)} {what} of the listed operations")
+    for key, what in FLAGS.items():
+        if options.get(key) and not used.get(key):
+            sys.exit(f"{key} is true, but {what}")
 
 
 def slice_spec(spec: dict, operation_ids: list, model_names: dict = None, body_envelopes: list = (),
                connection_headers: list = (), connection_parameters: list = (),
                pinned_path_parameters: list = (), omit_parameters: list = (),
                read_operations: list = (), connection_path_prefix: str = None,
-               query_objects: dict = ()) -> dict:
+               query_objects: dict = (), opaque_records: bool = False,
+               path_parameters_win: bool = False) -> dict:
     """Keep the listed operations and every component they reference.
 
     openapi-generator's FILTER normalizer drops unlisted operations but still
@@ -1378,7 +1394,9 @@ def slice_spec(spec: dict, operation_ids: list, model_names: dict = None, body_e
                "pinned_path_parameters": pinned_path_parameters,
                "omit_parameters": omit_parameters,
                "read_operations": read_operations,
-               "query_objects": query_objects}
+               "query_objects": query_objects,
+               "opaque_records": opaque_records,
+               "path_parameters_win": path_parameters_win}
     sliced, used = slice_one(spec, operation_ids, operation_ids[0], model_names or {},
                              connection_path_prefix=connection_path_prefix, **options)
     check_used(options, used)
@@ -1390,6 +1408,7 @@ def slice_specs(specs: list, config: dict, reads: list = ()) -> dict:
     merged into one when there are several. `reads` are operations that only
     read though they are POSTs: a GraphQL API's queries."""
     options = {key: config.get(key) or [] for key in NAME_LISTS}
+    options.update({key: flag(config, key) for key in FLAGS})
     options["read_operations"] = [*options["read_operations"], *reads]
     model_names = config.get("model_names") or {}
     first = specs[0][0]["operations"][0]
@@ -1565,17 +1584,18 @@ OPERATION_NAME = re.compile(r"[a-z][A-Za-z0-9]*")
 
 
 def operation_name_entries(names) -> dict:
-    """`operation_names`, each entry as `{name, description?}`: a bare name, or
-    a mapping that also gives the capability's description."""
+    """`operation_names`, each entry as `{name, description?, label?}`: a bare
+    name, or a mapping that also gives the capability's description, its label,
+    or both."""
     if not isinstance(names, dict):
         sys.exit("operation_names maps a listed operationId to the name it is generated under")
     entries = {}
     for vendor, entry in names.items():
         entry = {"name": entry} if not isinstance(entry, dict) else entry
-        description = entry.get("description")
-        if (set(entry) - {"name", "description"}
-                or (description is not None and (not isinstance(description, str) or not description.strip()))):
-            sys.exit(f"operation_names: `{vendor}` takes a name, or `{{name: …, description: …}}`")
+        texts = [entry[key] for key in ("description", "label") if entry.get(key) is not None]
+        if (set(entry) - {"name", "description", "label"}
+                or any(not isinstance(text, str) or not text.strip() for text in texts)):
+            sys.exit(f"operation_names: `{vendor}` takes a name, or `{{name: …, description: …, label: …}}`")
         entries[vendor] = entry
     return entries
 
@@ -1592,9 +1612,10 @@ def rename_operations(sliced: dict, names: dict, listed: list) -> None:
     summary of the vendor's, its label ("Get Order"). Magento derives its ids
     from the path (`GetV1OrdersId`) and writes no summaries. An entry may also
     give the capability's description, where the vendor's says something else
-    (Magento's update of a product reads "Create product") or nothing.
-    `operations:` and the other options name the vendor's ids, as the spec
-    does."""
+    (Magento's update of a product reads "Create product") or nothing, and its
+    label, where the vendor's summary is a sentence of its reference
+    (Shopware's "Create a new Product resources."). `operations:` and the
+    other options name the vendor's ids, as the spec does."""
     entries = operation_name_entries(names)
     unknown = sorted(set(entries) - set(listed))
     if unknown:
@@ -1612,7 +1633,8 @@ def rename_operations(sliced: dict, names: dict, listed: list) -> None:
             if method in HTTP_METHODS and op["operationId"] in entries:
                 entry = entries[op["operationId"]]
                 op["operationId"] = entry["name"]
-                op["x-runtara-summary"] = clean_text(op.get("summary") or humanize(op["operationId"]))
+                op["x-runtara-summary"] = clean_text(
+                    (entry.get("label") or "").strip() or op.get("summary") or humanize(op["operationId"]))
                 if entry.get("description"):
                     op["description"] = entry["description"].strip()
 
@@ -1632,17 +1654,191 @@ def make_optional(sliced: dict, fields: dict) -> None:
             del schemas[schema]["required"]
 
 
+def flag(config: dict, key: str) -> bool:
+    """A `connector.yaml` option that is `true` or `false` (the default)."""
+    value = config.get(key, False)
+    if not isinstance(value, bool):
+        sys.exit(f"{key} in connector.yaml is true or false, not {value!r}")
+    return value
+
+
+# What a reference to a record keeps when `opaque_records` makes it any JSON.
+OPAQUE_KEPT = ("description", "title", "deprecated", "nullable", "readOnly", "writeOnly")
+
+
+def make_records_opaque(spec: dict) -> set:
+    """`opaque_records`: a property of a component schema that refers to
+    another record, a component schema with an `id` of its own (directly, as
+    the one part of an `allOf`, as the one part of an `anyOf` or `oneOf`
+    beside `{type: null}`, or as an array's items or a map's values), takes
+    any JSON instead of that record's type. Shopware's entities refer to
+    one another and back (an order's deliveries each carry their order), so
+    typed they are infinite, and hundreds of types; its API sends an
+    association only when a search asks for it. A schema without an `id` (a
+    price, a search's criteria) and what an operation refers to itself stay
+    typed. Returns the components whose properties changed."""
+    schemas = (spec.get("components") or {}).get("schemas") or {}
+
+    def referred(node) -> tuple:
+        """The `$ref` a schema stands for, and whether it may be null: a bare
+        `$ref`, the one part of an `allOf`, or the one part of an `anyOf` or
+        `oneOf` beside `{type: null}`, as 3.1 writes a nullable reference."""
+        if not isinstance(node, dict):
+            return None, False
+        if "$ref" in node:
+            return node["$ref"], False
+        parts = node.get("allOf")
+        if isinstance(parts, list) and len(parts) == 1 \
+                and isinstance(parts[0], dict) and set(parts[0]) == {"$ref"}:
+            return parts[0]["$ref"], False
+        for key in ("anyOf", "oneOf"):
+            parts = node.get(key)
+            if not isinstance(parts, list):
+                continue
+            refs = [part for part in parts if isinstance(part, dict) and set(part) == {"$ref"}]
+            nulls = [part for part in parts if part == {"type": "null"}]
+            if len(refs) == 1 and nulls and len(refs) + len(nulls) == len(parts):
+                return refs[0]["$ref"], True
+        return None, False
+
+    def record(node) -> bool:
+        ref, _ = referred(node)
+        if not isinstance(ref, str) or not ref.startswith("#/components/schemas/") or ref.count("/") != 3:
+            return False
+        target = deref(spec, {"$ref": ref})
+        return isinstance(target, dict) and "id" in (target.get("properties") or {})
+
+    def opaque(node: dict) -> dict:
+        kept = {key: node[key] for key in OPAQUE_KEPT if key in node}
+        if referred(node)[1]:
+            kept["nullable"] = True
+        return kept
+
+    def rewrite(node) -> bool:
+        changed = False
+        if isinstance(node, list):
+            for value in node:
+                changed |= rewrite(value)
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                if key in DATA_KEYS:
+                    continue
+                if key in NAME_MAPS and isinstance(value, dict):
+                    for name, child in value.items():
+                        if record(child):
+                            value[name] = opaque(child)
+                            changed = True
+                        else:
+                            changed |= rewrite(child)
+                elif key in ("items", "additionalProperties") and record(value):
+                    node[key] = opaque(value)
+                    changed = True
+                else:
+                    changed |= rewrite(value)
+        return changed
+
+    return {name for name, schema in schemas.items() if rewrite(schema)}
+
+
+def leave_path_parameters_out_of_body(spec: dict, op: dict, item: dict, dropped: set) -> bool:
+    """`path_parameters_win`: a request-body field named like one of the
+    operation's path parameters is no input and is not sent; the path
+    parameter is the input. Shopware's `PATCH /product/{id}` takes the
+    product's `id` in its path and in its body, and keeps the path's. The
+    operation gets its own copy of the body schema, the component
+    `<OperationId>Body`, without those fields: the schema it copies may be the
+    body of an operation that has no such path parameter (a create, whose
+    body's `id` is an input). `dropped` are path parameters that are no
+    inputs (pinned, or the connection's). Returns whether a field was left
+    out."""
+    path_names = set()
+    for parameter in [*item.get("parameters", []), *op.get("parameters", [])]:
+        resolved = deref(spec, parameter)
+        if resolved.get("in") == "path" and resolved.get("name") not in dropped:
+            path_names.add(resolved.get(INPUT_NAME) or resolved.get("name"))
+    body = deref(spec, op.get("requestBody"))
+    if not path_names or not isinstance(body, dict) or not body.get("content"):
+        return False
+    name = model_name(op["operationId"]) + "Body"
+    schemas = spec.setdefault("components", {}).setdefault("schemas", {})
+    copied = None
+    for media in body["content"].values():
+        schema = deref(spec, media.get("schema") or {})
+        properties = schema.get("properties") or {}
+        repeated = [field for field, prop in properties.items()
+                    if (prop.get(INPUT_NAME) or field) in path_names and not deref(spec, prop).get("readOnly")]
+        if not repeated:
+            continue
+        if copied is None:
+            if name in schemas:
+                sys.exit(f"{op['operationId']}: path_parameters_win names this operation's body "
+                         f"`{name}`, which is a schema of the spec's already")
+            copied = copy.deepcopy(body)
+        own = copy.deepcopy(schema)
+        for field in repeated:
+            del own["properties"][field]
+        if "required" in own:
+            own["required"] = [field for field in own["required"] if field not in repeated]
+            if not own["required"]:
+                del own["required"]
+        schemas[name] = own
+        break
+    if copied is None:
+        return False
+    # The body may be a `#/components/requestBodies` entry other operations share.
+    for media in copied["content"].values():
+        media["schema"] = {"$ref": f"#/components/schemas/{name}"}
+    op["requestBody"] = copied
+    return True
+
+
+# What OpenAPI 3.2 added to 3.1, which openapi-generator (a 3.1 parser) cannot
+# read: `query` and `additionalOperations` methods (never sliced), streamed
+# items, a document's `$self`, example values, a discriminator's default, and
+# an OAuth flow and metadata URL.
+OPENAPI_32_KEYS = ("additionalOperations", "itemSchema", "prefixEncoding", "itemEncoding", "$self",
+                   "dataValue", "serializedValue", "defaultMapping", "deviceAuthorization",
+                   "oauth2MetadataUrl")
+
+
+def check_openapi_version(spec: dict, sliced: dict) -> None:
+    """OpenAPI 3.0, 3.1 and 3.2. A 3.2 slice must use nothing 3.1 lacks, as it is
+    rendered as 3.1 (see `render`). Shopware's spec is 3.2 for a tag's
+    `parent` and one streamed response (`itemSchema`), none of them in what
+    an agent uses."""
+    version = str(spec.get("openapi", ""))
+    if not re.match(r"3\.[012](\.|$)", version):
+        sys.exit(f"OpenAPI {version} is not supported; 3.0, 3.1 and 3.2 are")
+    if not version.startswith("3.2"):
+        return
+    found = set()
+
+    def visit(node):
+        found.update(key for key in OPENAPI_32_KEYS if key in node)
+        if node.get("in") == "querystring":
+            found.add("in: querystring")
+
+    walk_schema({key: value for key, value in sliced.items() if key != "info"}, visit)
+    if found:
+        sys.exit(f"the listed operations use what OpenAPI 3.2 added to 3.1, which openapi-generator "
+                 f"cannot read yet: {sorted(found)}")
+
+
 def slice_one(spec: dict, operation_ids: list, first: str, model_names: dict, body_envelopes=(),
               connection_headers=(), connection_parameters=(), pinned_path_parameters=(),
               omit_parameters=(), read_operations=(), connection_path_prefix=None,
-              query_objects=()) -> tuple:
-    """The slice of one spec, and the listed names (`NAME_LISTS`) it used.
-    `first` is the operation that carries the agent's module attributes."""
+              query_objects=(), opaque_records=False, path_parameters_win=False) -> tuple:
+    """The slice of one spec, and the listed names (`NAME_LISTS`) it used, with
+    what the `FLAGS` changed under theirs. `first` is the operation that
+    carries the agent's module attributes."""
     check_path_prefix(connection_path_prefix)
     if is_swagger2(spec):
         spec = convert_swagger2(spec)
     if "openapi" not in spec:
         sys.exit("only OpenAPI 3.x and Swagger 2.0 specs are supported")
+    # Both options add to or change the spec's components.
+    spec = copy.deepcopy(spec) if opaque_records or path_parameters_win else spec
+    opaque = make_records_opaque(spec) if opaque_records else set()
 
     wanted = set(operation_ids)
     paths = {}
@@ -1653,7 +1849,7 @@ def slice_one(spec: dict, operation_ids: list, first: str, model_names: dict, bo
                 kept["parameters"] = item["parameters"]
             paths[path] = kept
 
-    found, used = set(), {key: set() for key in NAME_LISTS}
+    found, used = set(), {key: set() for key in (*NAME_LISTS, *FLAGS)}
     sliced_paths = {}
     for path, item in paths.items():
         targets = []
@@ -1678,6 +1874,8 @@ def slice_one(spec: dict, operation_ids: list, first: str, model_names: dict, bo
             target, stripped = strip_path_prefix(spec, path, op, item, connection_path_prefix)
             target, pinned = pin_path_parameters(spec, target, op, item, pinned_path_parameters)
             used["pinned_path_parameters"] |= pinned
+            if path_parameters_win and leave_path_parameters_out_of_body(spec, op, item, pinned | stripped):
+                used["path_parameters_win"].add(op["operationId"])
             if op["operationId"] == first:
                 op["x-runtara-first"] = True
             entry = sliced_paths.setdefault(target, {})
@@ -1710,6 +1908,8 @@ def slice_one(spec: dict, operation_ids: list, first: str, model_names: dict, bo
     if "securitySchemes" in spec.get("components", {}):
         components["securitySchemes"] = spec["components"]["securitySchemes"]
 
+    used["opaque_records"] = opaque & set(components.get("schemas", {}))
+
     sliced = {key: spec[key] for key in ("openapi", "info", "servers", "security") if key in spec}
     sliced["paths"] = paths
     sliced["components"] = components
@@ -1721,6 +1921,7 @@ def slice_one(spec: dict, operation_ids: list, first: str, model_names: dict, bo
     rename_schemas(sliced, model_names)
     check_names(sliced, operation_ids, model_names)
     check_input_names(sliced)
+    check_openapi_version(spec, sliced)
     return sliced, used
 
 
@@ -2262,11 +2463,17 @@ def render(crate: Path) -> str:
         out.mkdir()
         # `fetch` writes a nullable field as `nullable: true`, which
         # openapi-generator ignores in a 3.1 document: there it is handed the
-        # 3.1 form, a type list with "null".
+        # 3.1 form, a type list with "null". It parses no 3.2 document, and a
+        # 3.2 slice uses nothing 3.1 lacks (`check_openapi_version`), so one is
+        # handed over as 3.1.
         spec_path = crate / "spec.slice.json"
-        if str(sliced.get("openapi", "")).startswith("3.1"):
+        version = str(sliced.get("openapi", ""))
+        if version.startswith(("3.1", "3.2")):
+            handed = nullable_as_type_lists(sliced)
+            if version.startswith("3.2"):
+                handed["openapi"] = "3.1.0"
             spec_path = Path(tmp) / "spec.slice.json"
-            spec_path.write_text(json.dumps(nullable_as_type_lists(sliced)))
+            spec_path.write_text(json.dumps(handed))
         # Only the single generated file is wanted from the run.
         (out / ".openapi-generator-ignore").write_text("*\n**/*\n!src/generated.rs\n")
         config_path = Path(tmp) / "config.json"

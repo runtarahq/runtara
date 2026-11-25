@@ -1,0 +1,234 @@
+{
+  "data": {
+    "extensions": {
+      "search": {
+        "extensions": [],
+        "translated": [],
+        "autoIncrement": 1,
+        "orderNumber": "10000"
+      }
+    },
+    "_uniqueIdentifier": "01a211e2a05f7a10a011b45a47c3a6f9",
+    "versionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+    "translated": [],
+    "createdAt": "2026-11-25T08:46:35.010+00:00",
+    "updatedAt": "2026-11-25T08:48:26.869+00:00",
+    "orderNumber": "10000",
+    "currencyId": "b7d2554b0ce847cd82f3ac9bd1c0dfca",
+    "currencyFactor": 1,
+    "salesChannelId": "01a20e4d37e971f79c753668a0c59bbb",
+    "billingAddressId": "01a211e2a05f7568a011b45a45f07375",
+    "billingAddressVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+    "orderDateTime": "2025-02-02T05:22:25.000+00:00",
+    "orderDate": "2025-02-02T00:00:00.000+00:00",
+    "price": {
+      "extensions": [],
+      "rawTotal": 2396.8,
+      "netPrice": 2289.27,
+      "totalPrice": 2396.8,
+      "positionPrice": 2289.27,
+      "calculatedTaxes": [
+        {
+          "extensions": [],
+          "tax": 30.8,
+          "taxRate": 19,
+          "price": 162.12,
+          "label": null,
+          "apiAlias": "cart_tax_calculated"
+        },
+        {
+          "extensions": [],
+          "tax": 0,
+          "taxRate": 0,
+          "price": 1031.05,
+          "label": null,
+          "apiAlias": "cart_tax_calculated"
+        },
+        {
+          "extensions": [],
+          "tax": 76.73,
+          "taxRate": 7,
+          "price": 1096.1,
+          "label": null,
+          "apiAlias": "cart_tax_calculated"
+        }
+      ],
+      "taxRules": [
+        {
+          "extensions": [],
+          "taxRate": 19,
+          "percentage": 100,
+          "apiAlias": "cart_tax_rule"
+        },
+        {
+          "extensions": [],
+          "taxRate": 0,
+          "percentage": 100,
+          "apiAlias": "cart_tax_rule"
+        },
+        {
+          "extensions": [],
+          "taxRate": 7,
+          "percentage": 100,
+          "apiAlias": "cart_tax_rule"
+        }
+      ],
+      "taxStatus": "net",
+      "apiAlias": "cart_price"
+    },
+    "amountTotal": 2396.8,
+    "amountNet": 2289.27,
+    "positionPrice": 2289.27,
+    "taxStatus": "net",
+    "shippingCosts": {
+      "extensions": [],
+      "unitPrice": 0,
+      "totalPrice": 0,
+      "calculatedTaxes": [
+        {
+          "extensions": [],
+          "tax": 0,
+          "taxRate": 19,
+          "price": 0,
+          "label": null,
+          "apiAlias": "cart_tax_calculated"
+        },
+        {
+          "extensions": [],
+          "tax": 0,
+          "taxRate": 0,
+          "price": 0,
+          "label": null,
+          "apiAlias": "cart_tax_calculated"
+        },
+        {
+          "extensions": [],
+          "tax": 0,
+          "taxRate": 7,
+          "price": 0,
+          "label": null,
+          "apiAlias": "cart_tax_calculated"
+        }
+      ],
+      "taxRules": [
+        {
+          "extensions": [],
+          "taxRate": 19,
+          "percentage": 7.0817334783577,
+          "apiAlias": "cart_tax_rule"
+        },
+        {
+          "extensions": [],
+          "taxRate": 0,
+          "percentage": 45.038374678391,
+          "apiAlias": "cart_tax_rule"
+        },
+        {
+          "extensions": [],
+          "taxRate": 7,
+          "percentage": 47.879891843251,
+          "apiAlias": "cart_tax_rule"
+        }
+      ],
+      "quantity": 1,
+      "referencePrice": null,
+      "listPrice": null,
+      "regulationPrice": null,
+      "apiAlias": "calculated_price"
+    },
+    "shippingTotal": 0,
+    "orderCustomer": {
+      "extensions": {
+        "foreignKeys": {
+          "extensions": [],
+          "apiAlias": "order_customer_foreign_keys_extension"
+        },
+        "internal_mapping_storage": {
+          "extensions": [],
+          "apiAlias": null
+        }
+      },
+      "_uniqueIdentifier": "01a211e2a1f67d0a98ee4849583d9782",
+      "versionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+      "translated": [],
+      "createdAt": "2026-11-25T08:46:35.006+00:00",
+      "updatedAt": null,
+      "email": "01a211e298867599a8bc491a6dab6d54jazmyn34@example.org",
+      "orderId": "01a211e2a05f7a10a011b45a47c3a6f9",
+      "salutationId": "01a20e4b86467de38d5119d264cd5a09",
+      "firstName": "Thomas",
+      "lastName": "Nader",
+      "title": "Prof.",
+      "vatIds": null,
+      "company": null,
+      "customerNumber": "10000",
+      "customerId": "01a211e298867599a8bc491a6dab6d54",
+      "customer": null,
+      "salutation": null,
+      "order": null,
+      "remoteAddress": null,
+      "orderVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+      "customFields": {
+        "shopwareDemoData": true
+      },
+      "id": "01a211e2a1f67d0a98ee4849583d9782",
+      "apiAlias": "order_customer"
+    },
+    "currency": null,
+    "languageId": "2fbb5fe2e29a4d70aa5854ce7ce3e20b",
+    "language": null,
+    "salesChannel": null,
+    "addresses": null,
+    "billingAddress": null,
+    "deliveries": null,
+    "lineItems": null,
+    "transactions": null,
+    "deepLinkCode": "Ove5U-wYHihQCDPsSPpQE1d2ulUaPefp",
+    "autoIncrement": 1,
+    "stateMachineState": null,
+    "stateId": "01a20e4b9cd775648355cd7f66b0ae59",
+    "primaryOrderDelivery": null,
+    "primaryOrderDeliveryId": "01a211e2a05f77b2a011b45a461a54e7",
+    "primaryOrderDeliveryVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+    "primaryOrderTransaction": null,
+    "primaryOrderTransactionId": "01a211e2a05f79d2a011b45a46f727f1",
+    "primaryOrderTransactionVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+    "documents": null,
+    "tags": null,
+    "affiliateCode": null,
+    "campaignCode": null,
+    "customerComment": "runtara smoke test",
+    "internalComment": null,
+    "ruleIds": [
+      "01a20e4b97da7fe384371994a092572f",
+      "01a20e4bd7767c6e96a928e5f7cae61e",
+      "3858957016644de4ae48c0500bf3ccc8",
+      "e1378db7808a478f919e0d740d5d6c1a"
+    ],
+    "createdById": null,
+    "createdBy": null,
+    "updatedById": null,
+    "updatedBy": null,
+    "itemRounding": {
+      "extensions": [],
+      "decimals": 2,
+      "interval": 0.01,
+      "roundForNet": true,
+      "apiAlias": "shopware_core_framework_data_abstraction_layer_pricing_cash_rounding_config"
+    },
+    "totalRounding": {
+      "extensions": [],
+      "decimals": 2,
+      "interval": 0.01,
+      "roundForNet": true,
+      "apiAlias": "shopware_core_framework_data_abstraction_layer_pricing_cash_rounding_config"
+    },
+    "source": null,
+    "taxCalculationType": "horizontal",
+    "customFields": {
+      "shopwareDemoData": true
+    },
+    "id": "01a211e2a05f7a10a011b45a47c3a6f9",
+    "apiAlias": "order"
+  }
+}

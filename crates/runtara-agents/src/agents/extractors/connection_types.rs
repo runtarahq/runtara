@@ -2244,6 +2244,102 @@ impl HttpConnectionExtractor for WooCommerceExtractor {
 }
 
 // ============================================================================
+// Shopware Connection Type
+// ============================================================================
+
+/// The base URL of a Shopware 6 store, which its Admin API is under: the
+/// store's address (`https://shop.example.com`), or with the path Shopware
+/// lives under (`https://example.com/shop`). A trailing `/`, an API path
+/// pasted after it (`/api/…`) and the Administration's path (`/admin`, as a
+/// browser shows it: `/admin#/sw/dashboard/index`) are dropped. Requests and
+/// the token request go to `<base>/api/…`, and the proxy keeps them under the
+/// base. What passes is what [`magento_base_url`] lets pass.
+pub fn shopware_base_url(store_url: &str) -> Result<String, String> {
+    let raw = store_url.trim();
+    let raw = match raw.split_once('#') {
+        Some((before, _)) if before.trim_end_matches('/').ends_with("/admin") => before,
+        _ => raw,
+    };
+    store_base_url(raw, "/admin")
+        .and_then(|base| store_base_url(&base, "/api"))
+        .ok_or_else(|| {
+            format!(
+                "Invalid Shopware store URL `{}`: use the store's address, e.g. https://shop.example.com or https://example.com/shop",
+                store_url.trim()
+            )
+        })
+}
+
+/// Parameters for a Shopware integration, which gets its access tokens with
+/// the OAuth2 client-credentials grant.
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "shopware_client_credentials",
+    display_name = "Shopware",
+    description = "Connect to a Shopware 6 store's Admin API with an integration's access key",
+    category = "ecommerce",
+    auth_type = "oauth2_client_credentials"
+)]
+pub struct ShopwareClientCredentialsParams {
+    /// The store's address
+    #[field(
+        display_name = "Store URL",
+        description = "The store's address: https://shop.example.com, or with the path Shopware lives under (https://example.com/shop). The Administration's address (…/admin) works too. Steps reach the Admin API under <store URL>/api",
+        placeholder = "https://shop.example.com",
+        is_url
+    )]
+    pub store_url: String,
+
+    /// The integration's access key ID
+    #[field(
+        display_name = "Access Key ID",
+        description = "The Access key ID (SWIA…) of an integration, from Settings → System → Integrations → Add integration. Its role (Administrator, or roles of the store's own) decides what steps can read and change",
+        placeholder = "SWIA…",
+        is_required,
+        trim
+    )]
+    pub client_id: String,
+
+    /// The integration's secret access key
+    #[field(
+        display_name = "Secret Access Key",
+        description = "The integration's Secret access key, which Shopware shows once, when the integration is created",
+        secret,
+        is_required,
+        trim
+    )]
+    pub client_secret: String,
+}
+
+/// HTTP extractor for Shopware connections. The Bearer token is minted and
+/// injected at request time by the connection subsystem
+/// (`describe_connection_auth`); this extractor only pins the store's address.
+pub struct ShopwareClientCredentialsExtractor;
+
+impl HttpConnectionExtractor for ShopwareClientCredentialsExtractor {
+    fn integration_id(&self) -> &'static str {
+        "shopware_client_credentials"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        let p: ShopwareClientCredentialsParams =
+            serde_json::from_value(params.clone()).map_err(|e| {
+                format!(
+                    "Invalid shopware_client_credentials connection parameters: {}",
+                    e
+                )
+            })?;
+
+        Ok(HttpConnectionConfig {
+            headers: HashMap::new(),
+            query_parameters: HashMap::new(),
+            url_prefix: shopware_base_url(&p.store_url)?,
+            rate_limit_config: None,
+        })
+    }
+}
+
+// ============================================================================
 // Zendesk Connection Types
 // ============================================================================
 
