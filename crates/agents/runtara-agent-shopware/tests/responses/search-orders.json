@@ -1,0 +1,1788 @@
+{
+  "total": 30,
+  "data": [
+    {
+      "extensions": {
+        "search": {
+          "extensions": [],
+          "translated": [],
+          "autoIncrement": 1,
+          "orderNumber": "10000"
+        }
+      },
+      "_uniqueIdentifier": "01a211e2a05f7a10a011b45a47c3a6f9",
+      "versionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+      "translated": [],
+      "createdAt": "2026-11-25T08:46:35.010+00:00",
+      "updatedAt": "2026-11-25T08:48:26.869+00:00",
+      "orderNumber": "10000",
+      "currencyId": "b7d2554b0ce847cd82f3ac9bd1c0dfca",
+      "currencyFactor": 1,
+      "salesChannelId": "01a20e4d37e971f79c753668a0c59bbb",
+      "billingAddressId": "01a211e2a05f7568a011b45a45f07375",
+      "billingAddressVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+      "orderDateTime": "2025-02-02T05:22:25.000+00:00",
+      "orderDate": "2025-02-02T00:00:00.000+00:00",
+      "price": {
+        "extensions": [],
+        "rawTotal": 2396.8,
+        "netPrice": 2289.27,
+        "totalPrice": 2396.8,
+        "positionPrice": 2289.27,
+        "calculatedTaxes": [
+          {
+            "extensions": [],
+            "tax": 30.8,
+            "taxRate": 19,
+            "price": 162.12,
+            "label": null,
+            "apiAlias": "cart_tax_calculated"
+          },
+          {
+            "extensions": [],
+            "tax": 0,
+            "taxRate": 0,
+            "price": 1031.05,
+            "label": null,
+            "apiAlias": "cart_tax_calculated"
+          },
+          {
+            "extensions": [],
+            "tax": 76.73,
+            "taxRate": 7,
+            "price": 1096.1,
+            "label": null,
+            "apiAlias": "cart_tax_calculated"
+          }
+        ],
+        "taxRules": [
+          {
+            "extensions": [],
+            "taxRate": 19,
+            "percentage": 100,
+            "apiAlias": "cart_tax_rule"
+          },
+          {
+            "extensions": [],
+            "taxRate": 0,
+            "percentage": 100,
+            "apiAlias": "cart_tax_rule"
+          },
+          {
+            "extensions": [],
+            "taxRate": 7,
+            "percentage": 100,
+            "apiAlias": "cart_tax_rule"
+          }
+        ],
+        "taxStatus": "net",
+        "apiAlias": "cart_price"
+      },
+      "amountTotal": 2396.8,
+      "amountNet": 2289.27,
+      "positionPrice": 2289.27,
+      "taxStatus": "net",
+      "shippingCosts": {
+        "extensions": [],
+        "unitPrice": 0,
+        "totalPrice": 0,
+        "calculatedTaxes": [
+          {
+            "extensions": [],
+            "tax": 0,
+            "taxRate": 19,
+            "price": 0,
+            "label": null,
+            "apiAlias": "cart_tax_calculated"
+          },
+          {
+            "extensions": [],
+            "tax": 0,
+            "taxRate": 0,
+            "price": 0,
+            "label": null,
+            "apiAlias": "cart_tax_calculated"
+          },
+          {
+            "extensions": [],
+            "tax": 0,
+            "taxRate": 7,
+            "price": 0,
+            "label": null,
+            "apiAlias": "cart_tax_calculated"
+          }
+        ],
+        "taxRules": [
+          {
+            "extensions": [],
+            "taxRate": 19,
+            "percentage": 7.0817334783577,
+            "apiAlias": "cart_tax_rule"
+          },
+          {
+            "extensions": [],
+            "taxRate": 0,
+            "percentage": 45.038374678391,
+            "apiAlias": "cart_tax_rule"
+          },
+          {
+            "extensions": [],
+            "taxRate": 7,
+            "percentage": 47.879891843251,
+            "apiAlias": "cart_tax_rule"
+          }
+        ],
+        "quantity": 1,
+        "referencePrice": null,
+        "listPrice": null,
+        "regulationPrice": null,
+        "apiAlias": "calculated_price"
+      },
+      "shippingTotal": 0,
+      "orderCustomer": {
+        "extensions": {
+          "foreignKeys": {
+            "extensions": [],
+            "apiAlias": "order_customer_foreign_keys_extension"
+          },
+          "internal_mapping_storage": {
+            "extensions": [],
+            "apiAlias": null
+          }
+        },
+        "_uniqueIdentifier": "01a211e2a1f67d0a98ee4849583d9782",
+        "versionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+        "translated": [],
+        "createdAt": "2026-11-25T08:46:35.006+00:00",
+        "updatedAt": null,
+        "email": "01a211e298867599a8bc491a6dab6d54jazmyn34@example.org",
+        "orderId": "01a211e2a05f7a10a011b45a47c3a6f9",
+        "salutationId": "01a20e4b86467de38d5119d264cd5a09",
+        "firstName": "Thomas",
+        "lastName": "Nader",
+        "title": "Prof.",
+        "vatIds": null,
+        "company": null,
+        "customerNumber": "10000",
+        "customerId": "01a211e298867599a8bc491a6dab6d54",
+        "customer": null,
+        "salutation": null,
+        "order": null,
+        "remoteAddress": null,
+        "orderVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+        "customFields": {
+          "shopwareDemoData": true
+        },
+        "id": "01a211e2a1f67d0a98ee4849583d9782",
+        "apiAlias": "order_customer"
+      },
+      "currency": null,
+      "languageId": "2fbb5fe2e29a4d70aa5854ce7ce3e20b",
+      "language": null,
+      "salesChannel": null,
+      "addresses": null,
+      "billingAddress": null,
+      "deliveries": [
+        {
+          "extensions": {
+            "foreignKeys": {
+              "extensions": [],
+              "apiAlias": "order_delivery_foreign_keys_extension"
+            }
+          },
+          "_uniqueIdentifier": "01a211e2a05f77b2a011b45a461a54e7",
+          "versionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "translated": [],
+          "createdAt": "2026-11-25T08:46:35.008+00:00",
+          "updatedAt": "2026-11-25T08:48:26.706+00:00",
+          "orderId": "01a211e2a05f7a10a011b45a47c3a6f9",
+          "orderVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "shippingOrderAddressId": "01a211e2a05f7568a011b45a45f07375",
+          "shippingOrderAddressVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "shippingMethodId": "01a20e4b97da7ee984371994a0757032",
+          "trackingCodes": [],
+          "shippingDateEarliest": "2026-11-26T00:00:00.000+00:00",
+          "shippingDateLatest": "2026-11-28T00:00:00.000+00:00",
+          "shippingCosts": {
+            "extensions": [],
+            "unitPrice": 0,
+            "totalPrice": 0,
+            "calculatedTaxes": [
+              {
+                "extensions": [],
+                "tax": 0,
+                "taxRate": 19,
+                "price": 0,
+                "label": null,
+                "apiAlias": "cart_tax_calculated"
+              },
+              {
+                "extensions": [],
+                "tax": 0,
+                "taxRate": 0,
+                "price": 0,
+                "label": null,
+                "apiAlias": "cart_tax_calculated"
+              },
+              {
+                "extensions": [],
+                "tax": 0,
+                "taxRate": 7,
+                "price": 0,
+                "label": null,
+                "apiAlias": "cart_tax_calculated"
+              }
+            ],
+            "taxRules": [
+              {
+                "extensions": [],
+                "taxRate": 19,
+                "percentage": 7.0817334783577,
+                "apiAlias": "cart_tax_rule"
+              },
+              {
+                "extensions": [],
+                "taxRate": 0,
+                "percentage": 45.038374678391,
+                "apiAlias": "cart_tax_rule"
+              },
+              {
+                "extensions": [],
+                "taxRate": 7,
+                "percentage": 47.879891843251,
+                "apiAlias": "cart_tax_rule"
+              }
+            ],
+            "quantity": 1,
+            "referencePrice": null,
+            "listPrice": null,
+            "regulationPrice": null,
+            "apiAlias": "calculated_price"
+          },
+          "shippingOrderAddress": null,
+          "stateId": "01a20e4b9d647102bee44018de7446e1",
+          "stateMachineState": null,
+          "shippingMethod": null,
+          "order": null,
+          "positions": null,
+          "primaryOrder": null,
+          "customFields": null,
+          "id": "01a211e2a05f77b2a011b45a461a54e7",
+          "apiAlias": "order_delivery"
+        }
+      ],
+      "lineItems": [
+        {
+          "extensions": {
+            "foreignKeys": {
+              "extensions": [],
+              "apiAlias": "order_line_item_foreign_keys_extension"
+            }
+          },
+          "_uniqueIdentifier": "01a211e2a05f737ca011b45a44c89a5d",
+          "versionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "translated": [],
+          "createdAt": "2026-11-25T08:46:35.008+00:00",
+          "updatedAt": null,
+          "orderId": "01a211e2a05f7a10a011b45a47c3a6f9",
+          "identifier": "01a211e29e8a7410a16f3fd2f711816b",
+          "referencedId": "01a211e29e8a7410a16f3fd2f711816b",
+          "productId": "01a211e29e8a7410a16f3fd2f711816b",
+          "promotionId": null,
+          "quantity": 7,
+          "unitPrice": 6.36,
+          "totalPrice": 44.52,
+          "label": "Incredible Steel Motobodies",
+          "description": null,
+          "good": true,
+          "removable": true,
+          "coverId": "01a211e2984072b4a97460ef0517ebe2",
+          "stackable": true,
+          "position": 1,
+          "price": {
+            "extensions": [],
+            "unitPrice": 6.36,
+            "totalPrice": 44.52,
+            "calculatedTaxes": [
+              {
+                "extensions": [],
+                "tax": 8.46,
+                "taxRate": 19,
+                "price": 44.52,
+                "label": null,
+                "apiAlias": "cart_tax_calculated"
+              }
+            ],
+            "taxRules": [
+              {
+                "extensions": [],
+                "taxRate": 19,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              }
+            ],
+            "quantity": 7,
+            "referencePrice": null,
+            "listPrice": null,
+            "regulationPrice": null,
+            "apiAlias": "calculated_price"
+          },
+          "priceDefinition": {
+            "extensions": [],
+            "isCalculated": true,
+            "referencePriceDefinition": null,
+            "listPrice": null,
+            "regulationPrice": null,
+            "price": 6.36,
+            "taxRules": [
+              {
+                "extensions": [],
+                "taxRate": 19,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              }
+            ],
+            "quantity": 7,
+            "type": "quantity",
+            "apiAlias": "cart_price_quantity"
+          },
+          "payload": {
+            "isNew": false,
+            "stock": 6,
+            "taxId": "01a20e4b981b7841b12579502b36da2e",
+            "tagIds": null,
+            "options": [],
+            "features": [],
+            "parentId": null,
+            "createdAt": "2026-11-25 08:46:34.174",
+            "optionIds": null,
+            "streamIds": null,
+            "garanLabel": null,
+            "isCloseout": false,
+            "categoryIds": null,
+            "productType": "physical",
+            "propertyIds": null,
+            "releaseDate": null,
+            "customFields": [],
+            "productNumber": "SW_01a211e29e8a7424a16f3fd2f7397b99",
+            "manufacturerId": "2326d67406134c88bcf80e52d9d2ecb7",
+            "markAsTopseller": false
+          },
+          "parentId": null,
+          "parent": null,
+          "type": "product",
+          "order": null,
+          "orderDeliveryPositions": null,
+          "cover": null,
+          "children": null,
+          "product": null,
+          "orderTransactionCaptureRefundPositions": null,
+          "states": [
+            "is-physical"
+          ],
+          "downloads": null,
+          "promotion": null,
+          "orderVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "productVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "parentVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "customFields": null,
+          "id": "01a211e2a05f737ca011b45a44c89a5d",
+          "apiAlias": "order_line_item"
+        },
+        {
+          "extensions": {
+            "foreignKeys": {
+              "extensions": [],
+              "apiAlias": "order_line_item_foreign_keys_extension"
+            }
+          },
+          "_uniqueIdentifier": "01a211e2a05f73efa011b45a45443cc3",
+          "versionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "translated": [],
+          "createdAt": "2026-11-25T08:46:35.009+00:00",
+          "updatedAt": null,
+          "orderId": "01a211e2a05f7a10a011b45a47c3a6f9",
+          "identifier": "01a20e4db1bb7116a7859a53c5d4682b",
+          "referencedId": "01a20e4db1bb7116a7859a53c5d4682b",
+          "productId": "01a20e4db1bb7116a7859a53c5d4682b",
+          "promotionId": null,
+          "quantity": 7,
+          "unitPrice": 16.8,
+          "totalPrice": 117.6,
+          "label": "Main product with properties",
+          "description": null,
+          "good": true,
+          "removable": true,
+          "coverId": "5808d194947f415495d9782d8fdc92ae",
+          "stackable": true,
+          "position": 2,
+          "price": {
+            "extensions": [],
+            "unitPrice": 16.8,
+            "totalPrice": 117.6,
+            "calculatedTaxes": [
+              {
+                "extensions": [],
+                "tax": 22.34,
+                "taxRate": 19,
+                "price": 117.6,
+                "label": null,
+                "apiAlias": "cart_tax_calculated"
+              }
+            ],
+            "taxRules": [
+              {
+                "extensions": [],
+                "taxRate": 19,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              }
+            ],
+            "quantity": 7,
+            "referencePrice": null,
+            "listPrice": null,
+            "regulationPrice": null,
+            "apiAlias": "calculated_price"
+          },
+          "priceDefinition": {
+            "extensions": [],
+            "isCalculated": true,
+            "referencePriceDefinition": null,
+            "listPrice": null,
+            "regulationPrice": null,
+            "price": 16.8,
+            "taxRules": [
+              {
+                "extensions": [],
+                "taxRate": 19,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              }
+            ],
+            "quantity": 7,
+            "type": "quantity",
+            "apiAlias": "cart_price_quantity"
+          },
+          "payload": {
+            "isNew": true,
+            "stock": 50,
+            "taxId": "01a20e4b981b7841b12579502b36da2e",
+            "tagIds": null,
+            "options": [
+              {
+                "group": "Size",
+                "option": "L"
+              }
+            ],
+            "features": [],
+            "parentId": "c7bca22753c84d08b6178a50052b4146",
+            "createdAt": "2026-11-24 16:05:02.637",
+            "optionIds": [
+              "54147692cbfb43419a6d11e26cad44dc"
+            ],
+            "streamIds": null,
+            "garanLabel": null,
+            "isCloseout": false,
+            "categoryIds": [
+              "01a20e4b98277c188194145db38e90a6",
+              "a515ae260223466f8e37471d279e6406",
+              "2185182cbbd4462ea844abeb2a438b33"
+            ],
+            "productType": "physical",
+            "propertyIds": [
+              "41e5013b67d64d3a92b7a275da8af441",
+              "5193ffa5de8648a1bcfba1fa8a26c02b",
+              "54147692cbfb43419a6d11e26cad44dc",
+              "5997d91dc0784997bdef68dfc5a08912",
+              "78c53f3f6dd14eb4927978415bfb74db",
+              "96638a1c7ab847bbb3ca64167ab30a3e",
+              "acfd7586d02848f1ac801f4776efa414"
+            ],
+            "releaseDate": "2026-11-24 16:05:02.509",
+            "customFields": [],
+            "productNumber": "SWDEMO10007.2",
+            "manufacturerId": "7f24e96676e944b0a0addc20d56728cb",
+            "markAsTopseller": false
+          },
+          "parentId": null,
+          "parent": null,
+          "type": "product",
+          "order": null,
+          "orderDeliveryPositions": null,
+          "cover": null,
+          "children": null,
+          "product": null,
+          "orderTransactionCaptureRefundPositions": null,
+          "states": [
+            "is-physical"
+          ],
+          "downloads": null,
+          "promotion": null,
+          "orderVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "productVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "parentVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "customFields": null,
+          "id": "01a211e2a05f73efa011b45a45443cc3",
+          "apiAlias": "order_line_item"
+        },
+        {
+          "extensions": {
+            "foreignKeys": {
+              "extensions": [],
+              "apiAlias": "order_line_item_foreign_keys_extension"
+            }
+          },
+          "_uniqueIdentifier": "01a211e2a05f7418a011b45a455b0a2c",
+          "versionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "translated": [],
+          "createdAt": "2026-11-25T08:46:35.009+00:00",
+          "updatedAt": null,
+          "orderId": "01a211e2a05f7a10a011b45a47c3a6f9",
+          "identifier": "01a211e29e877fc295be4350e8372ba0",
+          "referencedId": "01a211e29e877fc295be4350e8372ba0",
+          "productId": "01a211e29e877fc295be4350e8372ba0",
+          "promotionId": null,
+          "quantity": 5,
+          "unitPrice": 206.21,
+          "totalPrice": 1031.05,
+          "label": "Lightweight Wooden Zenlighten",
+          "description": null,
+          "good": true,
+          "removable": true,
+          "coverId": "01a211e298597364b30d969a9957186d",
+          "stackable": true,
+          "position": 3,
+          "price": {
+            "extensions": [],
+            "unitPrice": 206.21,
+            "totalPrice": 1031.05,
+            "calculatedTaxes": [
+              {
+                "extensions": [],
+                "tax": 0,
+                "taxRate": 0,
+                "price": 1031.05,
+                "label": null,
+                "apiAlias": "cart_tax_calculated"
+              }
+            ],
+            "taxRules": [
+              {
+                "extensions": [],
+                "taxRate": 0,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              }
+            ],
+            "quantity": 5,
+            "referencePrice": null,
+            "listPrice": null,
+            "regulationPrice": null,
+            "apiAlias": "calculated_price"
+          },
+          "priceDefinition": {
+            "extensions": [],
+            "isCalculated": true,
+            "referencePriceDefinition": null,
+            "listPrice": null,
+            "regulationPrice": null,
+            "price": 206.21,
+            "taxRules": [
+              {
+                "extensions": [],
+                "taxRate": 0,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              }
+            ],
+            "quantity": 5,
+            "type": "quantity",
+            "apiAlias": "cart_price_quantity"
+          },
+          "payload": {
+            "isNew": false,
+            "stock": 25,
+            "taxId": "01a20e4bf5287e628dd78abecf8027e7",
+            "tagIds": null,
+            "options": [],
+            "features": [],
+            "parentId": null,
+            "createdAt": "2026-11-25 08:46:34.164",
+            "optionIds": null,
+            "streamIds": null,
+            "garanLabel": null,
+            "isCloseout": false,
+            "categoryIds": null,
+            "productType": "physical",
+            "propertyIds": null,
+            "releaseDate": null,
+            "customFields": [],
+            "productNumber": "SW_01a211e29e877fca95be4350e88aaf98",
+            "manufacturerId": "01a211e29e7974e9a6f89c7c97a10048",
+            "markAsTopseller": false
+          },
+          "parentId": null,
+          "parent": null,
+          "type": "product",
+          "order": null,
+          "orderDeliveryPositions": null,
+          "cover": null,
+          "children": null,
+          "product": null,
+          "orderTransactionCaptureRefundPositions": null,
+          "states": [
+            "is-physical"
+          ],
+          "downloads": null,
+          "promotion": null,
+          "orderVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "productVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "parentVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "customFields": null,
+          "id": "01a211e2a05f7418a011b45a455b0a2c",
+          "apiAlias": "order_line_item"
+        },
+        {
+          "extensions": {
+            "foreignKeys": {
+              "extensions": [],
+              "apiAlias": "order_line_item_foreign_keys_extension"
+            }
+          },
+          "_uniqueIdentifier": "01a211e2a05f743da011b45a45c529d3",
+          "versionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "translated": [],
+          "createdAt": "2026-11-25T08:46:35.009+00:00",
+          "updatedAt": null,
+          "orderId": "01a211e2a05f7a10a011b45a47c3a6f9",
+          "identifier": "01a211e29f577e45b23fed96bb674259",
+          "referencedId": "01a211e29f577e45b23fed96bb674259",
+          "productId": "01a211e29f577e45b23fed96bb674259",
+          "promotionId": null,
+          "quantity": 5,
+          "unitPrice": 219.22,
+          "totalPrice": 1096.1,
+          "label": "Fantastic Marble Imageflow",
+          "description": null,
+          "good": true,
+          "removable": true,
+          "coverId": "102ac62ba27347a688030a05c1790db7",
+          "stackable": true,
+          "position": 4,
+          "price": {
+            "extensions": [],
+            "unitPrice": 219.22,
+            "totalPrice": 1096.1,
+            "calculatedTaxes": [
+              {
+                "extensions": [],
+                "tax": 76.73,
+                "taxRate": 7,
+                "price": 1096.1,
+                "label": null,
+                "apiAlias": "cart_tax_calculated"
+              }
+            ],
+            "taxRules": [
+              {
+                "extensions": [],
+                "taxRate": 7,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              }
+            ],
+            "quantity": 5,
+            "referencePrice": null,
+            "listPrice": null,
+            "regulationPrice": null,
+            "apiAlias": "calculated_price"
+          },
+          "priceDefinition": {
+            "extensions": [],
+            "isCalculated": true,
+            "referencePriceDefinition": null,
+            "listPrice": null,
+            "regulationPrice": null,
+            "price": 219.22,
+            "taxRules": [
+              {
+                "extensions": [],
+                "taxRate": 7,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              }
+            ],
+            "quantity": 5,
+            "type": "quantity",
+            "apiAlias": "cart_price_quantity"
+          },
+          "payload": {
+            "isNew": false,
+            "stock": 4,
+            "taxId": "01a20e4b981b7912b12579502bc8e2e9",
+            "tagIds": null,
+            "options": [],
+            "features": [],
+            "parentId": null,
+            "createdAt": "2026-11-25 08:46:34.364",
+            "optionIds": null,
+            "streamIds": null,
+            "garanLabel": null,
+            "isCloseout": false,
+            "categoryIds": null,
+            "productType": "physical",
+            "propertyIds": null,
+            "releaseDate": null,
+            "customFields": [],
+            "productNumber": "SW_01a211e29f577e51b23fed96bbf01f3c",
+            "manufacturerId": "cc1c20c365d34cfb88bfab3c3e81d350",
+            "markAsTopseller": false
+          },
+          "parentId": null,
+          "parent": null,
+          "type": "product",
+          "order": null,
+          "orderDeliveryPositions": null,
+          "cover": null,
+          "children": null,
+          "product": null,
+          "orderTransactionCaptureRefundPositions": null,
+          "states": [
+            "is-physical"
+          ],
+          "downloads": null,
+          "promotion": null,
+          "orderVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "productVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "parentVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "customFields": null,
+          "id": "01a211e2a05f743da011b45a45c529d3",
+          "apiAlias": "order_line_item"
+        }
+      ],
+      "transactions": [
+        {
+          "extensions": {
+            "foreignKeys": {
+              "extensions": [],
+              "apiAlias": "order_transaction_foreign_keys_extension"
+            }
+          },
+          "_uniqueIdentifier": "01a211e2a05f79d2a011b45a46f727f1",
+          "versionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "translated": [],
+          "createdAt": "2026-11-25T08:46:35.009+00:00",
+          "updatedAt": "2026-11-25T08:48:26.555+00:00",
+          "orderId": "01a211e2a05f7a10a011b45a47c3a6f9",
+          "orderVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "paymentMethodId": "01a20e4b977c7efdbf5970306de54683",
+          "amount": {
+            "extensions": [],
+            "unitPrice": 2396.8,
+            "totalPrice": 2396.8,
+            "calculatedTaxes": [
+              {
+                "extensions": [],
+                "tax": 30.8,
+                "taxRate": 19,
+                "price": 162.12,
+                "label": null,
+                "apiAlias": "cart_tax_calculated"
+              },
+              {
+                "extensions": [],
+                "tax": 0,
+                "taxRate": 0,
+                "price": 1031.05,
+                "label": null,
+                "apiAlias": "cart_tax_calculated"
+              },
+              {
+                "extensions": [],
+                "tax": 76.73,
+                "taxRate": 7,
+                "price": 1096.1,
+                "label": null,
+                "apiAlias": "cart_tax_calculated"
+              }
+            ],
+            "taxRules": [
+              {
+                "extensions": [],
+                "taxRate": 19,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              },
+              {
+                "extensions": [],
+                "taxRate": 0,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              },
+              {
+                "extensions": [],
+                "taxRate": 7,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              }
+            ],
+            "quantity": 1,
+            "referencePrice": null,
+            "listPrice": null,
+            "regulationPrice": null,
+            "apiAlias": "calculated_price"
+          },
+          "paymentMethod": null,
+          "order": null,
+          "stateMachineState": null,
+          "stateId": "01a20e4b9e2370f59119f3319ef3fafc",
+          "captures": null,
+          "primaryOrder": null,
+          "validationData": [],
+          "customFields": null,
+          "id": "01a211e2a05f79d2a011b45a46f727f1",
+          "apiAlias": "order_transaction"
+        }
+      ],
+      "deepLinkCode": "Ove5U-wYHihQCDPsSPpQE1d2ulUaPefp",
+      "autoIncrement": 1,
+      "stateMachineState": null,
+      "stateId": "01a20e4b9cd775648355cd7f66b0ae59",
+      "primaryOrderDelivery": null,
+      "primaryOrderDeliveryId": "01a211e2a05f77b2a011b45a461a54e7",
+      "primaryOrderDeliveryVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+      "primaryOrderTransaction": null,
+      "primaryOrderTransactionId": "01a211e2a05f79d2a011b45a46f727f1",
+      "primaryOrderTransactionVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+      "documents": null,
+      "tags": null,
+      "affiliateCode": null,
+      "campaignCode": null,
+      "customerComment": "runtara smoke test",
+      "internalComment": null,
+      "ruleIds": [
+        "01a20e4b97da7fe384371994a092572f",
+        "01a20e4bd7767c6e96a928e5f7cae61e",
+        "3858957016644de4ae48c0500bf3ccc8",
+        "e1378db7808a478f919e0d740d5d6c1a"
+      ],
+      "createdById": null,
+      "createdBy": null,
+      "updatedById": null,
+      "updatedBy": null,
+      "itemRounding": {
+        "extensions": [],
+        "decimals": 2,
+        "interval": 0.01,
+        "roundForNet": true,
+        "apiAlias": "shopware_core_framework_data_abstraction_layer_pricing_cash_rounding_config"
+      },
+      "totalRounding": {
+        "extensions": [],
+        "decimals": 2,
+        "interval": 0.01,
+        "roundForNet": true,
+        "apiAlias": "shopware_core_framework_data_abstraction_layer_pricing_cash_rounding_config"
+      },
+      "source": null,
+      "taxCalculationType": "horizontal",
+      "customFields": {
+        "shopwareDemoData": true
+      },
+      "id": "01a211e2a05f7a10a011b45a47c3a6f9",
+      "apiAlias": "order"
+    },
+    {
+      "extensions": {
+        "search": {
+          "extensions": [],
+          "translated": [],
+          "autoIncrement": 2,
+          "orderNumber": "10001"
+        }
+      },
+      "_uniqueIdentifier": "01a211e2a0837bb2a351f4042cc089c2",
+      "versionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+      "translated": [],
+      "createdAt": "2026-11-25T08:46:35.013+00:00",
+      "updatedAt": "2026-11-25T08:49:08.995+00:00",
+      "orderNumber": "10001",
+      "currencyId": "b7d2554b0ce847cd82f3ac9bd1c0dfca",
+      "currencyFactor": 1,
+      "salesChannelId": "01a20e4d37e971f79c753668a0c59bbb",
+      "billingAddressId": "01a211e2a0837b68a351f4042b54939f",
+      "billingAddressVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+      "orderDateTime": "2025-03-30T22:39:42.000+00:00",
+      "orderDate": "2025-03-30T00:00:00.000+00:00",
+      "price": {
+        "extensions": [],
+        "rawTotal": 3767.55,
+        "netPrice": 3514.7,
+        "totalPrice": 3767.55,
+        "positionPrice": 3514.7,
+        "calculatedTaxes": [
+          {
+            "extensions": [],
+            "tax": 17.67,
+            "taxRate": 19,
+            "price": 93,
+            "label": null,
+            "apiAlias": "cart_tax_calculated"
+          },
+          {
+            "extensions": [],
+            "tax": 235.18,
+            "taxRate": 7,
+            "price": 3359.76,
+            "label": null,
+            "apiAlias": "cart_tax_calculated"
+          },
+          {
+            "extensions": [],
+            "tax": 0,
+            "taxRate": 0,
+            "price": 61.94,
+            "label": null,
+            "apiAlias": "cart_tax_calculated"
+          }
+        ],
+        "taxRules": [
+          {
+            "extensions": [],
+            "taxRate": 19,
+            "percentage": 100,
+            "apiAlias": "cart_tax_rule"
+          },
+          {
+            "extensions": [],
+            "taxRate": 7,
+            "percentage": 100,
+            "apiAlias": "cart_tax_rule"
+          },
+          {
+            "extensions": [],
+            "taxRate": 0,
+            "percentage": 100,
+            "apiAlias": "cart_tax_rule"
+          }
+        ],
+        "taxStatus": "net",
+        "apiAlias": "cart_price"
+      },
+      "amountTotal": 3767.55,
+      "amountNet": 3514.7,
+      "positionPrice": 3514.7,
+      "taxStatus": "net",
+      "shippingCosts": {
+        "extensions": [],
+        "unitPrice": 0,
+        "totalPrice": 0,
+        "calculatedTaxes": [
+          {
+            "extensions": [],
+            "tax": 0,
+            "taxRate": 19,
+            "price": 0,
+            "label": null,
+            "apiAlias": "cart_tax_calculated"
+          },
+          {
+            "extensions": [],
+            "tax": 0,
+            "taxRate": 7,
+            "price": 0,
+            "label": null,
+            "apiAlias": "cart_tax_calculated"
+          },
+          {
+            "extensions": [],
+            "tax": 0,
+            "taxRate": 0,
+            "price": 0,
+            "label": null,
+            "apiAlias": "cart_tax_calculated"
+          }
+        ],
+        "taxRules": [
+          {
+            "extensions": [],
+            "taxRate": 19,
+            "percentage": 2.6460295331038,
+            "apiAlias": "cart_tax_rule"
+          },
+          {
+            "extensions": [],
+            "taxRate": 7,
+            "percentage": 95.591657893988,
+            "apiAlias": "cart_tax_rule"
+          },
+          {
+            "extensions": [],
+            "taxRate": 0,
+            "percentage": 1.7623125729081,
+            "apiAlias": "cart_tax_rule"
+          }
+        ],
+        "quantity": 1,
+        "referencePrice": null,
+        "listPrice": null,
+        "regulationPrice": null,
+        "apiAlias": "calculated_price"
+      },
+      "shippingTotal": 0,
+      "orderCustomer": {
+        "extensions": {
+          "foreignKeys": {
+            "extensions": [],
+            "apiAlias": "order_customer_foreign_keys_extension"
+          },
+          "internal_mapping_storage": {
+            "extensions": [],
+            "apiAlias": null
+          }
+        },
+        "_uniqueIdentifier": "01a211e2a1f7729ba0534a2d0c192ca4",
+        "versionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+        "translated": [],
+        "createdAt": "2026-11-25T08:46:35.010+00:00",
+        "updatedAt": null,
+        "email": "01a211e2988a765a9e166634839b9534flabadie@example.com",
+        "orderId": "01a211e2a0837bb2a351f4042cc089c2",
+        "salutationId": "01a20e4b865a7343b88bf6df388a708c",
+        "firstName": "Josiah",
+        "lastName": "Gleason",
+        "title": "Prof. Dr.",
+        "vatIds": null,
+        "company": null,
+        "customerNumber": "10001",
+        "customerId": "01a211e2988a765a9e166634839b9534",
+        "customer": null,
+        "salutation": null,
+        "order": null,
+        "remoteAddress": null,
+        "orderVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+        "customFields": {
+          "shopwareDemoData": true
+        },
+        "id": "01a211e2a1f7729ba0534a2d0c192ca4",
+        "apiAlias": "order_customer"
+      },
+      "currency": null,
+      "languageId": "2fbb5fe2e29a4d70aa5854ce7ce3e20b",
+      "language": null,
+      "salesChannel": null,
+      "addresses": null,
+      "billingAddress": null,
+      "deliveries": [
+        {
+          "extensions": {
+            "foreignKeys": {
+              "extensions": [],
+              "apiAlias": "order_delivery_foreign_keys_extension"
+            }
+          },
+          "_uniqueIdentifier": "01a211e2a0837b4fa351f4042a58c211",
+          "versionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "translated": [],
+          "createdAt": "2026-11-25T08:46:35.011+00:00",
+          "updatedAt": "2026-11-25T08:49:08.616+00:00",
+          "orderId": "01a211e2a0837bb2a351f4042cc089c2",
+          "orderVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "shippingOrderAddressId": "01a211e2a0837b06a351f404299648c9",
+          "shippingOrderAddressVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "shippingMethodId": "01a20e4b97da7ee984371994a0757032",
+          "trackingCodes": [],
+          "shippingDateEarliest": "2026-11-26T00:00:00.000+00:00",
+          "shippingDateLatest": "2026-11-28T00:00:00.000+00:00",
+          "shippingCosts": {
+            "extensions": [],
+            "unitPrice": 0,
+            "totalPrice": 0,
+            "calculatedTaxes": [
+              {
+                "extensions": [],
+                "tax": 0,
+                "taxRate": 19,
+                "price": 0,
+                "label": null,
+                "apiAlias": "cart_tax_calculated"
+              },
+              {
+                "extensions": [],
+                "tax": 0,
+                "taxRate": 7,
+                "price": 0,
+                "label": null,
+                "apiAlias": "cart_tax_calculated"
+              },
+              {
+                "extensions": [],
+                "tax": 0,
+                "taxRate": 0,
+                "price": 0,
+                "label": null,
+                "apiAlias": "cart_tax_calculated"
+              }
+            ],
+            "taxRules": [
+              {
+                "extensions": [],
+                "taxRate": 19,
+                "percentage": 2.6460295331038,
+                "apiAlias": "cart_tax_rule"
+              },
+              {
+                "extensions": [],
+                "taxRate": 7,
+                "percentage": 95.591657893988,
+                "apiAlias": "cart_tax_rule"
+              },
+              {
+                "extensions": [],
+                "taxRate": 0,
+                "percentage": 1.7623125729081,
+                "apiAlias": "cart_tax_rule"
+              }
+            ],
+            "quantity": 1,
+            "referencePrice": null,
+            "listPrice": null,
+            "regulationPrice": null,
+            "apiAlias": "calculated_price"
+          },
+          "shippingOrderAddress": null,
+          "stateId": "01a20e4b9d647102bee44018de7446e1",
+          "stateMachineState": null,
+          "shippingMethod": null,
+          "order": null,
+          "positions": null,
+          "primaryOrder": null,
+          "customFields": null,
+          "id": "01a211e2a0837b4fa351f4042a58c211",
+          "apiAlias": "order_delivery"
+        }
+      ],
+      "lineItems": [
+        {
+          "extensions": {
+            "foreignKeys": {
+              "extensions": [],
+              "apiAlias": "order_line_item_foreign_keys_extension"
+            }
+          },
+          "_uniqueIdentifier": "01a211e2a0837a10a351f404278ae38f",
+          "versionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "translated": [],
+          "createdAt": "2026-11-25T08:46:35.012+00:00",
+          "updatedAt": null,
+          "orderId": "01a211e2a0837bb2a351f4042cc089c2",
+          "identifier": "01a211e29f5c7487829b2a0dd651104d",
+          "referencedId": "01a211e29f5c7487829b2a0dd651104d",
+          "productId": "01a211e29f5c7487829b2a0dd651104d",
+          "promotionId": null,
+          "quantity": 2,
+          "unitPrice": 12.9,
+          "totalPrice": 25.8,
+          "label": "Durable Linen Purpletown",
+          "description": null,
+          "good": true,
+          "removable": true,
+          "coverId": "01a211e2980673e7a5a63ec8220d0ab9",
+          "stackable": true,
+          "position": 1,
+          "price": {
+            "extensions": [],
+            "unitPrice": 12.9,
+            "totalPrice": 25.8,
+            "calculatedTaxes": [
+              {
+                "extensions": [],
+                "tax": 4.9,
+                "taxRate": 19,
+                "price": 25.8,
+                "label": null,
+                "apiAlias": "cart_tax_calculated"
+              }
+            ],
+            "taxRules": [
+              {
+                "extensions": [],
+                "taxRate": 19,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              }
+            ],
+            "quantity": 2,
+            "referencePrice": null,
+            "listPrice": null,
+            "regulationPrice": null,
+            "apiAlias": "calculated_price"
+          },
+          "priceDefinition": {
+            "extensions": [],
+            "isCalculated": true,
+            "referencePriceDefinition": null,
+            "listPrice": null,
+            "regulationPrice": null,
+            "price": 12.9,
+            "taxRules": [
+              {
+                "extensions": [],
+                "taxRate": 19,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              }
+            ],
+            "quantity": 2,
+            "type": "quantity",
+            "apiAlias": "cart_price_quantity"
+          },
+          "payload": {
+            "isNew": false,
+            "stock": 10,
+            "taxId": "01a20e4b981b7841b12579502b36da2e",
+            "tagIds": null,
+            "options": [],
+            "features": [],
+            "parentId": null,
+            "createdAt": "2026-11-25 08:46:34.381",
+            "optionIds": null,
+            "streamIds": null,
+            "garanLabel": null,
+            "isCloseout": false,
+            "categoryIds": null,
+            "productType": "physical",
+            "propertyIds": null,
+            "releaseDate": null,
+            "customFields": [],
+            "productNumber": "SW_01a211e29f5c74a3829b2a0dd6bc0d14",
+            "manufacturerId": "01a211e29e79746aa6f89c7c96ce53f0",
+            "markAsTopseller": false
+          },
+          "parentId": null,
+          "parent": null,
+          "type": "product",
+          "order": null,
+          "orderDeliveryPositions": null,
+          "cover": null,
+          "children": null,
+          "product": null,
+          "orderTransactionCaptureRefundPositions": null,
+          "states": [
+            "is-physical"
+          ],
+          "downloads": null,
+          "promotion": null,
+          "orderVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "productVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "parentVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "customFields": null,
+          "id": "01a211e2a0837a10a351f404278ae38f",
+          "apiAlias": "order_line_item"
+        },
+        {
+          "extensions": {
+            "foreignKeys": {
+              "extensions": [],
+              "apiAlias": "order_line_item_foreign_keys_extension"
+            }
+          },
+          "_uniqueIdentifier": "01a211e2a0837a62a351f40427fdf33c",
+          "versionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "translated": [],
+          "createdAt": "2026-11-25T08:46:35.012+00:00",
+          "updatedAt": null,
+          "orderId": "01a211e2a0837bb2a351f4042cc089c2",
+          "identifier": "01a20e4db1bb7428a7859a53c6bfb013",
+          "referencedId": "01a20e4db1bb7428a7859a53c6bfb013",
+          "productId": "01a20e4db1bb7428a7859a53c6bfb013",
+          "promotionId": null,
+          "quantity": 4,
+          "unitPrice": 16.8,
+          "totalPrice": 67.2,
+          "label": "Main product with properties",
+          "description": null,
+          "good": true,
+          "removable": true,
+          "coverId": "5808d194947f415495d9782d8fdc92ae",
+          "stackable": true,
+          "position": 2,
+          "price": {
+            "extensions": [],
+            "unitPrice": 16.8,
+            "totalPrice": 67.2,
+            "calculatedTaxes": [
+              {
+                "extensions": [],
+                "tax": 12.77,
+                "taxRate": 19,
+                "price": 67.2,
+                "label": null,
+                "apiAlias": "cart_tax_calculated"
+              }
+            ],
+            "taxRules": [
+              {
+                "extensions": [],
+                "taxRate": 19,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              }
+            ],
+            "quantity": 4,
+            "referencePrice": null,
+            "listPrice": null,
+            "regulationPrice": null,
+            "apiAlias": "calculated_price"
+          },
+          "priceDefinition": {
+            "extensions": [],
+            "isCalculated": true,
+            "referencePriceDefinition": null,
+            "listPrice": null,
+            "regulationPrice": null,
+            "price": 16.8,
+            "taxRules": [
+              {
+                "extensions": [],
+                "taxRate": 19,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              }
+            ],
+            "quantity": 4,
+            "type": "quantity",
+            "apiAlias": "cart_price_quantity"
+          },
+          "payload": {
+            "isNew": true,
+            "stock": 50,
+            "taxId": "01a20e4b981b7841b12579502b36da2e",
+            "tagIds": null,
+            "options": [
+              {
+                "group": "Size",
+                "option": "XL"
+              }
+            ],
+            "features": [],
+            "parentId": "c7bca22753c84d08b6178a50052b4146",
+            "createdAt": "2026-11-24 16:05:02.641",
+            "optionIds": [
+              "acfd7586d02848f1ac801f4776efa414"
+            ],
+            "streamIds": null,
+            "garanLabel": null,
+            "isCloseout": false,
+            "categoryIds": [
+              "01a20e4b98277c188194145db38e90a6",
+              "a515ae260223466f8e37471d279e6406",
+              "2185182cbbd4462ea844abeb2a438b33"
+            ],
+            "productType": "physical",
+            "propertyIds": [
+              "41e5013b67d64d3a92b7a275da8af441",
+              "5193ffa5de8648a1bcfba1fa8a26c02b",
+              "54147692cbfb43419a6d11e26cad44dc",
+              "5997d91dc0784997bdef68dfc5a08912",
+              "78c53f3f6dd14eb4927978415bfb74db",
+              "96638a1c7ab847bbb3ca64167ab30a3e",
+              "acfd7586d02848f1ac801f4776efa414"
+            ],
+            "releaseDate": "2026-11-24 16:05:02.509",
+            "customFields": [],
+            "productNumber": "SWDEMO10007.4",
+            "manufacturerId": "7f24e96676e944b0a0addc20d56728cb",
+            "markAsTopseller": false
+          },
+          "parentId": null,
+          "parent": null,
+          "type": "product",
+          "order": null,
+          "orderDeliveryPositions": null,
+          "cover": null,
+          "children": null,
+          "product": null,
+          "orderTransactionCaptureRefundPositions": null,
+          "states": [
+            "is-physical"
+          ],
+          "downloads": null,
+          "promotion": null,
+          "orderVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "productVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "parentVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "customFields": null,
+          "id": "01a211e2a0837a62a351f40427fdf33c",
+          "apiAlias": "order_line_item"
+        },
+        {
+          "extensions": {
+            "foreignKeys": {
+              "extensions": [],
+              "apiAlias": "order_line_item_foreign_keys_extension"
+            }
+          },
+          "_uniqueIdentifier": "01a211e2a0837a8ba351f40428b54a27",
+          "versionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "translated": [],
+          "createdAt": "2026-11-25T08:46:35.012+00:00",
+          "updatedAt": null,
+          "orderId": "01a211e2a0837bb2a351f4042cc089c2",
+          "identifier": "01a211e29e897be7873b251f4d62135b",
+          "referencedId": "01a211e29e897be7873b251f4d62135b",
+          "productId": "01a211e29e897be7873b251f4d62135b",
+          "promotionId": null,
+          "quantity": 8,
+          "unitPrice": 419.97,
+          "totalPrice": 3359.76,
+          "label": "Incredible Bronze Motherwit",
+          "description": null,
+          "good": true,
+          "removable": true,
+          "coverId": "6968ad64888844679918c638e449ffc5",
+          "stackable": true,
+          "position": 3,
+          "price": {
+            "extensions": [],
+            "unitPrice": 419.97,
+            "totalPrice": 3359.76,
+            "calculatedTaxes": [
+              {
+                "extensions": [],
+                "tax": 235.18,
+                "taxRate": 7,
+                "price": 3359.76,
+                "label": null,
+                "apiAlias": "cart_tax_calculated"
+              }
+            ],
+            "taxRules": [
+              {
+                "extensions": [],
+                "taxRate": 7,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              }
+            ],
+            "quantity": 8,
+            "referencePrice": null,
+            "listPrice": null,
+            "regulationPrice": null,
+            "apiAlias": "calculated_price"
+          },
+          "priceDefinition": {
+            "extensions": [],
+            "isCalculated": true,
+            "referencePriceDefinition": null,
+            "listPrice": null,
+            "regulationPrice": null,
+            "price": 419.97,
+            "taxRules": [
+              {
+                "extensions": [],
+                "taxRate": 7,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              }
+            ],
+            "quantity": 8,
+            "type": "quantity",
+            "apiAlias": "cart_price_quantity"
+          },
+          "payload": {
+            "isNew": false,
+            "stock": 48,
+            "taxId": "01a20e4b981b7912b12579502bc8e2e9",
+            "tagIds": null,
+            "options": [],
+            "features": [],
+            "parentId": null,
+            "createdAt": "2026-11-25 08:46:34.171",
+            "optionIds": null,
+            "streamIds": null,
+            "garanLabel": null,
+            "isCloseout": false,
+            "categoryIds": null,
+            "productType": "physical",
+            "propertyIds": null,
+            "releaseDate": null,
+            "customFields": [],
+            "productNumber": "SW_01a211e29e897bf3873b251f4dd22311",
+            "manufacturerId": "2326d67406134c88bcf80e52d9d2ecb7",
+            "markAsTopseller": false
+          },
+          "parentId": null,
+          "parent": null,
+          "type": "product",
+          "order": null,
+          "orderDeliveryPositions": null,
+          "cover": null,
+          "children": null,
+          "product": null,
+          "orderTransactionCaptureRefundPositions": null,
+          "states": [
+            "is-physical"
+          ],
+          "downloads": null,
+          "promotion": null,
+          "orderVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "productVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "parentVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "customFields": null,
+          "id": "01a211e2a0837a8ba351f40428b54a27",
+          "apiAlias": "order_line_item"
+        },
+        {
+          "extensions": {
+            "foreignKeys": {
+              "extensions": [],
+              "apiAlias": "order_line_item_foreign_keys_extension"
+            }
+          },
+          "_uniqueIdentifier": "01a211e2a0837ab4a351f4042963fc7f",
+          "versionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "translated": [],
+          "createdAt": "2026-11-25T08:46:35.012+00:00",
+          "updatedAt": null,
+          "orderId": "01a211e2a0837bb2a351f4042cc089c2",
+          "identifier": "01a211e29f6070ccb70856c15d088cac",
+          "referencedId": "01a211e29f6070ccb70856c15d088cac",
+          "productId": "01a211e29f6070ccb70856c15d088cac",
+          "promotionId": null,
+          "quantity": 2,
+          "unitPrice": 30.97,
+          "totalPrice": 61.94,
+          "label": "Ergonomic Wooden Mondicil",
+          "description": null,
+          "good": true,
+          "removable": true,
+          "coverId": "5808d194947f415495d9782d8fdc92ae",
+          "stackable": true,
+          "position": 4,
+          "price": {
+            "extensions": [],
+            "unitPrice": 30.97,
+            "totalPrice": 61.94,
+            "calculatedTaxes": [
+              {
+                "extensions": [],
+                "tax": 0,
+                "taxRate": 0,
+                "price": 61.94,
+                "label": null,
+                "apiAlias": "cart_tax_calculated"
+              }
+            ],
+            "taxRules": [
+              {
+                "extensions": [],
+                "taxRate": 0,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              }
+            ],
+            "quantity": 2,
+            "referencePrice": null,
+            "listPrice": null,
+            "regulationPrice": null,
+            "apiAlias": "calculated_price"
+          },
+          "priceDefinition": {
+            "extensions": [],
+            "isCalculated": true,
+            "referencePriceDefinition": null,
+            "listPrice": null,
+            "regulationPrice": null,
+            "price": 30.97,
+            "taxRules": [
+              {
+                "extensions": [],
+                "taxRate": 0,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              }
+            ],
+            "quantity": 2,
+            "type": "quantity",
+            "apiAlias": "cart_price_quantity"
+          },
+          "payload": {
+            "isNew": false,
+            "stock": 28,
+            "taxId": "01a20e4bf5287e628dd78abecf8027e7",
+            "tagIds": null,
+            "options": [],
+            "features": [],
+            "parentId": null,
+            "createdAt": "2026-11-25 08:46:34.395",
+            "optionIds": null,
+            "streamIds": null,
+            "garanLabel": null,
+            "isCloseout": false,
+            "categoryIds": null,
+            "productType": "physical",
+            "propertyIds": null,
+            "releaseDate": null,
+            "customFields": [],
+            "productNumber": "SW_01a211e29f6070ddb70856c15d62c0bb",
+            "manufacturerId": "01a211e29e797431a6f89c7c964e627a",
+            "markAsTopseller": false
+          },
+          "parentId": null,
+          "parent": null,
+          "type": "product",
+          "order": null,
+          "orderDeliveryPositions": null,
+          "cover": null,
+          "children": null,
+          "product": null,
+          "orderTransactionCaptureRefundPositions": null,
+          "states": [
+            "is-physical"
+          ],
+          "downloads": null,
+          "promotion": null,
+          "orderVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "productVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "parentVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "customFields": null,
+          "id": "01a211e2a0837ab4a351f4042963fc7f",
+          "apiAlias": "order_line_item"
+        }
+      ],
+      "transactions": [
+        {
+          "extensions": {
+            "foreignKeys": {
+              "extensions": [],
+              "apiAlias": "order_transaction_foreign_keys_extension"
+            }
+          },
+          "_uniqueIdentifier": "01a211e2a0837b81a351f4042c3ca383",
+          "versionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "translated": [],
+          "createdAt": "2026-11-25T08:46:35.013+00:00",
+          "updatedAt": "2026-11-25T08:49:08.195+00:00",
+          "orderId": "01a211e2a0837bb2a351f4042cc089c2",
+          "orderVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+          "paymentMethodId": "01a20e4b975874a385f4e537b7de8da7",
+          "amount": {
+            "extensions": [],
+            "unitPrice": 3767.55,
+            "totalPrice": 3767.55,
+            "calculatedTaxes": [
+              {
+                "extensions": [],
+                "tax": 17.67,
+                "taxRate": 19,
+                "price": 93,
+                "label": null,
+                "apiAlias": "cart_tax_calculated"
+              },
+              {
+                "extensions": [],
+                "tax": 235.18,
+                "taxRate": 7,
+                "price": 3359.76,
+                "label": null,
+                "apiAlias": "cart_tax_calculated"
+              },
+              {
+                "extensions": [],
+                "tax": 0,
+                "taxRate": 0,
+                "price": 61.94,
+                "label": null,
+                "apiAlias": "cart_tax_calculated"
+              }
+            ],
+            "taxRules": [
+              {
+                "extensions": [],
+                "taxRate": 19,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              },
+              {
+                "extensions": [],
+                "taxRate": 7,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              },
+              {
+                "extensions": [],
+                "taxRate": 0,
+                "percentage": 100,
+                "apiAlias": "cart_tax_rule"
+              }
+            ],
+            "quantity": 1,
+            "referencePrice": null,
+            "listPrice": null,
+            "regulationPrice": null,
+            "apiAlias": "calculated_price"
+          },
+          "paymentMethod": null,
+          "order": null,
+          "stateMachineState": null,
+          "stateId": "01a20e4b9e2370f59119f3319ef3fafc",
+          "captures": null,
+          "primaryOrder": null,
+          "validationData": [],
+          "customFields": null,
+          "id": "01a211e2a0837b81a351f4042c3ca383",
+          "apiAlias": "order_transaction"
+        }
+      ],
+      "deepLinkCode": "adVgRkyGDy32rag9x9DU8hWBz5wjk67P",
+      "autoIncrement": 2,
+      "stateMachineState": null,
+      "stateId": "01a20e4b9cd775648355cd7f66b0ae59",
+      "primaryOrderDelivery": null,
+      "primaryOrderDeliveryId": "01a211e2a0837b4fa351f4042a58c211",
+      "primaryOrderDeliveryVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+      "primaryOrderTransaction": null,
+      "primaryOrderTransactionId": "01a211e2a0837b81a351f4042c3ca383",
+      "primaryOrderTransactionVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+      "documents": null,
+      "tags": null,
+      "affiliateCode": null,
+      "campaignCode": null,
+      "customerComment": "runtara smoke test",
+      "internalComment": null,
+      "ruleIds": [
+        "01a20e4b97da7fe384371994a092572f",
+        "01a20e4bd7767c6e96a928e5f7cae61e",
+        "3858957016644de4ae48c0500bf3ccc8",
+        "e1378db7808a478f919e0d740d5d6c1a"
+      ],
+      "createdById": null,
+      "createdBy": null,
+      "updatedById": null,
+      "updatedBy": null,
+      "itemRounding": {
+        "extensions": [],
+        "decimals": 2,
+        "interval": 0.01,
+        "roundForNet": true,
+        "apiAlias": "shopware_core_framework_data_abstraction_layer_pricing_cash_rounding_config"
+      },
+      "totalRounding": {
+        "extensions": [],
+        "decimals": 2,
+        "interval": 0.01,
+        "roundForNet": true,
+        "apiAlias": "shopware_core_framework_data_abstraction_layer_pricing_cash_rounding_config"
+      },
+      "source": null,
+      "taxCalculationType": "horizontal",
+      "customFields": {
+        "shopwareDemoData": true
+      },
+      "id": "01a211e2a0837bb2a351f4042cc089c2",
+      "apiAlias": "order"
+    }
+  ],
+  "aggregations": []
+}

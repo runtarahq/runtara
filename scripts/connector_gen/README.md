@@ -425,6 +425,17 @@ operation_names:
     description: Updates the product that has `current_sku` with the fields given.
 ```
 
+Where the vendor's summary is a sentence of its reference, as Shopware's are
+("Create a new Product resources."), the entry gives the step's label, which
+then wins over the summary:
+
+```yaml
+operation_names:
+  searchProduct:
+    name: searchProducts
+    label: Search Products
+```
+
 **One object is declared as a query parameter per key**, at fixed indices, as
 Magento's search criteria are (`searchCriteria[filterGroups][0][filters][0][field]`,
 `searchCriteria[pageSize]`, …), which allow one filter and one sort order. Name
@@ -449,6 +460,40 @@ effects:
 read_operations:
   - executeCOQLQuery
 ```
+
+**Records refer to one another, and back**, as Shopware's entities do: an
+order has its deliveries, each delivery its order, and every record a dozen
+others. Typed, they are infinite (`E0072`), and hundreds of types. With
+`opaque_records`, a property of one schema that refers to another record (a
+component schema with an `id` of its own), directly, as the one part of an
+`allOf`, or as an array's items or a map's values, takes any JSON instead.
+What an operation refers to itself (a search's `data: [Order]`, a create's
+body) stays typed, and so does a schema without an `id` (a price), whatever it
+refers to. A record that nothing typed refers to any more is not sliced.
+
+```yaml
+opaque_records: true
+```
+
+**The body repeats a path parameter**, as Shopware's `PATCH /product/{id}`
+takes the product's `id` in its path and in its body, and keeps the path's.
+Without an option the two inputs clash (`two inputs are named id`). With
+`path_parameters_win`, the body field is no input and is not sent; the path
+parameter is the input. The operation gets its own copy of the body schema
+without the field, the component `<OperationId>Body` (`UpdateProductBody`),
+because the schema it copies may be the body of an operation without that path
+parameter, a create whose `id` is an input. `optional_fields` names the copy
+to make an update's fields optional.
+
+```yaml
+path_parameters_win: true
+```
+
+**The spec is OpenAPI 3.2**, as Shopware's is. openapi-generator reads no 3.2
+document, so `generate` hands it the slice labelled 3.1; the slice keeps the
+vendor's version. `fetch` refuses, naming them, what 3.2 added that the listed
+operations use (`itemSchema`, `in: querystring`, `dataValue`, …); what they do
+not use (a tag's `parent`, the document's `$self`) does not matter.
 
 **The agent accepts several connection types** for the same API (an OAuth
 client and an API token, say): list them all.
@@ -777,6 +822,8 @@ crates/agents/runtara-agent-<id>/
   (Shippo's `CustomsDeclarationIncotermEnum`).
 - `integer` without a `format` is generated as `i64` (`fetch` adds
   `format: int64`), so large ids and amounts fit.
+- `number` is generated as `f64`, `format: float` too: as an `f32`, Shopware's
+  amount 2396.8 would be read as 2396.800048828125.
 - Every input and output field gets a label for the step editor, chosen by
   `fetch` in this order: the `labels:` override in `connector.yaml`; the
   vendor's `title` when it is a phrase (one-word titles name models); the field
@@ -834,9 +881,10 @@ crates/agents/runtara-agent-<id>/
 
 ## Limits
 
-- OpenAPI 3.0 and Swagger 2.0 (3.1 features such as `type: "null"` are
-  rewritten where listed above), GraphQL schemas with operations of ours, and
-  WordPress REST namespaces as a site describes them.
+- OpenAPI 3.0, 3.1 (its features such as `type: "null"` are rewritten where
+  listed above) and 3.2 (where the listed operations use nothing 3.2 added),
+  Swagger 2.0, GraphQL schemas with operations of ours, and WordPress REST
+  namespaces as a site describes them.
 - A GraphQL operation selects one top-level field and is no subscription. The
   objects it returns are typed from what it selects, with every field
   optional. A top-level field that answers `null` is an error the kit reports,
@@ -854,5 +902,6 @@ crates/agents/runtara-agent-<id>/
   clears a field), type the input as a plain object with `input_types`.
 - A generated capability is one API call; one that takes several is written by
   hand (see Hand-written capabilities).
-- A request-body field named like a path or query parameter of the same
-  operation produces a compile error.
+- `fetch` refuses a request-body field named like a query or header parameter
+  of the same operation (`two inputs are named …`), and one named like a path
+  parameter unless `path_parameters_win` is set.

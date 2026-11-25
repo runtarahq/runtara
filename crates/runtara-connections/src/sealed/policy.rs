@@ -796,6 +796,7 @@ const CLIENT_CREDENTIALS_TYPES: &[(&str, &str)] = &[
     ("microsoft_entra_client_credentials", "client_secret"),
     ("http_oauth2_client_credentials", "client_secret"),
     ("zendesk_client_credentials", "client_secret"),
+    ("shopware_client_credentials", "client_secret"),
     ("ups_client_credentials", "client_secret"),
     ("paypal_client_credentials", "client_secret"),
     ("teams_bot", "app_password"),
@@ -1784,6 +1785,7 @@ pub const SEALABLE_TYPES: &[&str] = &[
     "microsoft_entra_client_credentials",
     "http_oauth2_client_credentials",
     "zendesk_client_credentials",
+    "shopware_client_credentials",
     "ups_client_credentials",
     "paypal_client_credentials",
     "teams_bot",
@@ -2268,6 +2270,96 @@ mod tests {
                 "{params}"
             );
         }
+    }
+
+    #[test]
+    fn a_shopware_secret_goes_to_the_stores_token_endpoint_and_its_tokens_under_the_store() {
+        let (field, policy) = client_secret(
+            "shopware_client_credentials",
+            json!({
+                "store_url": "https://example.com/shop/admin",
+                "client_id": "SWIAEXAMPLE",
+                "client_secret": "s"
+            }),
+        );
+        assert_eq!(field, "client_secret");
+        assert_eq!(
+            policy["rules"],
+            json!([{
+                "destination": {
+                    "scheme": "https", "host": "example.com",
+                    "path": "/shop/api/oauth/token",
+                },
+                "inject": {"json_field": {"pointer": "/client_secret"}},
+                "seal_response": sealed_access_token(),
+            }])
+        );
+        assert_eq!(
+            policy["definitions"]["api"]["rules"],
+            json!([{
+                "destination": {"scheme": "https", "host": "example.com", "path_prefix": "/shop"},
+                "inject": {"header": {"name": "Authorization", "format": "Bearer {}"}},
+            }])
+        );
+    }
+
+    #[test]
+    fn a_shopware_secret_without_a_valid_store_or_key_id_is_not_sealed() {
+        for (store_url, client_id) in [
+            (json!("https://user@shop.example.com"), json!("SWIA")),
+            (json!("https://shop.example.com/?x=1"), json!("SWIA")),
+            (json!("shop.example.com"), json!("SWIA")),
+            (Value::Null, json!("SWIA")),
+            (json!("https://shop.example.com"), json!(" ")),
+            (json!("https://shop.example.com"), Value::Null),
+        ] {
+            let params = json!({
+                "client_id": client_id,
+                "client_secret": "s",
+                "store_url": store_url
+            });
+            assert_eq!(
+                policies(
+                    "shopware_client_credentials",
+                    &params,
+                    &Allowances::default()
+                ),
+                None,
+                "{params}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shopware_store_on_plain_http_is_sealed_only_where_the_deployment_allows_it() {
+        let params = json!({
+            "client_id": "SWIAEXAMPLE",
+            "client_secret": "s",
+            "store_url": "http://localhost:8092"
+        });
+        assert_eq!(
+            policies(
+                "shopware_client_credentials",
+                &params,
+                &Allowances::default()
+            ),
+            None
+        );
+        let allowances = Allowances {
+            private_hosts: vec!["localhost:8092".to_owned()],
+            plain_http_hosts: vec!["localhost".to_owned()],
+            ..Allowances::default()
+        };
+        let policy = policies("shopware_client_credentials", &params, &allowances).unwrap();
+        let policy = canonical(&policy["client_secret"]);
+        assert_eq!(
+            policy["rules"][0]["destination"],
+            json!({"scheme": "http", "host": "localhost", "port": 8092, "path": "/api/oauth/token"})
+        );
+        assert_eq!(
+            policy["definitions"]["api"]["rules"][0]["destination"],
+            json!({"scheme": "http", "host": "localhost", "port": 8092})
+        );
     }
 
     #[test]

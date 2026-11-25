@@ -1236,6 +1236,115 @@ fn test_woocommerce_connection_type_is_registered() {
 }
 
 // ============================================================================
+// ShopwareClientCredentialsExtractor Tests
+// ============================================================================
+
+#[test]
+fn test_shopware_extractor_pins_the_store_and_sends_no_credential() {
+    let config = extract_http_config(
+        "shopware_client_credentials",
+        &json!({
+            "store_url": "https://shop.example.com/admin#/sw/dashboard/index",
+            "client_id": "SWIAEXAMPLE",
+            "client_secret": "secret"
+        }),
+        None,
+    )
+    .expect("Should extract config");
+
+    // The Bearer token is minted at request time, through seal.
+    assert!(config.headers.is_empty());
+    assert_eq!(config.url_prefix, "https://shop.example.com");
+}
+
+#[test]
+fn test_shopware_extractor_refuses_an_invalid_store_url() {
+    let err = extract_http_config(
+        "shopware_client_credentials",
+        &json!({
+            "store_url": "https://shop.example.com/?sw=1",
+            "client_id": "SWIAEXAMPLE",
+            "client_secret": "secret"
+        }),
+        None,
+    )
+    .expect_err("a store URL with a query should fail");
+    assert!(err.contains("Shopware store URL"), "{err}");
+    let err = extract_http_config("shopware_client_credentials", &json!({}), None)
+        .expect_err("missing parameters should fail");
+    assert!(err.contains("shopware_client_credentials"), "{err}");
+}
+
+#[test]
+fn test_shopware_base_url_is_the_stores_address() {
+    use connection_types::shopware_base_url;
+    for (input, expected) in [
+        ("https://shop.example.com", "https://shop.example.com"),
+        (" https://Shop.Example.com/ ", "https://shop.example.com"),
+        ("https://example.com/shop/", "https://example.com/shop"),
+        ("http://localhost:8092", "http://localhost:8092"),
+        // An API path pasted after the address.
+        ("https://shop.example.com/api", "https://shop.example.com"),
+        (
+            "https://example.com/shop/api/search/order",
+            "https://example.com/shop",
+        ),
+        // The Administration's address, as a browser shows it.
+        ("https://shop.example.com/admin", "https://shop.example.com"),
+        (
+            "https://shop.example.com/admin/",
+            "https://shop.example.com",
+        ),
+        (
+            "https://example.com/shop/admin#/sw/order/index",
+            "https://example.com/shop",
+        ),
+        // A host or a path that only starts like one stays.
+        ("https://admin.example.com", "https://admin.example.com"),
+        (
+            "https://example.com/administration",
+            "https://example.com/administration",
+        ),
+        ("https://example.com/apis", "https://example.com/apis"),
+    ] {
+        assert_eq!(
+            shopware_base_url(input).as_deref(),
+            Ok(expected),
+            "{input:?}"
+        );
+    }
+    for input in [
+        "",
+        "shop.example.com",
+        "https://user:pass@shop.example.com",
+        "https://shop.example.com/#/sw/dashboard",
+        "https://shop.example.com/shop#admin",
+        "https://shop.example.com/?x=1",
+        "https://shop.example.com/a/../b",
+        "https://[::1]",
+    ] {
+        assert!(shopware_base_url(input).is_err(), "{input:?} was accepted");
+    }
+}
+
+#[test]
+fn test_shopware_connection_type_is_registered() {
+    assert!(get_http_extractor_ids().contains(&"shopware_client_credentials"));
+    let meta = crate::registry::find_connection_type("shopware_client_credentials")
+        .expect("shopware_client_credentials is in the static registry");
+    assert_eq!(meta.display_name, "Shopware");
+    assert!(matches!(
+        meta.auth_type,
+        Some(runtara_dsl::agent_meta::ConnectionAuthType::Oauth2ClientCredentials)
+    ));
+    let field = |name: &str| meta.fields.iter().find(|f| f.name == name).unwrap();
+    assert!(field("client_secret").is_secret);
+    assert!(!field("client_id").is_secret);
+    assert!(!field("store_url").is_secret);
+    assert!(field("store_url").is_url);
+}
+
+// ============================================================================
 // Jira Extractor Tests
 // ============================================================================
 

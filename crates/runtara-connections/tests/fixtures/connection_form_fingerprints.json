@@ -162,6 +162,12 @@
     "fnv1a64": "14e3971ebb0f2e8e"
   },
   {
+    "integrationId": "shopware_client_credentials",
+    "fieldCount": 3,
+    "serializedBytes": 1475,
+    "fnv1a64": "3d91b2d279eee843"
+  },
+  {
     "integrationId": "slack_bot",
     "fieldCount": 2,
     "serializedBytes": 906,

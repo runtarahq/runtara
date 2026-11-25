@@ -1,0 +1,36 @@
+{
+  "extensions": {
+    "foreignKeys": {
+      "extensions": [],
+      "apiAlias": "state_machine_state_foreign_keys_extension"
+    },
+    "internal_mapping_storage": {
+      "extensions": [],
+      "apiAlias": null
+    }
+  },
+  "_uniqueIdentifier": "01a20e4b9cd775858355cd7f66b6fab8",
+  "versionId": null,
+  "translated": {
+    "name": "In Progress",
+    "customFields": []
+  },
+  "createdAt": "2026-11-24T16:02:46.161+00:00",
+  "updatedAt": null,
+  "name": "In Progress",
+  "technicalName": "in_progress",
+  "stateMachineId": "01a20e4b9cd774768355cd7f658f90f4",
+  "stateMachine": null,
+  "fromStateMachineTransitions": null,
+  "toStateMachineTransitions": null,
+  "translations": null,
+  "orders": null,
+  "orderTransactionCaptures": null,
+  "orderTransactionCaptureRefunds": null,
+  "orderTransactions": null,
+  "orderDeliveries": null,
+  "fromStateMachineHistoryEntries": null,
+  "toStateMachineHistoryEntries": null,
+  "customFields": null,
+  "id": "01a20e4b9cd775858355cd7f66b6fab8"
+}

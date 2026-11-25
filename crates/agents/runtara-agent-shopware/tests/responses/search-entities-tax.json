@@ -1,0 +1,24 @@
+{
+  "total": 3,
+  "data": [
+    {
+      "taxRate": 0,
+      "name": "Reduced rate 2",
+      "id": "01a20e4bf5287e628dd78abecf8027e7",
+      "apiAlias": "tax"
+    },
+    {
+      "taxRate": 7,
+      "name": "Reduced rate",
+      "id": "01a20e4b981b7912b12579502bc8e2e9",
+      "apiAlias": "tax"
+    },
+    {
+      "taxRate": 19,
+      "name": "Standard rate",
+      "id": "01a20e4b981b7841b12579502b36da2e",
+      "apiAlias": "tax"
+    }
+  ],
+  "aggregations": []
+}

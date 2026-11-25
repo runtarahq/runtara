@@ -1,0 +1,71 @@
+{
+  "data": {
+    "_uniqueIdentifier": "01a211e2a0bc7cfda509255c7f8132d0",
+    "versionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+    "translated": [],
+    "createdAt": "2026-11-25T08:46:35.018+00:00",
+    "updatedAt": "2026-11-25T10:28:11.806+00:00",
+    "orderId": "01a211e2a0bd744995abe0cd7610fe89",
+    "orderVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+    "shippingOrderAddressId": "01a211e2a0bc7cd0a509255c7eb97e52",
+    "shippingOrderAddressVersionId": "0fa91ce3e96a4bc2be4bd9ce752c3425",
+    "shippingMethodId": "01a20e4b97da7ee984371994a0757032",
+    "trackingCodes": [
+      "RT-TRACK-1"
+    ],
+    "shippingDateEarliest": "2026-11-26T00:00:00.000+00:00",
+    "shippingDateLatest": "2026-11-28T00:00:00.000+00:00",
+    "shippingCosts": {
+      "extensions": [],
+      "unitPrice": 0,
+      "totalPrice": 0,
+      "calculatedTaxes": [
+        {
+          "extensions": [],
+          "tax": 0,
+          "taxRate": 19,
+          "price": 0,
+          "label": null,
+          "apiAlias": "cart_tax_calculated"
+        },
+        {
+          "extensions": [],
+          "tax": 0,
+          "taxRate": 0,
+          "price": 0,
+          "label": null,
+          "apiAlias": "cart_tax_calculated"
+        }
+      ],
+      "taxRules": [
+        {
+          "extensions": [],
+          "taxRate": 19,
+          "percentage": 90.189584098911,
+          "apiAlias": "cart_tax_rule"
+        },
+        {
+          "extensions": [],
+          "taxRate": 0,
+          "percentage": 9.8104159010894,
+          "apiAlias": "cart_tax_rule"
+        }
+      ],
+      "quantity": 1,
+      "referencePrice": null,
+      "listPrice": null,
+      "regulationPrice": null,
+      "apiAlias": "calculated_price"
+    },
+    "shippingOrderAddress": null,
+    "stateId": "01a20e4b9d647093bee44018dd815c6f",
+    "stateMachineState": null,
+    "shippingMethod": null,
+    "order": null,
+    "positions": null,
+    "primaryOrder": null,
+    "customFields": null,
+    "id": "01a211e2a0bc7cfda509255c7f8132d0",
+    "apiAlias": "order_delivery"
+  }
+}
