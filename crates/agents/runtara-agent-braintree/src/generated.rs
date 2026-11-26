@@ -3399,6 +3399,79 @@ pub struct VaultPaymentMethodResult {
         skip_serializing_if = "Option::is_none"
     )]
     pub payment_method: Option<VaultPaymentMethodPaymentMethod>,
+    #[field(
+        display_name = r##"Verification"##,
+        description = r##"The verification that was run on the payment method prior to vaulting."##
+    )]
+    #[serde(
+        rename = "verification",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub verification: Option<VaultPaymentMethodVerification>,
+    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
+    #[field(skip)]
+    #[serde(flatten)]
+    pub __extra: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "VaultPaymentMethodVerification")]
+pub struct VaultPaymentMethodVerification {
+    #[field(
+        display_name = r##"Gateway Rejection Reason"##,
+        description = r##"The reason the verification was rejected. This will only be set if status is GATEWAY_REJECTED. One of: APPLICATION_INCOMPLETE, AVS, AVS_AND_CVV, CVV, DUPLICATE, EXCESSIVE_RETRY, FRAUD, MANUAL_TRANSACTIONS_DISABLED, PAYMENT_METHOD_BLOCKED, RISK_THRESHOLD, THREE_D_SECURE, TOKEN_ISSUANCE, TOO_MANY_CONFIRMATION_ATTEMPTS, UNION_PAY_ENROLLMENT_REQUIRED."##
+    )]
+    #[serde(
+        rename = "gatewayRejectionReason",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub gateway_rejection_reason: Option<String>,
+    #[field(display_name = r##"ID"##, description = r##"Unique identifier."##)]
+    #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[field(
+        display_name = r##"Processor Response"##,
+        description = r##"Detailed response information from the processor. Will not be present if the verification was rejected prior to contacting the processor."##
+    )]
+    #[serde(
+        rename = "processorResponse",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub processor_response: Option<VaultPaymentMethodVerificationProcessorResponse>,
+    #[field(
+        display_name = r##"Status"##,
+        description = r##"The current status of this verification, indicating whether the verification was successful. Braintree recommends only vaulting payment methods that are successfully verified. One of: FAILED, GATEWAY_REJECTED, PENDING, PROCESSOR_DECLINED, VERIFIED, VERIFYING."##
+    )]
+    #[serde(rename = "status", default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Fields the vendor returns but its spec does not declare; passed through unchanged.
+    #[field(skip)]
+    #[serde(flatten)]
+    pub __extra: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, CapabilityOutput)]
+#[capability_output(display_name = "VaultPaymentMethodVerificationProcessorResponse")]
+pub struct VaultPaymentMethodVerificationProcessorResponse {
+    #[field(
+        display_name = r##"Legacy Code"##,
+        description = r##"The processor response code indicating the result of attempting the verification."##
+    )]
+    #[serde(
+        rename = "legacyCode",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub legacy_code: Option<String>,
+    #[field(
+        display_name = r##"Message"##,
+        description = r##"The text explanation of the processor response code."##
+    )]
+    #[serde(rename = "message", default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     /// Fields the vendor returns but its spec does not declare; passed through unchanged.
     #[field(skip)]
     #[serde(flatten)]
@@ -4975,7 +5048,7 @@ pub struct VaultPaymentMethodInput {
     module = "braintree",
     id = "vault-payment-method",
     display_name = r##"Vault Payment Method"##,
-    description = r##"Stores a single-use payment method (a nonce from a client SDK) in the vault, for the customer given, so that it can be charged again later. Answers the stored payment method's ID."##,
+    description = r##"Stores a single-use payment method (a nonce from a client SDK) in the vault, for the customer given, so that it can be charged again later. Braintree verifies a card first: one whose verification is declined or rejected is not stored, and fails as BRAINTREE_PAYMENT_DECLINED with the verification's ID, status and the processor's response. Answers the stored payment method's ID and the verification."##,
     side_effects = true,
     rate_limited = true
 )]
@@ -5004,6 +5077,15 @@ impl VaultPaymentMethodInput {
       createdAt
       customer {
         id
+      }
+    }
+    verification {
+      id
+      status
+      gatewayRejectionReason
+      processorResponse {
+        legacyCode
+        message
       }
     }
   }
@@ -5501,6 +5583,14 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         (
             "VaultPaymentMethodResult",
             &__OUTPUT_META_VaultPaymentMethodResult as &OutputTypeMeta,
+        ),
+        (
+            "VaultPaymentMethodVerification",
+            &__OUTPUT_META_VaultPaymentMethodVerification as &OutputTypeMeta,
+        ),
+        (
+            "VaultPaymentMethodVerificationProcessorResponse",
+            &__OUTPUT_META_VaultPaymentMethodVerificationProcessorResponse as &OutputTypeMeta,
         ),
     ]
     .into_iter()

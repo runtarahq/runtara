@@ -2920,6 +2920,85 @@
             ],
             "description": "A payment method that has been stored in a merchant's vault and can be reused.",
             "x-runtara-label": "Payment Method"
+          },
+          "verification": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/VaultPaymentMethodVerification"
+              }
+            ],
+            "description": "The verification that was run on the payment method prior to vaulting.",
+            "x-runtara-label": "Verification"
+          }
+        },
+        "type": "object"
+      },
+      "VaultPaymentMethodVerification": {
+        "description": "A verification reporting whether the payment method has passed your fraud rules and the issuer has ensured it is associated with a valid account.",
+        "properties": {
+          "gatewayRejectionReason": {
+            "description": "The reason the verification was rejected. This will only be set if status is GATEWAY_REJECTED.",
+            "enum": [
+              "APPLICATION_INCOMPLETE",
+              "AVS",
+              "AVS_AND_CVV",
+              "CVV",
+              "DUPLICATE",
+              "EXCESSIVE_RETRY",
+              "FRAUD",
+              "MANUAL_TRANSACTIONS_DISABLED",
+              "PAYMENT_METHOD_BLOCKED",
+              "RISK_THRESHOLD",
+              "THREE_D_SECURE",
+              "TOKEN_ISSUANCE",
+              "TOO_MANY_CONFIRMATION_ATTEMPTS",
+              "UNION_PAY_ENROLLMENT_REQUIRED"
+            ],
+            "type": "string",
+            "x-runtara-label": "Gateway Rejection Reason"
+          },
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          },
+          "processorResponse": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/VaultPaymentMethodVerificationProcessorResponse"
+              }
+            ],
+            "description": "Detailed response information from the processor. Will not be present if the verification was rejected prior to contacting the processor.",
+            "x-runtara-label": "Processor Response"
+          },
+          "status": {
+            "description": "The current status of this verification, indicating whether the verification was successful. Braintree recommends only vaulting payment methods that are successfully verified.",
+            "enum": [
+              "FAILED",
+              "GATEWAY_REJECTED",
+              "PENDING",
+              "PROCESSOR_DECLINED",
+              "VERIFIED",
+              "VERIFYING"
+            ],
+            "type": "string",
+            "x-runtara-label": "Status"
+          }
+        },
+        "type": "object"
+      },
+      "VaultPaymentMethodVerificationProcessorResponse": {
+        "description": "Detailed response information from the processor.",
+        "properties": {
+          "legacyCode": {
+            "description": "The processor response code indicating the result of attempting the verification.",
+            "type": "string",
+            "x-runtara-label": "Legacy Code"
+          },
+          "message": {
+            "description": "The text explanation of the processor response code.",
+            "type": "string",
+            "x-runtara-label": "Message"
           }
         },
         "type": "object"
@@ -3809,7 +3888,7 @@
     },
     "/vaultPaymentMethod": {
       "post": {
-        "description": "Stores a single-use payment method (a nonce from a client SDK) in the vault, for the customer given, so that it can be charged again later. Answers the stored payment method's ID.",
+        "description": "Stores a single-use payment method (a nonce from a client SDK) in the vault, for the customer given, so that it can be charged again later. Braintree verifies a card first: one whose verification is declined or rejected is not stored, and fails as BRAINTREE_PAYMENT_DECLINED with the verification's ID, status and the processor's response. Answers the stored payment method's ID and the verification.",
         "operationId": "vaultPaymentMethod",
         "requestBody": {
           "content": {
@@ -3858,7 +3937,7 @@
         "tags": [
           "graphql"
         ],
-        "x-runtara-graphql-document": "mutation vaultPaymentMethod($paymentMethodId: ID!, $customerId: ID, $makeDefault: Boolean) {\n  vaultPaymentMethod(\n    input: {\n      paymentMethodId: $paymentMethodId\n      customerId: $customerId\n      makeDefault: $makeDefault\n    }\n  ) {\n    paymentMethod {\n      id\n      legacyId\n      usage\n      createdAt\n      customer {\n        id\n      }\n    }\n  }\n}",
+        "x-runtara-graphql-document": "mutation vaultPaymentMethod($paymentMethodId: ID!, $customerId: ID, $makeDefault: Boolean) {\n  vaultPaymentMethod(\n    input: {\n      paymentMethodId: $paymentMethodId\n      customerId: $customerId\n      makeDefault: $makeDefault\n    }\n  ) {\n    paymentMethod {\n      id\n      legacyId\n      usage\n      createdAt\n      customer {\n        id\n      }\n    }\n    verification {\n      id\n      status\n      gatewayRejectionReason\n      processorResponse {\n        legacyCode\n        message\n      }\n    }\n  }\n}",
         "x-runtara-graphql-field": "vaultPaymentMethod",
         "x-runtara-graphql-path": "/graphql",
         "x-runtara-side-effects": true,
