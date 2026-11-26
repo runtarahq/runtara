@@ -46,8 +46,21 @@ const DECLINED_STATUSES: &[&str] = &[
     "SETTLEMENT_DECLINED",
 ];
 
-/// The fields of a mutation's payload that hold the payment it made: a
-/// transaction, a refund, or a reversal (either of the two).
+/// The mutations whose answer is a payment they made or settled, which a
+/// declined status fails. Another mutation may answer a transaction too
+/// (`createTransactionPackageTracking` answers the one it tracks), whose
+/// status says nothing of what the mutation did.
+const PAYMENT_MUTATIONS: &[&str] = &[
+    "chargePaymentMethod",
+    "authorizePaymentMethod",
+    "captureTransaction",
+    "refundTransaction",
+    "reverseTransaction",
+    "sandboxSettleTransaction",
+];
+
+/// The fields of a payment mutation's payload that hold the payment it made:
+/// a transaction, a refund, or a reversal (either of the two).
 const PAYMENT_FIELDS: &[&str] = &["transaction", "refund", "reversal"];
 
 /// The JSON envelope the `#[capability]` macro passes back to the host.
@@ -308,15 +321,17 @@ pub fn network_error(
 
 /// A write that got no answer, a 5xx, or an answer that cannot be read:
 /// Braintree may or may not have carried it out. Permanent, so the step is
-/// not sent again; the workflow decides (look the transaction up, or send it
-/// again with the same idempotency key, which answers the first request's
-/// transaction) before retrying.
+/// not sent again; the workflow decides (look it up first) before retrying.
+/// Only the payment operations take an idempotency key, which makes sending
+/// them again safe.
 pub fn outcome_unknown(prefix: &str, message: String) -> AgentError {
     AgentError::permanent(
         format!("{prefix}_OUTCOME_UNKNOWN"),
         format!(
-            "{message}. It may have been carried out (a payment made or refunded); \
-             look it up, or send it again with the same idempotency key, before retrying"
+            "{message}. It may have been carried out (a payment made or refunded, a record \
+             created or changed); look it up before retrying. A charge, authorization, \
+             capture, refund or reversal sent again with the same idempotency key answers \
+             the first request's result instead of running again"
         ),
     )
 }
@@ -371,17 +386,22 @@ pub fn decode<T: DeserializeOwned>(
 
 /// Reads a GraphQL answer: the value of `data.<field>`.
 ///
-/// - `errors` fail the step. With a mutation that answered its field as well,
-///   it ran, so the outcome is unknown ([`outcome_unknown`]). Otherwise
-///   Braintree did not run it, and the error is what its `errorClass` says
-///   ([`graphql_error`]).
-/// - A mutation whose transaction, refund or reversal has a declined status
-///   (`PROCESSOR_DECLINED`, `GATEWAY_REJECTED`, `FAILED`,
-///   `SETTLEMENT_DECLINED`) is `<PREFIX>_PAYMENT_DECLINED`: Braintree made
-///   the transaction, and it was refused. Its ID, status and the processor's
-///   response are attributes.
+/// - A payment mutation (one of [`PAYMENT_MUTATIONS`]) whose transaction,
+///   refund or reversal has a declined status (`PROCESSOR_DECLINED`,
+///   `GATEWAY_REJECTED`, `FAILED`, `SETTLEMENT_DECLINED`) is
+///   `<PREFIX>_PAYMENT_DECLINED`: Braintree made the transaction, and it was
+///   refused. Its ID, status and the processor's response are attributes.
+///   This holds whether or not the answer has `errors` as well: a declined
+///   payment is a known outcome.
+/// - Otherwise `errors` fail the step. With a mutation that answered its
+///   field as well, it ran, so the outcome is unknown ([`outcome_unknown`]).
+///   Otherwise Braintree did not run it, and the error is what its
+///   `errorClass` says ([`graphql_error`]).
 /// - A `null` field is `<PREFIX>_NOT_FOUND` for a query (`node(id:)` of an
-///   unknown id), and [`outcome_unknown`] for a mutation.
+///   unknown id), and [`outcome_unknown`] for a mutation. So is an empty
+///   object for a query: `node(id:)` of an object of another type than the
+///   operation asks for (a customer's ID given for a transaction) answers
+///   none of its fields.
 pub fn decode_graphql<T: DeserializeOwned>(
     response: &runtara_http::HttpResponse,
     graphql: Graphql,
@@ -402,19 +422,32 @@ pub fn decode_graphql<T: DeserializeOwned>(
         )));
     };
 
-    if let Some(errors) = envelope.get("errors").filter(|errors| match errors {
+    let value = envelope
+        .get("data")
+        .and_then(|data| data.get(graphql.field))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let errors = envelope.get("errors").filter(|errors| match errors {
         Value::Array(list) => !list.is_empty(),
         Value::Null => false,
         _ => true,
-    }) {
+    });
+
+    // A declined payment is a known outcome, errors or not.
+    if !graphql.read
+        && PAYMENT_MUTATIONS.contains(&graphql.field)
+        && let Some(declined) = declined_payment(&value, graphql.field, prefix)
+    {
+        return Err(match errors {
+            Some(errors) => declined.with_attr("errors", errors.clone()),
+            None => declined,
+        });
+    }
+
+    if let Some(errors) = errors {
         // A mutation that answered its field as well ran: the errors are of a
         // part of the answer, not a refusal.
-        let ran = !graphql.read
-            && envelope
-                .get("data")
-                .and_then(|data| data.get(graphql.field))
-                .is_some_and(|value| !value.is_null());
-        if ran {
+        if !graphql.read && !value.is_null() {
             return Err(outcome_unknown(
                 prefix,
                 format!(
@@ -428,13 +461,17 @@ pub fn decode_graphql<T: DeserializeOwned>(
         return Err(graphql_error(errors, graphql, prefix));
     }
 
-    let value = envelope
-        .get("data")
-        .and_then(|data| data.get(graphql.field))
-        .cloned()
-        .unwrap_or(Value::Null);
-    if value.is_null() {
-        let message = format!("{prefix}: `{}` is null in the answer", graphql.field);
+    let nothing = value.is_null()
+        || (graphql.read && value.as_object().is_some_and(serde_json::Map::is_empty));
+    if nothing {
+        let message = if value.is_null() {
+            format!("{prefix}: `{}` is null in the answer", graphql.field)
+        } else {
+            format!(
+                "{prefix}: `{}` names an object of another type than the one asked for",
+                graphql.field
+            )
+        };
         return Err(if graphql.read {
             AgentError::permanent(
                 format!("{prefix}_NOT_FOUND"),
@@ -444,12 +481,6 @@ pub fn decode_graphql<T: DeserializeOwned>(
         } else {
             outcome_unknown(prefix, message)
         });
-    }
-
-    if !graphql.read
-        && let Some(declined) = declined_payment(&value, graphql.field, prefix)
-    {
-        return Err(declined);
     }
 
     serde_json::from_value(value)

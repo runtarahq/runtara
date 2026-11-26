@@ -328,6 +328,53 @@ fn a_null_field_is_nothing_found_for_a_query_and_unknown_for_a_write() {
 }
 
 #[test]
+fn an_object_of_another_type_is_nothing_found() {
+    // `node(id:)` given a customer's ID for a transaction: none of the
+    // transaction's fields apply, so the object comes back empty.
+    let err = error(QUERY, json!({"data": {"node": {}}}));
+    assert_eq!(kind(&err), ("BRAINTREE_NOT_FOUND", "permanent"));
+    assert_eq!(err.attributes["field"], json!("node"));
+    assert!(err.message.contains("another type"), "{}", err.message);
+}
+
+#[test]
+fn tracking_a_transaction_is_no_payment_of_its_own() {
+    // The tracker was added; the status of the transaction it tracks says
+    // nothing of that.
+    let tracking = kit::Graphql {
+        field: "createTransactionPackageTracking",
+        read: false,
+    };
+    for status in ["FAILED", "SETTLEMENT_DECLINED"] {
+        let value = decode(
+            tracking,
+            json!({"data": {"createTransactionPackageTracking": {
+                "packageTracker": {"id": "jm0yevzh", "trackingNumber": "1Z999", "carrier": "UPS"},
+                "transaction": {"id": "dHJhbnNhY3Rpb25fYWJj", "status": status},
+            }}}),
+        )
+        .unwrap();
+        assert_eq!(value["packageTracker"]["id"], json!("jm0yevzh"), "{status}");
+    }
+}
+
+#[test]
+fn a_decline_answered_with_errors_as_well_is_still_a_decline() {
+    let mut body = charged("PROCESSOR_DECLINED");
+    body["errors"] = json!([{
+        "message": "a field could not be read",
+        "extensions": {"errorClass": "INTERNAL"},
+    }]);
+    let err = error(CHARGE, body);
+    assert_eq!(kind(&err), ("BRAINTREE_PAYMENT_DECLINED", "permanent"));
+    assert_eq!(
+        err.attributes["transaction_id"],
+        json!("dHJhbnNhY3Rpb25fYWJj")
+    );
+    assert!(err.attributes.contains_key("errors"));
+}
+
+#[test]
 fn a_write_answered_with_errors_and_its_field_has_an_unknown_outcome() {
     let mut body = charged("SUBMITTED_FOR_SETTLEMENT");
     body["errors"] = json!([{
@@ -337,7 +384,14 @@ fn a_write_answered_with_errors_and_its_field_has_an_unknown_outcome() {
     let err = error(CHARGE, body);
     assert_eq!(kind(&err), ("BRAINTREE_OUTCOME_UNKNOWN", "permanent"));
     assert!(
-        err.message.contains("same idempotency key"),
+        err.message.contains("look it up before retrying"),
+        "{}",
+        err.message
+    );
+    // The idempotency key is offered for the payment operations only.
+    assert!(
+        err.message
+            .contains("A charge, authorization, capture, refund or reversal sent again with the same idempotency key"),
         "{}",
         err.message
     );
