@@ -213,6 +213,15 @@ pub fn get_default_rate_limit_config(integration_id: &str) -> Option<RateLimitCo
             max_retries: 3,
             max_wait_ms: 60000,
         }),
+        // Braintree publishes no request limit; the one it enforces answers a
+        // RESOURCE_LIMIT error. PayPal's 5 req/s with burst 10 for its sister.
+        "braintree_api_keys" => Some(RateLimitConfigDto {
+            requests_per_second: 5,
+            burst_size: 10,
+            retry_on_limit: true,
+            max_retries: 3,
+            max_wait_ms: 60000,
+        }),
         // Shippo: limits are per minute and per endpoint. Live tokens get 500 writes
         // and 50 list reads, test tokens 50 and 10. 5 req/s with burst 10 stays under
         // the live write limit; heavy listing or a test token relies on the 429 retry.
@@ -411,6 +420,14 @@ mod tests {
     #[test]
     fn test_magento_defaults() {
         let config = get_default_rate_limit_config("magento_access_token").unwrap();
+        assert_eq!(config.requests_per_second, 5);
+        assert_eq!(config.burst_size, 10);
+        assert!(config.retry_on_limit);
+    }
+
+    #[test]
+    fn test_braintree_defaults() {
+        let config = get_default_rate_limit_config("braintree_api_keys").unwrap();
         assert_eq!(config.requests_per_second, 5);
         assert_eq!(config.burst_size, 10);
         assert!(config.retry_on_limit);

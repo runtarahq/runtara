@@ -1,0 +1,29 @@
+mutation reverseTransaction($transactionId: ID!, $apiRequestKey: String) {
+  reverseTransaction(input: {transactionId: $transactionId, apiRequestKey: $apiRequestKey}) {
+    reversal {
+      __typename
+      ... on Transaction {
+        id
+        legacyId
+        status
+        amount {
+          value
+          currencyCode
+        }
+      }
+      ... on Refund {
+        id
+        legacyId
+        status
+        amount {
+          value
+          currencyCode
+        }
+        processorAuthorizationResponse {
+          legacyCode
+          message
+        }
+      }
+    }
+  }
+}

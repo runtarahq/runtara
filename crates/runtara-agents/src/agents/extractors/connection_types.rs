@@ -2795,6 +2795,103 @@ impl HttpConnectionExtractor for PaypalClientCredentialsExtractor {
 }
 
 // ============================================================================
+// Braintree Connection Type
+// ============================================================================
+
+/// The Braintree GraphQL API origin for an environment: `production`, or
+/// `sandbox` (Braintree's test environment, with its own account and keys).
+/// Anything else is an error, so credentialed requests can only ever go to
+/// one of the two Braintree hosts.
+pub fn braintree_base_url(environment: &str) -> Result<&'static str, String> {
+    match environment.trim().to_ascii_lowercase().as_str() {
+        "production" => Ok("https://payments.braintree-api.com"),
+        "sandbox" => Ok("https://payments.sandbox.braintree-api.com"),
+        _ => Err(format!(
+            "Invalid Braintree environment `{}`: use `production` or `sandbox`",
+            environment.trim()
+        )),
+    }
+}
+
+/// Braintree, authorized with an API key pair of a Control Panel user: the
+/// public key and private key as HTTP Basic on every request.
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "braintree_api_keys",
+    display_name = "Braintree",
+    description = "Connect to Braintree's GraphQL API with an API key pair (public and private key) from the Braintree Control Panel",
+    category = "payment",
+    auth_type = "api_key"
+)]
+pub struct BraintreeApiKeysParams {
+    /// Braintree environment
+    #[serde(default = "default_braintree_environment")]
+    #[field(
+        display_name = "Environment",
+        description = "production, or sandbox for Braintree's test environment (each has its own account and keys)",
+        default = "production",
+        enum_values = "production,sandbox"
+    )]
+    pub environment: String,
+
+    /// The API key pair's public key
+    #[field(
+        display_name = "Public Key",
+        description = "The Public Key of an API key pair: Braintree Control Panel → gear icon → API → API Keys, in the same environment",
+        is_required,
+        trim
+    )]
+    pub public_key: String,
+
+    /// The API key pair's private key
+    #[field(
+        display_name = "Private Key",
+        description = "The Private Key of the same pair: select View in its Private Key column",
+        secret,
+        is_required,
+        trim
+    )]
+    pub private_key: String,
+}
+
+fn default_braintree_environment() -> String {
+    "production".to_string()
+}
+
+/// HTTP extractor for Braintree connections.
+pub struct BraintreeExtractor;
+
+impl HttpConnectionExtractor for BraintreeExtractor {
+    fn integration_id(&self) -> &'static str {
+        "braintree_api_keys"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        let p: BraintreeApiKeysParams = serde_json::from_value(without_null_environment(params))
+            .map_err(|e| format!("Invalid braintree_api_keys connection parameters: {e}"))?;
+
+        // HTTP Basic with `public_key:private_key`. Both are trimmed, as a
+        // pasted value often ends in a newline.
+        let credentials = format!("{}:{}", p.public_key.trim(), p.private_key.trim());
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            format!(
+                "Basic {}",
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, credentials)
+            ),
+        );
+
+        Ok(HttpConnectionConfig {
+            headers,
+            query_parameters: HashMap::new(),
+            url_prefix: braintree_base_url(&p.environment)?.to_string(),
+            rate_limit_config: None,
+        })
+    }
+}
+
+// ============================================================================
 // MCP (Model Context Protocol) Connection Type
 // ============================================================================
 

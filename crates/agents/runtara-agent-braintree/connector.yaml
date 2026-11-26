@@ -1,0 +1,152 @@
+# Input to scripts/connector_gen/connector_gen.py; see its README.md.
+agent:
+  id: braintree
+  name: Braintree
+  description: >-
+    Braintree payments over its GraphQL API: charges, authorizations,
+    captures, refunds and reversals, transaction search, package tracking,
+    customers, the vault and disputes.
+  integration_id: braintree_api_keys
+  error_prefix: BRAINTREE
+  # Braintree publishes no request limit and answers one it enforces with a
+  # RESOURCE_LIMIT error: a step is retried 5 times by default rather than 3.
+  rate_limited: true
+# Braintree's API is GraphQL. Its schema needs credentials to introspect, so it
+# is read from the copy Braintree publishes with its changelog, pinned to a
+# commit; the pin is the sha256 of its sorted SDL.
+graphql:
+  schema:
+    url: https://raw.githubusercontent.com/braintree/graphql-api/eb3aaef7bb37e8cc60ba99818e8b468111282d56/schema.graphql
+    sha256: f16a71edba9e6c0e23fe9e9436b6e6e1e08079662e0c570c15ea2cf2a40b73f6
+  # Relative to the connection's https://payments[.sandbox].braintree-api.com.
+  path: /graphql
+  # Braintree's own scalars, as its reference describes them: amounts are
+  # decimal strings ("10.00"), times ISO 8601.
+  scalars:
+    Amount: string
+    Timestamp: {type: string, format: date-time}
+    Date: {type: string, format: date}
+    URL: {type: string, format: uri}
+    CurrencyCodeAlpha: string
+    EmailAddress: string
+    CountryCode: string
+    CountryCodeAlpha2: string
+labels:
+  paymentMethodId: Payment method
+  merchantAccountId: Merchant account
+  apiRequestKey: Idempotency key
+  orderId: Order ID
+operation_names:
+  ping:
+    name: ping
+    label: Check Connection
+    description: >-
+      Answers `pong` when the connection's keys are accepted: a check of the
+      connection that reads and changes nothing.
+  getTransaction:
+    name: getTransaction
+    description: >-
+      A transaction by its ID: its status and status history, amount, order
+      ID, the payment method it was made with, the processor's response, the
+      customer and its refunds. An ID that names no transaction fails as
+      BRAINTREE_NOT_FOUND.
+  searchTransactions:
+    name: searchTransactions
+    description: >-
+      Transactions matching every filter given: an order ID, a creation time
+      range and statuses. A page at a time: pass the previous page's
+      `endCursor` as `after` while `hasNextPage` is true.
+  chargePaymentMethod:
+    name: chargePaymentMethod
+    description: >-
+      Charges a payment method (a vaulted payment method's ID, or a nonce from
+      a client SDK) and submits the transaction for settlement. A charge the
+      processor declines or the gateway rejects fails as
+      BRAINTREE_PAYMENT_DECLINED, with the transaction's ID and status. The
+      same idempotency key with the same input answers the transaction the
+      first request made instead of charging again.
+  authorizePaymentMethod:
+    name: authorizePaymentMethod
+    description: >-
+      Authorizes a payment method for an amount without submitting it for
+      settlement; capture it later, or reverse it. A declined or rejected
+      authorization fails as BRAINTREE_PAYMENT_DECLINED, with the
+      transaction's ID and status. The same idempotency key with the same
+      input answers the first request's transaction.
+  captureTransaction:
+    name: captureTransaction
+    description: >-
+      Submits an authorized transaction for settlement, for its whole amount
+      or a smaller `amount`.
+  refundTransaction:
+    name: refundTransaction
+    description: >-
+      Refunds a settled (or settling) transaction, in full or for `amount`.
+      Answers the refund, itself a transaction with its own ID and status.
+  reverseTransaction:
+    name: reverseTransaction
+    description: >-
+      Undoes a transaction whatever its state: voids it if it is not settled
+      yet, refunds it in full otherwise. Answers the voided transaction or the
+      refund (`__typename` says which).
+  addPackageTracking:
+    name: addPackageTracking
+    description: >-
+      Adds a shipment's tracking number and carrier to a PayPal transaction,
+      which must have been submitted for settlement. PayPal uses it for seller
+      protection and can notify the payer.
+  createCustomer:
+    name: createCustomer
+    description: Creates a customer in the vault, to store payment methods under.
+  searchCustomers:
+    name: searchCustomers
+    description: >-
+      Customers whose email is the one given (all customers without it). A
+      page at a time: pass the previous page's `endCursor` as `after` while
+      `hasNextPage` is true.
+  searchDisputes:
+    name: searchDisputes
+    description: >-
+      Disputes (chargebacks, retrievals, pre-arbitrations) in the statuses
+      given (all disputes without them), with the transaction each is about.
+      A page at a time: pass the previous page's `endCursor` as `after` while
+      `hasNextPage` is true.
+  acceptDispute:
+    name: acceptDispute
+    description: >-
+      Accepts a dispute: the merchant concedes it, and it is closed as lost.
+  vaultPaymentMethod:
+    name: vaultPaymentMethod
+    description: >-
+      Stores a single-use payment method (a nonce from a client SDK) in the
+      vault, for the customer given, so that it can be charged again later.
+      Answers the stored payment method's ID.
+  deletePaymentMethodFromVault:
+    name: deletePaymentMethodFromVault
+    description: Deletes a payment method from the vault.
+  sandboxSettleTransaction:
+    name: sandboxSettleTransaction
+    label: Settle Transaction (Sandbox Only)
+    description: >-
+      Settles a transaction that was submitted for settlement, at once, in
+      Braintree's sandbox only (for testing a refund); fails in production.
+operations:
+  - ping
+  # Transactions
+  - getTransaction
+  - searchTransactions
+  - chargePaymentMethod
+  - authorizePaymentMethod
+  - captureTransaction
+  - refundTransaction
+  - reverseTransaction
+  - addPackageTracking
+  - sandboxSettleTransaction
+  # Customers and the vault
+  - createCustomer
+  - searchCustomers
+  - vaultPaymentMethod
+  - deletePaymentMethodFromVault
+  # Disputes
+  - searchDisputes
+  - acceptDispute

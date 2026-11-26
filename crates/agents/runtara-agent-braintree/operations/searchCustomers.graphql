@@ -1,0 +1,23 @@
+query searchCustomers($email: String, $first: Int = 50, $after: String) {
+  customers(input: {email: {is: $email}}, first: $first, after: $after) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    edges {
+      node {
+        id
+        legacyId
+        email
+        firstName
+        lastName
+        company
+        phoneNumber
+        createdAt
+        defaultPaymentMethod {
+          id
+        }
+      }
+    }
+  }
+}

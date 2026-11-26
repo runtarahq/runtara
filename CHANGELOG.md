@@ -13,6 +13,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Braintree agent, generated from Braintree's GraphQL schema.** Sixteen
+  capabilities: charge or authorize a payment method (a vaulted one's ID or a
+  client nonce), capture an authorization (in part too), refund a
+  transaction (in part too), and reverse one (a void before settlement, a
+  full refund after); read a transaction (its status history and refunds)
+  and search them by order ID, creation time and status, a page at a time;
+  add a shipment's tracking to a PayPal transaction; create and search
+  customers, vault a payment method for one and delete it; search and accept
+  disputes; check the connection (`ping`); and settle a transaction at once
+  in the sandbox. The schema is the one Braintree publishes with its
+  changelog (braintree/graphql-api), pinned to a commit, and every request
+  names that schema's date as its `Braintree-Version`. The new
+  `braintree_api_keys` connection type takes the environment (production or
+  sandbox) and an API key pair, both keys trimmed as they are saved; seal
+  sends them as HTTP Basic to that environment's host only. It is limited by
+  default to 5 requests/s with a burst of 10. A charge, authorization,
+  refund or reversal Braintree declines or rejects is no result but
+  `BRAINTREE_PAYMENT_DECLINED`, with the transaction's ID, status and the
+  processor's response, so a workflow never reads it as paid; reading a
+  declined transaction is no error. Charges and authorizations take an
+  idempotency key, which answers the first request's transaction when sent
+  again. A refused input is `BRAINTREE_VALIDATION_ERROR` (naming the input),
+  an unknown ID `BRAINTREE_NOT_FOUND`, and Braintree's limit a retried
+  `BRAINTREE_RATE_LIMITED`; a write that gets no answer, a 5xx or an
+  internal error fails with `BRAINTREE_OUTCOME_UNKNOWN` instead of being sent
+  again. Not covered: webhooks, client tokens and Drop-in, subscriptions,
+  in-store readers, and the legacy XML gateway API.
+
 - **Shopware agent, generated from Shopware's Admin API spec.** Seventeen
   capabilities: search and read orders, update them and their deliveries
   (tracking codes), and move an order, a delivery or a payment to another

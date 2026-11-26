@@ -1,0 +1,8 @@
+mutation sandboxSettleTransaction($transactionId: ID!) {
+  sandboxSettleTransaction(input: {transactionId: $transactionId}) {
+    transaction {
+      id
+      status
+    }
+  }
+}

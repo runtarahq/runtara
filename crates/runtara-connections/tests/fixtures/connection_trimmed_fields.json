@@ -26,6 +26,15 @@
     ]
   },
   {
+    "integrationId": "braintree_api_keys",
+    "trimmedByTheServer": [
+      "public_key"
+    ],
+    "trimmedFields": [
+      "private_key"
+    ]
+  },
+  {
     "integrationId": "ebay_oauth",
     "trimmedByTheServer": [
       "client_id"

@@ -1,0 +1,3869 @@
+{
+  "components": {
+    "schemas": {
+      "AcceptDisputeDispute": {
+        "description": "A case raised by a customer to either request information about or to challenge a charge. These are initiated via a customer's payment provider, such as their bank, and require a merchant to provide evidence or further information.",
+        "properties": {
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          },
+          "legacyId": {
+            "description": "Legacy unique identifier.",
+            "type": "string",
+            "x-runtara-label": "Legacy ID"
+          },
+          "status": {
+            "description": "The status of the dispute.",
+            "enum": [
+              "ACCEPTED",
+              "AUTO_ACCEPTED",
+              "DISPUTED",
+              "EXPIRED",
+              "LOST",
+              "OPEN",
+              "UNDER_REVIEW",
+              "WON"
+            ],
+            "type": "string",
+            "x-runtara-label": "Status"
+          }
+        },
+        "type": "object"
+      },
+      "AcceptDisputeResult": {
+        "description": "Top-level field returned when accepting a dispute.",
+        "properties": {
+          "dispute": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AcceptDisputeDispute"
+              }
+            ],
+            "description": "Information about the dispute that was accepted.",
+            "x-runtara-label": "Dispute"
+          }
+        },
+        "type": "object"
+      },
+      "AddPackageTrackingPackageTracker": {
+        "description": "Data for an individual package tracker on a PayPal transaction.",
+        "properties": {
+          "carrier": {
+            "description": "Shipping carrier.",
+            "type": "string",
+            "x-runtara-label": "Carrier"
+          },
+          "id": {
+            "description": "Unique identifier for the tracker.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          },
+          "paypalTrackerId": {
+            "description": "PayPal assigned identifier for this tracker. This field may not be immediately available, but will be available when querying the transaction at a later time. This field is only available for PayPal transactions.",
+            "type": "string",
+            "x-runtara-label": "Paypal Tracker ID"
+          },
+          "trackingNumber": {
+            "description": "Tracking number for this package.",
+            "type": "string",
+            "x-runtara-label": "Tracking Number"
+          }
+        },
+        "type": "object"
+      },
+      "AddPackageTrackingResult": {
+        "description": "Top-level output field from creating a transaction package tracker.",
+        "properties": {
+          "packageTracker": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AddPackageTrackingPackageTracker"
+              }
+            ],
+            "description": "The package tracker created during the request.",
+            "x-runtara-label": "Package Tracker"
+          },
+          "transaction": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AddPackageTrackingTransaction"
+              }
+            ],
+            "description": "The representing of the transaction for which the tracker was added.",
+            "x-runtara-label": "Transaction"
+          }
+        },
+        "type": "object"
+      },
+      "AddPackageTrackingTransaction": {
+        "description": "A charge on a payment method.",
+        "properties": {
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          },
+          "status": {
+            "description": "The current status of this transaction.",
+            "enum": [
+              "AUTHORIZATION_EXPIRED",
+              "AUTHORIZED",
+              "AUTHORIZING",
+              "FAILED",
+              "GATEWAY_REJECTED",
+              "PROCESSOR_DECLINED",
+              "SETTLED",
+              "SETTLEMENT_CONFIRMED",
+              "SETTLEMENT_DECLINED",
+              "SETTLEMENT_PENDING",
+              "SETTLING",
+              "SUBMITTED_FOR_SETTLEMENT",
+              "VOIDED"
+            ],
+            "type": "string",
+            "x-runtara-label": "Status"
+          }
+        },
+        "type": "object"
+      },
+      "AuthorizePaymentMethodResult": {
+        "description": "Top-level output field from creating a transaction.",
+        "properties": {
+          "transaction": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AuthorizePaymentMethodTransaction"
+              }
+            ],
+            "description": "The transaction representing the charge on the payment method.",
+            "x-runtara-label": "Transaction"
+          }
+        },
+        "type": "object"
+      },
+      "AuthorizePaymentMethodTransaction": {
+        "description": "A charge on a payment method.",
+        "properties": {
+          "amount": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AuthorizePaymentMethodTransactionAmount"
+              }
+            ],
+            "description": "The amount charged in this transaction. For transactions that are partially captured, this amount will be the cummulative amount captured on this transaction. For transactions that are partially authorized, the amount will be less than the `initialRequestedAuthorizationAmount`.",
+            "x-runtara-label": "Amount"
+          },
+          "createdAt": {
+            "description": "Date and time when the transaction was created.",
+            "format": "date-time",
+            "type": "string",
+            "x-runtara-label": "Created At"
+          },
+          "customer": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AuthorizePaymentMethodTransactionCustomer"
+              }
+            ],
+            "description": "Customer associated with the transaction, if applicable.",
+            "x-runtara-label": "Customer"
+          },
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          },
+          "legacyId": {
+            "description": "Legacy unique identifier.",
+            "type": "string",
+            "x-runtara-label": "Legacy ID"
+          },
+          "merchantAccountId": {
+            "description": "The ID of the merchant account that processed this transaction.",
+            "type": "string",
+            "x-runtara-label": "Merchant account"
+          },
+          "orderId": {
+            "description": "The order ID for this transaction. For PayPal transactions, the PayPal Invoice ID.",
+            "type": "string",
+            "x-runtara-label": "Order ID"
+          },
+          "paymentMethodSnapshot": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AuthorizePaymentMethodTransactionPaymentMethodSnapshot"
+              }
+            ],
+            "description": "Snapshot of payment method details used to create the transaction, preserved at the time the transaction was created. This will always be present.",
+            "x-runtara-label": "Payment Method Snapshot"
+          },
+          "processorAuthorizationResponse": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AuthorizePaymentMethodTransactionProcessorAuthorizationResponse"
+              }
+            ],
+            "description": "Fields describing the payment authorization processor response.",
+            "x-runtara-label": "Processor Authorization Response"
+          },
+          "status": {
+            "description": "The current status of this transaction.",
+            "enum": [
+              "AUTHORIZATION_EXPIRED",
+              "AUTHORIZED",
+              "AUTHORIZING",
+              "FAILED",
+              "GATEWAY_REJECTED",
+              "PROCESSOR_DECLINED",
+              "SETTLED",
+              "SETTLEMENT_CONFIRMED",
+              "SETTLEMENT_DECLINED",
+              "SETTLEMENT_PENDING",
+              "SETTLING",
+              "SUBMITTED_FOR_SETTLEMENT",
+              "VOIDED"
+            ],
+            "type": "string",
+            "x-runtara-label": "Status"
+          }
+        },
+        "type": "object"
+      },
+      "AuthorizePaymentMethodTransactionAmount": {
+        "description": "A monetary amount with currency.",
+        "properties": {
+          "currencyCode": {
+            "description": "The currency code for the monetary amount.",
+            "type": "string",
+            "x-runtara-label": "Currency Code"
+          },
+          "value": {
+            "description": "The amount of money, either a whole number or a number with up to 3 decimal places.",
+            "type": "string",
+            "x-runtara-label": "Value"
+          }
+        },
+        "type": "object"
+      },
+      "AuthorizePaymentMethodTransactionCustomer": {
+        "description": "Information about a customer and their associated payment methods and transactions.",
+        "properties": {
+          "email": {
+            "description": "Email address for this customer.",
+            "type": "string",
+            "x-runtara-label": "Email"
+          },
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          }
+        },
+        "type": "object"
+      },
+      "AuthorizePaymentMethodTransactionPaymentMethodSnapshot": {
+        "description": "A union of all possible payment method details as they were used in a transaction or verification. PaymentMethodSnapshot preserves values used to create a given transaction or verify a payment method at that moment in time.",
+        "properties": {
+          "__typename": {
+            "description": "The object's GraphQL type name.",
+            "type": "string",
+            "x-runtara-label": "Typename"
+          },
+          "authorizationId": {
+            "description": "If the transaction was successfully authorized, the PayPal ID for the authorization.",
+            "type": "string",
+            "x-runtara-label": "Authorization ID"
+          },
+          "brandCode": {
+            "description": "A static code identifying the card brand.",
+            "enum": [
+              "AMERICAN_EXPRESS",
+              "CITI",
+              "DINERS",
+              "DISCOVER",
+              "ELO",
+              "HIPER",
+              "HIPERCARD",
+              "INTERNATIONAL_MAESTRO",
+              "JCB",
+              "MASTERCARD",
+              "NARANJA",
+              "SOLO",
+              "SWITCH",
+              "TROY",
+              "UK_MAESTRO",
+              "UNION_PAY",
+              "UNKNOWN",
+              "VERVE",
+              "VISA",
+              "american_express",
+              "citi",
+              "diners",
+              "discover",
+              "elo",
+              "hiper",
+              "hipercard",
+              "international_maestro",
+              "jcb",
+              "mastercard",
+              "naranja",
+              "solo",
+              "switch",
+              "troy",
+              "uk_maestro",
+              "union_pay",
+              "unknown",
+              "verve",
+              "visa"
+            ],
+            "type": "string",
+            "x-runtara-label": "Brand Code"
+          },
+          "captureId": {
+            "description": "If funds for the transaction have settled, the PayPal ID for the capture of funds.",
+            "type": "string",
+            "x-runtara-label": "Capture ID"
+          },
+          "creditCard": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AuthorizePaymentMethodTransactionPaymentMethodSnapshotCreditCard"
+              }
+            ],
+            "description": "The details of the credit card itself.",
+            "x-runtara-label": "Credit Card"
+          },
+          "expirationMonth": {
+            "description": "The month of the expiration date, formatted MM.",
+            "type": "string",
+            "x-runtara-label": "Expiration Month"
+          },
+          "expirationYear": {
+            "description": "The year of the expiration date, formatted YYYY.",
+            "type": "string",
+            "x-runtara-label": "Expiration Year"
+          },
+          "last4": {
+            "description": "The last four digits of the card number.",
+            "type": "string",
+            "x-runtara-label": "Last4"
+          },
+          "payer": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AuthorizePaymentMethodTransactionPaymentMethodSnapshotPayer"
+              }
+            ],
+            "description": "Details about the payer or owner of the PayPal account.",
+            "x-runtara-label": "Payer"
+          }
+        },
+        "type": "object"
+      },
+      "AuthorizePaymentMethodTransactionPaymentMethodSnapshotCreditCard": {
+        "description": "Details about a credit card.",
+        "properties": {
+          "brandCode": {
+            "description": "A static code identifying the card brand.",
+            "enum": [
+              "AMERICAN_EXPRESS",
+              "CITI",
+              "DINERS",
+              "DISCOVER",
+              "ELO",
+              "HIPER",
+              "HIPERCARD",
+              "INTERNATIONAL_MAESTRO",
+              "JCB",
+              "MASTERCARD",
+              "NARANJA",
+              "SOLO",
+              "SWITCH",
+              "TROY",
+              "UK_MAESTRO",
+              "UNION_PAY",
+              "UNKNOWN",
+              "VERVE",
+              "VISA",
+              "american_express",
+              "citi",
+              "diners",
+              "discover",
+              "elo",
+              "hiper",
+              "hipercard",
+              "international_maestro",
+              "jcb",
+              "mastercard",
+              "naranja",
+              "solo",
+              "switch",
+              "troy",
+              "uk_maestro",
+              "union_pay",
+              "unknown",
+              "verve",
+              "visa"
+            ],
+            "type": "string",
+            "x-runtara-label": "Brand Code"
+          },
+          "expirationMonth": {
+            "description": "The month of the expiration date, formatted MM.",
+            "type": "string",
+            "x-runtara-label": "Expiration Month"
+          },
+          "expirationYear": {
+            "description": "The year of the expiration date, formatted YYYY.",
+            "type": "string",
+            "x-runtara-label": "Expiration Year"
+          },
+          "last4": {
+            "description": "The last four digits of the card number.",
+            "type": "string",
+            "x-runtara-label": "Last4"
+          }
+        },
+        "type": "object"
+      },
+      "AuthorizePaymentMethodTransactionPaymentMethodSnapshotPayer": {
+        "description": "Details about a PayPal account.",
+        "properties": {
+          "email": {
+            "description": "The email address associated with the PayPal account.",
+            "type": "string",
+            "x-runtara-label": "Email"
+          },
+          "payerId": {
+            "description": "The PayPal ID of the PayPal account.",
+            "type": "string",
+            "x-runtara-label": "Payer ID"
+          }
+        },
+        "type": "object"
+      },
+      "AuthorizePaymentMethodTransactionProcessorAuthorizationResponse": {
+        "description": "Detailed response information from the processor when attempting to authorize a transaction.",
+        "properties": {
+          "avsPostalCodeResponse": {
+            "description": "The processing bank's response to the provided billing postal or zip code.",
+            "enum": [
+              "BYPASS",
+              "DOES_NOT_MATCH",
+              "ISSUER_DOES_NOT_PARTICIPATE",
+              "MATCHES",
+              "NOT_APPLICABLE",
+              "NOT_PROVIDED",
+              "NOT_VERIFIED",
+              "SYSTEM_ERROR"
+            ],
+            "type": "string",
+            "x-runtara-label": "Avs Postal Code Response"
+          },
+          "avsStreetAddressResponse": {
+            "description": "The processing bank's response to the provided billing street address.",
+            "enum": [
+              "BYPASS",
+              "DOES_NOT_MATCH",
+              "ISSUER_DOES_NOT_PARTICIPATE",
+              "MATCHES",
+              "NOT_APPLICABLE",
+              "NOT_PROVIDED",
+              "NOT_VERIFIED",
+              "SYSTEM_ERROR"
+            ],
+            "type": "string",
+            "x-runtara-label": "Avs Street Address Response"
+          },
+          "cvvResponse": {
+            "description": "The processing bank's response to the provided CVV.",
+            "enum": [
+              "BYPASS",
+              "DOES_NOT_MATCH",
+              "ISSUER_DOES_NOT_PARTICIPATE",
+              "MATCHES",
+              "NOT_APPLICABLE",
+              "NOT_PROVIDED",
+              "NOT_VERIFIED",
+              "SYSTEM_ERROR"
+            ],
+            "type": "string",
+            "x-runtara-label": "Cvv Response"
+          },
+          "legacyCode": {
+            "description": "A code based on the response from the processor, indicating the result of attempting to authorize this transaction. See the [list of possible processor response codes for authorization](https://developers.braintreepayments.com/reference/general/processor-responses/authorization-responses).",
+            "type": "string",
+            "x-runtara-label": "Legacy Code"
+          },
+          "message": {
+            "description": "The text explanation of the processor response legacyCode.",
+            "type": "string",
+            "x-runtara-label": "Message"
+          }
+        },
+        "type": "object"
+      },
+      "CaptureTransactionResult": {
+        "description": "Top-level output field from creating a transaction.",
+        "properties": {
+          "transaction": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CaptureTransactionTransaction"
+              }
+            ],
+            "description": "The transaction representing the charge on the payment method.",
+            "x-runtara-label": "Transaction"
+          }
+        },
+        "type": "object"
+      },
+      "CaptureTransactionTransaction": {
+        "description": "A charge on a payment method.",
+        "properties": {
+          "amount": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CaptureTransactionTransactionAmount"
+              }
+            ],
+            "description": "The amount charged in this transaction. For transactions that are partially captured, this amount will be the cummulative amount captured on this transaction. For transactions that are partially authorized, the amount will be less than the `initialRequestedAuthorizationAmount`.",
+            "x-runtara-label": "Amount"
+          },
+          "createdAt": {
+            "description": "Date and time when the transaction was created.",
+            "format": "date-time",
+            "type": "string",
+            "x-runtara-label": "Created At"
+          },
+          "customer": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CaptureTransactionTransactionCustomer"
+              }
+            ],
+            "description": "Customer associated with the transaction, if applicable.",
+            "x-runtara-label": "Customer"
+          },
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          },
+          "legacyId": {
+            "description": "Legacy unique identifier.",
+            "type": "string",
+            "x-runtara-label": "Legacy ID"
+          },
+          "merchantAccountId": {
+            "description": "The ID of the merchant account that processed this transaction.",
+            "type": "string",
+            "x-runtara-label": "Merchant account"
+          },
+          "orderId": {
+            "description": "The order ID for this transaction. For PayPal transactions, the PayPal Invoice ID.",
+            "type": "string",
+            "x-runtara-label": "Order ID"
+          },
+          "paymentMethodSnapshot": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CaptureTransactionTransactionPaymentMethodSnapshot"
+              }
+            ],
+            "description": "Snapshot of payment method details used to create the transaction, preserved at the time the transaction was created. This will always be present.",
+            "x-runtara-label": "Payment Method Snapshot"
+          },
+          "processorAuthorizationResponse": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CaptureTransactionTransactionProcessorAuthorizationResponse"
+              }
+            ],
+            "description": "Fields describing the payment authorization processor response.",
+            "x-runtara-label": "Processor Authorization Response"
+          },
+          "status": {
+            "description": "The current status of this transaction.",
+            "enum": [
+              "AUTHORIZATION_EXPIRED",
+              "AUTHORIZED",
+              "AUTHORIZING",
+              "FAILED",
+              "GATEWAY_REJECTED",
+              "PROCESSOR_DECLINED",
+              "SETTLED",
+              "SETTLEMENT_CONFIRMED",
+              "SETTLEMENT_DECLINED",
+              "SETTLEMENT_PENDING",
+              "SETTLING",
+              "SUBMITTED_FOR_SETTLEMENT",
+              "VOIDED"
+            ],
+            "type": "string",
+            "x-runtara-label": "Status"
+          }
+        },
+        "type": "object"
+      },
+      "CaptureTransactionTransactionAmount": {
+        "description": "A monetary amount with currency.",
+        "properties": {
+          "currencyCode": {
+            "description": "The currency code for the monetary amount.",
+            "type": "string",
+            "x-runtara-label": "Currency Code"
+          },
+          "value": {
+            "description": "The amount of money, either a whole number or a number with up to 3 decimal places.",
+            "type": "string",
+            "x-runtara-label": "Value"
+          }
+        },
+        "type": "object"
+      },
+      "CaptureTransactionTransactionCustomer": {
+        "description": "Information about a customer and their associated payment methods and transactions.",
+        "properties": {
+          "email": {
+            "description": "Email address for this customer.",
+            "type": "string",
+            "x-runtara-label": "Email"
+          },
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          }
+        },
+        "type": "object"
+      },
+      "CaptureTransactionTransactionPaymentMethodSnapshot": {
+        "description": "A union of all possible payment method details as they were used in a transaction or verification. PaymentMethodSnapshot preserves values used to create a given transaction or verify a payment method at that moment in time.",
+        "properties": {
+          "__typename": {
+            "description": "The object's GraphQL type name.",
+            "type": "string",
+            "x-runtara-label": "Typename"
+          },
+          "authorizationId": {
+            "description": "If the transaction was successfully authorized, the PayPal ID for the authorization.",
+            "type": "string",
+            "x-runtara-label": "Authorization ID"
+          },
+          "brandCode": {
+            "description": "A static code identifying the card brand.",
+            "enum": [
+              "AMERICAN_EXPRESS",
+              "CITI",
+              "DINERS",
+              "DISCOVER",
+              "ELO",
+              "HIPER",
+              "HIPERCARD",
+              "INTERNATIONAL_MAESTRO",
+              "JCB",
+              "MASTERCARD",
+              "NARANJA",
+              "SOLO",
+              "SWITCH",
+              "TROY",
+              "UK_MAESTRO",
+              "UNION_PAY",
+              "UNKNOWN",
+              "VERVE",
+              "VISA",
+              "american_express",
+              "citi",
+              "diners",
+              "discover",
+              "elo",
+              "hiper",
+              "hipercard",
+              "international_maestro",
+              "jcb",
+              "mastercard",
+              "naranja",
+              "solo",
+              "switch",
+              "troy",
+              "uk_maestro",
+              "union_pay",
+              "unknown",
+              "verve",
+              "visa"
+            ],
+            "type": "string",
+            "x-runtara-label": "Brand Code"
+          },
+          "captureId": {
+            "description": "If funds for the transaction have settled, the PayPal ID for the capture of funds.",
+            "type": "string",
+            "x-runtara-label": "Capture ID"
+          },
+          "creditCard": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CaptureTransactionTransactionPaymentMethodSnapshotCreditCard"
+              }
+            ],
+            "description": "The details of the credit card itself.",
+            "x-runtara-label": "Credit Card"
+          },
+          "expirationMonth": {
+            "description": "The month of the expiration date, formatted MM.",
+            "type": "string",
+            "x-runtara-label": "Expiration Month"
+          },
+          "expirationYear": {
+            "description": "The year of the expiration date, formatted YYYY.",
+            "type": "string",
+            "x-runtara-label": "Expiration Year"
+          },
+          "last4": {
+            "description": "The last four digits of the card number.",
+            "type": "string",
+            "x-runtara-label": "Last4"
+          },
+          "payer": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CaptureTransactionTransactionPaymentMethodSnapshotPayer"
+              }
+            ],
+            "description": "Details about the payer or owner of the PayPal account.",
+            "x-runtara-label": "Payer"
+          }
+        },
+        "type": "object"
+      },
+      "CaptureTransactionTransactionPaymentMethodSnapshotCreditCard": {
+        "description": "Details about a credit card.",
+        "properties": {
+          "brandCode": {
+            "description": "A static code identifying the card brand.",
+            "enum": [
+              "AMERICAN_EXPRESS",
+              "CITI",
+              "DINERS",
+              "DISCOVER",
+              "ELO",
+              "HIPER",
+              "HIPERCARD",
+              "INTERNATIONAL_MAESTRO",
+              "JCB",
+              "MASTERCARD",
+              "NARANJA",
+              "SOLO",
+              "SWITCH",
+              "TROY",
+              "UK_MAESTRO",
+              "UNION_PAY",
+              "UNKNOWN",
+              "VERVE",
+              "VISA",
+              "american_express",
+              "citi",
+              "diners",
+              "discover",
+              "elo",
+              "hiper",
+              "hipercard",
+              "international_maestro",
+              "jcb",
+              "mastercard",
+              "naranja",
+              "solo",
+              "switch",
+              "troy",
+              "uk_maestro",
+              "union_pay",
+              "unknown",
+              "verve",
+              "visa"
+            ],
+            "type": "string",
+            "x-runtara-label": "Brand Code"
+          },
+          "expirationMonth": {
+            "description": "The month of the expiration date, formatted MM.",
+            "type": "string",
+            "x-runtara-label": "Expiration Month"
+          },
+          "expirationYear": {
+            "description": "The year of the expiration date, formatted YYYY.",
+            "type": "string",
+            "x-runtara-label": "Expiration Year"
+          },
+          "last4": {
+            "description": "The last four digits of the card number.",
+            "type": "string",
+            "x-runtara-label": "Last4"
+          }
+        },
+        "type": "object"
+      },
+      "CaptureTransactionTransactionPaymentMethodSnapshotPayer": {
+        "description": "Details about a PayPal account.",
+        "properties": {
+          "email": {
+            "description": "The email address associated with the PayPal account.",
+            "type": "string",
+            "x-runtara-label": "Email"
+          },
+          "payerId": {
+            "description": "The PayPal ID of the PayPal account.",
+            "type": "string",
+            "x-runtara-label": "Payer ID"
+          }
+        },
+        "type": "object"
+      },
+      "CaptureTransactionTransactionProcessorAuthorizationResponse": {
+        "description": "Detailed response information from the processor when attempting to authorize a transaction.",
+        "properties": {
+          "avsPostalCodeResponse": {
+            "description": "The processing bank's response to the provided billing postal or zip code.",
+            "enum": [
+              "BYPASS",
+              "DOES_NOT_MATCH",
+              "ISSUER_DOES_NOT_PARTICIPATE",
+              "MATCHES",
+              "NOT_APPLICABLE",
+              "NOT_PROVIDED",
+              "NOT_VERIFIED",
+              "SYSTEM_ERROR"
+            ],
+            "type": "string",
+            "x-runtara-label": "Avs Postal Code Response"
+          },
+          "avsStreetAddressResponse": {
+            "description": "The processing bank's response to the provided billing street address.",
+            "enum": [
+              "BYPASS",
+              "DOES_NOT_MATCH",
+              "ISSUER_DOES_NOT_PARTICIPATE",
+              "MATCHES",
+              "NOT_APPLICABLE",
+              "NOT_PROVIDED",
+              "NOT_VERIFIED",
+              "SYSTEM_ERROR"
+            ],
+            "type": "string",
+            "x-runtara-label": "Avs Street Address Response"
+          },
+          "cvvResponse": {
+            "description": "The processing bank's response to the provided CVV.",
+            "enum": [
+              "BYPASS",
+              "DOES_NOT_MATCH",
+              "ISSUER_DOES_NOT_PARTICIPATE",
+              "MATCHES",
+              "NOT_APPLICABLE",
+              "NOT_PROVIDED",
+              "NOT_VERIFIED",
+              "SYSTEM_ERROR"
+            ],
+            "type": "string",
+            "x-runtara-label": "Cvv Response"
+          },
+          "legacyCode": {
+            "description": "A code based on the response from the processor, indicating the result of attempting to authorize this transaction. See the [list of possible processor response codes for authorization](https://developers.braintreepayments.com/reference/general/processor-responses/authorization-responses).",
+            "type": "string",
+            "x-runtara-label": "Legacy Code"
+          },
+          "message": {
+            "description": "The text explanation of the processor response legacyCode.",
+            "type": "string",
+            "x-runtara-label": "Message"
+          }
+        },
+        "type": "object"
+      },
+      "ChargePaymentMethodResult": {
+        "description": "Top-level output field from creating a transaction.",
+        "properties": {
+          "transaction": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChargePaymentMethodTransaction"
+              }
+            ],
+            "description": "The transaction representing the charge on the payment method.",
+            "x-runtara-label": "Transaction"
+          }
+        },
+        "type": "object"
+      },
+      "ChargePaymentMethodTransaction": {
+        "description": "A charge on a payment method.",
+        "properties": {
+          "amount": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChargePaymentMethodTransactionAmount"
+              }
+            ],
+            "description": "The amount charged in this transaction. For transactions that are partially captured, this amount will be the cummulative amount captured on this transaction. For transactions that are partially authorized, the amount will be less than the `initialRequestedAuthorizationAmount`.",
+            "x-runtara-label": "Amount"
+          },
+          "createdAt": {
+            "description": "Date and time when the transaction was created.",
+            "format": "date-time",
+            "type": "string",
+            "x-runtara-label": "Created At"
+          },
+          "customer": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChargePaymentMethodTransactionCustomer"
+              }
+            ],
+            "description": "Customer associated with the transaction, if applicable.",
+            "x-runtara-label": "Customer"
+          },
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          },
+          "legacyId": {
+            "description": "Legacy unique identifier.",
+            "type": "string",
+            "x-runtara-label": "Legacy ID"
+          },
+          "merchantAccountId": {
+            "description": "The ID of the merchant account that processed this transaction.",
+            "type": "string",
+            "x-runtara-label": "Merchant account"
+          },
+          "orderId": {
+            "description": "The order ID for this transaction. For PayPal transactions, the PayPal Invoice ID.",
+            "type": "string",
+            "x-runtara-label": "Order ID"
+          },
+          "paymentMethodSnapshot": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChargePaymentMethodTransactionPaymentMethodSnapshot"
+              }
+            ],
+            "description": "Snapshot of payment method details used to create the transaction, preserved at the time the transaction was created. This will always be present.",
+            "x-runtara-label": "Payment Method Snapshot"
+          },
+          "processorAuthorizationResponse": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChargePaymentMethodTransactionProcessorAuthorizationResponse"
+              }
+            ],
+            "description": "Fields describing the payment authorization processor response.",
+            "x-runtara-label": "Processor Authorization Response"
+          },
+          "status": {
+            "description": "The current status of this transaction.",
+            "enum": [
+              "AUTHORIZATION_EXPIRED",
+              "AUTHORIZED",
+              "AUTHORIZING",
+              "FAILED",
+              "GATEWAY_REJECTED",
+              "PROCESSOR_DECLINED",
+              "SETTLED",
+              "SETTLEMENT_CONFIRMED",
+              "SETTLEMENT_DECLINED",
+              "SETTLEMENT_PENDING",
+              "SETTLING",
+              "SUBMITTED_FOR_SETTLEMENT",
+              "VOIDED"
+            ],
+            "type": "string",
+            "x-runtara-label": "Status"
+          }
+        },
+        "type": "object"
+      },
+      "ChargePaymentMethodTransactionAmount": {
+        "description": "A monetary amount with currency.",
+        "properties": {
+          "currencyCode": {
+            "description": "The currency code for the monetary amount.",
+            "type": "string",
+            "x-runtara-label": "Currency Code"
+          },
+          "value": {
+            "description": "The amount of money, either a whole number or a number with up to 3 decimal places.",
+            "type": "string",
+            "x-runtara-label": "Value"
+          }
+        },
+        "type": "object"
+      },
+      "ChargePaymentMethodTransactionCustomer": {
+        "description": "Information about a customer and their associated payment methods and transactions.",
+        "properties": {
+          "email": {
+            "description": "Email address for this customer.",
+            "type": "string",
+            "x-runtara-label": "Email"
+          },
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          }
+        },
+        "type": "object"
+      },
+      "ChargePaymentMethodTransactionPaymentMethodSnapshot": {
+        "description": "A union of all possible payment method details as they were used in a transaction or verification. PaymentMethodSnapshot preserves values used to create a given transaction or verify a payment method at that moment in time.",
+        "properties": {
+          "__typename": {
+            "description": "The object's GraphQL type name.",
+            "type": "string",
+            "x-runtara-label": "Typename"
+          },
+          "authorizationId": {
+            "description": "If the transaction was successfully authorized, the PayPal ID for the authorization.",
+            "type": "string",
+            "x-runtara-label": "Authorization ID"
+          },
+          "brandCode": {
+            "description": "A static code identifying the card brand.",
+            "enum": [
+              "AMERICAN_EXPRESS",
+              "CITI",
+              "DINERS",
+              "DISCOVER",
+              "ELO",
+              "HIPER",
+              "HIPERCARD",
+              "INTERNATIONAL_MAESTRO",
+              "JCB",
+              "MASTERCARD",
+              "NARANJA",
+              "SOLO",
+              "SWITCH",
+              "TROY",
+              "UK_MAESTRO",
+              "UNION_PAY",
+              "UNKNOWN",
+              "VERVE",
+              "VISA",
+              "american_express",
+              "citi",
+              "diners",
+              "discover",
+              "elo",
+              "hiper",
+              "hipercard",
+              "international_maestro",
+              "jcb",
+              "mastercard",
+              "naranja",
+              "solo",
+              "switch",
+              "troy",
+              "uk_maestro",
+              "union_pay",
+              "unknown",
+              "verve",
+              "visa"
+            ],
+            "type": "string",
+            "x-runtara-label": "Brand Code"
+          },
+          "captureId": {
+            "description": "If funds for the transaction have settled, the PayPal ID for the capture of funds.",
+            "type": "string",
+            "x-runtara-label": "Capture ID"
+          },
+          "creditCard": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChargePaymentMethodTransactionPaymentMethodSnapshotCreditCard"
+              }
+            ],
+            "description": "The details of the credit card itself.",
+            "x-runtara-label": "Credit Card"
+          },
+          "expirationMonth": {
+            "description": "The month of the expiration date, formatted MM.",
+            "type": "string",
+            "x-runtara-label": "Expiration Month"
+          },
+          "expirationYear": {
+            "description": "The year of the expiration date, formatted YYYY.",
+            "type": "string",
+            "x-runtara-label": "Expiration Year"
+          },
+          "last4": {
+            "description": "The last four digits of the card number.",
+            "type": "string",
+            "x-runtara-label": "Last4"
+          },
+          "payer": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ChargePaymentMethodTransactionPaymentMethodSnapshotPayer"
+              }
+            ],
+            "description": "Details about the payer or owner of the PayPal account.",
+            "x-runtara-label": "Payer"
+          }
+        },
+        "type": "object"
+      },
+      "ChargePaymentMethodTransactionPaymentMethodSnapshotCreditCard": {
+        "description": "Details about a credit card.",
+        "properties": {
+          "brandCode": {
+            "description": "A static code identifying the card brand.",
+            "enum": [
+              "AMERICAN_EXPRESS",
+              "CITI",
+              "DINERS",
+              "DISCOVER",
+              "ELO",
+              "HIPER",
+              "HIPERCARD",
+              "INTERNATIONAL_MAESTRO",
+              "JCB",
+              "MASTERCARD",
+              "NARANJA",
+              "SOLO",
+              "SWITCH",
+              "TROY",
+              "UK_MAESTRO",
+              "UNION_PAY",
+              "UNKNOWN",
+              "VERVE",
+              "VISA",
+              "american_express",
+              "citi",
+              "diners",
+              "discover",
+              "elo",
+              "hiper",
+              "hipercard",
+              "international_maestro",
+              "jcb",
+              "mastercard",
+              "naranja",
+              "solo",
+              "switch",
+              "troy",
+              "uk_maestro",
+              "union_pay",
+              "unknown",
+              "verve",
+              "visa"
+            ],
+            "type": "string",
+            "x-runtara-label": "Brand Code"
+          },
+          "expirationMonth": {
+            "description": "The month of the expiration date, formatted MM.",
+            "type": "string",
+            "x-runtara-label": "Expiration Month"
+          },
+          "expirationYear": {
+            "description": "The year of the expiration date, formatted YYYY.",
+            "type": "string",
+            "x-runtara-label": "Expiration Year"
+          },
+          "last4": {
+            "description": "The last four digits of the card number.",
+            "type": "string",
+            "x-runtara-label": "Last4"
+          }
+        },
+        "type": "object"
+      },
+      "ChargePaymentMethodTransactionPaymentMethodSnapshotPayer": {
+        "description": "Details about a PayPal account.",
+        "properties": {
+          "email": {
+            "description": "The email address associated with the PayPal account.",
+            "type": "string",
+            "x-runtara-label": "Email"
+          },
+          "payerId": {
+            "description": "The PayPal ID of the PayPal account.",
+            "type": "string",
+            "x-runtara-label": "Payer ID"
+          }
+        },
+        "type": "object"
+      },
+      "ChargePaymentMethodTransactionProcessorAuthorizationResponse": {
+        "description": "Detailed response information from the processor when attempting to authorize a transaction.",
+        "properties": {
+          "avsPostalCodeResponse": {
+            "description": "The processing bank's response to the provided billing postal or zip code.",
+            "enum": [
+              "BYPASS",
+              "DOES_NOT_MATCH",
+              "ISSUER_DOES_NOT_PARTICIPATE",
+              "MATCHES",
+              "NOT_APPLICABLE",
+              "NOT_PROVIDED",
+              "NOT_VERIFIED",
+              "SYSTEM_ERROR"
+            ],
+            "type": "string",
+            "x-runtara-label": "Avs Postal Code Response"
+          },
+          "avsStreetAddressResponse": {
+            "description": "The processing bank's response to the provided billing street address.",
+            "enum": [
+              "BYPASS",
+              "DOES_NOT_MATCH",
+              "ISSUER_DOES_NOT_PARTICIPATE",
+              "MATCHES",
+              "NOT_APPLICABLE",
+              "NOT_PROVIDED",
+              "NOT_VERIFIED",
+              "SYSTEM_ERROR"
+            ],
+            "type": "string",
+            "x-runtara-label": "Avs Street Address Response"
+          },
+          "cvvResponse": {
+            "description": "The processing bank's response to the provided CVV.",
+            "enum": [
+              "BYPASS",
+              "DOES_NOT_MATCH",
+              "ISSUER_DOES_NOT_PARTICIPATE",
+              "MATCHES",
+              "NOT_APPLICABLE",
+              "NOT_PROVIDED",
+              "NOT_VERIFIED",
+              "SYSTEM_ERROR"
+            ],
+            "type": "string",
+            "x-runtara-label": "Cvv Response"
+          },
+          "legacyCode": {
+            "description": "A code based on the response from the processor, indicating the result of attempting to authorize this transaction. See the [list of possible processor response codes for authorization](https://developers.braintreepayments.com/reference/general/processor-responses/authorization-responses).",
+            "type": "string",
+            "x-runtara-label": "Legacy Code"
+          },
+          "message": {
+            "description": "The text explanation of the processor response legacyCode.",
+            "type": "string",
+            "x-runtara-label": "Message"
+          }
+        },
+        "type": "object"
+      },
+      "CreateCustomerCustomer": {
+        "description": "Information about a customer and their associated payment methods and transactions.",
+        "properties": {
+          "company": {
+            "description": "Company or business name associated with this customer.",
+            "type": "string",
+            "x-runtara-label": "Company"
+          },
+          "createdAt": {
+            "description": "Date and time at which the customer was created.",
+            "format": "date-time",
+            "type": "string",
+            "x-runtara-label": "Created At"
+          },
+          "email": {
+            "description": "Email address for this customer.",
+            "type": "string",
+            "x-runtara-label": "Email"
+          },
+          "firstName": {
+            "description": "Customer's first name.",
+            "type": "string",
+            "x-runtara-label": "First Name"
+          },
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          },
+          "lastName": {
+            "description": "Customer's last name.",
+            "type": "string",
+            "x-runtara-label": "Last Name"
+          },
+          "legacyId": {
+            "description": "Legacy unique identifier.",
+            "type": "string",
+            "x-runtara-label": "Legacy ID"
+          },
+          "phoneNumber": {
+            "description": "The phone number for this customer.",
+            "type": "string",
+            "x-runtara-label": "Phone Number"
+          }
+        },
+        "type": "object"
+      },
+      "CreateCustomerResult": {
+        "description": "Top-level fields returned when creating a customer.",
+        "properties": {
+          "customer": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CreateCustomerCustomer"
+              }
+            ],
+            "description": "Information about the customer that was created. Can be used when vaulting payment methods or creating transactions to associate those objects.",
+            "x-runtara-label": "Customer"
+          }
+        },
+        "type": "object"
+      },
+      "DeletePaymentMethodFromVaultResult": {
+        "description": "Top-level output field from deleting a multi-use payment method.",
+        "properties": {
+          "clientMutationId": {
+            "description": "An identifier used to reconcile requests and responses. 255 characters maximum.",
+            "type": "string",
+            "x-runtara-label": "Client Mutation ID"
+          }
+        },
+        "type": "object"
+      },
+      "GetTransactionAmount": {
+        "description": "A monetary amount with currency.",
+        "properties": {
+          "currencyCode": {
+            "description": "The currency code for the monetary amount.",
+            "type": "string",
+            "x-runtara-label": "Currency Code"
+          },
+          "value": {
+            "description": "The amount of money, either a whole number or a number with up to 3 decimal places.",
+            "type": "string",
+            "x-runtara-label": "Value"
+          }
+        },
+        "type": "object"
+      },
+      "GetTransactionCustomer": {
+        "description": "Information about a customer and their associated payment methods and transactions.",
+        "properties": {
+          "email": {
+            "description": "Email address for this customer.",
+            "type": "string",
+            "x-runtara-label": "Email"
+          },
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          }
+        },
+        "type": "object"
+      },
+      "GetTransactionPaymentMethodSnapshot": {
+        "description": "A union of all possible payment method details as they were used in a transaction or verification. PaymentMethodSnapshot preserves values used to create a given transaction or verify a payment method at that moment in time.",
+        "properties": {
+          "__typename": {
+            "description": "The object's GraphQL type name.",
+            "type": "string",
+            "x-runtara-label": "Typename"
+          },
+          "authorizationId": {
+            "description": "If the transaction was successfully authorized, the PayPal ID for the authorization.",
+            "type": "string",
+            "x-runtara-label": "Authorization ID"
+          },
+          "brandCode": {
+            "description": "A static code identifying the card brand.",
+            "enum": [
+              "AMERICAN_EXPRESS",
+              "CITI",
+              "DINERS",
+              "DISCOVER",
+              "ELO",
+              "HIPER",
+              "HIPERCARD",
+              "INTERNATIONAL_MAESTRO",
+              "JCB",
+              "MASTERCARD",
+              "NARANJA",
+              "SOLO",
+              "SWITCH",
+              "TROY",
+              "UK_MAESTRO",
+              "UNION_PAY",
+              "UNKNOWN",
+              "VERVE",
+              "VISA",
+              "american_express",
+              "citi",
+              "diners",
+              "discover",
+              "elo",
+              "hiper",
+              "hipercard",
+              "international_maestro",
+              "jcb",
+              "mastercard",
+              "naranja",
+              "solo",
+              "switch",
+              "troy",
+              "uk_maestro",
+              "union_pay",
+              "unknown",
+              "verve",
+              "visa"
+            ],
+            "type": "string",
+            "x-runtara-label": "Brand Code"
+          },
+          "captureId": {
+            "description": "If funds for the transaction have settled, the PayPal ID for the capture of funds.",
+            "type": "string",
+            "x-runtara-label": "Capture ID"
+          },
+          "creditCard": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GetTransactionPaymentMethodSnapshotCreditCard"
+              }
+            ],
+            "description": "The details of the credit card itself.",
+            "x-runtara-label": "Credit Card"
+          },
+          "expirationMonth": {
+            "description": "The month of the expiration date, formatted MM.",
+            "type": "string",
+            "x-runtara-label": "Expiration Month"
+          },
+          "expirationYear": {
+            "description": "The year of the expiration date, formatted YYYY.",
+            "type": "string",
+            "x-runtara-label": "Expiration Year"
+          },
+          "last4": {
+            "description": "The last four digits of the card number.",
+            "type": "string",
+            "x-runtara-label": "Last4"
+          },
+          "payer": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GetTransactionPaymentMethodSnapshotPayer"
+              }
+            ],
+            "description": "Details about the payer or owner of the PayPal account.",
+            "x-runtara-label": "Payer"
+          }
+        },
+        "type": "object"
+      },
+      "GetTransactionPaymentMethodSnapshotCreditCard": {
+        "description": "Details about a credit card.",
+        "properties": {
+          "brandCode": {
+            "description": "A static code identifying the card brand.",
+            "enum": [
+              "AMERICAN_EXPRESS",
+              "CITI",
+              "DINERS",
+              "DISCOVER",
+              "ELO",
+              "HIPER",
+              "HIPERCARD",
+              "INTERNATIONAL_MAESTRO",
+              "JCB",
+              "MASTERCARD",
+              "NARANJA",
+              "SOLO",
+              "SWITCH",
+              "TROY",
+              "UK_MAESTRO",
+              "UNION_PAY",
+              "UNKNOWN",
+              "VERVE",
+              "VISA",
+              "american_express",
+              "citi",
+              "diners",
+              "discover",
+              "elo",
+              "hiper",
+              "hipercard",
+              "international_maestro",
+              "jcb",
+              "mastercard",
+              "naranja",
+              "solo",
+              "switch",
+              "troy",
+              "uk_maestro",
+              "union_pay",
+              "unknown",
+              "verve",
+              "visa"
+            ],
+            "type": "string",
+            "x-runtara-label": "Brand Code"
+          },
+          "expirationMonth": {
+            "description": "The month of the expiration date, formatted MM.",
+            "type": "string",
+            "x-runtara-label": "Expiration Month"
+          },
+          "expirationYear": {
+            "description": "The year of the expiration date, formatted YYYY.",
+            "type": "string",
+            "x-runtara-label": "Expiration Year"
+          },
+          "last4": {
+            "description": "The last four digits of the card number.",
+            "type": "string",
+            "x-runtara-label": "Last4"
+          }
+        },
+        "type": "object"
+      },
+      "GetTransactionPaymentMethodSnapshotPayer": {
+        "description": "Details about a PayPal account.",
+        "properties": {
+          "email": {
+            "description": "The email address associated with the PayPal account.",
+            "type": "string",
+            "x-runtara-label": "Email"
+          },
+          "payerId": {
+            "description": "The PayPal ID of the PayPal account.",
+            "type": "string",
+            "x-runtara-label": "Payer ID"
+          }
+        },
+        "type": "object"
+      },
+      "GetTransactionProcessorAuthorizationResponse": {
+        "description": "Detailed response information from the processor when attempting to authorize a transaction.",
+        "properties": {
+          "avsPostalCodeResponse": {
+            "description": "The processing bank's response to the provided billing postal or zip code.",
+            "enum": [
+              "BYPASS",
+              "DOES_NOT_MATCH",
+              "ISSUER_DOES_NOT_PARTICIPATE",
+              "MATCHES",
+              "NOT_APPLICABLE",
+              "NOT_PROVIDED",
+              "NOT_VERIFIED",
+              "SYSTEM_ERROR"
+            ],
+            "type": "string",
+            "x-runtara-label": "Avs Postal Code Response"
+          },
+          "avsStreetAddressResponse": {
+            "description": "The processing bank's response to the provided billing street address.",
+            "enum": [
+              "BYPASS",
+              "DOES_NOT_MATCH",
+              "ISSUER_DOES_NOT_PARTICIPATE",
+              "MATCHES",
+              "NOT_APPLICABLE",
+              "NOT_PROVIDED",
+              "NOT_VERIFIED",
+              "SYSTEM_ERROR"
+            ],
+            "type": "string",
+            "x-runtara-label": "Avs Street Address Response"
+          },
+          "cvvResponse": {
+            "description": "The processing bank's response to the provided CVV.",
+            "enum": [
+              "BYPASS",
+              "DOES_NOT_MATCH",
+              "ISSUER_DOES_NOT_PARTICIPATE",
+              "MATCHES",
+              "NOT_APPLICABLE",
+              "NOT_PROVIDED",
+              "NOT_VERIFIED",
+              "SYSTEM_ERROR"
+            ],
+            "type": "string",
+            "x-runtara-label": "Cvv Response"
+          },
+          "legacyCode": {
+            "description": "A code based on the response from the processor, indicating the result of attempting to authorize this transaction. See the [list of possible processor response codes for authorization](https://developers.braintreepayments.com/reference/general/processor-responses/authorization-responses).",
+            "type": "string",
+            "x-runtara-label": "Legacy Code"
+          },
+          "message": {
+            "description": "The text explanation of the processor response legacyCode.",
+            "type": "string",
+            "x-runtara-label": "Message"
+          }
+        },
+        "type": "object"
+      },
+      "GetTransactionRefunds": {
+        "description": "A refund of a charge on a payment method, representing an attempt to send money from a previous transaction back to the customer.",
+        "properties": {
+          "amount": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GetTransactionRefundsAmount"
+              }
+            ],
+            "description": "The amount that will be refunded, which can be less than or equal to the original charge amount.",
+            "x-runtara-label": "Amount"
+          },
+          "createdAt": {
+            "description": "Date and time when the refund was created.",
+            "format": "date-time",
+            "type": "string",
+            "x-runtara-label": "Created At"
+          },
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          },
+          "status": {
+            "description": "The current status of this refund.",
+            "enum": [
+              "AUTHORIZATION_EXPIRED",
+              "AUTHORIZED",
+              "AUTHORIZING",
+              "FAILED",
+              "GATEWAY_REJECTED",
+              "PROCESSOR_DECLINED",
+              "SETTLED",
+              "SETTLEMENT_CONFIRMED",
+              "SETTLEMENT_DECLINED",
+              "SETTLEMENT_PENDING",
+              "SETTLING",
+              "SUBMITTED_FOR_SETTLEMENT",
+              "VOIDED"
+            ],
+            "type": "string",
+            "x-runtara-label": "Status"
+          }
+        },
+        "type": "object"
+      },
+      "GetTransactionRefundsAmount": {
+        "description": "A monetary amount with currency.",
+        "properties": {
+          "currencyCode": {
+            "description": "The currency code for the monetary amount.",
+            "type": "string",
+            "x-runtara-label": "Currency Code"
+          },
+          "value": {
+            "description": "The amount of money, either a whole number or a number with up to 3 decimal places.",
+            "type": "string",
+            "x-runtara-label": "Value"
+          }
+        },
+        "type": "object"
+      },
+      "GetTransactionResult": {
+        "description": "Relay compatible Node interface.",
+        "properties": {
+          "amount": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GetTransactionAmount"
+              }
+            ],
+            "description": "The amount charged in this transaction. For transactions that are partially captured, this amount will be the cummulative amount captured on this transaction. For transactions that are partially authorized, the amount will be less than the `initialRequestedAuthorizationAmount`.",
+            "x-runtara-label": "Amount"
+          },
+          "createdAt": {
+            "description": "Date and time when the transaction was created.",
+            "format": "date-time",
+            "type": "string",
+            "x-runtara-label": "Created At"
+          },
+          "customer": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GetTransactionCustomer"
+              }
+            ],
+            "description": "Customer associated with the transaction, if applicable.",
+            "x-runtara-label": "Customer"
+          },
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          },
+          "legacyId": {
+            "description": "Legacy unique identifier.",
+            "type": "string",
+            "x-runtara-label": "Legacy ID"
+          },
+          "merchantAccountId": {
+            "description": "The ID of the merchant account that processed this transaction.",
+            "type": "string",
+            "x-runtara-label": "Merchant account"
+          },
+          "orderId": {
+            "description": "The order ID for this transaction. For PayPal transactions, the PayPal Invoice ID.",
+            "type": "string",
+            "x-runtara-label": "Order ID"
+          },
+          "paymentMethodSnapshot": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GetTransactionPaymentMethodSnapshot"
+              }
+            ],
+            "description": "Snapshot of payment method details used to create the transaction, preserved at the time the transaction was created. This will always be present.",
+            "x-runtara-label": "Payment Method Snapshot"
+          },
+          "processorAuthorizationResponse": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GetTransactionProcessorAuthorizationResponse"
+              }
+            ],
+            "description": "Fields describing the payment authorization processor response.",
+            "x-runtara-label": "Processor Authorization Response"
+          },
+          "refunds": {
+            "description": "The list of refunds issued against this transaction.",
+            "items": {
+              "$ref": "#/components/schemas/GetTransactionRefunds"
+            },
+            "type": "array",
+            "x-runtara-label": "Refunds"
+          },
+          "status": {
+            "description": "The current status of this transaction.",
+            "enum": [
+              "AUTHORIZATION_EXPIRED",
+              "AUTHORIZED",
+              "AUTHORIZING",
+              "FAILED",
+              "GATEWAY_REJECTED",
+              "PROCESSOR_DECLINED",
+              "SETTLED",
+              "SETTLEMENT_CONFIRMED",
+              "SETTLEMENT_DECLINED",
+              "SETTLEMENT_PENDING",
+              "SETTLING",
+              "SUBMITTED_FOR_SETTLEMENT",
+              "VOIDED"
+            ],
+            "type": "string",
+            "x-runtara-label": "Status"
+          },
+          "statusHistory": {
+            "description": "The records of all statuses this transaction has passed through, with additional information on why each status occurred. Returned in reverse chronological order, with the most recent event first in the list.",
+            "items": {
+              "$ref": "#/components/schemas/GetTransactionStatusHistory"
+            },
+            "type": "array",
+            "x-runtara-label": "Status History"
+          }
+        },
+        "type": "object"
+      },
+      "GetTransactionStatusHistory": {
+        "description": "Status event in the lifecycle of a payment.",
+        "properties": {
+          "amount": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GetTransactionStatusHistoryAmount"
+              }
+            ],
+            "description": "The payment amount applicable to the status. For instance, the amount when a transaction is `SUBMITTED_FOR_SETTLEMENT` might be less than the amount for which it was `AUTHORIZED`.",
+            "x-runtara-label": "Amount"
+          },
+          "status": {
+            "description": "New status of the payment.",
+            "enum": [
+              "AUTHORIZATION_EXPIRED",
+              "AUTHORIZED",
+              "AUTHORIZING",
+              "FAILED",
+              "GATEWAY_REJECTED",
+              "PROCESSOR_DECLINED",
+              "SETTLED",
+              "SETTLEMENT_CONFIRMED",
+              "SETTLEMENT_DECLINED",
+              "SETTLEMENT_PENDING",
+              "SETTLING",
+              "SUBMITTED_FOR_SETTLEMENT",
+              "VOIDED"
+            ],
+            "type": "string",
+            "x-runtara-label": "Status"
+          },
+          "timestamp": {
+            "description": "Date and time when the status event occurred.",
+            "format": "date-time",
+            "type": "string",
+            "x-runtara-label": "Timestamp"
+          }
+        },
+        "type": "object"
+      },
+      "GetTransactionStatusHistoryAmount": {
+        "description": "A monetary amount with currency.",
+        "properties": {
+          "currencyCode": {
+            "description": "The currency code for the monetary amount.",
+            "type": "string",
+            "x-runtara-label": "Currency Code"
+          },
+          "value": {
+            "description": "The amount of money, either a whole number or a number with up to 3 decimal places.",
+            "type": "string",
+            "x-runtara-label": "Value"
+          }
+        },
+        "type": "object"
+      },
+      "RefundTransactionRefund": {
+        "description": "A refund of a charge on a payment method, representing an attempt to send money from a previous transaction back to the customer.",
+        "properties": {
+          "amount": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RefundTransactionRefundAmount"
+              }
+            ],
+            "description": "The amount that will be refunded, which can be less than or equal to the original charge amount.",
+            "x-runtara-label": "Amount"
+          },
+          "createdAt": {
+            "description": "Date and time when the refund was created.",
+            "format": "date-time",
+            "type": "string",
+            "x-runtara-label": "Created At"
+          },
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          },
+          "legacyId": {
+            "description": "Legacy unique identifier.",
+            "type": "string",
+            "x-runtara-label": "Legacy ID"
+          },
+          "orderId": {
+            "description": "The order ID for this refund. For PayPal transactions, the PayPal Invoice ID.",
+            "type": "string",
+            "x-runtara-label": "Order ID"
+          },
+          "processorAuthorizationResponse": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RefundTransactionRefundProcessorAuthorizationResponse"
+              }
+            ],
+            "description": "Fields describing the payment authorization processor response.",
+            "x-runtara-label": "Processor Authorization Response"
+          },
+          "refundedTransaction": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RefundTransactionRefundRefundedTransaction"
+              }
+            ],
+            "description": "The original transaction that this refunds. If this is not present, then this refund represents a refund of a transaction that does not belong to this Braintree gateway account.",
+            "x-runtara-label": "Refunded Transaction"
+          },
+          "status": {
+            "description": "The current status of this refund.",
+            "enum": [
+              "AUTHORIZATION_EXPIRED",
+              "AUTHORIZED",
+              "AUTHORIZING",
+              "FAILED",
+              "GATEWAY_REJECTED",
+              "PROCESSOR_DECLINED",
+              "SETTLED",
+              "SETTLEMENT_CONFIRMED",
+              "SETTLEMENT_DECLINED",
+              "SETTLEMENT_PENDING",
+              "SETTLING",
+              "SUBMITTED_FOR_SETTLEMENT",
+              "VOIDED"
+            ],
+            "type": "string",
+            "x-runtara-label": "Status"
+          }
+        },
+        "type": "object"
+      },
+      "RefundTransactionRefundAmount": {
+        "description": "A monetary amount with currency.",
+        "properties": {
+          "currencyCode": {
+            "description": "The currency code for the monetary amount.",
+            "type": "string",
+            "x-runtara-label": "Currency Code"
+          },
+          "value": {
+            "description": "The amount of money, either a whole number or a number with up to 3 decimal places.",
+            "type": "string",
+            "x-runtara-label": "Value"
+          }
+        },
+        "type": "object"
+      },
+      "RefundTransactionRefundProcessorAuthorizationResponse": {
+        "description": "Detailed response information from the processor when attempting to authorize a transaction.",
+        "properties": {
+          "legacyCode": {
+            "description": "A code based on the response from the processor, indicating the result of attempting to authorize this transaction. See the [list of possible processor response codes for authorization](https://developers.braintreepayments.com/reference/general/processor-responses/authorization-responses).",
+            "type": "string",
+            "x-runtara-label": "Legacy Code"
+          },
+          "message": {
+            "description": "The text explanation of the processor response legacyCode.",
+            "type": "string",
+            "x-runtara-label": "Message"
+          }
+        },
+        "type": "object"
+      },
+      "RefundTransactionRefundRefundedTransaction": {
+        "description": "A charge on a payment method.",
+        "properties": {
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          },
+          "status": {
+            "description": "The current status of this transaction.",
+            "enum": [
+              "AUTHORIZATION_EXPIRED",
+              "AUTHORIZED",
+              "AUTHORIZING",
+              "FAILED",
+              "GATEWAY_REJECTED",
+              "PROCESSOR_DECLINED",
+              "SETTLED",
+              "SETTLEMENT_CONFIRMED",
+              "SETTLEMENT_DECLINED",
+              "SETTLEMENT_PENDING",
+              "SETTLING",
+              "SUBMITTED_FOR_SETTLEMENT",
+              "VOIDED"
+            ],
+            "type": "string",
+            "x-runtara-label": "Status"
+          }
+        },
+        "type": "object"
+      },
+      "RefundTransactionResult": {
+        "description": "Top-level output field from refunding a transaction.",
+        "properties": {
+          "refund": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RefundTransactionRefund"
+              }
+            ],
+            "description": "The information about the created refund.",
+            "x-runtara-label": "Refund"
+          }
+        },
+        "type": "object"
+      },
+      "ReverseTransactionResult": {
+        "description": "Top-level output field for reversing a transaction.",
+        "properties": {
+          "reversal": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ReverseTransactionReversal"
+              }
+            ],
+            "description": "A transaction (if the original transaction was voided) or refund (if the original transaction was refunded). A reversal will attempt to void the original transaction if it has not yet settled. If the original transaction has settled, a reversal will create a refund for the full amount.",
+            "x-runtara-label": "Reversal"
+          }
+        },
+        "type": "object"
+      },
+      "ReverseTransactionReversal": {
+        "description": "A union of all possible results of a transaction reversal. If the transaction is settled, a refund will be issued and a Refund object will be returned. Otherwise, the transaction will be voided and a Transaction object will be returned.",
+        "properties": {
+          "__typename": {
+            "description": "The object's GraphQL type name.",
+            "type": "string",
+            "x-runtara-label": "Typename"
+          },
+          "amount": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ReverseTransactionReversalAmount"
+              }
+            ],
+            "description": "The amount charged in this transaction. For transactions that are partially captured, this amount will be the cummulative amount captured on this transaction. For transactions that are partially authorized, the amount will be less than the `initialRequestedAuthorizationAmount`.",
+            "x-runtara-label": "Amount"
+          },
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          },
+          "legacyId": {
+            "description": "Legacy unique identifier.",
+            "type": "string",
+            "x-runtara-label": "Legacy ID"
+          },
+          "processorAuthorizationResponse": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ReverseTransactionReversalProcessorAuthorizationResponse"
+              }
+            ],
+            "description": "Fields describing the payment authorization processor response.",
+            "x-runtara-label": "Processor Authorization Response"
+          },
+          "status": {
+            "description": "The current status of this transaction.",
+            "enum": [
+              "AUTHORIZATION_EXPIRED",
+              "AUTHORIZED",
+              "AUTHORIZING",
+              "FAILED",
+              "GATEWAY_REJECTED",
+              "PROCESSOR_DECLINED",
+              "SETTLED",
+              "SETTLEMENT_CONFIRMED",
+              "SETTLEMENT_DECLINED",
+              "SETTLEMENT_PENDING",
+              "SETTLING",
+              "SUBMITTED_FOR_SETTLEMENT",
+              "VOIDED"
+            ],
+            "type": "string",
+            "x-runtara-label": "Status"
+          }
+        },
+        "type": "object"
+      },
+      "ReverseTransactionReversalAmount": {
+        "description": "A monetary amount with currency.",
+        "properties": {
+          "currencyCode": {
+            "description": "The currency code for the monetary amount.",
+            "type": "string",
+            "x-runtara-label": "Currency Code"
+          },
+          "value": {
+            "description": "The amount of money, either a whole number or a number with up to 3 decimal places.",
+            "type": "string",
+            "x-runtara-label": "Value"
+          }
+        },
+        "type": "object"
+      },
+      "ReverseTransactionReversalProcessorAuthorizationResponse": {
+        "description": "Detailed response information from the processor when attempting to authorize a transaction.",
+        "properties": {
+          "legacyCode": {
+            "description": "A code based on the response from the processor, indicating the result of attempting to authorize this transaction. See the [list of possible processor response codes for authorization](https://developers.braintreepayments.com/reference/general/processor-responses/authorization-responses).",
+            "type": "string",
+            "x-runtara-label": "Legacy Code"
+          },
+          "message": {
+            "description": "The text explanation of the processor response legacyCode.",
+            "type": "string",
+            "x-runtara-label": "Message"
+          }
+        },
+        "type": "object"
+      },
+      "SandboxSettleTransactionResult": {
+        "description": "Top-level output field from creating a transaction.",
+        "properties": {
+          "transaction": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SandboxSettleTransactionTransaction"
+              }
+            ],
+            "description": "The transaction representing the charge on the payment method.",
+            "x-runtara-label": "Transaction"
+          }
+        },
+        "type": "object"
+      },
+      "SandboxSettleTransactionTransaction": {
+        "description": "A charge on a payment method.",
+        "properties": {
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          },
+          "status": {
+            "description": "The current status of this transaction.",
+            "enum": [
+              "AUTHORIZATION_EXPIRED",
+              "AUTHORIZED",
+              "AUTHORIZING",
+              "FAILED",
+              "GATEWAY_REJECTED",
+              "PROCESSOR_DECLINED",
+              "SETTLED",
+              "SETTLEMENT_CONFIRMED",
+              "SETTLEMENT_DECLINED",
+              "SETTLEMENT_PENDING",
+              "SETTLING",
+              "SUBMITTED_FOR_SETTLEMENT",
+              "VOIDED"
+            ],
+            "type": "string",
+            "x-runtara-label": "Status"
+          }
+        },
+        "type": "object"
+      },
+      "SearchCustomersEdges": {
+        "description": "A customer within a CustomerConnection.",
+        "properties": {
+          "node": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SearchCustomersEdgesNode"
+              }
+            ],
+            "description": "The customer.",
+            "x-runtara-label": "Node"
+          }
+        },
+        "type": "object"
+      },
+      "SearchCustomersEdgesNode": {
+        "description": "Information about a customer and their associated payment methods and transactions.",
+        "properties": {
+          "company": {
+            "description": "Company or business name associated with this customer.",
+            "type": "string",
+            "x-runtara-label": "Company"
+          },
+          "createdAt": {
+            "description": "Date and time at which the customer was created.",
+            "format": "date-time",
+            "type": "string",
+            "x-runtara-label": "Created At"
+          },
+          "defaultPaymentMethod": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SearchCustomersEdgesNodeDefaultPaymentMethod"
+              }
+            ],
+            "description": "Customer's default payment method.",
+            "x-runtara-label": "Default Payment Method"
+          },
+          "email": {
+            "description": "Email address for this customer.",
+            "type": "string",
+            "x-runtara-label": "Email"
+          },
+          "firstName": {
+            "description": "Customer's first name.",
+            "type": "string",
+            "x-runtara-label": "First Name"
+          },
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          },
+          "lastName": {
+            "description": "Customer's last name.",
+            "type": "string",
+            "x-runtara-label": "Last Name"
+          },
+          "legacyId": {
+            "description": "Legacy unique identifier.",
+            "type": "string",
+            "x-runtara-label": "Legacy ID"
+          },
+          "phoneNumber": {
+            "description": "The phone number for this customer.",
+            "type": "string",
+            "x-runtara-label": "Phone Number"
+          }
+        },
+        "type": "object"
+      },
+      "SearchCustomersEdgesNodeDefaultPaymentMethod": {
+        "description": "Top-level field representing a payment method.",
+        "properties": {
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          }
+        },
+        "type": "object"
+      },
+      "SearchCustomersPageInfo": {
+        "description": "The page information for a connection.",
+        "properties": {
+          "endCursor": {
+            "description": "The cursor for the last item in the connection page.",
+            "type": "string",
+            "x-runtara-label": "End Cursor"
+          },
+          "hasNextPage": {
+            "description": "Whether or not there is a next page available.",
+            "type": "boolean",
+            "x-runtara-label": "Has Next Page"
+          }
+        },
+        "type": "object"
+      },
+      "SearchCustomersResult": {
+        "description": "A paginated list of customers.",
+        "properties": {
+          "edges": {
+            "description": "A list of customers.",
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/SearchCustomersEdges"
+                }
+              ],
+              "nullable": true
+            },
+            "type": "array",
+            "x-runtara-label": "Edges"
+          },
+          "pageInfo": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SearchCustomersPageInfo"
+              }
+            ],
+            "description": "Information about the page of customers contained in `edges`.",
+            "x-runtara-label": "Page Info"
+          }
+        },
+        "type": "object"
+      },
+      "SearchDisputesEdges": {
+        "description": "A dispute within a DisputeConnection.",
+        "properties": {
+          "node": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SearchDisputesEdgesNode"
+              }
+            ],
+            "description": "The dispute.",
+            "x-runtara-label": "Node"
+          }
+        },
+        "type": "object"
+      },
+      "SearchDisputesEdgesNode": {
+        "description": "A case raised by a customer to either request information about or to challenge a charge. These are initiated via a customer's payment provider, such as their bank, and require a merchant to provide evidence or further information.",
+        "properties": {
+          "amountDisputed": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SearchDisputesEdgesNodeAmountDisputed"
+              }
+            ],
+            "description": "The amount of money from the original charge that the customer is disputing. Can be 0. This amount is debited from a merchant's account and held in a third-party account until the dispute is resolved, at which time it is sent to either the merchant or customer.",
+            "x-runtara-label": "Amount Disputed"
+          },
+          "caseNumber": {
+            "description": "The case number for the dispute.",
+            "type": "string",
+            "x-runtara-label": "Case Number"
+          },
+          "createdAt": {
+            "description": "Date and time at which the dispute was created.",
+            "format": "date-time",
+            "type": "string",
+            "x-runtara-label": "Created At"
+          },
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          },
+          "legacyId": {
+            "description": "Legacy unique identifier.",
+            "type": "string",
+            "x-runtara-label": "Legacy ID"
+          },
+          "receivedDate": {
+            "description": "Date the dispute was received by the merchant.",
+            "format": "date",
+            "type": "string",
+            "x-runtara-label": "Received Date"
+          },
+          "referenceNumber": {
+            "description": "The transaction reference number for the dispute.",
+            "type": "string",
+            "x-runtara-label": "Reference Number"
+          },
+          "replyByDate": {
+            "description": "The reply by date for the merchant to submit a response to the dispute.",
+            "format": "date",
+            "type": "string",
+            "x-runtara-label": "Reply By Date"
+          },
+          "status": {
+            "description": "The status of the dispute.",
+            "enum": [
+              "ACCEPTED",
+              "AUTO_ACCEPTED",
+              "DISPUTED",
+              "EXPIRED",
+              "LOST",
+              "OPEN",
+              "UNDER_REVIEW",
+              "WON"
+            ],
+            "type": "string",
+            "x-runtara-label": "Status"
+          },
+          "transaction": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SearchDisputesEdgesNodeTransaction"
+              }
+            ],
+            "description": "The disputed transaction which the customer is either requesting further information on or challenging.",
+            "x-runtara-label": "Transaction"
+          },
+          "type": {
+            "description": "The type of dispute.",
+            "enum": [
+              "CHARGEBACK",
+              "PRE_ARBITRATION",
+              "RETRIEVAL"
+            ],
+            "type": "string",
+            "x-runtara-label": "Type"
+          }
+        },
+        "type": "object"
+      },
+      "SearchDisputesEdgesNodeAmountDisputed": {
+        "description": "A monetary amount with currency.",
+        "properties": {
+          "currencyCode": {
+            "description": "The currency code for the monetary amount.",
+            "type": "string",
+            "x-runtara-label": "Currency Code"
+          },
+          "value": {
+            "description": "The amount of money, either a whole number or a number with up to 3 decimal places.",
+            "type": "string",
+            "x-runtara-label": "Value"
+          }
+        },
+        "type": "object"
+      },
+      "SearchDisputesEdgesNodeTransaction": {
+        "description": "A charge on a payment method.",
+        "properties": {
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          },
+          "orderId": {
+            "description": "The order ID for this transaction. For PayPal transactions, the PayPal Invoice ID.",
+            "type": "string",
+            "x-runtara-label": "Order ID"
+          }
+        },
+        "type": "object"
+      },
+      "SearchDisputesPageInfo": {
+        "description": "The page information for a connection.",
+        "properties": {
+          "endCursor": {
+            "description": "The cursor for the last item in the connection page.",
+            "type": "string",
+            "x-runtara-label": "End Cursor"
+          },
+          "hasNextPage": {
+            "description": "Whether or not there is a next page available.",
+            "type": "boolean",
+            "x-runtara-label": "Has Next Page"
+          }
+        },
+        "type": "object"
+      },
+      "SearchDisputesResult": {
+        "description": "A paginated list of disputes.",
+        "properties": {
+          "edges": {
+            "description": "A list of disputes.",
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/SearchDisputesEdges"
+                }
+              ],
+              "nullable": true
+            },
+            "type": "array",
+            "x-runtara-label": "Edges"
+          },
+          "pageInfo": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SearchDisputesPageInfo"
+              }
+            ],
+            "description": "Information about the page of disputes contained in `edges`.",
+            "x-runtara-label": "Page Info"
+          }
+        },
+        "type": "object"
+      },
+      "SearchTransactionsEdges": {
+        "description": "A transaction within a TransactionConnection.",
+        "properties": {
+          "node": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SearchTransactionsEdgesNode"
+              }
+            ],
+            "description": "The transaction.",
+            "x-runtara-label": "Node"
+          }
+        },
+        "type": "object"
+      },
+      "SearchTransactionsEdgesNode": {
+        "description": "A charge on a payment method.",
+        "properties": {
+          "amount": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SearchTransactionsEdgesNodeAmount"
+              }
+            ],
+            "description": "The amount charged in this transaction. For transactions that are partially captured, this amount will be the cummulative amount captured on this transaction. For transactions that are partially authorized, the amount will be less than the `initialRequestedAuthorizationAmount`.",
+            "x-runtara-label": "Amount"
+          },
+          "createdAt": {
+            "description": "Date and time when the transaction was created.",
+            "format": "date-time",
+            "type": "string",
+            "x-runtara-label": "Created At"
+          },
+          "customer": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SearchTransactionsEdgesNodeCustomer"
+              }
+            ],
+            "description": "Customer associated with the transaction, if applicable.",
+            "x-runtara-label": "Customer"
+          },
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          },
+          "legacyId": {
+            "description": "Legacy unique identifier.",
+            "type": "string",
+            "x-runtara-label": "Legacy ID"
+          },
+          "merchantAccountId": {
+            "description": "The ID of the merchant account that processed this transaction.",
+            "type": "string",
+            "x-runtara-label": "Merchant account"
+          },
+          "orderId": {
+            "description": "The order ID for this transaction. For PayPal transactions, the PayPal Invoice ID.",
+            "type": "string",
+            "x-runtara-label": "Order ID"
+          },
+          "paymentMethodSnapshot": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SearchTransactionsEdgesNodePaymentMethodSnapshot"
+              }
+            ],
+            "description": "Snapshot of payment method details used to create the transaction, preserved at the time the transaction was created. This will always be present.",
+            "x-runtara-label": "Payment Method Snapshot"
+          },
+          "processorAuthorizationResponse": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SearchTransactionsEdgesNodeProcessorAuthorizationResponse"
+              }
+            ],
+            "description": "Fields describing the payment authorization processor response.",
+            "x-runtara-label": "Processor Authorization Response"
+          },
+          "status": {
+            "description": "The current status of this transaction.",
+            "enum": [
+              "AUTHORIZATION_EXPIRED",
+              "AUTHORIZED",
+              "AUTHORIZING",
+              "FAILED",
+              "GATEWAY_REJECTED",
+              "PROCESSOR_DECLINED",
+              "SETTLED",
+              "SETTLEMENT_CONFIRMED",
+              "SETTLEMENT_DECLINED",
+              "SETTLEMENT_PENDING",
+              "SETTLING",
+              "SUBMITTED_FOR_SETTLEMENT",
+              "VOIDED"
+            ],
+            "type": "string",
+            "x-runtara-label": "Status"
+          }
+        },
+        "type": "object"
+      },
+      "SearchTransactionsEdgesNodeAmount": {
+        "description": "A monetary amount with currency.",
+        "properties": {
+          "currencyCode": {
+            "description": "The currency code for the monetary amount.",
+            "type": "string",
+            "x-runtara-label": "Currency Code"
+          },
+          "value": {
+            "description": "The amount of money, either a whole number or a number with up to 3 decimal places.",
+            "type": "string",
+            "x-runtara-label": "Value"
+          }
+        },
+        "type": "object"
+      },
+      "SearchTransactionsEdgesNodeCustomer": {
+        "description": "Information about a customer and their associated payment methods and transactions.",
+        "properties": {
+          "email": {
+            "description": "Email address for this customer.",
+            "type": "string",
+            "x-runtara-label": "Email"
+          },
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          }
+        },
+        "type": "object"
+      },
+      "SearchTransactionsEdgesNodePaymentMethodSnapshot": {
+        "description": "A union of all possible payment method details as they were used in a transaction or verification. PaymentMethodSnapshot preserves values used to create a given transaction or verify a payment method at that moment in time.",
+        "properties": {
+          "__typename": {
+            "description": "The object's GraphQL type name.",
+            "type": "string",
+            "x-runtara-label": "Typename"
+          },
+          "authorizationId": {
+            "description": "If the transaction was successfully authorized, the PayPal ID for the authorization.",
+            "type": "string",
+            "x-runtara-label": "Authorization ID"
+          },
+          "brandCode": {
+            "description": "A static code identifying the card brand.",
+            "enum": [
+              "AMERICAN_EXPRESS",
+              "CITI",
+              "DINERS",
+              "DISCOVER",
+              "ELO",
+              "HIPER",
+              "HIPERCARD",
+              "INTERNATIONAL_MAESTRO",
+              "JCB",
+              "MASTERCARD",
+              "NARANJA",
+              "SOLO",
+              "SWITCH",
+              "TROY",
+              "UK_MAESTRO",
+              "UNION_PAY",
+              "UNKNOWN",
+              "VERVE",
+              "VISA",
+              "american_express",
+              "citi",
+              "diners",
+              "discover",
+              "elo",
+              "hiper",
+              "hipercard",
+              "international_maestro",
+              "jcb",
+              "mastercard",
+              "naranja",
+              "solo",
+              "switch",
+              "troy",
+              "uk_maestro",
+              "union_pay",
+              "unknown",
+              "verve",
+              "visa"
+            ],
+            "type": "string",
+            "x-runtara-label": "Brand Code"
+          },
+          "captureId": {
+            "description": "If funds for the transaction have settled, the PayPal ID for the capture of funds.",
+            "type": "string",
+            "x-runtara-label": "Capture ID"
+          },
+          "creditCard": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SearchTransactionsEdgesNodePaymentMethodSnapshotCreditCard"
+              }
+            ],
+            "description": "The details of the credit card itself.",
+            "x-runtara-label": "Credit Card"
+          },
+          "expirationMonth": {
+            "description": "The month of the expiration date, formatted MM.",
+            "type": "string",
+            "x-runtara-label": "Expiration Month"
+          },
+          "expirationYear": {
+            "description": "The year of the expiration date, formatted YYYY.",
+            "type": "string",
+            "x-runtara-label": "Expiration Year"
+          },
+          "last4": {
+            "description": "The last four digits of the card number.",
+            "type": "string",
+            "x-runtara-label": "Last4"
+          },
+          "payer": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SearchTransactionsEdgesNodePaymentMethodSnapshotPayer"
+              }
+            ],
+            "description": "Details about the payer or owner of the PayPal account.",
+            "x-runtara-label": "Payer"
+          }
+        },
+        "type": "object"
+      },
+      "SearchTransactionsEdgesNodePaymentMethodSnapshotCreditCard": {
+        "description": "Details about a credit card.",
+        "properties": {
+          "brandCode": {
+            "description": "A static code identifying the card brand.",
+            "enum": [
+              "AMERICAN_EXPRESS",
+              "CITI",
+              "DINERS",
+              "DISCOVER",
+              "ELO",
+              "HIPER",
+              "HIPERCARD",
+              "INTERNATIONAL_MAESTRO",
+              "JCB",
+              "MASTERCARD",
+              "NARANJA",
+              "SOLO",
+              "SWITCH",
+              "TROY",
+              "UK_MAESTRO",
+              "UNION_PAY",
+              "UNKNOWN",
+              "VERVE",
+              "VISA",
+              "american_express",
+              "citi",
+              "diners",
+              "discover",
+              "elo",
+              "hiper",
+              "hipercard",
+              "international_maestro",
+              "jcb",
+              "mastercard",
+              "naranja",
+              "solo",
+              "switch",
+              "troy",
+              "uk_maestro",
+              "union_pay",
+              "unknown",
+              "verve",
+              "visa"
+            ],
+            "type": "string",
+            "x-runtara-label": "Brand Code"
+          },
+          "expirationMonth": {
+            "description": "The month of the expiration date, formatted MM.",
+            "type": "string",
+            "x-runtara-label": "Expiration Month"
+          },
+          "expirationYear": {
+            "description": "The year of the expiration date, formatted YYYY.",
+            "type": "string",
+            "x-runtara-label": "Expiration Year"
+          },
+          "last4": {
+            "description": "The last four digits of the card number.",
+            "type": "string",
+            "x-runtara-label": "Last4"
+          }
+        },
+        "type": "object"
+      },
+      "SearchTransactionsEdgesNodePaymentMethodSnapshotPayer": {
+        "description": "Details about a PayPal account.",
+        "properties": {
+          "email": {
+            "description": "The email address associated with the PayPal account.",
+            "type": "string",
+            "x-runtara-label": "Email"
+          },
+          "payerId": {
+            "description": "The PayPal ID of the PayPal account.",
+            "type": "string",
+            "x-runtara-label": "Payer ID"
+          }
+        },
+        "type": "object"
+      },
+      "SearchTransactionsEdgesNodeProcessorAuthorizationResponse": {
+        "description": "Detailed response information from the processor when attempting to authorize a transaction.",
+        "properties": {
+          "avsPostalCodeResponse": {
+            "description": "The processing bank's response to the provided billing postal or zip code.",
+            "enum": [
+              "BYPASS",
+              "DOES_NOT_MATCH",
+              "ISSUER_DOES_NOT_PARTICIPATE",
+              "MATCHES",
+              "NOT_APPLICABLE",
+              "NOT_PROVIDED",
+              "NOT_VERIFIED",
+              "SYSTEM_ERROR"
+            ],
+            "type": "string",
+            "x-runtara-label": "Avs Postal Code Response"
+          },
+          "avsStreetAddressResponse": {
+            "description": "The processing bank's response to the provided billing street address.",
+            "enum": [
+              "BYPASS",
+              "DOES_NOT_MATCH",
+              "ISSUER_DOES_NOT_PARTICIPATE",
+              "MATCHES",
+              "NOT_APPLICABLE",
+              "NOT_PROVIDED",
+              "NOT_VERIFIED",
+              "SYSTEM_ERROR"
+            ],
+            "type": "string",
+            "x-runtara-label": "Avs Street Address Response"
+          },
+          "cvvResponse": {
+            "description": "The processing bank's response to the provided CVV.",
+            "enum": [
+              "BYPASS",
+              "DOES_NOT_MATCH",
+              "ISSUER_DOES_NOT_PARTICIPATE",
+              "MATCHES",
+              "NOT_APPLICABLE",
+              "NOT_PROVIDED",
+              "NOT_VERIFIED",
+              "SYSTEM_ERROR"
+            ],
+            "type": "string",
+            "x-runtara-label": "Cvv Response"
+          },
+          "legacyCode": {
+            "description": "A code based on the response from the processor, indicating the result of attempting to authorize this transaction. See the [list of possible processor response codes for authorization](https://developers.braintreepayments.com/reference/general/processor-responses/authorization-responses).",
+            "type": "string",
+            "x-runtara-label": "Legacy Code"
+          },
+          "message": {
+            "description": "The text explanation of the processor response legacyCode.",
+            "type": "string",
+            "x-runtara-label": "Message"
+          }
+        },
+        "type": "object"
+      },
+      "SearchTransactionsPageInfo": {
+        "description": "The page information for a connection.",
+        "properties": {
+          "endCursor": {
+            "description": "The cursor for the last item in the connection page.",
+            "type": "string",
+            "x-runtara-label": "End Cursor"
+          },
+          "hasNextPage": {
+            "description": "Whether or not there is a next page available.",
+            "type": "boolean",
+            "x-runtara-label": "Has Next Page"
+          }
+        },
+        "type": "object"
+      },
+      "SearchTransactionsResult": {
+        "description": "A paginated list of transactions.",
+        "properties": {
+          "edges": {
+            "description": "A list of transactions.",
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/SearchTransactionsEdges"
+                }
+              ],
+              "nullable": true
+            },
+            "type": "array",
+            "x-runtara-label": "Edges"
+          },
+          "pageInfo": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SearchTransactionsPageInfo"
+              }
+            ],
+            "description": "Information about the page of transactions contained in `edges`.",
+            "x-runtara-label": "Page Info"
+          }
+        },
+        "type": "object"
+      },
+      "VaultPaymentMethodPaymentMethod": {
+        "description": "Top-level field representing a payment method.",
+        "properties": {
+          "createdAt": {
+            "description": "Date and time when the payment method was vaulted.",
+            "format": "date-time",
+            "type": "string",
+            "x-runtara-label": "Created At"
+          },
+          "customer": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/VaultPaymentMethodPaymentMethodCustomer"
+              }
+            ],
+            "description": "The customer that the payment method belongs to.",
+            "x-runtara-label": "Customer"
+          },
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          },
+          "legacyId": {
+            "description": "Legacy unique identifier. May be the same as ID for single-use payment methods.",
+            "type": "string",
+            "x-runtara-label": "Legacy ID"
+          },
+          "usage": {
+            "description": "Whether a payment method may be used only once or multiple times.",
+            "enum": [
+              "MULTI_USE",
+              "SINGLE_USE"
+            ],
+            "type": "string",
+            "x-runtara-label": "Usage"
+          }
+        },
+        "type": "object"
+      },
+      "VaultPaymentMethodPaymentMethodCustomer": {
+        "description": "Information about a customer and their associated payment methods and transactions.",
+        "properties": {
+          "id": {
+            "description": "Unique identifier.",
+            "type": "string",
+            "x-runtara-label": "ID"
+          }
+        },
+        "type": "object"
+      },
+      "VaultPaymentMethodResult": {
+        "description": "Top-level output field from vaulting a payment method.",
+        "properties": {
+          "paymentMethod": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/VaultPaymentMethodPaymentMethod"
+              }
+            ],
+            "description": "A payment method that has been stored in a merchant's vault and can be reused.",
+            "x-runtara-label": "Payment Method"
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Braintree",
+    "version": "graphql"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/acceptDispute": {
+      "post": {
+        "description": "Accepts a dispute: the merchant concedes it, and it is closed as lost.",
+        "operationId": "acceptDispute",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "disputeId": {
+                    "description": "The ID of the dispute to be accepted.",
+                    "type": "string",
+                    "x-runtara-label": "Dispute ID"
+                  }
+                },
+                "required": [
+                  "disputeId"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptDisputeResult"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "graphql"
+        ],
+        "x-runtara-graphql-document": "mutation acceptDispute($disputeId: ID!) {\n  acceptDispute(input: { disputeId: $disputeId }) {\n    dispute {\n      id\n      legacyId\n      status\n    }\n  }\n}",
+        "x-runtara-graphql-field": "acceptDispute",
+        "x-runtara-graphql-path": "/graphql",
+        "x-runtara-side-effects": true,
+        "x-runtara-summary": "Accept Dispute"
+      }
+    },
+    "/addPackageTracking": {
+      "post": {
+        "description": "Adds a shipment's tracking number and carrier to a PayPal transaction, which must have been submitted for settlement. PayPal uses it for seller protection and can notify the payer.",
+        "operationId": "addPackageTracking",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "carrier": {
+                    "description": "Shipping carrier. In order to provide customer with convenient tracking updates, refer to [PayPal Add Tracking API Carriers](https://developer.paypal.com/docs/tracking/reference/carriers/), and use the middle column of screaming snake case values for the carrier of the shipment. If the carrier cannot be found in this list, use the carrier's name. 64 characters maximum.",
+                    "type": "string",
+                    "x-runtara-label": "Carrier"
+                  },
+                  "notifyPayer": {
+                    "description": "Indicator of whether or not to send customer notifications of shipment. Defaults to false.",
+                    "nullable": true,
+                    "type": "boolean",
+                    "x-runtara-label": "Notify Payer"
+                  },
+                  "trackingNumber": {
+                    "description": "Tracking number for this package. 64 characters maximum.",
+                    "type": "string",
+                    "x-runtara-label": "Tracking Number"
+                  },
+                  "transactionId": {
+                    "description": "The ID of the transaction to create the tracker for. The transaction be must be submitted for settlement before adding trackers. If this is a partial settlement transaction, provide the child transaction ID.",
+                    "type": "string",
+                    "x-runtara-label": "Transaction ID"
+                  }
+                },
+                "required": [
+                  "transactionId",
+                  "trackingNumber",
+                  "carrier"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AddPackageTrackingResult"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "graphql"
+        ],
+        "x-runtara-graphql-document": "mutation addPackageTracking($transactionId: ID!, $trackingNumber: String!, $carrier: String!, $notifyPayer: Boolean) {\n  createTransactionPackageTracking(\n    input: {\n      transactionId: $transactionId\n      trackingNumber: $trackingNumber\n      carrier: $carrier\n      notifyPayer: $notifyPayer\n    }\n  ) {\n    packageTracker {\n      id\n      trackingNumber\n      carrier\n      paypalTrackerId\n    }\n    transaction {\n      id\n      status\n    }\n  }\n}",
+        "x-runtara-graphql-field": "createTransactionPackageTracking",
+        "x-runtara-graphql-path": "/graphql",
+        "x-runtara-side-effects": true,
+        "x-runtara-summary": "Add Package Tracking"
+      }
+    },
+    "/authorizePaymentMethod": {
+      "post": {
+        "description": "Authorizes a payment method for an amount without submitting it for settlement; capture it later, or reverse it. A declined or rejected authorization fails as BRAINTREE_PAYMENT_DECLINED, with the transaction's ID and status. The same idempotency key with the same input answers the first request's transaction.",
+        "operationId": "authorizePaymentMethod",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "amount": {
+                    "description": "Billing amount of the request. This value must be greater than 0, and must match the currency format of the merchant account. This can only contain numbers and one decimal point (e.g. x.xx). Can't be greater than the maximum allowed by the processor.",
+                    "type": "string",
+                    "x-runtara-label": "Amount"
+                  },
+                  "apiRequestKey": {
+                    "description": "An identifier to detect duplicate operations and prevent double-processing. This can be used to protect from submitting a duplicate request; for instance, after receiving an INTERNAL error where the ultimate state of the request is uncertain.\n\nIf a request is made with a new `apiRequestKey`, it will be processed as normal. If subsequent requests are made with the same `apiRequestKey`, and the first request resulted in a transaction being created (in any status), then the same transaction in its current status will be returned.\n\nSubsequent requests with the same `apiRequestKey` must have the same input values as the original request. Subsequent requests with the same `apiRequestKey` must also be made after the initial request completes, and before 30 days has elapsed since the initial request finished. If a subsequent request is made while the first is in-flight or with different input values than the original request, it will result in a `VALIDATION` error on the subsequent request. If an `apiRequestKey` is reused after 30 days since its first use, it will be treated as if it has not been used before.\n\nIf an initial request is made with an `apiRequestKey`, but the request receives a `AUTHENTICATION`, `AUTHORIZATION`, `NOT_FOUND`, `RESOURCE_LIMIT`, or `NOT_IMPLEMENTED` error, and no transaction is created, then no duplication will be considered. Subsequent requests with the same `apiRequestKey` will be treated as non-duplicate requests, just as if they were the first request with that value.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Idempotency key"
+                  },
+                  "merchantAccountId": {
+                    "description": "Merchant account ID used to process the transaction. Currency is also determined by merchant account ID. If no merchant account ID is specified, we will use your default merchant account.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Merchant account"
+                  },
+                  "orderId": {
+                    "description": "Additional information about the transaction. On PayPal transactions, this field maps to the PayPal invoice number. PayPal invoice numbers must be unique in your PayPal business account. Maximum 255 characters or 127 for PayPal transactions.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Order ID"
+                  },
+                  "paymentMethodId": {
+                    "description": "ID of a payment method to be authorized.",
+                    "type": "string",
+                    "x-runtara-label": "Payment method"
+                  }
+                },
+                "required": [
+                  "paymentMethodId",
+                  "amount"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizePaymentMethodResult"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "graphql"
+        ],
+        "x-runtara-graphql-document": "mutation authorizePaymentMethod($paymentMethodId: ID!, $amount: Amount!, $orderId: String, $merchantAccountId: ID, $apiRequestKey: String) {\n  authorizePaymentMethod(\n    input: {\n      paymentMethodId: $paymentMethodId\n      apiRequestKey: $apiRequestKey\n      transaction: { amount: $amount, orderId: $orderId, merchantAccountId: $merchantAccountId }\n    }\n  ) {\n    transaction {\n      ...TransactionFields\n    }\n  }\n}\n\nfragment TransactionFields on Transaction {\n  id\n  legacyId\n  status\n  orderId\n  createdAt\n  merchantAccountId\n  amount {\n    value\n    currencyCode\n  }\n  processorAuthorizationResponse {\n    legacyCode\n    message\n    cvvResponse\n    avsPostalCodeResponse\n    avsStreetAddressResponse\n  }\n  paymentMethodSnapshot {\n    __typename\n    ... on CreditCardDetails {\n      brandCode\n      last4\n      expirationMonth\n      expirationYear\n    }\n    ... on CreditCardTransactionDetails {\n      creditCard {\n        brandCode\n        last4\n        expirationMonth\n        expirationYear\n      }\n    }\n    ... on PayPalTransactionDetails {\n      authorizationId\n      captureId\n      payer {\n        email\n        payerId\n      }\n    }\n  }\n  customer {\n    id\n    email\n  }\n}",
+        "x-runtara-graphql-field": "authorizePaymentMethod",
+        "x-runtara-graphql-path": "/graphql",
+        "x-runtara-side-effects": true,
+        "x-runtara-summary": "Authorize Payment Method"
+      }
+    },
+    "/captureTransaction": {
+      "post": {
+        "description": "Submits an authorized transaction for settlement, for its whole amount or a smaller `amount`.",
+        "operationId": "captureTransaction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "amount": {
+                    "description": "The amount to capture on the transaction. Must be greater than 0. You can't capture more than the authorized amount unless your industry and processor support settlement adjustment (capturing a certain percentage over the authorized amount); contact us for assistance. If you capture an amount that is less than what was authorized, the transaction object will return the amount captured.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Amount"
+                  },
+                  "apiRequestKey": {
+                    "description": "An identifier to detect duplicate operations and prevent double-processing. This can be used to protect from submitting a duplicate request; for instance, after receiving an INTERNAL error where the ultimate state of the request is uncertain.\n\nIf a request is made with a new `apiRequestKey`, it will be processed as normal. If subsequent requests are made with the same `apiRequestKey`, and the first request resulted in a transaction being created (in any status), then the same transaction in its current status will be returned.\n\nSubsequent requests with the same `apiRequestKey` must have the same input values as the original request. Subsequent requests with the same `apiRequestKey` must also be made after the initial request completes, and before 30 days has elapsed since the initial request finished. If a subsequent request is made while the first is in-flight or with different input values than the original request, it will result in a `VALIDATION` error on the subsequent request. If an `apiRequestKey` is reused after 30 days since its first use, it will be treated as if it has not been used before.\n\nIf an initial request is made with an `apiRequestKey`, but the request receives a `AUTHENTICATION`, `AUTHORIZATION`, `NOT_FOUND`, `RESOURCE_LIMIT`, or `NOT_IMPLEMENTED` error, and no transaction is created, then no duplication will be considered. Subsequent requests with the same `apiRequestKey` will be treated as non-duplicate requests, just as if they were the first request with that value.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Idempotency key"
+                  },
+                  "transactionId": {
+                    "description": "ID of the transaction to be captured.",
+                    "type": "string",
+                    "x-runtara-label": "Transaction ID"
+                  }
+                },
+                "required": [
+                  "transactionId"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureTransactionResult"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "graphql"
+        ],
+        "x-runtara-graphql-document": "mutation captureTransaction($transactionId: ID!, $amount: Amount, $apiRequestKey: String) {\n  captureTransaction(\n    input: {\n      transactionId: $transactionId\n      apiRequestKey: $apiRequestKey\n      transaction: { amount: $amount }\n    }\n  ) {\n    transaction {\n      ...TransactionFields\n    }\n  }\n}\n\nfragment TransactionFields on Transaction {\n  id\n  legacyId\n  status\n  orderId\n  createdAt\n  merchantAccountId\n  amount {\n    value\n    currencyCode\n  }\n  processorAuthorizationResponse {\n    legacyCode\n    message\n    cvvResponse\n    avsPostalCodeResponse\n    avsStreetAddressResponse\n  }\n  paymentMethodSnapshot {\n    __typename\n    ... on CreditCardDetails {\n      brandCode\n      last4\n      expirationMonth\n      expirationYear\n    }\n    ... on CreditCardTransactionDetails {\n      creditCard {\n        brandCode\n        last4\n        expirationMonth\n        expirationYear\n      }\n    }\n    ... on PayPalTransactionDetails {\n      authorizationId\n      captureId\n      payer {\n        email\n        payerId\n      }\n    }\n  }\n  customer {\n    id\n    email\n  }\n}",
+        "x-runtara-graphql-field": "captureTransaction",
+        "x-runtara-graphql-path": "/graphql",
+        "x-runtara-side-effects": true,
+        "x-runtara-summary": "Capture Transaction"
+      }
+    },
+    "/chargePaymentMethod": {
+      "post": {
+        "description": "Charges a payment method (a vaulted payment method's ID, or a nonce from a client SDK) and submits the transaction for settlement. A charge the processor declines or the gateway rejects fails as BRAINTREE_PAYMENT_DECLINED, with the transaction's ID and status. The same idempotency key with the same input answers the transaction the first request made instead of charging again.",
+        "operationId": "chargePaymentMethod",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "amount": {
+                    "description": "Billing amount of the request. This value must be greater than 0, and must match the currency format of the merchant account. This can only contain numbers and one decimal point (e.g. x.xx). Can't be greater than the maximum allowed by the processor.",
+                    "type": "string",
+                    "x-runtara-label": "Amount"
+                  },
+                  "apiRequestKey": {
+                    "description": "An identifier to detect duplicate operations and prevent double-processing. This can be used to protect from submitting a duplicate request; for instance, after receiving an INTERNAL error where the ultimate state of the request is uncertain.\n\nIf a request is made with a new `apiRequestKey`, it will be processed as normal. If subsequent requests are made with the same `apiRequestKey`, and the first request resulted in a transaction being created (in any status), then the same transaction in its current status will be returned.\n\nSubsequent requests with the same `apiRequestKey` must have the same input values as the original request. Subsequent requests with the same `apiRequestKey` must also be made after the initial request completes, and before 30 days has elapsed since the initial request finished. If a subsequent request is made while the first is in-flight or with different input values than the original request, it will result in a `VALIDATION` error on the subsequent request. If an `apiRequestKey` is reused after 30 days since its first use, it will be treated as if it has not been used before.\n\nIf an initial request is made with an `apiRequestKey`, but the request receives a `AUTHENTICATION`, `AUTHORIZATION`, `NOT_FOUND`, `RESOURCE_LIMIT`, or `NOT_IMPLEMENTED` error, and no transaction is created, then no duplication will be considered. Subsequent requests with the same `apiRequestKey` will be treated as non-duplicate requests, just as if they were the first request with that value.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Idempotency key"
+                  },
+                  "merchantAccountId": {
+                    "description": "Merchant account ID used to process the transaction. Currency is also determined by merchant account ID. If no merchant account ID is specified, we will use your default merchant account.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Merchant account"
+                  },
+                  "orderId": {
+                    "description": "Additional information about the transaction. On PayPal transactions, this field maps to the PayPal invoice number. PayPal invoice numbers must be unique in your PayPal business account. Maximum 255 characters or 127 for PayPal transactions.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Order ID"
+                  },
+                  "paymentMethodId": {
+                    "description": "ID of a payment method to be charged.",
+                    "type": "string",
+                    "x-runtara-label": "Payment method"
+                  }
+                },
+                "required": [
+                  "paymentMethodId",
+                  "amount"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChargePaymentMethodResult"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "graphql"
+        ],
+        "x-runtara-graphql-document": "mutation chargePaymentMethod($paymentMethodId: ID!, $amount: Amount!, $orderId: String, $merchantAccountId: ID, $apiRequestKey: String) {\n  chargePaymentMethod(\n    input: {\n      paymentMethodId: $paymentMethodId\n      apiRequestKey: $apiRequestKey\n      transaction: { amount: $amount, orderId: $orderId, merchantAccountId: $merchantAccountId }\n    }\n  ) {\n    transaction {\n      ...TransactionFields\n    }\n  }\n}\n\nfragment TransactionFields on Transaction {\n  id\n  legacyId\n  status\n  orderId\n  createdAt\n  merchantAccountId\n  amount {\n    value\n    currencyCode\n  }\n  processorAuthorizationResponse {\n    legacyCode\n    message\n    cvvResponse\n    avsPostalCodeResponse\n    avsStreetAddressResponse\n  }\n  paymentMethodSnapshot {\n    __typename\n    ... on CreditCardDetails {\n      brandCode\n      last4\n      expirationMonth\n      expirationYear\n    }\n    ... on CreditCardTransactionDetails {\n      creditCard {\n        brandCode\n        last4\n        expirationMonth\n        expirationYear\n      }\n    }\n    ... on PayPalTransactionDetails {\n      authorizationId\n      captureId\n      payer {\n        email\n        payerId\n      }\n    }\n  }\n  customer {\n    id\n    email\n  }\n}",
+        "x-runtara-graphql-field": "chargePaymentMethod",
+        "x-runtara-graphql-path": "/graphql",
+        "x-runtara-side-effects": true,
+        "x-runtara-summary": "Charge Payment Method"
+      }
+    },
+    "/createCustomer": {
+      "post": {
+        "description": "Creates a customer in the vault, to store payment methods under.",
+        "operationId": "createCustomer",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "company": {
+                    "description": "Company or business name associated with the customer.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Company"
+                  },
+                  "email": {
+                    "description": "Email address for the customer.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Email"
+                  },
+                  "firstName": {
+                    "description": "Customer's first name.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "First Name"
+                  },
+                  "lastName": {
+                    "description": "Customer's last name.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Last Name"
+                  },
+                  "phoneNumber": {
+                    "description": "The customer's phone number.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Phone Number"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateCustomerResult"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "graphql"
+        ],
+        "x-runtara-graphql-document": "mutation createCustomer($email: String, $firstName: String, $lastName: String, $company: String, $phoneNumber: String) {\n  createCustomer(\n    input: {\n      customer: {\n        email: $email\n        firstName: $firstName\n        lastName: $lastName\n        company: $company\n        phoneNumber: $phoneNumber\n      }\n    }\n  ) {\n    customer {\n      id\n      legacyId\n      email\n      firstName\n      lastName\n      company\n      phoneNumber\n      createdAt\n    }\n  }\n}",
+        "x-runtara-graphql-field": "createCustomer",
+        "x-runtara-graphql-path": "/graphql",
+        "x-runtara-side-effects": true,
+        "x-runtara-summary": "Create Customer"
+      }
+    },
+    "/deletePaymentMethodFromVault": {
+      "post": {
+        "description": "Deletes a payment method from the vault.",
+        "operationId": "deletePaymentMethodFromVault",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "paymentMethodId": {
+                    "description": "The ID of the multi-use payment method to be deleted.",
+                    "type": "string",
+                    "x-runtara-label": "Payment method"
+                  }
+                },
+                "required": [
+                  "paymentMethodId"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletePaymentMethodFromVaultResult"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "graphql"
+        ],
+        "x-runtara-graphql-document": "mutation deletePaymentMethodFromVault($paymentMethodId: ID!) {\n  deletePaymentMethodFromVault(input: { paymentMethodId: $paymentMethodId }) {\n    clientMutationId\n  }\n}",
+        "x-runtara-graphql-field": "deletePaymentMethodFromVault",
+        "x-runtara-graphql-path": "/graphql",
+        "x-runtara-side-effects": true,
+        "x-runtara-summary": "Delete Payment Method From Vault"
+      }
+    },
+    "/getTransaction": {
+      "post": {
+        "description": "A transaction by its ID: its status and status history, amount, order ID, the payment method it was made with, the processor's response, the customer and its refunds. An ID that names no transaction fails as BRAINTREE_NOT_FOUND.",
+        "operationId": "getTransaction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "x-runtara-label": "ID"
+                  }
+                },
+                "required": [
+                  "id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetTransactionResult"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "graphql"
+        ],
+        "x-runtara-graphql-document": "query getTransaction($id: ID!) {\n  node(id: $id) {\n    ...TransactionFields\n    ... on Transaction {\n      statusHistory {\n        status\n        timestamp\n        amount {\n          value\n          currencyCode\n        }\n      }\n      refunds {\n        id\n        status\n        createdAt\n        amount {\n          value\n          currencyCode\n        }\n      }\n    }\n  }\n}\n\nfragment TransactionFields on Transaction {\n  id\n  legacyId\n  status\n  orderId\n  createdAt\n  merchantAccountId\n  amount {\n    value\n    currencyCode\n  }\n  processorAuthorizationResponse {\n    legacyCode\n    message\n    cvvResponse\n    avsPostalCodeResponse\n    avsStreetAddressResponse\n  }\n  paymentMethodSnapshot {\n    __typename\n    ... on CreditCardDetails {\n      brandCode\n      last4\n      expirationMonth\n      expirationYear\n    }\n    ... on CreditCardTransactionDetails {\n      creditCard {\n        brandCode\n        last4\n        expirationMonth\n        expirationYear\n      }\n    }\n    ... on PayPalTransactionDetails {\n      authorizationId\n      captureId\n      payer {\n        email\n        payerId\n      }\n    }\n  }\n  customer {\n    id\n    email\n  }\n}",
+        "x-runtara-graphql-field": "node",
+        "x-runtara-graphql-path": "/graphql",
+        "x-runtara-summary": "Get Transaction"
+      }
+    },
+    "/ping": {
+      "post": {
+        "description": "Answers `pong` when the connection's keys are accepted: a check of the connection that reads and changes nothing.",
+        "operationId": "ping",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "graphql"
+        ],
+        "x-runtara-first": true,
+        "x-runtara-graphql-document": "query ping {\n  ping\n}",
+        "x-runtara-graphql-field": "ping",
+        "x-runtara-graphql-path": "/graphql",
+        "x-runtara-summary": "Check Connection"
+      }
+    },
+    "/refundTransaction": {
+      "post": {
+        "description": "Refunds a settled (or settling) transaction, in full or for `amount`. Answers the refund, itself a transaction with its own ID and status.",
+        "operationId": "refundTransaction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "amount": {
+                    "description": "The amount to refund. Must be less than or equal to the amount of the original transaction. Defaults to the total amount of the original transaction.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Amount"
+                  },
+                  "apiRequestKey": {
+                    "description": "An identifier to detect duplicate operations and prevent double-processing. This can be used to protect from submitting a duplicate request; for instance, after receiving an INTERNAL error where the ultimate state of the request is uncertain.\n\nIf a request is made with a new `apiRequestKey`, it will be processed as normal. If subsequent requests are made with the same `apiRequestKey`, and the first request resulted in a refund being created (in any status), then the same refund in its current status will be returned.\n\nSubsequent requests with the same `apiRequestKey` must have the same input values as the original request. Subsequent requests with the same `apiRequestKey` must also be made after the initial request completes, and before 30 days has elapsed since the initial request finished. If a subsequent request is made while the first is in-flight or with different input values than the original request, it will result in a `VALIDATION` error on the subsequent request. If an `apiRequestKey` is reused after 30 days since its first use, it will be treated as if it has not been used before.\n\nIf an initial request is made with an `apiRequestKey`, but the request receives a `AUTHENTICATION`, `AUTHORIZATION`, `NOT_FOUND`, `RESOURCE_LIMIT`, or `NOT_IMPLEMENTED` error, and no refund is created, then no duplication will be considered. Subsequent requests with the same `apiRequestKey` will be treated as non-duplicate requests, just as if they were the first request with that value.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Idempotency key"
+                  },
+                  "orderId": {
+                    "description": "The refund's order ID. Defaults to the order ID of the original transaction.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Order ID"
+                  },
+                  "transactionId": {
+                    "description": "The ID of a transaction to be refunded.",
+                    "type": "string",
+                    "x-runtara-label": "Transaction ID"
+                  }
+                },
+                "required": [
+                  "transactionId"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefundTransactionResult"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "graphql"
+        ],
+        "x-runtara-graphql-document": "mutation refundTransaction($transactionId: ID!, $amount: Amount, $orderId: String, $apiRequestKey: String) {\n  refundTransaction(\n    input: {\n      transactionId: $transactionId\n      apiRequestKey: $apiRequestKey\n      refund: { amount: $amount, orderId: $orderId }\n    }\n  ) {\n    refund {\n      id\n      legacyId\n      status\n      orderId\n      createdAt\n      amount {\n        value\n        currencyCode\n      }\n      processorAuthorizationResponse {\n        legacyCode\n        message\n      }\n      refundedTransaction {\n        id\n        status\n      }\n    }\n  }\n}",
+        "x-runtara-graphql-field": "refundTransaction",
+        "x-runtara-graphql-path": "/graphql",
+        "x-runtara-side-effects": true,
+        "x-runtara-summary": "Refund Transaction"
+      }
+    },
+    "/reverseTransaction": {
+      "post": {
+        "description": "Undoes a transaction whatever its state: voids it if it is not settled yet, refunds it in full otherwise. Answers the voided transaction or the refund (`__typename` says which).",
+        "operationId": "reverseTransaction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "apiRequestKey": {
+                    "description": "An identifier to detect duplicate operations and prevent double-processing. This can be used to protect from submitting a duplicate request; for instance, after receiving an INTERNAL error where the ultimate state of the request is uncertain.\n\nIf a request is made with a new `apiRequestKey`, it will be processed as normal. If subsequent requests are made with the same `apiRequestKey`, and the first request resulted in a transaction or refund being created (in any status), then the same transaction or refund in its current status will be returned.\n\nSubsequent requests with the same `apiRequestKey` must have the same input values as the original request. Subsequent requests with the same `apiRequestKey` must also be made after the initial request completes, and before 30 days has elapsed since the initial request finished. If a subsequent request is made while the first is in-flight or with different input values than the original request, it will result in a `VALIDATION` error on the subsequent request. If an `apiRequestKey` is reused after 30 days since its first use, it will be treated as if it has not been used before.\n\nIf an initial request is made with an `apiRequestKey`, but the request receives a `AUTHENTICATION`, `AUTHORIZATION`, `NOT_FOUND`, `RESOURCE_LIMIT`, or `NOT_IMPLEMENTED` error, and no transaction or refund is created, then no duplication will be considered. Subsequent requests with the same `apiRequestKey` will be treated as non-duplicate requests, just as if they were the first request with that value.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Idempotency key"
+                  },
+                  "transactionId": {
+                    "description": "The ID of the transaction to reverse.",
+                    "type": "string",
+                    "x-runtara-label": "Transaction ID"
+                  }
+                },
+                "required": [
+                  "transactionId"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReverseTransactionResult"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "graphql"
+        ],
+        "x-runtara-graphql-document": "mutation reverseTransaction($transactionId: ID!, $apiRequestKey: String) {\n  reverseTransaction(\n    input: { transactionId: $transactionId, apiRequestKey: $apiRequestKey }\n  ) {\n    reversal {\n      __typename\n      ... on Transaction {\n        id\n        legacyId\n        status\n        amount {\n          value\n          currencyCode\n        }\n      }\n      ... on Refund {\n        id\n        legacyId\n        status\n        amount {\n          value\n          currencyCode\n        }\n        processorAuthorizationResponse {\n          legacyCode\n          message\n        }\n      }\n    }\n  }\n}",
+        "x-runtara-graphql-field": "reverseTransaction",
+        "x-runtara-graphql-path": "/graphql",
+        "x-runtara-side-effects": true,
+        "x-runtara-summary": "Reverse Transaction"
+      }
+    },
+    "/sandboxSettleTransaction": {
+      "post": {
+        "description": "Settles a transaction that was submitted for settlement, at once, in Braintree's sandbox only (for testing a refund); fails in production.",
+        "operationId": "sandboxSettleTransaction",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "transactionId": {
+                    "description": "Id of the transaction to force settlement in the sandbox environment.",
+                    "type": "string",
+                    "x-runtara-label": "Transaction ID"
+                  }
+                },
+                "required": [
+                  "transactionId"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxSettleTransactionResult"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "graphql"
+        ],
+        "x-runtara-graphql-document": "mutation sandboxSettleTransaction($transactionId: ID!) {\n  sandboxSettleTransaction(input: { transactionId: $transactionId }) {\n    transaction {\n      id\n      status\n    }\n  }\n}",
+        "x-runtara-graphql-field": "sandboxSettleTransaction",
+        "x-runtara-graphql-path": "/graphql",
+        "x-runtara-side-effects": true,
+        "x-runtara-summary": "Settle Transaction (Sandbox Only)"
+      }
+    },
+    "/searchCustomers": {
+      "post": {
+        "description": "Customers whose email is the one given (all customers without it). A page at a time: pass the previous page's `endCursor` as `after` while `hasNextPage` is true.",
+        "operationId": "searchCustomers",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "after": {
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "After"
+                  },
+                  "email": {
+                    "description": "Field is exactly this value.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Email"
+                  },
+                  "first": {
+                    "default": 50,
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer",
+                    "x-runtara-default": "50",
+                    "x-runtara-label": "First"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchCustomersResult"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "graphql"
+        ],
+        "x-runtara-graphql-document": "query searchCustomers($email: String, $first: Int = 50, $after: String) {\n  customers(input: { email: { is: $email } }, first: $first, after: $after) {\n    pageInfo {\n      hasNextPage\n      endCursor\n    }\n    edges {\n      node {\n        id\n        legacyId\n        email\n        firstName\n        lastName\n        company\n        phoneNumber\n        createdAt\n        defaultPaymentMethod {\n          id\n        }\n      }\n    }\n  }\n}",
+        "x-runtara-graphql-field": "customers",
+        "x-runtara-graphql-path": "/graphql",
+        "x-runtara-summary": "Search Customers"
+      }
+    },
+    "/searchDisputes": {
+      "post": {
+        "description": "Disputes (chargebacks, retrievals, pre-arbitrations) in the statuses given (all disputes without them), with the transaction each is about. A page at a time: pass the previous page's `endCursor` as `after` while `hasNextPage` is true.",
+        "operationId": "searchDisputes",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "after": {
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "After"
+                  },
+                  "first": {
+                    "default": 50,
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer",
+                    "x-runtara-default": "50",
+                    "x-runtara-label": "First"
+                  },
+                  "statuses": {
+                    "description": "The dispute status is one of these values.",
+                    "items": {
+                      "description": "The status of the dispute.",
+                      "enum": [
+                        "ACCEPTED",
+                        "AUTO_ACCEPTED",
+                        "DISPUTED",
+                        "EXPIRED",
+                        "LOST",
+                        "OPEN",
+                        "UNDER_REVIEW",
+                        "WON"
+                      ],
+                      "type": "string"
+                    },
+                    "nullable": true,
+                    "type": "array",
+                    "x-runtara-label": "Statuses"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchDisputesResult"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "graphql"
+        ],
+        "x-runtara-graphql-document": "query searchDisputes($statuses: [DisputeStatus!], $first: Int = 50, $after: String) {\n  disputes(input: { status: { in: $statuses } }, first: $first, after: $after) {\n    pageInfo {\n      hasNextPage\n      endCursor\n    }\n    edges {\n      node {\n        id\n        legacyId\n        status\n        type\n        caseNumber\n        referenceNumber\n        receivedDate\n        replyByDate\n        createdAt\n        amountDisputed {\n          value\n          currencyCode\n        }\n        transaction {\n          id\n          orderId\n        }\n      }\n    }\n  }\n}",
+        "x-runtara-graphql-field": "disputes",
+        "x-runtara-graphql-path": "/graphql",
+        "x-runtara-summary": "Search Disputes"
+      }
+    },
+    "/searchTransactions": {
+      "post": {
+        "description": "Transactions matching every filter given: an order ID, a creation time range and statuses. A page at a time: pass the previous page's `endCursor` as `after` while `hasNextPage` is true.",
+        "operationId": "searchTransactions",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "after": {
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "After"
+                  },
+                  "createdFrom": {
+                    "description": "Timestamp is greater than or equal to this value.",
+                    "format": "date-time",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Created From"
+                  },
+                  "createdTo": {
+                    "description": "Timestamp is less than this value.",
+                    "format": "date-time",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Created To"
+                  },
+                  "first": {
+                    "default": 50,
+                    "format": "int64",
+                    "nullable": true,
+                    "type": "integer",
+                    "x-runtara-default": "50",
+                    "x-runtara-label": "First"
+                  },
+                  "orderId": {
+                    "description": "Field is exactly this value.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Order ID"
+                  },
+                  "statuses": {
+                    "description": "The transaction status is one of these values.",
+                    "items": {
+                      "description": "The status of the payment, indicating its success or failure, and where it is in its lifecycle. For further details on why any given status occurred, consult the corresponding `PaymentStatusEvent` in the payment's `statusHistory`.",
+                      "enum": [
+                        "AUTHORIZATION_EXPIRED",
+                        "AUTHORIZED",
+                        "AUTHORIZING",
+                        "FAILED",
+                        "GATEWAY_REJECTED",
+                        "PROCESSOR_DECLINED",
+                        "SETTLED",
+                        "SETTLEMENT_CONFIRMED",
+                        "SETTLEMENT_DECLINED",
+                        "SETTLEMENT_PENDING",
+                        "SETTLING",
+                        "SUBMITTED_FOR_SETTLEMENT",
+                        "VOIDED"
+                      ],
+                      "type": "string"
+                    },
+                    "nullable": true,
+                    "type": "array",
+                    "x-runtara-label": "Statuses"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchTransactionsResult"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "graphql"
+        ],
+        "x-runtara-graphql-document": "query searchTransactions($orderId: String, $createdFrom: Timestamp, $createdTo: Timestamp, $statuses: [PaymentStatus!], $first: Int = 50, $after: String) {\n  transactions(\n    input: {\n      orderId: { is: $orderId }\n      createdAt: { greaterThanOrEqualTo: $createdFrom, lessThanOrEqualTo: $createdTo }\n      status: { in: $statuses }\n    }\n    first: $first\n    after: $after\n  ) {\n    pageInfo {\n      hasNextPage\n      endCursor\n    }\n    edges {\n      node {\n        ...TransactionFields\n      }\n    }\n  }\n}\n\nfragment TransactionFields on Transaction {\n  id\n  legacyId\n  status\n  orderId\n  createdAt\n  merchantAccountId\n  amount {\n    value\n    currencyCode\n  }\n  processorAuthorizationResponse {\n    legacyCode\n    message\n    cvvResponse\n    avsPostalCodeResponse\n    avsStreetAddressResponse\n  }\n  paymentMethodSnapshot {\n    __typename\n    ... on CreditCardDetails {\n      brandCode\n      last4\n      expirationMonth\n      expirationYear\n    }\n    ... on CreditCardTransactionDetails {\n      creditCard {\n        brandCode\n        last4\n        expirationMonth\n        expirationYear\n      }\n    }\n    ... on PayPalTransactionDetails {\n      authorizationId\n      captureId\n      payer {\n        email\n        payerId\n      }\n    }\n  }\n  customer {\n    id\n    email\n  }\n}",
+        "x-runtara-graphql-field": "transactions",
+        "x-runtara-graphql-path": "/graphql",
+        "x-runtara-summary": "Search Transactions"
+      }
+    },
+    "/vaultPaymentMethod": {
+      "post": {
+        "description": "Stores a single-use payment method (a nonce from a client SDK) in the vault, for the customer given, so that it can be charged again later. Answers the stored payment method's ID.",
+        "operationId": "vaultPaymentMethod",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "customerId": {
+                    "description": "ID of the customer to associate the resulting multi-use payment method with.",
+                    "nullable": true,
+                    "type": "string",
+                    "x-runtara-label": "Customer ID"
+                  },
+                  "makeDefault": {
+                    "description": "This option makes the specified payment method the default for the customer.",
+                    "nullable": true,
+                    "type": "boolean",
+                    "x-runtara-label": "Make Default"
+                  },
+                  "paymentMethodId": {
+                    "description": "ID of an existing single-use payment method to be vaulted.",
+                    "type": "string",
+                    "x-runtara-label": "Payment method"
+                  }
+                },
+                "required": [
+                  "paymentMethodId"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VaultPaymentMethodResult"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "graphql"
+        ],
+        "x-runtara-graphql-document": "mutation vaultPaymentMethod($paymentMethodId: ID!, $customerId: ID, $makeDefault: Boolean) {\n  vaultPaymentMethod(\n    input: {\n      paymentMethodId: $paymentMethodId\n      customerId: $customerId\n      makeDefault: $makeDefault\n    }\n  ) {\n    paymentMethod {\n      id\n      legacyId\n      usage\n      createdAt\n      customer {\n        id\n      }\n    }\n  }\n}",
+        "x-runtara-graphql-field": "vaultPaymentMethod",
+        "x-runtara-graphql-path": "/graphql",
+        "x-runtara-side-effects": true,
+        "x-runtara-summary": "Vault Payment Method"
+      }
+    }
+  }
+}

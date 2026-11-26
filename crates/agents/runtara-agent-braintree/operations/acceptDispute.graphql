@@ -1,0 +1,9 @@
+mutation acceptDispute($disputeId: ID!) {
+  acceptDispute(input: {disputeId: $disputeId}) {
+    dispute {
+      id
+      legacyId
+      status
+    }
+  }
+}

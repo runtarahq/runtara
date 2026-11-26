@@ -1,7 +1,8 @@
 use runtara_agents::extractors::connection_types::{
     GEMINI_API_BASE_URL, SHIPPO_API_BASE_URL, SHIPPO_API_VERSION, ZENDESK_DEFAULT_SCOPE,
-    bigcommerce_base_url, connection_environment, jira_base_url, magento_base_url, paypal_base_url,
-    shopware_base_url, ups_base_url, woocommerce_base_url, zendesk_base_url,
+    bigcommerce_base_url, braintree_base_url, connection_environment, jira_base_url,
+    magento_base_url, paypal_base_url, shopware_base_url, ups_base_url, woocommerce_base_url,
+    zendesk_base_url,
 };
 use runtara_agents::registry::find_connection_type;
 use runtara_dsl::agent_meta::{OAuthConfig, TokenEndpointAuth};
@@ -327,6 +328,14 @@ pub(crate) fn describe_connection_auth(
             azure_signing: None,
             deferred_auth: describe_paypal_client_credentials_auth(connection_id, params),
         },
+        // Braintree: HTTP Basic with the key pair, which seal attaches, to the
+        // environment's own host; an unknown environment leaves no base URL.
+        "braintree_api_keys" => ConnectionAuthDescriptor {
+            base_url: braintree_environment_url(params),
+            aws_signing: None,
+            azure_signing: None,
+            deferred_auth: None,
+        },
         "slack_bot" => ConnectionAuthDescriptor {
             base_url: Some("https://slack.com".into()),
             aws_signing: None,
@@ -627,6 +636,11 @@ fn describe_ups_client_credentials_auth(
 fn paypal_environment_url(params: &Value) -> Option<String> {
     let environment = connection_environment(params).ok()?;
     paypal_base_url(environment).ok().map(str::to_string)
+}
+
+pub(crate) fn braintree_environment_url(params: &Value) -> Option<String> {
+    let environment = connection_environment(params).ok()?;
+    braintree_base_url(environment).ok().map(str::to_string)
 }
 
 /// PayPal mints client-credentials tokens on the environment's own host from a
@@ -1363,6 +1377,39 @@ mod tests {
             descriptor.base_url.as_deref(),
             Some("https://example.com/shop")
         );
+    }
+
+    #[test]
+    fn braintree_pins_the_environments_host() {
+        for (environment, expected) in [
+            (
+                json!("sandbox"),
+                Some("https://payments.sandbox.braintree-api.com"),
+            ),
+            (
+                json!("production"),
+                Some("https://payments.braintree-api.com"),
+            ),
+            (Value::Null, Some("https://payments.braintree-api.com")),
+            (json!("staging"), None),
+            (json!(1), None),
+        ] {
+            let mut headers = HashMap::new();
+            let descriptor = describe_connection_auth(
+                "conn-1",
+                "braintree_api_keys",
+                &json!({
+                    "environment": environment,
+                    "public_key": "pub",
+                    "private_key": "secret"
+                }),
+                &mut headers,
+            );
+            // The credential is seal's to attach.
+            assert!(!headers.contains_key("Authorization"));
+            assert_eq!(descriptor.base_url.as_deref(), expected, "{environment}");
+            assert!(descriptor.deferred_auth.is_none());
+        }
     }
 
     #[test]

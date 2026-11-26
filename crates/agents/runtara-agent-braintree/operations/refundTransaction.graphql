@@ -1,0 +1,34 @@
+mutation refundTransaction(
+  $transactionId: ID!
+  $amount: Amount
+  $orderId: String
+  $apiRequestKey: String
+) {
+  refundTransaction(
+    input: {
+      transactionId: $transactionId
+      apiRequestKey: $apiRequestKey
+      refund: {amount: $amount, orderId: $orderId}
+    }
+  ) {
+    refund {
+      id
+      legacyId
+      status
+      orderId
+      createdAt
+      amount {
+        value
+        currencyCode
+      }
+      processorAuthorizationResponse {
+        legacyCode
+        message
+      }
+      refundedTransaction {
+        id
+        status
+      }
+    }
+  }
+}

@@ -28,6 +28,7 @@ fn agents() -> Vec<(&'static str, AgentInfo)> {
         ),
         ("bedrock", runtara_agent_bedrock::agent_info()),
         ("bigcommerce", runtara_agent_bigcommerce::agent_info()),
+        ("braintree", runtara_agent_braintree::agent_info()),
         ("compression", runtara_agent_compression::agent_info()),
         ("control", runtara_agent_control::agent_info()),
         ("conversation", runtara_agent_conversation::agent_info()),

@@ -19,9 +19,9 @@ use seal_format::{FieldName, PolicyName};
 use serde_json::{Value, json};
 
 use crate::auth::provider_auth::{
-    bigcommerce_store_url, first_string_param, jira_account_url, magento_store_url,
-    normalize_endpoint, openai_proxy_base_url, resolve_azure_blob_base_url, resolve_named_endpoint,
-    woocommerce_store_url,
+    bigcommerce_store_url, braintree_environment_url, first_string_param, jira_account_url,
+    magento_store_url, normalize_endpoint, openai_proxy_base_url, resolve_azure_blob_base_url,
+    resolve_named_endpoint, woocommerce_store_url,
 };
 
 /// Destinations a deployment lets credentials go to that seal refuses by
@@ -1361,6 +1361,20 @@ fn secrets(integration_id: &str, params: &Value) -> Option<Vec<Secret>> {
                 basic(consumer_key),
             )
         }
+        // HTTP Basic, the public key as its user, to the environment's own
+        // host. A public key with a `:` could not be read back from the
+        // header, and one with whitespace inside is no key Braintree made.
+        "braintree_api_keys" => {
+            let public_key = filled(params, "public_key")?.trim();
+            if public_key.contains(':') || public_key.contains(char::is_whitespace) {
+                return None;
+            }
+            one(
+                "private_key",
+                &braintree_environment_url(params)?,
+                basic(public_key),
+            )
+        }
         "jira_api_token" => one(
             "api_token",
             &jira_account_url(params)?,
@@ -1772,6 +1786,7 @@ pub const SEALABLE_TYPES: &[&str] = &[
     "bigcommerce_api_token",
     "magento_access_token",
     "woocommerce_api_key",
+    "braintree_api_keys",
     "jira_api_token",
     "telegram_bot",
     "slack_bot",
@@ -2109,6 +2124,17 @@ mod tests {
                 json!({"basic": {"username": {"literal": "ck_abc"}}}),
             ),
             (
+                "braintree_api_keys",
+                json!({
+                    "environment": "sandbox",
+                    "public_key": " pubkey\n",
+                    "private_key": "s"
+                }),
+                "private_key",
+                json!({"scheme": "https", "host": "payments.sandbox.braintree-api.com"}),
+                json!({"basic": {"username": {"literal": "pubkey"}}}),
+            ),
+            (
                 "http_bearer",
                 json!({"token": "s", "base_url": "https://api.example.com/v2/"}),
                 "token",
@@ -2242,6 +2268,57 @@ mod tests {
             canonical(&policy["access_token"])["rules"][0]["destination"],
             json!({"scheme": "http", "host": "localhost", "port": 8090})
         );
+    }
+
+    #[test]
+    fn a_braintree_private_key_goes_only_to_its_environments_host() {
+        for (environment, host) in [
+            (json!("sandbox"), "payments.sandbox.braintree-api.com"),
+            (json!("production"), "payments.braintree-api.com"),
+            // A missing environment is production, as the connection form's
+            // default.
+            (Value::Null, "payments.braintree-api.com"),
+        ] {
+            let params = json!({
+                "environment": environment,
+                "public_key": "pubkey",
+                "private_key": "s"
+            });
+            let policy =
+                policies("braintree_api_keys", &params, &Allowances::default()).expect("sealed");
+            assert_eq!(
+                canonical(&policy["private_key"]),
+                json!({"rules": [{
+                    "destination": {"scheme": "https", "host": host},
+                    "inject": {"basic": {"username": {"literal": "pubkey"}}},
+                }]}),
+                "{environment}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_braintree_key_pair_without_a_known_environment_or_valid_public_key_is_not_sealed() {
+        for (environment, public_key) in [
+            (json!("evil.com"), json!("pubkey")),
+            (json!("staging"), json!("pubkey")),
+            (json!(1), json!("pubkey")),
+            (json!("sandbox"), json!("pub:key")),
+            (json!("sandbox"), json!("pub key")),
+            (json!("sandbox"), json!(" ")),
+            (json!("sandbox"), Value::Null),
+        ] {
+            let params = json!({
+                "environment": environment,
+                "public_key": public_key,
+                "private_key": "s"
+            });
+            assert_eq!(
+                policies("braintree_api_keys", &params, &Allowances::default()),
+                None,
+                "{params}"
+            );
+        }
     }
 
     #[test]
@@ -2445,6 +2522,7 @@ mod tests {
             "tenant_id": "tenant", "scope": "read", "subdomain": "acme", "store_hash": "abc123",
             "store_url": "https://shop.example.com",
             "consumer_key": "ck_abc", "consumer_secret": "s",
+            "public_key": "pubkey", "private_key": "s",
             "token_url": "https://auth.example.com/token",
             "database_target": "postgres://app@db.example.com:5432/orders",
         });

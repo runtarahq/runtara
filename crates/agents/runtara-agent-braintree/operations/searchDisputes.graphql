@@ -1,0 +1,29 @@
+query searchDisputes($statuses: [DisputeStatus!], $first: Int = 50, $after: String) {
+  disputes(input: {status: {in: $statuses}}, first: $first, after: $after) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    edges {
+      node {
+        id
+        legacyId
+        status
+        type
+        caseNumber
+        referenceNumber
+        receivedDate
+        replyByDate
+        createdAt
+        amountDisputed {
+          value
+          currencyCode
+        }
+        transaction {
+          id
+          orderId
+        }
+      }
+    }
+  }
+}
