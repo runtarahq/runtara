@@ -120,7 +120,10 @@ operation_names:
     description: >-
       Stores a single-use payment method (a nonce from a client SDK) in the
       vault, for the customer given, so that it can be charged again later.
-      Answers the stored payment method's ID.
+      Braintree verifies a card first: one whose verification is declined or
+      rejected is not stored, and fails as BRAINTREE_PAYMENT_DECLINED with the
+      verification's ID, status and the processor's response. Answers the
+      stored payment method's ID and the verification.
   deletePaymentMethodFromVault:
     name: deletePaymentMethodFromVault
     description: Deletes a payment method from the vault.

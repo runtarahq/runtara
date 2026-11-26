@@ -465,6 +465,10 @@ fn customers_the_vault_and_disputes_read_into_their_types() {
         json!({"paymentMethod": {
             "id": "cGF5bWVudG1ldGhvZF8x", "legacyId": "abc123", "usage": "MULTI_USE",
             "createdAt": "2026-11-26T12:00:00.000000Z", "customer": {"id": "Y3VzdG9tZXJfMQ"},
+        },
+        "verification": {
+            "id": "dmVyaWZpY2F0aW9uXzE", "status": "VERIFIED", "gatewayRejectionReason": null,
+            "processorResponse": {"legacyCode": "1000", "message": "Approved"},
         }}),
     );
     let delete = input::<DeletePaymentMethodFromVaultInput>(json!({

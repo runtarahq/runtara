@@ -456,3 +456,168 @@ fn every_request_names_the_api_version_of_the_schema() {
         "{version}"
     );
 }
+
+const VAULT: kit::Graphql = kit::Graphql {
+    field: "vaultPaymentMethod",
+    read: false,
+};
+
+/// A charge refused with one VALIDATION error of `legacy_code`.
+fn refused_with_code(legacy_code: &str) -> Value {
+    json!({
+        "data": {"chargePaymentMethod": null},
+        "errors": [{
+            "message": "a refusal",
+            "path": ["chargePaymentMethod"],
+            "extensions": {"errorClass": "VALIDATION", "legacyCode": legacy_code},
+        }],
+    })
+}
+
+#[test]
+fn a_key_whose_first_request_is_in_flight_is_sent_again_later() {
+    let err = error(CHARGE, refused_with_code("915233"));
+    assert_eq!(kind(&err), ("BRAINTREE_REQUEST_IN_FLIGHT", "transient"));
+    assert_eq!(err.retry_after_ms, Some(2_000));
+    // The same key with other input is refused for good.
+    let err = error(CHARGE, refused_with_code("915232"));
+    assert_eq!(kind(&err), ("BRAINTREE_VALIDATION_ERROR", "permanent"));
+}
+
+#[test]
+fn a_vault_whose_verification_was_declined_is_a_decline() {
+    // As Braintree's vaulting guide shows a failed verification: nothing is
+    // stored, the verification says why.
+    let err = error(
+        VAULT,
+        json!({
+            "data": {"vaultPaymentMethod": {
+                "paymentMethod": null,
+                "verification": {
+                    "id": "dmVyaWZpY2F0aW9uXzE",
+                    "status": "PROCESSOR_DECLINED",
+                    "gatewayRejectionReason": null,
+                    "processorResponse": {"legacyCode": "2000", "message": "Do Not Honor"},
+                },
+            }},
+            "errors": [{
+                "message": "Payment method failed verification.",
+                "path": ["vaultPaymentMethod", "paymentMethod"],
+                "extensions": {"errorClass": "VALIDATION", "inputPath": ["input", "paymentMethodId"]},
+            }],
+        }),
+    );
+    assert_eq!(kind(&err), ("BRAINTREE_PAYMENT_DECLINED", "permanent"));
+    assert_eq!(
+        err.attributes["verification_id"],
+        json!("dmVyaWZpY2F0aW9uXzE")
+    );
+    assert_eq!(err.attributes["processor_response_code"], json!("2000"));
+    assert!(err.attributes.contains_key("errors"));
+    assert_eq!(
+        err.message,
+        "BRAINTREE refused `vaultPaymentMethod`: PROCESSOR_DECLINED (2000 Do Not Honor)"
+    );
+
+    // A gateway rejection names its reason.
+    let err = error(
+        VAULT,
+        json!({
+            "data": {"vaultPaymentMethod": {
+                "paymentMethod": null,
+                "verification": {"id": "dmVyaWZpY2F0aW9uXzI", "status": "GATEWAY_REJECTED",
+                                 "gatewayRejectionReason": "CVV", "processorResponse": null},
+            }},
+            "errors": [{
+                "message": "Payment method failed verification.",
+                "path": ["vaultPaymentMethod", "paymentMethod"],
+                "extensions": {"errorClass": "VALIDATION"},
+            }],
+        }),
+    );
+    assert_eq!(kind(&err), ("BRAINTREE_PAYMENT_DECLINED", "permanent"));
+    assert_eq!(err.attributes["gateway_rejection_reason"], json!("CVV"));
+}
+
+#[test]
+fn a_vault_refused_with_nothing_stored_is_a_validation_error() {
+    // A refusal at the payment method the answer holds as null: nothing was
+    // stored, whatever the verification.
+    let err = error(
+        VAULT,
+        json!({
+            "data": {"vaultPaymentMethod": {"paymentMethod": null, "verification": null}},
+            "errors": [{
+                "message": "Duplicate card exists in the vault.",
+                "path": ["vaultPaymentMethod", "paymentMethod"],
+                "extensions": {"errorClass": "VALIDATION", "legacyCode": "81724"},
+            }],
+        }),
+    );
+    assert_eq!(kind(&err), ("BRAINTREE_VALIDATION_ERROR", "permanent"));
+    assert_eq!(
+        err.attributes["validation_errors"][0]["legacyCode"],
+        json!("81724")
+    );
+}
+
+#[test]
+fn errors_that_do_not_show_what_was_refused_leave_the_outcome_unknown() {
+    let stored = json!({
+        "paymentMethod": {"id": "cGF5bWVudG1ldGhvZF8x"},
+        "verification": {"id": "dmVyaWZpY2F0aW9uXzE", "status": "VERIFIED"},
+    });
+    for (errors, why) in [
+        // At a field that has a value: something was made.
+        (
+            json!([{"message": "m", "path": ["vaultPaymentMethod", "paymentMethod"],
+                    "extensions": {"errorClass": "VALIDATION"}}]),
+            "a field with a value",
+        ),
+        // No path: it says nothing of what was refused.
+        (
+            json!([{"message": "m", "extensions": {"errorClass": "VALIDATION"}}]),
+            "no path",
+        ),
+        // Another class.
+        (
+            json!([{"message": "m", "path": ["vaultPaymentMethod", "customer"],
+                    "extensions": {"errorClass": "INTERNAL"}}]),
+            "an internal error",
+        ),
+    ] {
+        let err = error(
+            VAULT,
+            json!({"data": {"vaultPaymentMethod": stored.clone()}, "errors": errors}),
+        );
+        assert_eq!(
+            kind(&err),
+            ("BRAINTREE_OUTCOME_UNKNOWN", "permanent"),
+            "{why}"
+        );
+    }
+}
+
+#[test]
+fn a_verified_vault_is_the_result() {
+    let value = decode(
+        VAULT,
+        json!({"data": {"vaultPaymentMethod": {
+            "paymentMethod": {"id": "cGF5bWVudG1ldGhvZF8x"},
+            "verification": {"id": "dmVyaWZpY2F0aW9uXzE", "status": "VERIFIED"},
+        }}}),
+    )
+    .unwrap();
+    assert_eq!(value["verification"]["status"], json!("VERIFIED"));
+}
+
+#[test]
+fn an_unknown_outcome_reads_as_one_sentence() {
+    let err = kit::outcome_unknown("BRAINTREE", "Payment method failed verification.".into());
+    assert!(
+        err.message
+            .starts_with("Payment method failed verification. It may have been carried out"),
+        "{}",
+        err.message
+    );
+}

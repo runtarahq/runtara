@@ -11,5 +11,14 @@ mutation vaultPaymentMethod($paymentMethodId: ID!, $customerId: ID, $makeDefault
         id
       }
     }
+    verification {
+      id
+      status
+      gatewayRejectionReason
+      processorResponse {
+        legacyCode
+        message
+      }
+    }
   }
 }
