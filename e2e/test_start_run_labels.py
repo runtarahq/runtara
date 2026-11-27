@@ -128,12 +128,13 @@ def main():
     longest_page = query(plain, longest)
     assert longest_page["totalElements"] == 1 and longest_page["content"][0]["id"] == longest_id, longest_page
     assert api(f"/workflows/{plain}/instances/{longest_id}")["instance"]["runLabel"] == longest
+    # Public endpoints take no run label: anyone may send to them, and a
+    # label names a record. The run does not start.
     sync_path = f"/events/http-sync/{plain}?" + urllib.parse.urlencode({"runLabel": label})
-    sync = request(sync_path, {"rawInput": "kept separate from execution metadata"})
-    assert sync["success"], sync
-    sync_page = query(plain, label, status="completed")
-    assert sync_page["totalElements"] == 1, sync_page
+    refused = request(sync_path, {"rawInput": "a sender's label"}, expected=400)
+    assert "run label" in refused.get("error", ""), refused
     request(f"/events/http-sync/{plain}?runLabel=", {}, expected=400)
+    assert query(plain, label)["totalElements"] == 0
     # Finish assignment is no longer part of the DSL contract.
     invalid_graph = {"entryPoint": "finish", "steps": {"finish": {"id": "finish", "stepType": "Finish", "runLabel": {"valueType": "immediate", "value": "retired"}}}}
     response = request(f"/workflows/{plain}/update", {"executionGraph": invalid_graph}, expected=400)

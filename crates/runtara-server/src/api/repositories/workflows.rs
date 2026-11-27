@@ -2882,6 +2882,19 @@ impl WorkflowRepository {
                         ));
                     }
                 };
+                let label_policy = match label_policy_from_definition(&definition) {
+                    Ok(policy) => policy,
+                    Err(error) => {
+                        return Ok((
+                            resolved_version,
+                            CompilationStatus::Failed {
+                                error,
+                                terminal: true,
+                                authoring: true,
+                            },
+                        ));
+                    }
+                };
                 let current_checksum = workflow_definition_checksum(&definition);
                 let artifact_matches_current_compiler = compiler_provenance_matches(
                     compiled_template_major.as_deref(),
@@ -2905,6 +2918,7 @@ impl WorkflowRepository {
                             registered_image_id: registered_image_id.unwrap_or_default(),
                             execution_timeout,
                             track_events: definition_track_events,
+                            label_policy,
                         },
                     ));
                 }
@@ -3055,6 +3069,54 @@ pub fn is_workflow_authoring_error(error_message: &str) -> bool {
 ///
 /// Shared by `get_execution_timeout` and the compilation check so the two
 /// cannot disagree about how the field is spelled or coerced.
+/// What a workflow's runs do with a run label another of its runs holds
+/// (`labelConcurrency`), and whether they need one (`labelRequired`), as its
+/// definition declares them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LabelPolicy {
+    pub concurrency: runtara_dsl::LabelConcurrency,
+    pub required: bool,
+    /// `keepLatestPerLabel`: each label's latest run outlives retention.
+    pub keep_latest: bool,
+    /// `carryStateForward`: a run starts with its label's latest state.
+    pub carry_state: bool,
+}
+
+/// The [`LabelPolicy`] a definition declares; an error for a value that is
+/// not one of the settings.
+fn label_policy_from_definition(definition: &Value) -> Result<LabelPolicy, String> {
+    let concurrency = match definition.get("labelConcurrency") {
+        None | Some(Value::Null) => runtara_dsl::LabelConcurrency::Allow,
+        Some(Value::String(text)) => {
+            runtara_dsl::LabelConcurrency::parse(text).ok_or_else(|| {
+                format!("labelConcurrency is allow, queue, refuse or once, not '{text}'")
+            })?
+        }
+        Some(other) => return Err(format!("labelConcurrency is a string, not {other}")),
+    };
+    let required = match definition.get("labelRequired") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(required)) => *required,
+        Some(other) => return Err(format!("labelRequired is a boolean, not {other}")),
+    };
+    let keep_latest = match definition.get("keepLatestPerLabel") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(keep)) => *keep,
+        Some(other) => return Err(format!("keepLatestPerLabel is a boolean, not {other}")),
+    };
+    let carry_state = match definition.get("carryStateForward") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(carry)) => *carry,
+        Some(other) => return Err(format!("carryStateForward is a boolean, not {other}")),
+    };
+    Ok(LabelPolicy {
+        concurrency,
+        required,
+        keep_latest,
+        carry_state,
+    })
+}
+
 fn execution_timeout_from_definition(
     definition: &Value,
 ) -> Result<Option<ExecutionTimeoutSeconds>, ExecutionTimeoutError> {
@@ -3080,6 +3142,9 @@ pub enum CompilationStatus {
         /// of the artifact about to be launched rather than a stale request
         /// flag from the trigger queue.
         track_events: bool,
+        /// `labelConcurrency` and `labelRequired` from the same definition,
+        /// which the engine approved: what a start does with its run label.
+        label_policy: LabelPolicy,
     },
     /// Previous compilation attempt recorded a failure.
     Failed {
@@ -3101,6 +3166,46 @@ pub enum CompilationStatus {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_definition_declares_its_label_policy() {
+        use runtara_dsl::LabelConcurrency;
+        let policy = |definition: serde_json::Value| label_policy_from_definition(&definition);
+        assert_eq!(
+            policy(serde_json::json!({})).unwrap(),
+            LabelPolicy::default()
+        );
+        assert_eq!(
+            policy(serde_json::json!({"labelConcurrency": "queue", "labelRequired": true}))
+                .unwrap(),
+            LabelPolicy {
+                concurrency: LabelConcurrency::Queue,
+                required: true,
+                keep_latest: false,
+                carry_state: false
+            }
+        );
+        assert_eq!(
+            policy(serde_json::json!({"labelConcurrency": "once"}))
+                .unwrap()
+                .concurrency,
+            LabelConcurrency::Once
+        );
+        assert!(policy(serde_json::json!({"labelConcurrency": "serial"})).is_err());
+        assert!(policy(serde_json::json!({"labelConcurrency": 1})).is_err());
+        assert!(policy(serde_json::json!({"labelRequired": "yes"})).is_err());
+        assert!(
+            policy(serde_json::json!({"keepLatestPerLabel": true}))
+                .unwrap()
+                .keep_latest
+        );
+        assert!(policy(serde_json::json!({"keepLatestPerLabel": 1})).is_err());
+        assert!(
+            policy(serde_json::json!({"carryStateForward": true}))
+                .unwrap()
+                .carry_state
+        );
+    }
+
     use super::*;
 
     #[test]

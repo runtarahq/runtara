@@ -41,6 +41,21 @@ pub const SINGLE_INSTANCE_ACTIVE: &str = "single_instance_active";
 /// environment is persisted for the guest.
 pub const SINGLE_INSTANCE_LAUNCH_ENV: &str = "RUNTARA_SINGLE_INSTANCE_LAUNCH";
 
+/// Reserved environment key carrying the workflow's `labelConcurrency`, set
+/// by the engine from the definition it approved. Consumed like
+/// [`SINGLE_INSTANCE_LAUNCH_ENV`].
+pub const LABEL_CONCURRENCY_LAUNCH_ENV: &str = "RUNTARA_LABEL_CONCURRENCY_LAUNCH";
+
+/// Reserved environment key carrying the workflow's `labelRequired`.
+pub const LABEL_REQUIRED_LAUNCH_ENV: &str = "RUNTARA_LABEL_REQUIRED_LAUNCH";
+
+/// Reserved environment key carrying the workflow's `carryStateForward`.
+pub const CARRY_STATE_LAUNCH_ENV: &str = "RUNTARA_CARRY_STATE_LAUNCH";
+
+/// Reserved environment key carrying the workflow's `keepLatestPerLabel`
+/// (`true` or `false`); absent when the starter does not know it.
+pub const KEEP_LATEST_LAUNCH_ENV: &str = "RUNTARA_KEEP_LATEST_LAUNCH";
+
 const LAUNCH_COLUMNS: &str = "launch_id, instance_id, tenant_id, image_id, workflow_id, \
     single_instance, kind, state, \
     available_at, deadline_at, lease_owner, lease_expires_at, attempt_count, \
@@ -88,6 +103,11 @@ impl LaunchKind {
 /// Durable state of one physical launch generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchState {
+    /// A first launch waiting for its run label, which another run of the
+    /// workflow holds (`labelConcurrency: queue`). It holds no launch slot
+    /// and no deadline runs against it; it becomes [`Self::Queued`] when the
+    /// label is free (migration `label_concurrency`).
+    Waiting,
     /// The launch is durable and eligible for dispatcher claim at `available_at`.
     Queued,
     /// A dispatcher owns bounded artifact validation and component preparation.
@@ -116,6 +136,7 @@ impl LaunchState {
     /// Database spelling for this state.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Waiting => "waiting",
             Self::Queued => "queued",
             Self::Preparing => "preparing",
             Self::Leased => "leased",
@@ -136,6 +157,7 @@ impl LaunchState {
     /// always needs a forward migration, and the test turns forgetting one into
     /// a failure here instead of a constraint violation on first insert.
     pub const ALL: &'static [Self] = &[
+        Self::Waiting,
         Self::Queued,
         Self::Preparing,
         Self::Leased,
@@ -149,6 +171,18 @@ impl LaunchState {
 
     /// States in which a generation still owns the instance's live launch slot.
     pub const ACTIVE: &'static [Self] = &[
+        Self::Queued,
+        Self::Preparing,
+        Self::Leased,
+        Self::Starting,
+        Self::Running,
+    ];
+
+    /// States in which a durable queue row owns a non-terminal start,
+    /// including `waiting` behind a held run label: startup pending-instance
+    /// recovery and idempotent initial-claim replay must recognize all of them.
+    pub const OWNED: &'static [Self] = &[
+        Self::Waiting,
         Self::Queued,
         Self::Preparing,
         Self::Leased,
@@ -198,6 +232,7 @@ impl LaunchState {
 
     fn from_db(value: String) -> Result<Self, LaunchQueueError> {
         match value.as_str() {
+            "waiting" => Ok(Self::Waiting),
             "queued" => Ok(Self::Queued),
             "preparing" => Ok(Self::Preparing),
             "leased" => Ok(Self::Leased),
@@ -301,6 +336,17 @@ pub struct EnqueueRequest {
     pub available_after: Duration,
     /// Maximum time the row may wait in the queue, measured from database time.
     pub queue_timeout: Duration,
+    /// What a first start does when its run label is held by another run
+    /// of the workflow. Only enforced with a workflow scope.
+    pub label_concurrency: runtara_dsl::LabelConcurrency,
+    /// Refuse a first start without a run label.
+    pub label_required: bool,
+    /// The workflow's `keepLatestPerLabel`, recorded for retention; `None`
+    /// leaves what is recorded as it is.
+    pub keep_latest: Option<bool>,
+    /// The workflow's `carryStateForward`: the run starts with its label's
+    /// latest state.
+    pub carry_state: bool,
 }
 
 /// Atomic initial-instance claim plus its first durable launch generation.
@@ -330,6 +376,18 @@ pub struct InitialLaunchRequest {
     pub shared_child_steps: runtara_core::persistence::checkpoint_scope::SharedChildSteps,
 }
 
+/// What a run that waits for its run label waits for.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelWait {
+    /// The label.
+    pub label: String,
+    /// The run holding it; `None` in the moment it is handed on.
+    pub holder: Option<String>,
+    /// Runs waiting for it that started before this one.
+    pub ahead: u32,
+}
+
 /// Result of atomically claiming an initial instance and launch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InitialLaunchOutcome {
@@ -341,6 +399,25 @@ pub enum InitialLaunchOutcome {
     ///
     /// No Core instance or image binding was committed for this refusal.
     SingleInstanceActive,
+    /// The Core instance and image binding were committed, and its launch
+    /// waits for the run label, which another run holds.
+    Waiting(Launch),
+    /// Refused: another run of the workflow holds the run label. Nothing
+    /// was committed.
+    LabelHeld {
+        /// The label.
+        label: String,
+        /// The run holding it (or the oldest waiting for it).
+        holder: String,
+    },
+    /// Refused: a run with this label has completed, and the workflow lets
+    /// each label complete once. Nothing was committed.
+    LabelUsed {
+        /// The label.
+        label: String,
+    },
+    /// Refused: the workflow requires a run label and the start has none.
+    LabelRequired,
     /// The instance ID predates this request but has no live launch generation.
     ///
     /// Callers must inspect the existing durable instance rather than treating
@@ -368,7 +445,36 @@ impl EnqueueRequest {
             kind,
             available_after: Duration::ZERO,
             queue_timeout,
+            label_concurrency: runtara_dsl::LabelConcurrency::Allow,
+            label_required: false,
+            keep_latest: None,
+            carry_state: false,
         }
+    }
+
+    /// Start the run with its label's latest state (`carryStateForward`).
+    pub fn with_carry_state(mut self, carry_state: bool) -> Self {
+        self.carry_state = carry_state;
+        self
+    }
+
+    /// Record the workflow's `keepLatestPerLabel` with this first start.
+    pub fn with_keep_latest(mut self, keep_latest: Option<bool>) -> Self {
+        self.keep_latest = keep_latest;
+        self
+    }
+
+    /// What a first start does with a run label another run holds, and
+    /// whether it needs a label at all: the workflow's `labelConcurrency`
+    /// and `labelRequired`.
+    pub fn with_label_policy(
+        mut self,
+        label_concurrency: runtara_dsl::LabelConcurrency,
+        label_required: bool,
+    ) -> Self {
+        self.label_concurrency = label_concurrency;
+        self.label_required = label_required;
+        self
     }
 
     /// Attach the workflow-wide scope for this logical execution.
@@ -648,6 +754,9 @@ impl LaunchRepository {
         if request.launch.kind != LaunchKind::Start {
             return Err(LaunchQueueError::InitialLaunchRequiresStart);
         }
+        if request.launch.label_required && run_label.is_none() {
+            return Ok(InitialLaunchOutcome::LabelRequired);
+        }
         let available_after_us =
             duration_to_micros(request.launch.available_after, "available_after")?;
         let queue_timeout_us = duration_to_micros(request.launch.queue_timeout, "queue_timeout")?;
@@ -656,13 +765,13 @@ impl LaunchRepository {
             .env
             .filter(|values| !values.is_empty())
             .map(|values| serde_json::to_value(values).unwrap_or_default());
-        let active_states = LaunchState::sql_list(LaunchState::ACTIVE);
+        let owned_states = LaunchState::sql_list(LaunchState::OWNED);
         let active = format!(
             r#"
             SELECT {LAUNCH_COLUMNS}
             FROM instance_launches
             WHERE instance_id = $1
-              AND state IN ({active_states})
+              AND state IN ({owned_states})
             LIMIT 1
             "#
         );
@@ -671,13 +780,15 @@ impl LaunchRepository {
             INSERT INTO instance_launches (
                 launch_id, instance_id, tenant_id, image_id, workflow_id,
                 single_instance, kind, state,
-                available_at, deadline_at
+                available_at, deadline_at, run_label, carry_state
             )
-            VALUES (
-                $1, $2, $3, $4, $5, $6, 'start', 'queued',
+            SELECT
+                $1, $2, $3, image_id, $5, $6, 'start', $10,
                 NOW() + ($7 * INTERVAL '1 microsecond'),
-                NOW() + ($8 * INTERVAL '1 microsecond')
-            )
+                NOW() + ($8 * INTERVAL '1 microsecond'),
+                $9, $11
+            FROM images
+            WHERE image_id = $4 AND tenant_id = $3
             RETURNING {LAUNCH_COLUMNS}
             "#
         );
@@ -791,32 +902,101 @@ impl LaunchRepository {
             }
         }
 
-        // Bind only an image owned by the same tenant. The `RETURNING` result
-        // makes a missing or cross-tenant image abort the surrounding instance
-        // insert rather than leaving a launchable-looking `pending` row.
-        let image_bound: Option<String> = sqlx::query_scalar(
-            r#"
-            INSERT INTO instance_images
-                (instance_id, image_id, tenant_id, env, timeout_seconds, created_at)
-            SELECT $1, image_id, $3, $4, $5, NOW()
-            FROM images
-            WHERE image_id = $2 AND tenant_id = $3
-            RETURNING instance_id
-            "#,
-        )
-        .bind(&request.launch.instance_id)
-        .bind(&request.launch.image_id)
-        .bind(&request.launch.tenant_id)
-        .bind(env)
-        .bind(request.timeout_seconds)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if image_bound.is_none() {
-            return Err(LaunchQueueError::InvalidLaunchTarget {
-                launch_id: request.launch.launch_id,
-            });
+        // Whether retention keeps each label's latest run of the workflow,
+        // as the starter says: written only when it changes (steady-state
+        // starts take no write lock on `workflow_retention`).
+        if let (Some(keep), Some(scope)) = (request.launch.keep_latest, workflow_scope.as_ref()) {
+            sqlx::query(
+                r#"
+                INSERT INTO workflow_retention (tenant_id, workflow_id, keep_latest_per_label)
+                SELECT $1, $2, $3
+                WHERE (
+                    $3 AND NOT EXISTS (
+                        SELECT 1 FROM workflow_retention
+                        WHERE tenant_id = $1 AND workflow_id = $2 AND keep_latest_per_label
+                    )
+                ) OR (
+                    NOT $3 AND EXISTS (
+                        SELECT 1 FROM workflow_retention
+                        WHERE tenant_id = $1 AND workflow_id = $2 AND keep_latest_per_label
+                    )
+                )
+                ON CONFLICT (tenant_id, workflow_id) DO UPDATE
+                   SET keep_latest_per_label = EXCLUDED.keep_latest_per_label,
+                       updated_at = NOW()
+                 WHERE workflow_retention.keep_latest_per_label
+                       IS DISTINCT FROM EXCLUDED.keep_latest_per_label
+                "#,
+            )
+            .bind(&request.launch.tenant_id)
+            .bind(&scope.workflow_id)
+            .bind(keep)
+            .execute(&mut *tx)
+            .await?;
         }
 
+        // A label held by another run of the workflow, from its start until
+        // it ends: decided under the label's lock, which the trigger that
+        // lets the next run have the label takes too (`label_released`).
+        let mut waiting = false;
+        if let (Some(label), Some(scope)) = (run_label.as_deref(), workflow_scope.as_ref())
+            && request.launch.label_concurrency != runtara_dsl::LabelConcurrency::Allow
+        {
+            let tenant = &request.launch.tenant_id;
+            sqlx::query("SELECT runtara_label_lock($1, $2, $3)")
+                .bind(tenant)
+                .bind(&scope.workflow_id)
+                .bind(label)
+                .execute(&mut *tx)
+                .await?;
+            if request.launch.label_concurrency == runtara_dsl::LabelConcurrency::Once
+                && label_completed(&mut tx, tenant, &scope.workflow_id, label).await?
+            {
+                return Ok(InitialLaunchOutcome::LabelUsed {
+                    label: label.to_owned(),
+                });
+            }
+            if let Some(holder) = label_holder(
+                &mut tx,
+                tenant,
+                &scope.workflow_id,
+                label,
+                &request.launch.instance_id,
+            )
+            .await?
+            {
+                // A descendant waiting for an ancestor's label would wait
+                // forever: it is refused instead.
+                let ancestor_holder = match &request.parent {
+                    Some(parent) => {
+                        ancestor_label_holder(
+                            &mut tx,
+                            tenant,
+                            &scope.workflow_id,
+                            label,
+                            &parent.parent_instance_id,
+                        )
+                        .await?
+                    }
+                    None => None,
+                };
+                if request.launch.label_concurrency == runtara_dsl::LabelConcurrency::Queue
+                    && ancestor_holder.is_none()
+                {
+                    waiting = true;
+                } else {
+                    return Ok(InitialLaunchOutcome::LabelHeld {
+                        label: label.to_owned(),
+                        holder: ancestor_holder.unwrap_or(holder),
+                    });
+                }
+            }
+        }
+
+        // Insert the launch row first (verifying the image belongs to the same
+        // tenant) so that binding `instance_images` next sees `state = 'waiting'`
+        // in `run_keys_on_image` and does not displace the active holder in
+        // `run_keys` while this run is still waiting.
         let launch = sqlx::query_as::<_, LaunchRow>(&insert_launch)
             .bind(&request.launch.launch_id)
             .bind(&request.launch.instance_id)
@@ -830,12 +1010,53 @@ impl LaunchRepository {
             )
             .bind(available_after_us)
             .bind(queue_timeout_us)
-            .fetch_one(&mut *tx)
+            .bind(run_label.as_deref())
+            .bind(if waiting { "waiting" } else { "queued" })
+            .bind(request.launch.carry_state)
+            .fetch_optional(&mut *tx)
             .await?;
+        let Some(launch) = launch else {
+            return Err(LaunchQueueError::InvalidLaunchTarget {
+                launch_id: request.launch.launch_id,
+            });
+        };
+
+        sqlx::query(
+            r#"
+            INSERT INTO instance_images
+                (instance_id, image_id, tenant_id, env, timeout_seconds, created_at)
+            VALUES ($1, $2, $3, $4, $5, NOW())
+            "#,
+        )
+        .bind(&request.launch.instance_id)
+        .bind(&request.launch.image_id)
+        .bind(&request.launch.tenant_id)
+        .bind(env)
+        .bind(request.timeout_seconds)
+        .execute(&mut *tx)
+        .await?;
+        // A run that starts now starts with its label's latest state; one
+        // that waits gets it when it is let in (`label_released`).
+        if request.launch.carry_state
+            && !waiting
+            && let (Some(label), Some(scope)) = (run_label.as_deref(), workflow_scope.as_ref())
+        {
+            carry_state(
+                &mut tx,
+                &request.launch.tenant_id,
+                &scope.workflow_id,
+                label,
+                &request.launch.instance_id,
+            )
+            .await?;
+        }
         tx.commit().await?;
-        Ok(InitialLaunchOutcome::Enqueued(
-            self.committed(launch, "enqueue", None)?,
-        ))
+        let launch = self.committed(launch, "enqueue", None)?;
+        Ok(if waiting {
+            InitialLaunchOutcome::Waiting(launch)
+        } else {
+            InitialLaunchOutcome::Enqueued(launch)
+        })
     }
 
     /// Insert a durable row or return its existing idempotent/active winner.
@@ -858,12 +1079,13 @@ impl LaunchRepository {
             INSERT INTO instance_launches (
                 launch_id, instance_id, tenant_id, image_id, workflow_id,
                 single_instance, kind, state,
-                available_at, deadline_at
+                available_at, deadline_at, run_label
             )
             VALUES (
                 $1, $2, $3, $4, $5, $6, $7, 'queued',
                 NOW() + ($8 * INTERVAL '1 microsecond'),
-                NOW() + ($9 * INTERVAL '1 microsecond')
+                NOW() + ($9 * INTERVAL '1 microsecond'),
+                (SELECT run_label FROM instances WHERE instance_id = $2)
             )
             ON CONFLICT DO NOTHING
             RETURNING {LAUNCH_COLUMNS}
@@ -2316,6 +2538,130 @@ impl LaunchRepository {
         self.committed_batch(expired, "queue_timeout", Some("expired"))
     }
 
+    /// What each of `instance_ids` that waits for its run label waits for,
+    /// by instance id; runs that do not wait are left out.
+    pub async fn label_waits(
+        &self,
+        instance_ids: &[String],
+    ) -> Result<HashMap<String, LabelWait>, LaunchQueueError> {
+        if instance_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows: Vec<(String, String, Option<String>, i64)> = sqlx::query_as(
+            r#"
+            SELECT w.instance_id, w.run_label,
+                   (SELECT i.instance_id
+                      FROM instances i
+                      JOIN instance_launches l ON l.instance_id = i.instance_id
+                     WHERE i.tenant_id = w.tenant_id AND i.run_label = w.run_label
+                       AND l.workflow_id = w.workflow_id
+                       AND i.instance_id <> w.instance_id
+                       AND i.status IN ('pending', 'running', 'suspended')
+                       AND NOT EXISTS (
+                           SELECT 1 FROM instance_launches x
+                            WHERE x.instance_id = i.instance_id AND x.state = 'waiting')
+                     ORDER BY i.created_at, i.instance_id
+                     LIMIT 1) AS holder,
+                   (SELECT count(*)
+                      FROM instance_launches a
+                      JOIN instances ai ON ai.instance_id = a.instance_id
+                     WHERE a.tenant_id = w.tenant_id AND a.workflow_id = w.workflow_id
+                       AND a.run_label = w.run_label AND a.state = 'waiting'
+                       AND ai.status = 'pending'
+                       AND (a.created_at, a.launch_id) < (w.created_at, w.launch_id)) AS ahead
+            FROM instance_launches w
+            WHERE w.instance_id = ANY($1) AND w.state = 'waiting' AND w.run_label IS NOT NULL
+            "#,
+        )
+        .bind(instance_ids)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(instance_id, label, holder, ahead)| {
+                (
+                    instance_id,
+                    LabelWait {
+                        label,
+                        holder,
+                        ahead: u32::try_from(ahead).unwrap_or(u32::MAX),
+                    },
+                )
+            })
+            .collect())
+    }
+
+    /// Cancel a run whose first launch waits for its run label: the launch
+    /// and the instance together. `None` if it was not waiting.
+    ///
+    /// Acquires `runtara_label_lock` before locking `instance_launches` so it
+    /// agrees with `runtara_label_released`'s lock order and cannot AB-BA
+    /// deadlock when cancelling a waiting run as its holder finishes.
+    pub async fn cancel_waiting(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<Launch>, LaunchQueueError> {
+        let mut tx = self.pool.begin().await?;
+        let waiting_meta: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT tenant_id, workflow_id, run_label
+            FROM instance_launches
+            WHERE instance_id = $1 AND state = 'waiting'
+            LIMIT 1
+            "#,
+        )
+        .bind(instance_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((tenant_id, workflow_id, run_label)) = waiting_meta else {
+            return Ok(None);
+        };
+        if let (Some(workflow_id), Some(run_label)) = (workflow_id.as_deref(), run_label.as_deref())
+        {
+            sqlx::query("SELECT runtara_label_lock($1, $2, $3)")
+                .bind(&tenant_id)
+                .bind(workflow_id)
+                .bind(run_label)
+                .execute(&mut *tx)
+                .await?;
+        }
+        let cancelled = sqlx::query_as::<_, LaunchRow>(&format!(
+            r#"
+            UPDATE instance_launches
+            SET state = 'cancelled', updated_at = NOW()
+            WHERE instance_id = $1 AND state = 'waiting'
+            RETURNING {LAUNCH_COLUMNS}
+            "#
+        ))
+        .bind(instance_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(cancelled) = cancelled else {
+            return Ok(None);
+        };
+        let updated = sqlx::query(
+            r#"
+            UPDATE instances
+            SET status = 'cancelled', finished_at = NOW(), termination_reason = 'cancelled'
+            WHERE instance_id = $1 AND status = 'pending'
+            "#,
+        )
+        .bind(instance_id)
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(LaunchQueueError::InstanceNoLongerPreStart {
+                launch_id: cancelled.launch_id,
+            });
+        }
+        tx.commit().await?;
+        Ok(Some(self.committed(
+            cancelled,
+            "cancel",
+            Some("cancelled"),
+        )?))
+    }
+
     /// Cancel a queued, leased, or still-unconfirmed gate generation and
     /// terminalize its Core instance.
     ///
@@ -2483,6 +2829,132 @@ impl TryFrom<LaunchRow> for Launch {
             updated_at: row.updated_at,
         })
     }
+}
+
+/// The run holding `label` for the workflow, other than `instance`: one
+/// that is pending, running or suspended, a run that holds it before one
+/// that waits for it, the oldest first. The caller holds the label's lock.
+async fn label_holder(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    workflow_id: &str,
+    label: &str,
+    instance: &str,
+) -> Result<Option<String>, LaunchQueueError> {
+    Ok(sqlx::query_scalar(
+        r#"
+        SELECT i.instance_id
+        FROM instances i
+        JOIN instance_launches l ON l.instance_id = i.instance_id
+        WHERE i.tenant_id = $1 AND i.run_label = $3 AND l.workflow_id = $2
+          AND i.instance_id <> $4
+          AND i.status IN ('pending', 'running', 'suspended')
+        GROUP BY i.instance_id, i.created_at
+        ORDER BY bool_or(l.state = 'waiting'), i.created_at, i.instance_id
+        LIMIT 1
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(workflow_id)
+    .bind(label)
+    .bind(instance)
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+/// An ancestor of `parent_instance_id` (itself included) that currently holds
+/// `label` for `workflow_id`: a descendant waiting on any ancestor would
+/// deadlock its lineage. The caller holds the label's lock.
+async fn ancestor_label_holder(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    workflow_id: &str,
+    label: &str,
+    parent_instance_id: &str,
+) -> Result<Option<String>, LaunchQueueError> {
+    Ok(sqlx::query_scalar(
+        r#"
+        WITH RECURSIVE lineage(instance_id, parent_instance_id, depth) AS (
+            SELECT i.instance_id, i.parent_instance_id, 1
+            FROM instances i
+            WHERE i.tenant_id = $1 AND i.instance_id = $4
+            UNION ALL
+            SELECT p.instance_id, p.parent_instance_id, l.depth + 1
+            FROM lineage l
+            JOIN instances p
+              ON p.tenant_id = $1 AND p.instance_id = l.parent_instance_id
+            WHERE l.parent_instance_id IS NOT NULL AND l.depth < 32
+        )
+        SELECT a.instance_id
+        FROM lineage a
+        JOIN instances i ON i.instance_id = a.instance_id
+        JOIN instance_launches l ON l.instance_id = i.instance_id
+        WHERE i.tenant_id = $1
+          AND i.run_label = $3
+          AND l.workflow_id = $2
+          AND i.status IN ('pending', 'running', 'suspended')
+          AND NOT EXISTS (
+              SELECT 1 FROM instance_launches w
+              WHERE w.instance_id = i.instance_id AND w.state = 'waiting'
+          )
+        ORDER BY a.depth ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(workflow_id)
+    .bind(label)
+    .bind(parent_instance_id)
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+/// Start `instance` with `label`'s latest state, if the label has one.
+async fn carry_state(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    workflow_id: &str,
+    label: &str,
+    instance: &str,
+) -> Result<(), LaunchQueueError> {
+    sqlx::query("SELECT runtara_carry_label_state($1, $2, $3, $4)")
+        .bind(tenant_id)
+        .bind(workflow_id)
+        .bind(label)
+        .bind(instance)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Whether a run of the workflow with `label` has completed: one still
+/// stored, or, after runs are pruned, the label's latest as `run_keys`
+/// keeps it.
+async fn label_completed(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    workflow_id: &str,
+    label: &str,
+) -> Result<bool, LaunchQueueError> {
+    Ok(sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM instances i
+            JOIN instance_launches l ON l.instance_id = i.instance_id
+            WHERE i.tenant_id = $1 AND i.run_label = $3 AND l.workflow_id = $2
+              AND i.status = 'completed'
+        ) OR EXISTS (
+            SELECT 1 FROM run_keys k
+            WHERE k.tenant_id = $1 AND k.workflow_id = $2 AND k.run_label = $3
+              AND k.status = 'completed'
+        )
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(workflow_id)
+    .bind(label)
+    .fetch_one(&mut **tx)
+    .await?)
 }
 
 /// Take the workflow-scope launch admission lock on one PostgreSQL
@@ -2871,7 +3343,7 @@ mod tests {
         }
         assert_eq!(
             LaunchState::ALL.len(),
-            9,
+            10,
             "a new state needs a forward migration and a place in these sets"
         );
     }

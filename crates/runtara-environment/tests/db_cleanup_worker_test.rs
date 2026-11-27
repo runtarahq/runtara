@@ -1340,3 +1340,122 @@ async fn pinned_children_are_pruned_after_deletion_with_a_cursor() {
         .await
         .unwrap();
 }
+
+/// `keepLatestPerLabel`: retention keeps each label's latest run of a
+/// workflow that asks for it, and deletes the runs before it; a workflow
+/// that does not ask loses them all.
+#[tokio::test]
+async fn retention_keeps_each_labels_latest_run_where_the_workflow_asks() {
+    skip_if_no_db!();
+    let _sweep = SWEEP_LOCK.lock().await;
+    let pool = get_test_pool().await.unwrap();
+    let tenant = format!("keep-latest-{}", Uuid::new_v4());
+    let (keep_wf, plain_wf) = (
+        format!("keep-{}", Uuid::new_v4().simple()),
+        format!("plain-{}", Uuid::new_v4().simple()),
+    );
+    for wf in [&keep_wf, &plain_wf] {
+        sqlx::query(
+            "INSERT INTO images (image_id, tenant_id, name, description, binary_path) \
+             VALUES ($1, $2, $1 || ':1', 'Test image', '/usr/bin/test')",
+        )
+        .bind(wf)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO workflow_retention (tenant_id, workflow_id, keep_latest_per_label) \
+         VALUES ($1, $2, true)",
+    )
+    .bind(&tenant)
+    .bind(&keep_wf)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Two labels a workflow, two finished runs each, all past retention:
+    // the second of each label is its latest.
+    let mut runs = Vec::new();
+    for wf in [&keep_wf, &plain_wf] {
+        for label in ["order-1", "order-2"] {
+            for (n, age) in [(0, 50), (1, 40)] {
+                let id = format!("{wf}-{label}-{n}");
+                sqlx::query(
+                    "INSERT INTO instances (instance_id, tenant_id, status, run_label, created_at, \
+                     started_at, finished_at) VALUES ($1, $2, 'completed', $3, \
+                     NOW() - make_interval(days => $4), NOW() - make_interval(days => $4), \
+                     NOW() - make_interval(days => $4))",
+                )
+                .bind(&id)
+                .bind(&tenant)
+                .bind(label)
+                .bind(age)
+                .execute(&pool)
+                .await
+                .unwrap();
+                create_instance_image(&pool, &id, wf, &tenant).await;
+                runs.push((wf.clone(), label, n, id));
+            }
+        }
+    }
+
+    let worker = DbCleanupWorker::new(
+        pool.clone(),
+        Arc::new(PostgresPersistence::new(pool.clone())),
+        DbCleanupWorkerConfig {
+            max_age: Duration::from_secs(30 * 24 * 3600),
+            ..Default::default()
+        },
+    );
+    worker.run_once().await.expect("retention pass");
+
+    for (wf, label, n, id) in &runs {
+        let kept = *wf == keep_wf && *n == 1;
+        assert_eq!(
+            instance_exists(&pool, id).await,
+            kept,
+            "{wf} {label} run {n}: kept is {kept}"
+        );
+    }
+
+    // A newer run of a kept label takes its place: the run before is then
+    // retention's to delete.
+    let newer = format!("{keep_wf}-order-1-2");
+    sqlx::query(
+        "INSERT INTO instances (instance_id, tenant_id, status, run_label, created_at, started_at, \
+         finished_at) VALUES ($1, $2, 'completed', 'order-1', NOW(), NOW(), NOW())",
+    )
+    .bind(&newer)
+    .bind(&tenant)
+    .execute(&pool)
+    .await
+    .unwrap();
+    create_instance_image(&pool, &newer, &keep_wf, &tenant).await;
+    worker.run_once().await.expect("retention pass");
+    assert!(!instance_exists(&pool, &format!("{keep_wf}-order-1-1")).await);
+    assert!(instance_exists(&pool, &format!("{keep_wf}-order-2-1")).await);
+    assert!(instance_exists(&pool, &newer).await);
+
+    sqlx::query("DELETE FROM instances WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM run_keys WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM workflow_retention WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .ok();
+    sqlx::query("DELETE FROM images WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .ok();
+}

@@ -101,6 +101,9 @@ pub enum ExecutionPhase {
     Suspended,
     /// Explicitly paused: only a resume relaunches it.
     Paused,
+    /// Not started yet: it waits for its run label, which another run of
+    /// the workflow holds (`labelConcurrency: queue`).
+    WaitingForLabel,
 }
 
 impl ExecutionPhase {
@@ -182,6 +185,10 @@ pub enum TerminationType {
     ExecutionTimeout,
     /// Internal error or crash during execution
     SystemError,
+    /// Never started: the workflow refuses a run for a label another run
+    /// holds, or one that has completed (`labelConcurrency`). A decision
+    /// the workflow asked for, not a fault.
+    LabelRefused,
 }
 
 impl TerminationType {
@@ -193,6 +200,9 @@ impl TerminationType {
             TerminationType::QueueTimeout => "Execution timed out in queue (24h limit)",
             TerminationType::ExecutionTimeout => "Execution exceeded maximum runtime",
             TerminationType::SystemError => "System error occurred during execution",
+            TerminationType::LabelRefused => {
+                "Not started: the workflow refuses a run for this label (labelConcurrency)"
+            }
         }
     }
 }

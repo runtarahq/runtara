@@ -113,6 +113,33 @@ pub fn get_dsl_changelog() -> Value {
         "version": DSL_VERSION,
         "changes": [
             {
+                "version": "3.9.0",
+                "date": "2026-11-28",
+                "breaking": false,
+                "changes": [
+                    {
+                        "type": "added",
+                        "component": "execution-graph",
+                        "description": "labelConcurrency (allow, queue, refuse, once) on the workflow's own graph: what a start does when its run label is held by another run of the workflow, which it is from that run's start until it ends, suspended time included. allow (the default) starts regardless; queue waits, in the order started, until no earlier run holds the label; refuse is refused while one does (of several starts at the same moment one wins, the first to reach the engine rather than the first sent; use queue when order matters); once is refused too after a run with the label has completed (a failed or cancelled one does not use it up). A nested graph's value is ignored (W084)."
+                    },
+                    {
+                        "type": "added",
+                        "component": "execution-graph",
+                        "description": "labelRequired on the workflow's own graph: a start without a run label is refused. A nested graph's value is ignored (W084)."
+                    },
+                    {
+                        "type": "added",
+                        "component": "execution-graph",
+                        "description": "keepLatestPerLabel on the workflow's own graph: each run label's latest run is kept past the retention that deletes finished runs, until a newer run of the label takes its place. A nested graph's value is ignored (W084)."
+                    },
+                    {
+                        "type": "added",
+                        "component": "execution-graph",
+                        "description": "carryStateForward on the workflow's own graph: each run starts with its run label's latest state, copied when it is admitted or, waiting for its label (labelConcurrency: queue), when it is let in, so each run of a label carries its predecessor's state on. A nested graph's value is ignored (W084)."
+                    }
+                ]
+            },
+            {
                 "version": "3.8.0",
                 "date": "2026-11-20",
                 "breaking": true,

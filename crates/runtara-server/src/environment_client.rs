@@ -52,6 +52,14 @@ pub enum EnvironmentError {
     #[error("single-instance workflow already has active work")]
     SingleInstanceActive,
 
+    /// The workflow refuses this run for its label.
+    #[error("{0}")]
+    LabelRefused(String),
+
+    /// The workflow requires a run label.
+    #[error("{0}")]
+    LabelRequired(String),
+
     /// The caller supplied something the handler rejected.
     #[error("invalid input: {0}")]
     InvalidInput(String),
@@ -126,6 +134,30 @@ impl EnvironmentClient {
                 fields,
             )
             .await?)
+    }
+
+    /// The latest run of one label of a tenant's workflow, without taking a
+    /// query turn: a lookup by key.
+    pub async fn latest_run_for_label(
+        &self,
+        tenant: &str,
+        workflow: &str,
+        label: &str,
+    ) -> Result<runtara_environment::run_query::RunQueryResult> {
+        Ok(self
+            .instances()
+            .latest_run_for_label(tenant, workflow, label)
+            .await?)
+    }
+
+    /// A query over a tenant's runs of one workflow.
+    pub async fn query_runs(
+        &self,
+        tenant: &str,
+        workflow: &str,
+        query: runtara_environment::run_query::RunQuery,
+    ) -> Result<runtara_environment::run_query::RunQueryResult> {
+        Ok(self.instances().query_runs(tenant, workflow, query).await?)
     }
 
     /// Discover outstanding queues across workflow versions.
@@ -341,7 +373,20 @@ impl EnvironmentClient {
             inst.termination_reason.as_deref(),
             inst.wake_reason.as_deref(),
         );
+        let waiting_for = if inst.status == runtara_core::domain::InstanceStatus::Pending {
+            self.state
+                .label_waits(std::slice::from_ref(&inst.instance_id))
+                .await
+                .map_err(|error| EnvironmentError::Failed {
+                    code: "label_waits".into(),
+                    message: error.to_string(),
+                })?
+                .remove(&inst.instance_id)
+        } else {
+            None
+        };
         Ok(InstanceInfo {
+            waiting_for,
             suspension_reason,
             instance_id: inst.instance_id,
             run_label: inst.run_label,
@@ -520,12 +565,28 @@ impl EnvironmentClient {
             .instances()
             .list(&list_instances_options(&options))
             .await?;
+        // What the pending ones that wait for their run label wait for.
+        let pending: Vec<String> = result
+            .instances
+            .iter()
+            .filter(|inst| inst.status == runtara_core::domain::InstanceStatus::Pending)
+            .map(|inst| inst.instance_id.clone())
+            .collect();
+        let mut waits =
+            self.state
+                .label_waits(&pending)
+                .await
+                .map_err(|error| EnvironmentError::Failed {
+                    code: "label_waits".into(),
+                    message: error.to_string(),
+                })?;
 
         Ok(ListInstancesResult {
             instances: result
                 .instances
                 .into_iter()
                 .map(|inst| InstanceSummary {
+                    waiting_for: waits.remove(&inst.instance_id),
                     instance_id: inst.instance_id,
                     run_label: inst.run_label,
                     parent_instance_id: inst.parent_instance_id,
@@ -585,6 +646,13 @@ impl EnvironmentClient {
             }),
             Some(StartRejection::SingleInstanceActive) => {
                 Err(EnvironmentError::SingleInstanceActive)
+            }
+            Some(rejection @ StartRejection::LabelHeld { .. })
+            | Some(rejection @ StartRejection::LabelUsed { .. }) => {
+                Err(EnvironmentError::LabelRefused(rejection.to_string()))
+            }
+            Some(rejection @ StartRejection::LabelRequired) => {
+                Err(EnvironmentError::LabelRequired(rejection.to_string()))
             }
             // Both are repaired by registering the image again, which is what
             // the caller's ImageNotFound handler does.

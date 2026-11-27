@@ -144,6 +144,11 @@ const RUNTIME_TABLES: &[Table] = &[
     by("images", "tenant_id = $1"),
     by("instance_images", "tenant_id = $1"),
     by("instance_launches", "tenant_id = $1"),
+    // Workflow records (`docs/workflow-records.md`): each run label's latest
+    // run/state (kept by triggers, which replica mode disables) and which
+    // workflows keep each label's latest run past retention.
+    by("run_keys", "tenant_id = $1"),
+    by("workflow_retention", "tenant_id = $1"),
     // What the engine approved to run, and the version of each workflow that
     // runs when none is named: without them the tenant's workflows are there
     // and none of them runs.
@@ -584,5 +589,8 @@ mod tests {
         for table in RUNTIME_TABLES.iter().chain(SERVER_TABLES) {
             assert!(table.of_tenant.contains("$1"), "{}", table.name);
         }
+        let runtime_names: Vec<&str> = RUNTIME_TABLES.iter().map(|t| t.name).collect();
+        assert!(runtime_names.contains(&"run_keys"));
+        assert!(runtime_names.contains(&"workflow_retention"));
     }
 }

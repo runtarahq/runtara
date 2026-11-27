@@ -74,9 +74,9 @@ getrandom = "0.3"
 
 # Async trait
 async-trait = "0.1"
+futures-util = "0.3"
 
 [dev-dependencies]
-futures-util = "0.3"
 # Fake SQL hosts behind the workflow API connection tests.
 runtara-database-contract = { path = "../runtara-database-contract" }
 # Fake trusted credentials behind the workflow API trusted-call test.
@@ -130,6 +130,11 @@ required-features = ["db-integration-tests"]
 [[test]]
 name = "db_test"
 path = "tests/db_test.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
+name = "run_query_test"
+path = "tests/run_query_test.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]

@@ -958,6 +958,20 @@ impl Engine for RemoteEngine {
         .await
     }
 
+    async fn query_runs(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        query: runtara_environment::run_query::RunQuery,
+    ) -> Result<runtara_environment::run_query::RunQueryResult, RuntimeError> {
+        self.ask(wire::QueryRuns {
+            tenant_id: tenant_id.to_owned(),
+            workflow_id: workflow_id.to_owned(),
+            query,
+        })
+        .await
+    }
+
     async fn submit_input_response(
         &self,
         tenant_id: &str,
@@ -2202,6 +2216,7 @@ mod tests {
                 "OperationQueues",
                 vec![get("/api/runtime/operations/queues")],
             ),
+            ("QueryRuns", vec![post("/api/runtime/runs/query")]),
             (
                 "UnstageWorkflowAgent",
                 vec![

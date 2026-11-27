@@ -884,6 +884,8 @@ pub fn router(state: WorkflowApiState) -> Router {
             "/v1/conversations/history",
             post(control::post_conversation_history),
         )
+        .route("/v1/runs/query", post(control::post_runs_query))
+        .route("/v1/runs/latest", post(control::post_runs_latest))
         .route(
             "/v1/conversations/delta",
             post(control::post_conversation_delta),

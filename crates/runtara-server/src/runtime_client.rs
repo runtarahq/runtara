@@ -33,6 +33,21 @@ pub const DEFAULT_STOP_GRACE_SECONDS: u32 = 5;
 /// Longest grace a stop accepts.
 pub const MAX_STOP_GRACE_SECONDS: u32 = 3600;
 
+fn map_run_query_error(error: EnvironmentError) -> RuntimeError {
+    match error {
+        EnvironmentError::Environment(runtara_environment::error::Error::InvalidRequest(msg)) => {
+            RuntimeError::InvalidRequest(msg)
+        }
+        EnvironmentError::Environment(runtara_environment::error::Error::Busy(msg)) => {
+            RuntimeError::Busy(msg)
+        }
+        EnvironmentError::Environment(runtara_environment::error::Error::Timeout(msg)) => {
+            RuntimeError::QueryTimeout(msg)
+        }
+        other => RuntimeError::SdkError(other.to_string()),
+    }
+}
+
 /// Errors that can occur when interacting with the runtime
 #[derive(Debug, Error, serde::Serialize, serde::Deserialize)]
 pub enum RuntimeError {
@@ -48,6 +63,14 @@ pub enum RuntimeError {
     #[error("single-instance workflow already has active work")]
     SingleInstanceActive,
 
+    /// The workflow refuses this run for its label.
+    #[error("{0}")]
+    LabelRefused(String),
+
+    /// The workflow requires a run label.
+    #[error("{0}")]
+    LabelRequired(String),
+
     #[error("Instance not found: {0}")]
     InstanceNotFound(String),
 
@@ -56,6 +79,18 @@ pub enum RuntimeError {
 
     #[error("Timeout waiting for instance completion")]
     Timeout,
+
+    /// The caller's request was invalid (e.g., an invalid run query).
+    #[error("Invalid request: {0}")]
+    InvalidRequest(String),
+
+    /// The runtime refused work because a concurrency limit is full.
+    #[error("{0}")]
+    Busy(String),
+
+    /// A database query exceeded its time limit.
+    #[error("{0}")]
+    QueryTimeout(String),
 
     #[error("SDK error: {0}")]
     SdkError(String),
@@ -531,6 +566,7 @@ impl RuntimeClient {
         timeout: Option<ExecutionTimeoutSeconds>,
         debug: bool,
         single_instance: bool,
+        label_policy: crate::api::repositories::workflows::LabelPolicy,
     ) -> Result<StartInstanceOutcome, RuntimeError> {
         let sdk = &self.client;
 
@@ -603,10 +639,41 @@ impl RuntimeClient {
         if single_instance {
             options = options.with_env_var(SINGLE_INSTANCE_LAUNCH_ENV, "true");
         }
+        // The workflow's label settings, from the definition the engine
+        // approved; Environment consumes them before the guest sees its env.
+        if label_policy.concurrency != runtara_dsl::LabelConcurrency::Allow {
+            options = options.with_env_var(
+                runtara_environment::launch_queue::LABEL_CONCURRENCY_LAUNCH_ENV,
+                label_policy.concurrency.as_str(),
+            );
+        }
+        if label_policy.required {
+            options = options.with_env_var(
+                runtara_environment::launch_queue::LABEL_REQUIRED_LAUNCH_ENV,
+                "true",
+            );
+        }
+        if label_policy.carry_state {
+            options = options.with_env_var(
+                runtara_environment::launch_queue::CARRY_STATE_LAUNCH_ENV,
+                "true",
+            );
+        }
+        // Sent either way, so turning the setting off is recorded too.
+        options = options.with_env_var(
+            runtara_environment::launch_queue::KEEP_LATEST_LAUNCH_ENV,
+            if label_policy.keep_latest {
+                "true"
+            } else {
+                "false"
+            },
+        );
 
         let result = sdk.start_instance(options).await.map_err(|e| match e {
             EnvironmentError::ImageNotFound(message) => RuntimeError::ImageNotFound(message),
             EnvironmentError::SingleInstanceActive => RuntimeError::SingleInstanceActive,
+            EnvironmentError::LabelRefused(reason) => RuntimeError::LabelRefused(reason),
+            EnvironmentError::LabelRequired(reason) => RuntimeError::LabelRequired(reason),
             other => RuntimeError::StartFailed(other.to_string()),
         })?;
 
@@ -976,6 +1043,30 @@ impl RuntimeClient {
             .map_err(|e| RuntimeError::SdkError(e.to_string()))
     }
 
+    pub async fn latest_run_for_label(
+        &self,
+        tenant: &str,
+        workflow: &str,
+        label: &str,
+    ) -> Result<runtara_environment::run_query::RunQueryResult, RuntimeError> {
+        self.client
+            .latest_run_for_label(tenant, workflow, label)
+            .await
+            .map_err(map_run_query_error)
+    }
+
+    pub async fn query_runs(
+        &self,
+        tenant: &str,
+        workflow: &str,
+        query: runtara_environment::run_query::RunQuery,
+    ) -> Result<runtara_environment::run_query::RunQueryResult, RuntimeError> {
+        self.client
+            .query_runs(tenant, workflow, query)
+            .await
+            .map_err(map_run_query_error)
+    }
+
     pub async fn active_operation_queues(
         &self,
         tenant: &str,
@@ -1310,6 +1401,7 @@ mod classify_observed_status_tests {
     fn info(status: InstanceStatus) -> InstanceInfo {
         let created = Utc::now();
         InstanceInfo {
+            waiting_for: None,
             run_label: None,
             parent_instance_id: None,
             instance_id: "inst-1".to_string(),

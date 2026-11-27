@@ -400,6 +400,8 @@ pub async fn dispatch(
             ControlCall::ConversationDelta(body) => {
                 host.conversation_delta(authority, body).await?
             }
+            ControlCall::RunsQuery(body) => host.runs_query(authority, body).await?,
+            ControlCall::RunsLatest(body) => host.runs_latest(authority, body).await?,
         })
     })
     .await;

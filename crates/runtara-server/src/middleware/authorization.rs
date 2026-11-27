@@ -393,6 +393,8 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         ("POST", "/api/runtime/operations/views") => WorkflowUpdate,
         ("PUT" | "DELETE", "/api/runtime/operations/views/{id}") => WorkflowUpdate,
         ("POST", "/api/runtime/operations/requests/query") => InvocationHistoryRead,
+        ("POST", "/api/runtime/runs/query") => InvocationHistoryRead,
+        ("GET", "/api/runtime/runs/state") => InvocationHistoryRead,
         // What was said in a conversation is its runs' history.
         ("GET", "/api/runtime/workflows/{id}/conversations") => InvocationHistoryRead,
         ("GET", "/api/runtime/workflows/{id}/conversations/{key}") => InvocationHistoryRead,

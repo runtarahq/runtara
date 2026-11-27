@@ -301,6 +301,14 @@ impl ExecutionEngine {
                 start.workflow_id
             )));
         }
+        if let CompilationStatus::Ready { label_policy, .. } = &compilation
+            && label_policy.required
+            && start.run_label.is_none()
+        {
+            return Err(StartChildError::Invalid(
+                "this workflow requires a run label".to_owned(),
+            ));
+        }
         // The launch would refuse it, so refuse it before admitting it. An
         // image being rebuilt is admitted like a version not compiled yet.
         match self

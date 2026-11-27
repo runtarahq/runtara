@@ -1000,6 +1000,268 @@ pub async fn start(input: StartInput) -> Result<StartOutput, String> {
     host::start(input, args).await
 }
 
+// ---------------------------------------------------------------------------
+// Reads of a workflow's runs: the workflow as a store, each run label a
+// record and its state the record's data (`docs/workflow-records.md`).
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[serde(rename_all = "camelCase")]
+#[capability_input(display_name = "Get Latest Run Input")]
+pub struct GetLatestRunInput {
+    #[field(
+        display_name = "Workflow",
+        description = "The workflow, by id or slug; any workflow of this tenant",
+        example = "lead-intake"
+    )]
+    pub workflow: String,
+    #[field(
+        display_name = "Run Label",
+        description = "The label whose latest run to read: the record's key",
+        example = "lead-0042"
+    )]
+    pub label: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[capability_output(display_name = "Get Latest Run Output")]
+pub struct GetLatestRunOutput {
+    #[field(
+        display_name = "Found",
+        description = "Whether the label has a run; false for a new record"
+    )]
+    pub found: bool,
+    #[field(display_name = "Run ID", description = "The latest run's id")]
+    pub run_id: Option<String>,
+    #[field(
+        display_name = "Status",
+        description = "pending, running, suspended, completed, failed or cancelled"
+    )]
+    pub status: Option<String>,
+    #[field(display_name = "Version", description = "The workflow version it ran")]
+    pub version: Option<i64>,
+    #[field(
+        display_name = "Created At",
+        description = "When it was created, RFC 3339"
+    )]
+    pub created_at: Option<String>,
+    #[field(
+        display_name = "Updated At",
+        description = "When its state was last written, RFC 3339"
+    )]
+    pub updated_at: Option<String>,
+    #[field(
+        display_name = "State",
+        description = "Its state: what its SetState steps wrote"
+    )]
+    pub state: Option<Value>,
+}
+
+#[capability(
+    module = "control",
+    id = "get-latest-run",
+    display_name = "Get Latest Run",
+    description = "Read the latest run of a run label in a workflow of this tenant, with its state: the current record for that key. The latest is the run whose state was written last, then the newest. Found is false when the label has no run.",
+    tags = "runtime:requires-run",
+    side_effects = false,
+    idempotent = true,
+    errors(
+        permanent("CONTROL_INVALID", "The workflow or label is missing"),
+        permanent("CONTROL_NOT_FOUND", "No such workflow in this tenant"),
+        permanent(
+            "CONTROL_REQUIRES_INSTANCE",
+            "get-latest-run runs only as a step of a workflow run"
+        ),
+        permanent("CONTROL_DENIED", "Control is not available to this call"),
+        transient(
+            "CONTROL_UNAVAILABLE",
+            "The control service is temporarily unavailable"
+        ),
+        permanent("CONTROL_UNSUPPORTED", "The operation is not available in this build"),
+        permanent("CONTROL_TIMEOUT", "The control call ran past its deadline"),
+    )
+)]
+pub async fn get_latest_run(input: GetLatestRunInput) -> Result<GetLatestRunOutput, String> {
+    if input.workflow.trim().is_empty() || input.label.trim().is_empty() {
+        return Err(invalid("workflow and label must not be empty".into()));
+    }
+    host::get_latest_run(input).await
+}
+
+#[derive(Debug, Deserialize, CapabilityInput)]
+#[serde(rename_all = "camelCase")]
+#[capability_input(display_name = "Query Workflow Runs Input")]
+pub struct QueryWorkflowRunsInput {
+    #[field(
+        display_name = "Workflow",
+        description = "The workflow, by id or slug; any workflow of this tenant",
+        example = "lead-intake"
+    )]
+    pub workflow: String,
+    #[field(
+        display_name = "Latest Per Label",
+        description = "One row per run label, its latest run: the current records. Off: every run (history)",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub latest_per_label: bool,
+    #[field(
+        display_name = "Condition",
+        description = "Which rows to keep: {op, arguments}. AND/OR take conditions, NOT one; EQ, NE, GT, GTE, LT, LTE, CONTAINS, STARTS_WITH, ENDS_WITH take [path, value]; IN, NOT_IN [path, [values]]; IS_DEFINED, IS_EMPTY, IS_NOT_EMPTY [path]. Paths: runId, label, status, version, createdAt, startedAt, finishedAt, updatedAt, state.<field>, state.a.b, state.items.0.sku, and in a condition state.items[*].sku for any element",
+        example = r#"{"op": "AND", "arguments": [{"op": "GTE", "arguments": ["state.fitScore", 9]}, {"op": "IS_DEFINED", "arguments": ["state.notifiedAt", false]}]}"#
+    )]
+    #[serde(default)]
+    pub condition: Option<Value>,
+    #[field(
+        display_name = "Unnest",
+        description = "A path to an array in state: each element becomes a row, read as item and item.<field>"
+    )]
+    #[serde(default)]
+    pub unnest: Option<String>,
+    #[field(
+        display_name = "Select",
+        description = "The paths each row returns; by default runId, label, status, version, createdAt, updatedAt and state"
+    )]
+    #[serde(default)]
+    pub select: Vec<String>,
+    #[field(
+        display_name = "Group By",
+        description = "One row per distinct value of these paths, with aggregates"
+    )]
+    #[serde(default)]
+    pub group_by: Vec<String>,
+    #[field(
+        display_name = "Aggregates",
+        description = "Per group, or over every row kept: [{fn: count | count_distinct | min | max | sum | avg, path, as}]"
+    )]
+    #[serde(default)]
+    pub aggregates: Option<Value>,
+    #[field(
+        display_name = "Order By",
+        description = "[{path, desc}]: paths, or with groups the names of aggregates"
+    )]
+    #[serde(default)]
+    pub order_by: Option<Value>,
+    #[field(
+        display_name = "Limit",
+        description = "Rows to return, 1-1000",
+        default = "100"
+    )]
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[field(
+        display_name = "Offset",
+        description = "Rows to skip, for the next page"
+    )]
+    #[serde(default)]
+    pub offset: Option<u32>,
+    #[field(
+        display_name = "Count",
+        description = "Also count every row (or group) kept",
+        default = "false"
+    )]
+    #[serde(default)]
+    pub count: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[capability_output(display_name = "Query Workflow Runs Output")]
+pub struct QueryWorkflowRunsOutput {
+    #[field(
+        display_name = "Columns",
+        description = "The names of each row's fields"
+    )]
+    pub columns: Vec<String>,
+    #[field(
+        display_name = "Items",
+        description = "The rows, each an object keyed by its columns"
+    )]
+    pub items: Vec<Value>,
+    #[field(
+        display_name = "Total",
+        description = "Rows (or groups) kept in all, when count was asked"
+    )]
+    pub total: Option<u64>,
+    #[field(
+        display_name = "Has More",
+        description = "More rows follow: ask again with a greater offset"
+    )]
+    pub has_more: bool,
+}
+
+#[capability(
+    module = "control",
+    id = "query-workflow-runs",
+    display_name = "Query Workflow Runs",
+    description = "Find, group and aggregate the runs of a workflow of this tenant by their status, label and paths into their state, nested objects and arrays included: the workflow read as a store of records. latestPerLabel reads each label's current record; without it, every run.",
+    tags = "runtime:requires-run",
+    side_effects = false,
+    idempotent = true,
+    errors(
+        permanent("CONTROL_INVALID", "The query is not valid"),
+        permanent("CONTROL_NOT_FOUND", "No such workflow in this tenant"),
+        permanent(
+            "CONTROL_REQUIRES_INSTANCE",
+            "query-workflow-runs runs only as a step of a workflow run"
+        ),
+        transient(
+            "CONTROL_CAPACITY_RATE_LIMITED",
+            "Too many queries are running; try again shortly"
+        ),
+        permanent("CONTROL_DENIED", "Control is not available to this call"),
+        transient(
+            "CONTROL_UNAVAILABLE",
+            "The control service is temporarily unavailable"
+        ),
+        permanent("CONTROL_UNSUPPORTED", "The operation is not available in this build"),
+        permanent("CONTROL_TIMEOUT", "The control call ran past its deadline"),
+    )
+)]
+pub async fn query_workflow_runs(
+    input: QueryWorkflowRunsInput,
+) -> Result<QueryWorkflowRunsOutput, String> {
+    if input.workflow.trim().is_empty() {
+        return Err(invalid("workflow must not be empty".into()));
+    }
+    host::query_workflow_runs(input).await
+}
+
+/// The query `input` asks for, in the run query's own shape.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn run_query(input: &QueryWorkflowRunsInput) -> Value {
+    let mut query = serde_json::Map::new();
+    let mut put = |key: &str, value: Option<Value>| {
+        if let Some(value) = value {
+            query.insert(key.into(), value);
+        }
+    };
+    put(
+        "latestPerLabel",
+        input.latest_per_label.then_some(Value::Bool(true)),
+    );
+    put("condition", input.condition.clone());
+    put("unnest", input.unnest.clone().map(Value::String));
+    put(
+        "select",
+        (!input.select.is_empty()).then(|| serde_json::json!(input.select)),
+    );
+    put(
+        "groupBy",
+        (!input.group_by.is_empty()).then(|| serde_json::json!(input.group_by)),
+    );
+    put("aggregates", input.aggregates.clone());
+    put("orderBy", input.order_by.clone());
+    put("limit", input.limit.map(|limit| serde_json::json!(limit)));
+    put(
+        "offset",
+        input.offset.map(|offset| serde_json::json!(offset)),
+    );
+    put("count", input.count.then_some(Value::Bool(true)));
+    serde_json::json!({ "workflow": input.workflow, "query": query })
+}
+
 /// Host control calls over the workflow API's `/v1/instances`. Real only for
 /// a run's own entry; a mutation names the operation it runs in.
 #[cfg(target_arch = "wasm32")]
@@ -1227,6 +1489,63 @@ mod host {
         })
     }
 
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Latest {
+        found: bool,
+        run: Option<serde_json::Map<String, Value>>,
+    }
+
+    pub(super) async fn get_latest_run(
+        input: super::GetLatestRunInput,
+    ) -> Result<super::GetLatestRunOutput, String> {
+        let latest: Latest = answer(
+            api::call(
+                ControlCall::RunsLatest(json!({"workflow": input.workflow, "label": input.label})),
+                None,
+            )
+            .await?,
+        )?;
+        let mut run = latest.run.unwrap_or_default();
+        let mut take = |name: &str| run.remove(name).and_then(present);
+        Ok(super::GetLatestRunOutput {
+            found: latest.found,
+            run_id: take("runId").and_then(|v| v.as_str().map(str::to_owned)),
+            status: take("status").and_then(|v| v.as_str().map(str::to_owned)),
+            version: take("version").and_then(|v| v.as_i64()),
+            created_at: take("createdAt").and_then(|v| v.as_str().map(str::to_owned)),
+            updated_at: take("updatedAt").and_then(|v| v.as_str().map(str::to_owned)),
+            state: take("state"),
+        })
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Rows {
+        columns: Vec<String>,
+        rows: Vec<Vec<Value>>,
+        total: Option<u64>,
+        has_more: bool,
+    }
+
+    pub(super) async fn query_workflow_runs(
+        input: super::QueryWorkflowRunsInput,
+    ) -> Result<super::QueryWorkflowRunsOutput, String> {
+        let rows: Rows =
+            answer(api::call(ControlCall::RunsQuery(super::run_query(&input)), None).await?)?;
+        let items = rows
+            .rows
+            .into_iter()
+            .map(|row| Value::Object(rows.columns.iter().cloned().zip(row).collect()))
+            .collect();
+        Ok(super::QueryWorkflowRunsOutput {
+            columns: rows.columns,
+            items,
+            total: rows.total,
+            has_more: rows.has_more,
+        })
+    }
+
     pub(super) async fn query(
         input: super::QueryInput,
         args: super::QueryArgs,
@@ -1386,6 +1705,18 @@ mod host {
         Err(unavailable())
     }
 
+    pub(super) async fn get_latest_run(
+        _input: super::GetLatestRunInput,
+    ) -> Result<super::GetLatestRunOutput, String> {
+        Err(unavailable())
+    }
+
+    pub(super) async fn query_workflow_runs(
+        _input: super::QueryWorkflowRunsInput,
+    ) -> Result<super::QueryWorkflowRunsOutput, String> {
+        Err(unavailable())
+    }
+
     pub(super) async fn query(
         _input: super::QueryInput,
         _args: super::QueryArgs,
@@ -1445,11 +1776,16 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         ("SendSignalOutput", &__OUTPUT_META_SendSignalOutput),
         ("CommandOutput", &__OUTPUT_META_CommandOutput),
         ("GetStateOutput", &__OUTPUT_META_GetStateOutput),
+        ("GetLatestRunOutput", &__OUTPUT_META_GetLatestRunOutput),
+        (
+            "QueryWorkflowRunsOutput",
+            &__OUTPUT_META_QueryWorkflowRunsOutput,
+        ),
     ]);
     AgentInfo {
         id: runtara_dsl::agent_meta::CONTROL_AGENT_ID.into(),
         name: "Control".into(),
-        description: "Read and coordinate a workflow's own run and its child runs.".into(),
+        description: "Read and coordinate a workflow's own run and its child runs, and read the runs of the tenant's workflows as records.".into(),
         has_side_effects: false,
         supports_connections: false,
         integration_ids: vec![],
@@ -1508,6 +1844,18 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
                 Some(&__OUTPUT_META_GetStateOutput),
                 &output_types,
             ),
+            capability_to_api_with_types(
+                &__CAPABILITY_META_GET_LATEST_RUN,
+                Some(&__INPUT_META_GetLatestRunInput),
+                Some(&__OUTPUT_META_GetLatestRunOutput),
+                &output_types,
+            ),
+            capability_to_api_with_types(
+                &__CAPABILITY_META_QUERY_WORKFLOW_RUNS,
+                Some(&__INPUT_META_QueryWorkflowRunsInput),
+                Some(&__OUTPUT_META_QueryWorkflowRunsOutput),
+                &output_types,
+            ),
         ],
     }
 }
@@ -1524,7 +1872,9 @@ runtara_agent_macro::agent_component!(
         cancel,
         pause,
         resume,
-        get_state
+        get_state,
+        get_latest_run,
+        query_workflow_runs
     ],
 );
 
@@ -1577,7 +1927,9 @@ mod tests {
                 "cancel",
                 "pause",
                 "resume",
-                "get-state"
+                "get-state",
+                "get-latest-run",
+                "query-workflow-runs"
             ]
         );
         assert!(
@@ -1831,6 +2183,40 @@ mod tests {
             let known = runtara_control_contract::ErrorCode::all_agent_codes();
             assert!(codes.iter().all(|code| known.contains(code)), "{codes:?}");
         }
+        for record_read in &info.capabilities[9..11] {
+            assert!(
+                !record_read.suspends && !record_read.has_side_effects && record_read.is_idempotent,
+                "{}",
+                record_read.id
+            );
+            assert!(
+                record_read
+                    .tags
+                    .iter()
+                    .any(|tag| tag == runtara_control_contract::REQUIRES_RUN_TAG),
+                "{}: {:?}",
+                record_read.id,
+                record_read.tags
+            );
+            let codes: Vec<_> = record_read
+                .known_errors
+                .iter()
+                .map(|e| e.code.as_str())
+                .collect();
+            assert!(
+                codes.contains(&"CONTROL_REQUIRES_INSTANCE"),
+                "{}: {codes:?}",
+                record_read.id
+            );
+        }
+        assert!(
+            futures_lite_block_on(get_latest_run(GetLatestRunInput {
+                workflow: "orders".into(),
+                label: "   ".into(),
+            }))
+            .unwrap_err()
+            .contains("CONTROL_INVALID")
+        );
     }
 
     #[test]

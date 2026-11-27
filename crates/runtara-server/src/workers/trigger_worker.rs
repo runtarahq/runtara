@@ -1014,6 +1014,54 @@ async fn process_trigger_event(
             );
             ProcessResult::NotRunnable(e.to_string())
         }
+        Err(ExecutionError::LabelRefused(reason)) => {
+            // A deliberate skip, as for single_instance: the workflow does
+            // not start another run for this label (labelConcurrency).
+            if !terminalize_source_launch_claim(
+                outbox,
+                source_request_id,
+                handoff_owner,
+                "label_refused",
+                Some(&reason),
+            )
+            .await
+            {
+                return ProcessResult::HandoffInProgress(
+                    "source terminalization is pending for a refused label".to_string(),
+                );
+            }
+            info!(
+                instance_id = %event.instance_id,
+                workflow_id = %event.workflow_id,
+                reason = %reason,
+                "Skipping execution: the workflow refuses a run for this label"
+            );
+            ProcessResult::Success
+        }
+        Err(ExecutionError::LabelRequired(reason)) => {
+            // Permanent refusal: the workflow requires a run label and this
+            // delivery carried none (e.g., compiled after queueing).
+            if !terminalize_source_launch_claim(
+                outbox,
+                source_request_id,
+                handoff_owner,
+                "label_refused",
+                Some(&reason),
+            )
+            .await
+            {
+                return ProcessResult::HandoffInProgress(
+                    "source terminalization is pending for a missing required label".to_string(),
+                );
+            }
+            warn!(
+                instance_id = %event.instance_id,
+                workflow_id = %event.workflow_id,
+                reason = %reason,
+                "Refusing execution: the workflow requires a run label"
+            );
+            ProcessResult::NotRunnable(reason)
+        }
         Err(e @ ExecutionError::EntitlementDenied(_)) => {
             if !terminalize_source_launch_claim(
                 outbox,

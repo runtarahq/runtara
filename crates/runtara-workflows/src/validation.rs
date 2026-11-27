@@ -3295,6 +3295,18 @@ fn ignored_nested_settings(graph: &ExecutionGraph, scope: &str, result: &mut Val
     if graph.execution_timeout_seconds.is_some() {
         settings.push("executionTimeoutSeconds");
     }
+    if graph.label_concurrency.is_some() {
+        settings.push("labelConcurrency");
+    }
+    if graph.label_required.is_some() {
+        settings.push("labelRequired");
+    }
+    if graph.keep_latest_per_label.is_some() {
+        settings.push("keepLatestPerLabel");
+    }
+    if graph.carry_state_forward.is_some() {
+        settings.push("carryStateForward");
+    }
     for setting in settings {
         result
             .warnings
@@ -19277,6 +19289,10 @@ mod reserved_name_tests {
                     "entryPoint": "f",
                     "rateLimitBudgetMs": 1500,
                     "executionTimeoutSeconds": 10,
+                    "labelConcurrency": "queue",
+                    "labelRequired": true,
+                    "keepLatestPerLabel": true,
+                    "carryStateForward": true,
                     "steps": {"f": {"id": "f", "stepType": "Finish"}}
                 }
             }}
@@ -19288,9 +19304,13 @@ mod reserved_name_tests {
             .map(|warning| warning.to_string())
             .filter(|message| message.starts_with("[W084]"))
             .collect();
-        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert_eq!(warnings.len(), 6, "{warnings:?}");
         assert!(warnings[0].contains("Split 'split' subgraph sets rateLimitBudgetMs"));
         assert!(warnings[1].contains("executionTimeoutSeconds"));
+        assert!(warnings[2].contains("labelConcurrency"));
+        assert!(warnings[3].contains("labelRequired"));
+        assert!(warnings[4].contains("keepLatestPerLabel"));
+        assert!(warnings[5].contains("carryStateForward"));
     }
 
     #[test]

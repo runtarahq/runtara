@@ -514,10 +514,12 @@ pub(crate) fn control_agent_reference() -> serde_json::Value {
             "send-signal": "Answer the one open request of a WaitForSignal step, validated against its response schema.",
             "cancel": "Cancel a direct child: cooperatively, forced after graceMs. A parked or queued child ends at once.",
             "pause": "Pause a direct child. A waiting child pauses at once, a running one at its next checkpoint.",
-            "resume": "Resume an explicitly paused direct child (CONTROL_NOT_PAUSED otherwise). It never answers a WaitForSignal request."
+            "resume": "Resume an explicitly paused direct child (CONTROL_NOT_PAUSED otherwise). It never answers a WaitForSignal request.",
+            "get-latest-run": "Read the latest run (and its state) of one run label in any workflow of this tenant, by workflow id or slug: {found, runId, status, version, createdAt, updatedAt, state}. Requires a calling run (runtime:requires-run).",
+            "query-workflow-runs": "Filter, group and aggregate the runs of any workflow of this tenant by run columns and paths into state (latestPerLabel for current records, or every run for history). Requires a calling run (runtime:requires-run)."
         },
         "authorization": [
-            "Reads (get, get-state, query, list-pending-signals) see every run of the tenant. The caller-relative filters (query callerChildren, list-pending-signals children) need a calling run.",
+            "Reads (get, get-state, query, list-pending-signals) reach this run and its children; get-latest-run and query-workflow-runs read any workflow of the calling run's tenant (read-only) and require a calling run (use POST /api/runtime/runs/query or the query_runs MCP tool outside a run).",
             "cancel, pause and resume reach direct children only: CONTROL_NOT_CHILD otherwise, CONTROL_DENIED for an ancestor.",
             "send-signal answers a child, an ancestor, or any run whose WaitForSignal request opted in with action.key when the step passes the same actionKey; anything else is CONTROL_DENIED.",
             "No mutation may target the calling run (CONTROL_INVALID). Tenant, caller and operation come from the host, never from step inputs."
@@ -572,7 +574,7 @@ pub(crate) fn control_agent_reference() -> serde_json::Value {
         "replay": {
             "identity": "Each control step call has an operation identity: the step plus its loop position. A retried attempt, a crash recovery and a resumed run replay the same identity.",
             "table": [
-                {"capability": "get, get-state, query, list-pending-signals", "onReplay": "A durable step returns its checkpointed result; a non-durable one reads again."},
+                {"capability": "get, get-state, query, list-pending-signals, get-latest-run, query-workflow-runs", "onReplay": "A durable step returns its checkpointed result; a non-durable one reads again."},
                 {"capability": "start", "onReplay": "Returns the same child (replayed: true), also after a crash between admission and the checkpoint. Other arguments are CONTROL_REPLAY_CONFLICT."},
                 {"capability": "send-signal, cancel, pause, resume", "onReplay": "Returns the receipt of the first call (replayed: true) without acting again. Other arguments are CONTROL_REPLAY_CONFLICT."}
             ],

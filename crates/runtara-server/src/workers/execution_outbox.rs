@@ -2188,11 +2188,14 @@ impl ExecutionAdmissionReconciler {
         for reservation in reservations {
             match self
                 .runtime_client
-                .get_instance_status(&reservation.instance_id)
+                .get_instance_info(&reservation.instance_id)
                 .await
             {
-                Ok(status) => {
-                    let Some(reason) = release_reason_for_status(status) else {
+                Ok(info) => {
+                    let status = info.status;
+                    let waiting_for_label = info.waiting_for.is_some();
+                    let Some(reason) = release_reason_for_instance(status, waiting_for_label)
+                    else {
                         stats.unresolved += 1;
                         continue;
                     };
@@ -2274,6 +2277,16 @@ impl ExecutionAdmissionReconciler {
             }
         }
     }
+}
+
+fn release_reason_for_instance(
+    status: InstanceStatus,
+    waiting_for_label: bool,
+) -> Option<&'static str> {
+    if status == InstanceStatus::Pending && waiting_for_label {
+        return Some("runtime_waiting_for_label");
+    }
+    release_reason_for_status(status)
 }
 
 fn release_reason_for_status(status: InstanceStatus) -> Option<&'static str> {
@@ -2557,6 +2570,11 @@ mod tests {
             InstanceStatus::Running,
         ] {
             assert_eq!(release_reason_for_status(active), None);
+            assert_eq!(release_reason_for_instance(active, false), None);
         }
+        assert_eq!(
+            release_reason_for_instance(InstanceStatus::Pending, true),
+            Some("runtime_waiting_for_label")
+        );
     }
 }

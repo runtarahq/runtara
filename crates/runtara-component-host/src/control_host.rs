@@ -83,6 +83,26 @@ pub trait ControlHost: Send + Sync {
         Err(ControlError::unsupported())
     }
 
+    /// A query over the runs of a workflow of the caller's tenant: the body
+    /// is `{workflow, query}`, the answer `RunQueryResult`'s JSON. Reads.
+    async fn runs_query(
+        &self,
+        _authority: &ControlAuthority,
+        _request: serde_json::Value,
+    ) -> Result<serde_json::Value, ControlError> {
+        Err(ControlError::unsupported())
+    }
+
+    /// The latest run of one label of a workflow of the caller's tenant:
+    /// the body is `{workflow, label}`, the answer `{found, run}`. Reads.
+    async fn runs_latest(
+        &self,
+        _authority: &ControlAuthority,
+        _request: serde_json::Value,
+    ) -> Result<serde_json::Value, ControlError> {
+        Err(ControlError::unsupported())
+    }
+
     /// Durably admit a child of the caller.
     async fn start(
         &self,

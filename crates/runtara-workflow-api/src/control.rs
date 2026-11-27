@@ -34,6 +34,12 @@ pub enum ControlCall {
     /// `POST /v1/conversations/delta`: a piece of a reply the calling run is
     /// writing, for whoever reads its conversation now. Not kept.
     ConversationDelta(Value),
+    /// `POST /v1/runs/query`: a query over the runs of a workflow of the
+    /// caller's tenant (`runtara_environment::run_query::RunQuery`).
+    RunsQuery(Value),
+    /// `POST /v1/runs/latest`: the latest run of one label of a workflow of
+    /// the caller's tenant.
+    RunsLatest(Value),
 }
 
 impl ControlCall {
@@ -52,6 +58,8 @@ impl ControlCall {
             Self::ConversationSend(_) => "conversation-send",
             Self::ConversationHistory(_) => "conversation-history",
             Self::ConversationDelta(_) => "conversation-delta",
+            Self::RunsQuery(_) => "query-workflow-runs",
+            Self::RunsLatest(_) => "get-latest-run",
         }
     }
 

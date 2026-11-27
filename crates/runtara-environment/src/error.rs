@@ -40,6 +40,14 @@ pub enum Error {
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
 
+    /// Operation refused because a concurrency limit is full.
+    #[error("Busy: {0}")]
+    Busy(String),
+
+    /// Operation exceeded its database time limit.
+    #[error("Timeout: {0}")]
+    Timeout(String),
+
     /// Other error.
     #[error("{0}")]
     Other(String),
