@@ -1,0 +1,77 @@
+query searchTransactions(
+  $orderId: String
+  $createdFrom: Timestamp
+  $createdTo: Timestamp
+  $statuses: [PaymentStatus!]
+  $first: Int = 50
+  $after: String
+) {
+  transactions(
+    input: {
+      orderId: {is: $orderId}
+      createdAt: {greaterThanOrEqualTo: $createdFrom, lessThanOrEqualTo: $createdTo}
+      status: {in: $statuses}
+    }
+    first: $first
+    after: $after
+  ) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    edges {
+      node {
+        ...TransactionFields
+      }
+    }
+  }
+}
+
+fragment TransactionFields on Transaction {
+  id
+  legacyId
+  status
+  orderId
+  createdAt
+  merchantAccountId
+  amount {
+    value
+    currencyCode
+  }
+  processorAuthorizationResponse {
+    legacyCode
+    message
+    cvvResponse
+    avsPostalCodeResponse
+    avsStreetAddressResponse
+  }
+  paymentMethodSnapshot {
+    __typename
+    ... on CreditCardDetails {
+      brandCode
+      last4
+      expirationMonth
+      expirationYear
+    }
+    ... on CreditCardTransactionDetails {
+      creditCard {
+        brandCode
+        last4
+        expirationMonth
+        expirationYear
+      }
+    }
+    ... on PayPalTransactionDetails {
+      authorizationId
+      captureId
+      payer {
+        email
+        payerId
+      }
+    }
+  }
+  customer {
+    id
+    email
+  }
+}

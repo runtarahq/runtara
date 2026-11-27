@@ -1,0 +1,15 @@
+mutation vaultPaymentMethod($paymentMethodId: ID!, $customerId: ID, $makeDefault: Boolean) {
+  vaultPaymentMethod(
+    input: {paymentMethodId: $paymentMethodId, customerId: $customerId, makeDefault: $makeDefault}
+  ) {
+    paymentMethod {
+      id
+      legacyId
+      usage
+      createdAt
+      customer {
+        id
+      }
+    }
+  }
+}

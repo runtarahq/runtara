@@ -1,0 +1,30 @@
+mutation createCustomer(
+  $email: String
+  $firstName: String
+  $lastName: String
+  $company: String
+  $phoneNumber: String
+) {
+  createCustomer(
+    input: {
+      customer: {
+        email: $email
+        firstName: $firstName
+        lastName: $lastName
+        company: $company
+        phoneNumber: $phoneNumber
+      }
+    }
+  ) {
+    customer {
+      id
+      legacyId
+      email
+      firstName
+      lastName
+      company
+      phoneNumber
+      createdAt
+    }
+  }
+}

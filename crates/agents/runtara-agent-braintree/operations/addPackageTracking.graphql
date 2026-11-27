@@ -1,0 +1,26 @@
+mutation addPackageTracking(
+  $transactionId: ID!
+  $trackingNumber: String!
+  $carrier: String!
+  $notifyPayer: Boolean
+) {
+  createTransactionPackageTracking(
+    input: {
+      transactionId: $transactionId
+      trackingNumber: $trackingNumber
+      carrier: $carrier
+      notifyPayer: $notifyPayer
+    }
+  ) {
+    packageTracker {
+      id
+      trackingNumber
+      carrier
+      paypalTrackerId
+    }
+    transaction {
+      id
+      status
+    }
+  }
+}

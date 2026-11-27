@@ -1682,6 +1682,81 @@ fn test_paypal_extractor_pins_the_environment_and_refuses_another() {
     assert!(err.contains("Invalid PayPal environment"), "{err}");
 }
 
+// ============================================================================
+// BraintreeExtractor Tests
+// ============================================================================
+
+#[test]
+fn test_braintree_extractor_sends_the_key_pair_as_basic_auth_to_the_environment() {
+    for (environment, host) in [
+        (
+            json!("sandbox"),
+            "https://payments.sandbox.braintree-api.com",
+        ),
+        (json!("production"), "https://payments.braintree-api.com"),
+        (Value::Null, "https://payments.braintree-api.com"),
+    ] {
+        let mut params = json!({ "public_key": " pub\n", "private_key": "secret\n" });
+        if !environment.is_null() {
+            params["environment"] = environment;
+        }
+        let config = extract_http_config("braintree_api_keys", &params, None)
+            .expect("Should extract config");
+        // base64("pub:secret")
+        assert_eq!(
+            config.headers.get("Authorization"),
+            Some(&"Basic cHViOnNlY3JldA==".to_string())
+        );
+        assert_eq!(config.url_prefix, host);
+    }
+    let config = extract_http_config(
+        "braintree_api_keys",
+        &json!({ "environment": null, "public_key": "p", "private_key": "s" }),
+        None,
+    )
+    .expect("a null environment is production");
+    assert_eq!(config.url_prefix, "https://payments.braintree-api.com");
+}
+
+#[test]
+fn test_braintree_extractor_refuses_another_environment_or_missing_keys() {
+    let err = extract_http_config(
+        "braintree_api_keys",
+        &json!({ "environment": "evil.com", "public_key": "p", "private_key": "s" }),
+        None,
+    )
+    .expect_err("an unknown environment must be rejected");
+    assert!(err.contains("Invalid Braintree environment"), "{err}");
+    let err = extract_http_config(
+        "braintree_api_keys",
+        &json!({ "environment": 1, "public_key": "p", "private_key": "s" }),
+        None,
+    )
+    .expect_err("an environment that is no string must be rejected");
+    assert!(err.contains("braintree_api_keys"), "{err}");
+    let err = extract_http_config("braintree_api_keys", &json!({}), None)
+        .expect_err("missing keys should fail");
+    assert!(err.contains("braintree_api_keys"), "{err}");
+}
+
+#[test]
+fn test_braintree_connection_type_is_registered() {
+    assert!(get_http_extractor_ids().contains(&"braintree_api_keys"));
+    let meta = crate::registry::find_connection_type("braintree_api_keys")
+        .expect("braintree_api_keys is in the static registry");
+    assert_eq!(meta.display_name, "Braintree");
+    let field = |name: &str| meta.fields.iter().find(|f| f.name == name).unwrap();
+    assert!(field("private_key").is_secret);
+    // The public key is the Basic user, which seal is given as it is.
+    assert!(!field("public_key").is_secret);
+    let environment = field("environment");
+    assert_eq!(environment.default_value, Some("production"));
+    assert_eq!(
+        environment.enum_values,
+        Some(&["production", "sandbox"][..])
+    );
+}
+
 #[test]
 fn test_a_null_environment_is_production_and_another_type_is_refused() {
     // As the token request reads it: a null environment is the default one.

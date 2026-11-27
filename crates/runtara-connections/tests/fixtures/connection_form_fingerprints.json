@@ -18,6 +18,12 @@
     "fnv1a64": "6e9c6f1f3970d863"
   },
   {
+    "integrationId": "braintree_api_keys",
+    "fieldCount": 3,
+    "serializedBytes": 1339,
+    "fnv1a64": "7162c1bd9ce93c5a"
+  },
+  {
     "integrationId": "ebay_oauth",
     "fieldCount": 5,
     "serializedBytes": 2283,

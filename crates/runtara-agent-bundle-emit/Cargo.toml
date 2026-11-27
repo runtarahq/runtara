@@ -19,6 +19,7 @@ runtara-agent-ai-tools = { path = "../agents/runtara-agent-ai-tools" }
 runtara-agent-azure-blob-storage = { path = "../agents/runtara-agent-azure-blob-storage" }
 runtara-agent-bedrock = { path = "../agents/runtara-agent-bedrock" }
 runtara-agent-bigcommerce = { path = "../agents/runtara-agent-bigcommerce" }
+runtara-agent-braintree = { path = "../agents/runtara-agent-braintree" }
 runtara-agent-compression = { path = "../agents/runtara-agent-compression" }
 runtara-agent-control = { path = "../agents/runtara-agent-control" }
 runtara-agent-conversation = { path = "../agents/runtara-agent-conversation" }

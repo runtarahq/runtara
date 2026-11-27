@@ -4849,6 +4849,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtara-agent-braintree"
+version = "12.0.0"
+dependencies = [
+ "runtara-agent-macro",
+ "runtara-dsl",
+ "runtara-http",
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.58.0",
+]
+
+[[package]]
 name = "runtara-agent-bundle-emit"
 version = "12.0.0"
 dependencies = [
@@ -4857,6 +4869,7 @@ dependencies = [
  "runtara-agent-azure-blob-storage",
  "runtara-agent-bedrock",
  "runtara-agent-bigcommerce",
+ "runtara-agent-braintree",
  "runtara-agent-compression",
  "runtara-agent-control",
  "runtara-agent-conversation",
