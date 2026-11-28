@@ -32,9 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refund or reversal Braintree declines or rejects is no result but
   `BRAINTREE_PAYMENT_DECLINED`, with the transaction's ID, status and the
   processor's response, so a workflow never reads it as paid; reading a
-  declined transaction is no error. Charges and authorizations take an
-  idempotency key, which answers the first request's transaction when sent
-  again. A refused input is `BRAINTREE_VALIDATION_ERROR` (naming the input),
+  declined transaction is no error. So is a card whose verification fails
+  when it is vaulted (it is not stored), with the verification's ID.
+  Payments take an idempotency key, which answers the first request's result
+  when sent again; one sent while that first request is still being
+  processed is `BRAINTREE_REQUEST_IN_FLIGHT`, retried after a wait. A refused
+  input is `BRAINTREE_VALIDATION_ERROR` (naming the input),
   an unknown ID `BRAINTREE_NOT_FOUND`, and Braintree's limit a retried
   `BRAINTREE_RATE_LIMITED`; a write that gets no answer, a 5xx or an
   internal error fails with `BRAINTREE_OUTCOME_UNKNOWN` instead of being sent

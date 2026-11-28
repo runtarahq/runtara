@@ -36,9 +36,9 @@ pub const BRAINTREE_VERSION: &str = "2026-11-10";
 const TIMEOUT_MS: u64 = 60_000;
 const ERROR_BODY_LIMIT: usize = 512;
 
-/// The statuses that say a payment, refund or settlement was refused: the
-/// processor declined it, the gateway rejected it, it failed, or (in the
-/// sandbox's settle) settlement was declined.
+/// The statuses that say a payment, refund, settlement or card verification
+/// was refused: the processor declined it, the gateway rejected it, it
+/// failed, or (in the sandbox's settle) settlement was declined.
 const DECLINED_STATUSES: &[&str] = &[
     "PROCESSOR_DECLINED",
     "GATEWAY_REJECTED",
@@ -46,10 +46,10 @@ const DECLINED_STATUSES: &[&str] = &[
     "SETTLEMENT_DECLINED",
 ];
 
-/// The mutations whose answer is a payment they made or settled, which a
-/// declined status fails. Another mutation may answer a transaction too
-/// (`createTransactionPackageTracking` answers the one it tracks), whose
-/// status says nothing of what the mutation did.
+/// The mutations whose answer is a payment they made or settled, or the card
+/// verification they ran, which a declined status fails. Another mutation
+/// may answer a transaction too (`createTransactionPackageTracking` answers
+/// the one it tracks), whose status says nothing of what the mutation did.
 const PAYMENT_MUTATIONS: &[&str] = &[
     "chargePaymentMethod",
     "authorizePaymentMethod",
@@ -57,11 +57,22 @@ const PAYMENT_MUTATIONS: &[&str] = &[
     "refundTransaction",
     "reverseTransaction",
     "sandboxSettleTransaction",
+    "vaultPaymentMethod",
 ];
 
-/// The fields of a payment mutation's payload that hold the payment it made:
-/// a transaction, a refund, or a reversal (either of the two).
-const PAYMENT_FIELDS: &[&str] = &["transaction", "refund", "reversal"];
+/// The fields of a payment mutation's payload that hold what it made: a
+/// transaction, a refund, a reversal (either of the two), or the
+/// verification `vaultPaymentMethod` runs before it stores a card.
+const PAYMENT_FIELDS: &[&str] = &["transaction", "refund", "reversal", "verification"];
+
+/// The `legacyCode` of a request sent again with an idempotency key while the
+/// first request with that key is still being processed
+/// (`ApiRequestKeyIsInFlight` in Braintree's SDKs). The first request may
+/// still complete: sent again once it has, the same key answers its result.
+const API_REQUEST_KEY_IN_FLIGHT: &str = "915233";
+
+/// How long to wait before sending a request again whose key is in flight.
+const IN_FLIGHT_RETRY_MS: u64 = 2_000;
 
 /// The JSON envelope the `#[capability]` macro passes back to the host.
 #[derive(Debug, Clone, Serialize)]
@@ -328,10 +339,11 @@ pub fn outcome_unknown(prefix: &str, message: String) -> AgentError {
     AgentError::permanent(
         format!("{prefix}_OUTCOME_UNKNOWN"),
         format!(
-            "{message}. It may have been carried out (a payment made or refunded, a record \
+            "{}. It may have been carried out (a payment made or refunded, a record \
              created or changed); look it up before retrying. A charge, authorization, \
              capture, refund or reversal sent again with the same idempotency key answers \
-             the first request's result instead of running again"
+             the first request's result instead of running again",
+            message.trim_end_matches('.')
         ),
     )
 }
@@ -387,15 +399,18 @@ pub fn decode<T: DeserializeOwned>(
 /// Reads a GraphQL answer: the value of `data.<field>`.
 ///
 /// - A payment mutation (one of [`PAYMENT_MUTATIONS`]) whose transaction,
-///   refund or reversal has a declined status (`PROCESSOR_DECLINED`,
-///   `GATEWAY_REJECTED`, `FAILED`, `SETTLEMENT_DECLINED`) is
-///   `<PREFIX>_PAYMENT_DECLINED`: Braintree made the transaction, and it was
-///   refused. Its ID, status and the processor's response are attributes.
-///   This holds whether or not the answer has `errors` as well: a declined
-///   payment is a known outcome.
+///   refund, reversal or card verification has a declined status
+///   (`PROCESSOR_DECLINED`, `GATEWAY_REJECTED`, `FAILED`,
+///   `SETTLEMENT_DECLINED`) is `<PREFIX>_PAYMENT_DECLINED`: Braintree made
+///   the transaction or ran the verification, and it was refused. Its ID,
+///   status and the processor's response are attributes. This holds whether
+///   or not the answer has `errors` as well: a declined payment is a known
+///   outcome (a vault whose verification failed stores nothing).
 /// - Otherwise `errors` fail the step. With a mutation that answered its
-///   field as well, it ran, so the outcome is unknown ([`outcome_unknown`]).
-///   Otherwise Braintree did not run it, and the error is what its
+///   field as well, it ran, so the outcome is unknown ([`outcome_unknown`]),
+///   unless every error is a `VALIDATION` error at a field the answer holds
+///   as `null`: Braintree refused what that field would have been, and made
+///   nothing. Otherwise Braintree did not run it, and the error is what its
 ///   `errorClass` says ([`graphql_error`]).
 /// - A `null` field is `<PREFIX>_NOT_FOUND` for a query (`node(id:)` of an
 ///   unknown id), and [`outcome_unknown`] for a mutation. So is an empty
@@ -446,8 +461,9 @@ pub fn decode_graphql<T: DeserializeOwned>(
 
     if let Some(errors) = errors {
         // A mutation that answered its field as well ran: the errors are of a
-        // part of the answer, not a refusal.
-        if !graphql.read && !value.is_null() {
+        // part of the answer, not a refusal. Unless each error refuses a part
+        // the answer holds as null, which was then never made.
+        if !graphql.read && !value.is_null() && !refused_in_place(errors, &envelope) {
             return Err(outcome_unknown(
                 prefix,
                 format!(
@@ -487,17 +503,59 @@ pub fn decode_graphql<T: DeserializeOwned>(
         .map_err(|e| unreadable(format!("{prefix} `{}`: {e}", graphql.field)))
 }
 
-/// The error a mutation's payload means when the payment it made was refused:
-/// a transaction, refund or reversal in one of [`DECLINED_STATUSES`].
+/// Whether every error of a mutation's answer is a `VALIDATION` error whose
+/// `path` names a field the answer holds as `null` (`vaultPaymentMethod`'s
+/// `paymentMethod` when Braintree refused to store it): what Braintree
+/// refused was not made. An error without a path, of another class, or at a
+/// field with a value says nothing of that.
+fn refused_in_place(errors: &Value, envelope: &serde_json::Map<String, Value>) -> bool {
+    let Some(list) = errors.as_array().filter(|list| !list.is_empty()) else {
+        return false;
+    };
+    let Some(data) = envelope.get("data") else {
+        return false;
+    };
+    list.iter().all(|error| {
+        let validation = error
+            .pointer("/extensions/errorClass")
+            .and_then(Value::as_str)
+            == Some("VALIDATION");
+        let Some(path) = error.get("path").and_then(Value::as_array) else {
+            return false;
+        };
+        let mut at = data;
+        for step in path {
+            let next = match step {
+                Value::String(key) => at.get(key),
+                Value::Number(index) => index.as_u64().and_then(|i| at.get(i as usize)),
+                _ => None,
+            };
+            match next {
+                Some(value) => at = value,
+                None => return false,
+            }
+        }
+        validation && !path.is_empty() && at.is_null()
+    })
+}
+
+/// The error a mutation's payload means when what it made was refused: a
+/// transaction, refund, reversal or card verification in one of
+/// [`DECLINED_STATUSES`].
 fn declined_payment(payload: &Value, field: &str, prefix: &str) -> Option<AgentError> {
-    let (payment, status) = PAYMENT_FIELDS.iter().find_map(|key| {
+    let (key, payment, status) = PAYMENT_FIELDS.iter().find_map(|key| {
         let payment = payload.get(*key)?;
         let status = payment.get("status")?.as_str()?;
         DECLINED_STATUSES
             .contains(&status)
-            .then_some((payment, status))
+            .then_some((*key, payment, status))
     })?;
-    let response = payment.get("processorAuthorizationResponse");
+    // A verification's response is `processorResponse`; a payment's,
+    // `processorAuthorizationResponse`.
+    let response = payment
+        .get("processorAuthorizationResponse")
+        .or_else(|| payment.get("processorResponse"))
+        .filter(|response| !response.is_null());
     let code = response
         .and_then(|r| r.get("legacyCode"))
         .and_then(Value::as_str);
@@ -516,7 +574,18 @@ fn declined_payment(payload: &Value, field: &str, prefix: &str) -> Option<AgentE
     )
     .with_attr("status", status);
     if let Some(id) = payment.get("id").and_then(Value::as_str) {
-        err = err.with_attr("transaction_id", id);
+        let name = if key == "verification" {
+            "verification_id"
+        } else {
+            "transaction_id"
+        };
+        err = err.with_attr(name, id);
+    }
+    if let Some(reason) = payment
+        .get("gatewayRejectionReason")
+        .and_then(Value::as_str)
+    {
+        err = err.with_attr("gateway_rejection_reason", reason);
     }
     if let Some(code) = code {
         err = err.with_attr("processor_response_code", code);
@@ -552,6 +621,10 @@ fn graphql_messages(errors: &Value) -> String {
 /// - `INTERNAL`, `SERVICE_AVAILABILITY`: transient `<PREFIX>_UPSTREAM_ERROR`
 ///   for a query, [`outcome_unknown`] for a mutation.
 /// - `NOT_FOUND`: `<PREFIX>_NOT_FOUND`.
+/// - `VALIDATION` with the code of an idempotency key whose first request is
+///   still in flight ([`API_REQUEST_KEY_IN_FLIGHT`]): transient
+///   `<PREFIX>_REQUEST_IN_FLIGHT`, sent again after a wait. The same key with
+///   other input is a validation error like any other.
 /// - `VALIDATION`: `<PREFIX>_VALIDATION_ERROR`, Braintree refused the input
 ///   and changed nothing; each error's `inputPath` and `legacyCode` are kept.
 /// - Anything else (`UNSUPPORTED_CLIENT`, `NOT_IMPLEMENTED`):
@@ -572,6 +645,13 @@ fn graphql_error(errors: &Value, graphql: Graphql, prefix: &str) -> AgentError {
         .take(ERROR_BODY_LIMIT)
         .collect();
     let has = |class: &str| classes.contains(&class);
+    let in_flight = list
+        .iter()
+        .any(|error| match error.pointer("/extensions/legacyCode") {
+            Some(Value::String(code)) => code == API_REQUEST_KEY_IN_FLIGHT,
+            Some(Value::Number(code)) => code.to_string() == API_REQUEST_KEY_IN_FLIGHT,
+            _ => false,
+        });
     let err = if has("RESOURCE_LIMIT") {
         AgentError::transient(format!("{prefix}_RATE_LIMITED"), message)
     } else if has("AUTHENTICATION") || has("AUTHORIZATION") || has("UNAUTHORIZED") {
@@ -585,6 +665,9 @@ fn graphql_error(errors: &Value, graphql: Graphql, prefix: &str) -> AgentError {
     } else if has("NOT_FOUND") {
         AgentError::permanent(format!("{prefix}_NOT_FOUND"), message)
             .with_attr("field", graphql.field)
+    } else if in_flight {
+        AgentError::transient(format!("{prefix}_REQUEST_IN_FLIGHT"), message)
+            .with_retry_after_ms(Some(IN_FLIGHT_RETRY_MS))
     } else if has("VALIDATION") {
         let refused: Vec<Value> = list
             .iter()
