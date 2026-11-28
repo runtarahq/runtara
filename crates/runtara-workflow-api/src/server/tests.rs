@@ -1274,7 +1274,9 @@ impl WorkflowApiBackend for Control {
             | crate::ControlCall::PendingSignals(body)
             | crate::ControlCall::ConversationSend(body)
             | crate::ControlCall::ConversationHistory(body)
-            | crate::ControlCall::ConversationDelta(body) => (None, body.clone()),
+            | crate::ControlCall::ConversationDelta(body)
+            | crate::ControlCall::RunsQuery(body)
+            | crate::ControlCall::RunsLatest(body) => (None, body.clone()),
         };
         Ok(serde_json::json!({
             "call": call.name(),
@@ -1349,6 +1351,8 @@ async fn control_calls_route_to_their_names_with_the_operation() {
         ("/v1/conversations/send", "conversation-send"),
         ("/v1/conversations/history", "conversation-history"),
         ("/v1/conversations/delta", "conversation-delta"),
+        ("/v1/runs/query", "query-workflow-runs"),
+        ("/v1/runs/latest", "get-latest-run"),
     ] {
         let (status, _, body) = send(&app, write("POST", path, name, r#"{"limit":3}"#)).await;
         assert_eq!(status, StatusCode::OK, "{path}");

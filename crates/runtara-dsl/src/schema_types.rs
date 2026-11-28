@@ -26,7 +26,7 @@
 // (S, M, L, XL) also reads lowercase. DSL 4.0 removes the deprecated ones.
 
 /// DSL version - bump when making breaking changes
-pub const DSL_VERSION: &str = "3.8.0";
+pub const DSL_VERSION: &str = "3.9.0";
 
 // ============================================================================
 // Root Types
@@ -204,6 +204,79 @@ pub struct ExecutionGraph {
     /// `parse_workflow` copies `Workflow.durable` here when this is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durable: Option<bool>,
+
+    /// What happens when a run of this workflow starts with a run label that
+    /// another of its runs holds. A run holds its label from its start until
+    /// it ends, suspended time included. `None` is [`LabelConcurrency::Allow`].
+    /// Only the workflow's own graph is read; a nested graph's value is
+    /// ignored (W084). Read by the engine from the approved definition when
+    /// it starts a run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_concurrency: Option<LabelConcurrency>,
+
+    /// Refuse a start of this workflow that carries no run label. Only the
+    /// workflow's own graph is read (W084).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_required: Option<bool>,
+
+    /// Keep each run label's latest run past the retention that deletes
+    /// finished runs: the label's current record, with its history up to it,
+    /// stays until a newer run of the label takes its place. Only the
+    /// workflow's own graph is read (W084).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_latest_per_label: Option<bool>,
+
+    /// Start each run with its run label's latest state: the state the
+    /// label's latest run left, copied when the run is admitted, or, for a
+    /// run waiting for its label (`labelConcurrency: queue`), when it is
+    /// let in. With `queue`, each run of a label carries its predecessor's
+    /// state on. Only the workflow's own graph is read (W084).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carry_state_forward: Option<bool>,
+}
+
+/// What a start does when its run label is held by another run of the same
+/// workflow, which it is from that run's start until it ends.
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum LabelConcurrency {
+    /// Start regardless: runs with the same label may overlap.
+    #[default]
+    Allow,
+    /// Wait, in the order started, until no earlier run holds the label.
+    Queue,
+    /// Refuse the start while another run holds the label. Of several
+    /// starts at the same moment, one wins: the first to reach the engine,
+    /// not necessarily the first sent. Use [`Self::Queue`] when order matters.
+    Refuse,
+    /// Refuse it too once a run with the label has completed: each label
+    /// completes once. A failed or cancelled run does not use it up.
+    Once,
+}
+
+impl LabelConcurrency {
+    /// The setting's spelling, as the definition writes it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Queue => "queue",
+            Self::Refuse => "refuse",
+            Self::Once => "once",
+        }
+    }
+
+    /// The setting spelled `text`, if it is one.
+    pub fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "allow" => Self::Allow,
+            "queue" => Self::Queue,
+            "refuse" => Self::Refuse,
+            "once" => Self::Once,
+            _ => return None,
+        })
+    }
 }
 
 /// Read an empty edge label as no label, so `""` and an absent label are the
@@ -241,6 +314,10 @@ impl Default for ExecutionGraph {
             rate_limit_budget_ms: default_rate_limit_budget_ms(),
             execution_timeout_seconds: None,
             durable: None,
+            label_concurrency: None,
+            label_required: None,
+            keep_latest_per_label: None,
+            carry_state_forward: None,
         }
     }
 }

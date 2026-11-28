@@ -142,3 +142,105 @@ async fn an_environment_table_refuses_work_in_no_scope() {
     }
     drop_database(admin, &name).await;
 }
+
+/// A query over runs (`run_query`) reads in its scope only: one that names
+/// another tenant than its scope's reads nothing, and one in no scope is
+/// refused, whatever it names.
+#[tokio::test]
+async fn a_query_over_runs_reads_its_scopes_tenant_only() {
+    use runtara_environment::instance_repository::InstanceRepository;
+    use runtara_environment::run_query::RunQuery;
+
+    let (admin, name) = fresh().await;
+    let tag = Uuid::new_v4().simple().to_string();
+    let (a, b) = (format!("query-a-{tag}"), format!("query-b-{tag}"));
+    for tenant in [&a, &b] {
+        let image = Uuid::new_v4().to_string();
+        let run = format!("{tenant}-run");
+        sqlx::query(
+            "INSERT INTO images (image_id, tenant_id, name, binary_path) \
+             VALUES ($1, $2, 'wf:1', '/dev/null')",
+        )
+        .bind(&image)
+        .bind(tenant)
+        .execute(&admin)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO instances (instance_id, tenant_id, status, run_label) \
+             VALUES ($1, $2, 'completed', 'key')",
+        )
+        .bind(&run)
+        .bind(tenant)
+        .execute(&admin)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO instance_images (instance_id, image_id, tenant_id) VALUES ($1, $2, $3)",
+        )
+        .bind(&run)
+        .bind(&image)
+        .bind(tenant)
+        .execute(&admin)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO instance_state (instance_id, state) VALUES ($1, $2)")
+            .bind(&run)
+            .bind(serde_json::json!({ "owner": { "name": tenant } }))
+            .execute(&admin)
+            .await
+            .unwrap();
+    }
+
+    let role = format!("query_probe_{tag}");
+    for statement in [
+        format!("CREATE ROLE {role} NOLOGIN NOSUPERUSER NOBYPASSRLS"),
+        format!("GRANT USAGE ON SCHEMA public TO {role}"),
+        format!("GRANT SELECT ON ALL TABLES IN SCHEMA public TO {role}"),
+    ] {
+        sqlx::query(&statement).execute(&admin).await.unwrap();
+    }
+    let options: PgConnectOptions = url().parse().unwrap();
+    let pool = scoping(PgPoolOptions::new().max_connections(1).min_connections(0))
+        .connect_with(options.database(&name).options([("role", role.as_str())]))
+        .await
+        .unwrap();
+    let repository = InstanceRepository::new(pool.clone());
+    let ask = |tenant: String, query: serde_json::Value| {
+        let repository = repository.clone();
+        async move {
+            let query: RunQuery = serde_json::from_value(query).unwrap();
+            repository.query_runs(&tenant, "wf", query).await
+        }
+    };
+    let rows = serde_json::json!({ "select": ["state.owner.name"] });
+    let latest = serde_json::json!({ "latestPerLabel": true, "select": ["state.owner.name"] });
+    let counted = serde_json::json!({ "latestPerLabel": true, "aggregates": [{ "fn": "count" }] });
+
+    for query in [rows.clone(), latest.clone()] {
+        let own = scoped(a.clone(), ask(a.clone(), query.clone()))
+            .await
+            .unwrap();
+        assert_eq!(own.rows, vec![vec![serde_json::json!(a.clone())]]);
+        let theirs = scoped(a.clone(), ask(b.clone(), query.clone()))
+            .await
+            .unwrap();
+        assert!(theirs.rows.is_empty(), "{theirs:?}");
+        assert!(ask(a.clone(), query).await.is_err());
+    }
+    let own = scoped(a.clone(), ask(a.clone(), counted.clone()))
+        .await
+        .unwrap();
+    assert_eq!(own.rows, vec![vec![serde_json::json!(1)]]);
+    let theirs = scoped(a.clone(), ask(b.clone(), counted.clone()))
+        .await
+        .unwrap();
+    assert_eq!(theirs.rows, vec![vec![serde_json::json!(0)]]);
+    assert!(ask(a.clone(), counted).await.is_err());
+
+    pool.close().await;
+    for statement in [format!("DROP OWNED BY {role}"), format!("DROP ROLE {role}")] {
+        sqlx::query(&statement).execute(&admin).await.unwrap();
+    }
+    drop_database(admin, &name).await;
+}

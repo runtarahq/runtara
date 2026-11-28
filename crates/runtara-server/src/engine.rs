@@ -277,6 +277,15 @@ pub trait Engine: Send + Sync {
         fields: &[String],
     ) -> Result<runtara_environment::operations::RequestPage, RuntimeError>;
 
+    /// A query over a tenant's runs of one workflow, read as records
+    /// (`docs/workflow-records.md`). It takes no SQL.
+    async fn query_runs(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        query: runtara_environment::run_query::RunQuery,
+    ) -> Result<runtara_environment::run_query::RunQueryResult, RuntimeError>;
+
     // ---- Input a run waits for --------------------------------------------
 
     async fn submit_input_response(
@@ -1060,6 +1069,17 @@ impl Engine for LocalEngine {
     ) -> Result<runtara_environment::operations::RequestPage, RuntimeError> {
         self.runtime()?
             .operation_requests(tenant_id, workflow_id, key, listing, fields)
+            .await
+    }
+
+    async fn query_runs(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        query: runtara_environment::run_query::RunQuery,
+    ) -> Result<runtara_environment::run_query::RunQueryResult, RuntimeError> {
+        self.runtime()?
+            .query_runs(tenant_id, workflow_id, query)
             .await
     }
 

@@ -228,6 +228,9 @@ pub mod approved_builtins;
 pub mod control_reads;
 
 pub mod operations;
+/// Queries over one workflow's runs: filters, groups and aggregates by
+/// run columns and paths into state.
+pub mod run_query;
 /// Filters over a run's published state.
 pub mod state_filter;
 

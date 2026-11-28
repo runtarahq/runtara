@@ -111,6 +111,12 @@ pub enum ExecutionError {
     },
     /// A guarded trigger lost the durable workflow-wide launch race.
     SingleInstanceActive,
+    /// The workflow refuses a run for a label another run holds, or one
+    /// that has completed (`labelConcurrency: refuse` or `once`).
+    LabelRefused(String),
+    /// The workflow requires a run label (`labelRequired`), and the start
+    /// carries none.
+    LabelRequired(String),
     RuntimeError(String),
     DatabaseError(String),
     NotConnected(String),
@@ -161,6 +167,8 @@ impl std::fmt::Display for ExecutionError {
             ExecutionError::SingleInstanceActive => {
                 write!(f, "single-instance workflow already has active work")
             }
+            ExecutionError::LabelRefused(reason) => write!(f, "{reason}"),
+            ExecutionError::LabelRequired(reason) => write!(f, "{reason}"),
             ExecutionError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
             ExecutionError::DatabaseError(msg) => write!(f, "Database error: {}", msg),
             ExecutionError::NotConnected(msg) => write!(f, "Not connected: {}", msg),
@@ -190,6 +198,8 @@ impl ExecutionError {
             ExecutionError::NotCompiled { .. } => StatusCode::CONFLICT,
             ExecutionError::WorkflowNotRunnable { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             ExecutionError::SingleInstanceActive => StatusCode::CONFLICT,
+            ExecutionError::LabelRefused(_) => StatusCode::CONFLICT,
+            ExecutionError::LabelRequired(_) => StatusCode::BAD_REQUEST,
             ExecutionError::RuntimeError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ExecutionError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ExecutionError::NotConnected(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -626,6 +636,7 @@ const CONCURRENCY_COUNT_TTL: Duration = Duration::from_millis(500);
 struct ReadyLaunch {
     image_id: String,
     execution_timeout: Option<ExecutionTimeoutSeconds>,
+    label_policy: crate::api::repositories::workflows::LabelPolicy,
 }
 
 /// Admissions still unaccounted for after a fresh count landed.
@@ -1024,6 +1035,14 @@ impl ExecutionEngine {
                 version,
                 error: error.clone(),
             });
+        }
+        if let CompilationStatus::Ready { label_policy, .. } = &compilation
+            && label_policy.required
+            && run_label.is_none()
+        {
+            return Err(ExecutionError::LabelRequired(
+                "this workflow requires a run label".to_owned(),
+            ));
         }
 
         // 1.6 The launch refuses a workflow that calls an agent the tenant may
@@ -1544,6 +1563,7 @@ impl ExecutionEngine {
             .resolve_execution_timeout(ready.execution_timeout)
             .map_err(|error| ExecutionError::ValidationError(error.to_string()))?;
         let image_id = ready.image_id;
+        let label_policy = ready.label_policy;
 
         // Inputs are already in canonical format {"data": {...}, "variables": {...}}
         // from the API layer - inject _workflow_id for cache key isolation
@@ -1562,6 +1582,7 @@ impl ExecutionEngine {
                 Some(execution_timeout),
                 event.debug,
                 single_instance,
+                label_policy,
             )
             .await
         {
@@ -1585,6 +1606,12 @@ impl ExecutionEngine {
             Err(RuntimeError::SingleInstanceActive) => {
                 return Err(ExecutionError::SingleInstanceActive);
             }
+            Err(RuntimeError::LabelRefused(reason)) => {
+                return Err(ExecutionError::LabelRefused(reason));
+            }
+            Err(RuntimeError::LabelRequired(reason)) => {
+                return Err(ExecutionError::LabelRequired(reason));
+            }
             Err(e) => return Err(ExecutionError::RuntimeError(e.to_string())),
         };
 
@@ -1607,6 +1634,25 @@ impl ExecutionEngine {
         };
 
         Ok(outcome)
+    }
+
+    /// The tenant's workflow named by `workflow`, an id or a slug; `None` if
+    /// it has none by that name.
+    pub(crate) async fn resolve_workflow(
+        &self,
+        tenant_id: &str,
+        workflow: &str,
+    ) -> Result<Option<String>, ExecutionError> {
+        sqlx::query_scalar(
+            "SELECT workflow_id FROM workflows \
+             WHERE tenant_id = $1 AND deleted_at IS NULL AND (workflow_id = $2 OR slug = $2) \
+             ORDER BY (workflow_id = $2) DESC LIMIT 1",
+        )
+        .bind(tenant_id)
+        .bind(workflow)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ExecutionError::DatabaseError(e.to_string()))
     }
 
     // =========================================================================
@@ -2915,6 +2961,7 @@ impl ExecutionEngine {
             && let CompilationStatus::Ready {
                 registered_image_id,
                 execution_timeout,
+                label_policy,
                 ..
             } = status
         {
@@ -2923,6 +2970,7 @@ impl ExecutionEngine {
                 ReadyLaunch {
                     image_id: registered_image_id,
                     execution_timeout,
+                    label_policy,
                 },
             ));
         }
@@ -3059,12 +3107,14 @@ impl ExecutionEngine {
             && let CompilationStatus::Ready {
                 registered_image_id,
                 execution_timeout,
+                label_policy,
                 ..
             } = status
         {
             return Ok(ReadyLaunch {
                 image_id: registered_image_id,
                 execution_timeout,
+                label_policy,
             });
         }
 
@@ -3181,10 +3231,12 @@ impl ExecutionEngine {
             CompilationStatus::Ready {
                 registered_image_id,
                 execution_timeout,
+                label_policy,
                 ..
             } => Ok(ReadyLaunch {
                 image_id: registered_image_id,
                 execution_timeout,
+                label_policy,
             }),
             // The compilation we waited on recorded why it failed; report that
             // rather than the generic missing-binary message.
@@ -3432,6 +3484,7 @@ mod tests {
             registered_image_id: image_id.to_string(),
             execution_timeout: None,
             track_events: false,
+            label_policy: Default::default(),
         }
     }
 

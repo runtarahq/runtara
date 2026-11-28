@@ -134,7 +134,9 @@ pub(crate) fn tool_authz(tool: &str) -> ToolAuthz {
         | "trace_reference"
         | "conversation_read"
         | "conversation_list"
-        | "list_pending_signals" => ToolAuthz::Needs(InvocationHistoryRead),
+        | "list_pending_signals"
+        | "query_runs"
+        | "describe_run_state" => ToolAuthz::Needs(InvocationHistoryRead),
 
         // ── Object model / database ─────────────────────────────────────────────────────
         "list_object_schemas"
@@ -220,6 +222,7 @@ mod tests {
         "deploy_latest",
         "deploy_workflow",
         "describe_connection",
+        "describe_run_state",
         "diff_workflow_versions",
         "disconnect_steps",
         "execute_sql",
@@ -271,6 +274,7 @@ mod tests {
         "publish_workflow_agent",
         "query_aggregate",
         "query_object_instances",
+        "query_runs",
         "query_sql",
         "query_sql_one",
         "query_sql_raw",

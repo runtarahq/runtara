@@ -136,6 +136,9 @@ pub struct RetentionPassStats {
     /// Terminal children past retention kept because their parent is not
     /// terminal, or finished too recently. Each is counted once per pass.
     pub pinned_terminal_children: u64,
+    /// Terminal runs past retention kept because they are their run label's
+    /// latest run in a workflow with `keepLatestPerLabel`.
+    pub kept_latest: u64,
     /// Pages the pass read.
     pub pages: u64,
     /// External outcomes of never-launched children deleted.
@@ -338,7 +341,9 @@ impl DbCleanupWorker {
                 .await?;
             stats.pages += 1;
             stats.pinned_terminal_children += page.pinned;
-            let instance_ids = page.eligible;
+            let eligible_before = page.eligible.len();
+            let instance_ids = self.without_kept_latest(page.eligible).await?;
+            stats.kept_latest += (eligible_before - instance_ids.len()) as u64;
 
             if !instance_ids.is_empty() {
                 let batch_size = instance_ids.len();
@@ -389,11 +394,16 @@ impl DbCleanupWorker {
             }
         }
 
-        if stats.deleted > 0 || stats.outcomes_deleted > 0 || stats.pinned_terminal_children > 0 {
+        if stats.deleted > 0
+            || stats.outcomes_deleted > 0
+            || stats.pinned_terminal_children > 0
+            || stats.kept_latest > 0
+        {
             info!(
                 total_deleted = stats.deleted,
                 outcomes_deleted = stats.outcomes_deleted,
                 pinned_terminal_children = stats.pinned_terminal_children,
+                kept_latest = stats.kept_latest,
                 cutoff = %cutoff,
                 "Database cleanup cycle completed"
             );
@@ -402,6 +412,35 @@ impl DbCleanupWorker {
         }
 
         Ok(stats)
+    }
+
+    /// `instance_ids` less the runs retention keeps: each one that is its
+    /// run label's latest (`run_keys`) in a workflow that keeps each label's
+    /// latest run (`keepLatestPerLabel`, recorded in `workflow_retention`).
+    /// A run stops being kept when a newer run of its label takes its place.
+    async fn without_kept_latest(&self, mut instance_ids: Vec<String>) -> Result<Vec<String>> {
+        if instance_ids.is_empty() {
+            return Ok(instance_ids);
+        }
+        let kept: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT k.instance_id
+            FROM run_keys k
+            JOIN workflow_retention r
+              ON r.tenant_id = k.tenant_id AND r.workflow_id = k.workflow_id
+            WHERE k.instance_id = ANY($1) AND r.keep_latest_per_label
+            "#,
+        )
+        .bind(&instance_ids)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .collect();
+        if !kept.is_empty() {
+            debug!(kept = kept.len(), "Keeping each label's latest run");
+            instance_ids.retain(|id| !kept.contains(id));
+        }
+        Ok(instance_ids)
     }
 
     /// Clean up environment-specific tables that don't have FK cascade.

@@ -47,11 +47,11 @@ use crate::workers::execution_engine::{SyncExecution, SyncRequest};
     path = "/api/runtime/events/http-sync/{workflow_id}",
     params(
         ("workflow_id" = String, Path, description = "Workflow identifier"),
-        crate::api::dto::workflows::RunLabelQuery
     ),
     request_body(content = String, description = "Optional raw HTTP request body (accepts any content type or no body)", content_type = "application/octet-stream"),
     responses(
         (status = 200, description = "Execution completed (may be success or failure)", body = Value),
+        (status = 400, description = "A run label was given: public endpoints do not take one", body = Value),
         (status = 404, description = "Workflow not found or not compiled", body = Value),
         (status = 500, description = "Internal server error", body = Value)
     ),
@@ -68,6 +68,54 @@ pub async fn capture_http_event_sync(
     headers: HeaderMap,
     State(engine): State<Arc<dyn Engine>>,
     State(pool): State<sqlx::PgPool>,
+    body: Bytes,
+) -> Response {
+    // Anyone may send here: a run label names a record, so whoever sends
+    // one could take or overwrite another's. Labels come from callers who
+    // authenticate (the execute API, MCP) or from a workflow's own step.
+    if metadata.run_label.is_some() {
+        return crate::api::dto::workflows::RunLabelQuery::refused_publicly().into_response();
+    }
+    run_sync_for(workflow_id, None, method, uri, headers, engine, pool, body).await
+}
+
+/// The synchronous run for an authenticated caller (MCP's
+/// `execute_workflow_sync`, on the internal routes): the same run as the
+/// public endpoint, with the run label the caller may give.
+#[instrument(skip(engine, pool, body, headers, uri), fields(workflow_id = %workflow_id))]
+#[allow(clippy::too_many_arguments)]
+pub async fn run_workflow_sync_for_caller(
+    Path(workflow_id): Path<String>,
+    Query(metadata): Query<crate::api::dto::workflows::RunLabelQuery>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    State(engine): State<Arc<dyn Engine>>,
+    State(pool): State<sqlx::PgPool>,
+    body: Bytes,
+) -> Response {
+    run_sync_for(
+        workflow_id,
+        metadata.run_label,
+        method,
+        uri,
+        headers,
+        engine,
+        pool,
+        body,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_sync_for(
+    workflow_id: String,
+    run_label: Option<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    engine: Arc<dyn Engine>,
+    pool: sqlx::PgPool,
     body: Bytes,
 ) -> Response {
     // An unauthenticated webhook: the workflow's tenant, among those this
@@ -110,7 +158,7 @@ pub async fn capture_http_event_sync(
     match runtara_store_postgres::tenant_scope::scoped(
         tenant_id.clone(),
         engine.run_sync(SyncRequest {
-            run_label: metadata.run_label,
+            run_label,
             tenant_id: &tenant_id,
             workflow_id: &workflow_id,
             version: None,

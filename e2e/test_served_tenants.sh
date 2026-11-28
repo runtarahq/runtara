@@ -49,6 +49,14 @@
 #      until a caller who may compiles it; the version that runs is the one
 #      chosen through the engine; a version a caller edits through the API
 #      still runs as edited.
+#  12. RUNS AS RECORDS (docs/workflow-records.md) — as the plain role,
+#      and across the wire with TWO_ROLES: a label's runs one at a time, each
+#      starting with the state the one before left; the label's record read
+#      back by slug; a queued start that waits for a suspended holder and
+#      names it; a refused one that never starts (label_refused); a
+#      workflow's steps reading another workflow's records. The second tenant
+#      reads none of the primary's: its queries answer 404, and its run naming
+#      the primary's workflow finds none.
 #
 # With SERVED_TENANTS_KEY_ID_PER_TENANT, a host that seals each tenant's
 # credentials under its own keys (key id `{tenant}-k1`) is checked to.
@@ -1156,5 +1164,156 @@ echo "${RESP}" | jq -e '.outputs.answer == 44' >/dev/null \
     || { print_error "a version a caller edited in place did not run: $(echo "${RESP}" | head -c 400)"; exit 1; }
 echo "  a version a caller edited in place through the API ran as edited, compiled as it ran ✓"
 fi
+
+#-------------------------------------------------------------------------
+print_step "12. Runs as records: queries, labels, and the store read from workflows..."
+AUTH=()
+wait_run() {  # wait_run INSTANCE [curl args: who asks]: the run's final JSON
+    local instance="$1" resp status; shift
+    for _ in {1..240}; do
+        resp=$(curl -sS "$@" "${API}/workflows/instances/${instance}")
+        status=$(echo "${resp}" | jq -r '.data.status // empty')
+        case "${status}" in completed|failed|cancelled) break ;; esac
+        sleep 0.5
+    done
+    echo "${resp}"
+}
+wait_holding() {  # wait_holding INSTANCE: until the run runs or waits in its delay
+    local status
+    for _ in {1..120}; do
+        status=$(curl -sS "${API}/workflows/instances/$1" | jq -r '.data.status // empty')
+        case "${status}" in running|suspended) return 0 ;; esac
+        sleep 0.5
+    done
+    print_error "run $1 never started (${status})"; tail -30 "${TEST_LOG}"; exit 1
+}
+start_labelled() {  # start_labelled WORKFLOW LABEL DATA-JSON: the run's id
+    api_post "/workflows/$1/execute" "{\"inputs\": {\"data\": $3, \"variables\": {}}, \"runLabel\": \"$2\"}" \
+        | jq -r '.data.instanceId // empty'
+}
+REF() { printf '{"valueType": "reference", "value": "%s"}' "$1"; }
+IMM() { printf '{"valueType": "immediate", "value": %s}' "$1"; }
+
+# a. A label's runs, one at a time, each starting with the state the one
+# before left; the label's record read back by slug.
+RECORDS_GRAPH="{\"name\": \"Records\", \"labelConcurrency\": \"queue\", \"carryStateForward\": true,
+  \"keepLatestPerLabel\": true,
+  \"stateSchema\": {\"last\": {\"type\": \"string\"}, \"previous\": {\"type\": \"string\"}},
+  \"steps\": {
+    \"get\": {\"stepType\": \"GetState\", \"id\": \"get\"},
+    \"set\": {\"stepType\": \"SetState\", \"id\": \"set\", \"values\": {
+        \"previous\": $(REF steps.get.outputs.last), \"last\": $(REF data.value)}},
+    \"finish\": {\"stepType\": \"Finish\", \"id\": \"finish\", \"inputMapping\": {
+        \"previous\": $(REF steps.get.outputs.last)}}},
+  \"entryPoint\": \"get\",
+  \"executionPlan\": [{\"fromStep\": \"get\", \"toStep\": \"set\"}, {\"fromStep\": \"set\", \"toStep\": \"finish\"}],
+  \"variables\": {}, \"inputSchema\": {\"value\": {\"type\": \"string\"}}, \"outputSchema\": {}}"
+RECORDS_WF=$(create_and_compile "Records" "${RECORDS_GRAPH}")
+RESP=$(curl -sS -X PUT -H 'Content-Type: application/json' -d '{"slug": "records"}' "${API}/workflows/${RECORDS_WF}/slug")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "the slug was not set: ${RESP}"; exit 1; }
+for value in one two; do
+    RUN=$(start_labelled "${RECORDS_WF}" r-1 "{\"value\": \"${value}\"}")
+    [ -n "${RUN}" ] || { print_error "a labelled run did not start"; exit 1; }
+    RESP=$(wait_run "${RUN}")
+    [ "$(echo "${RESP}" | jq -r '.data.status')" = "completed" ] \
+        || { print_error "run '${value}' ended: $(echo "${RESP}" | jq -c '.data.error // .data.status')"; tail -30 "${TEST_LOG}"; exit 1; }
+done
+[ "$(echo "${RESP}" | jq -r '.data.outputs.previous')" = "one" ] \
+    || { print_error "the second run did not start with the first run's state: $(echo "${RESP}" | jq -c '.data.outputs')"; exit 1; }
+RESP=$(api_post /runs/query '{"workflow": "records", "query": {"latestPerLabel": true, "select": ["label", "state.last", "state.previous"], "count": true}}')
+echo "${RESP}" | jq -e '.data.rows == [["r-1", "two", "one"]] and .data.total == 1' >/dev/null \
+    || { print_error "the label's record was not read back: ${RESP}"; exit 1; }
+curl -sS "${API}/runs/state" | jq -e --arg wf "${RECORDS_WF}" \
+    '[.data[] | select(.workflowId == $wf and .slug == "records" and .stateSchema.last != null)] | length == 1' >/dev/null \
+    || { print_error "the workflow's state schema was not listed"; exit 1; }
+[ "$(runtime_sql "SELECT keep_latest_per_label FROM workflow_retention WHERE tenant_id = '${TENANT}' AND workflow_id = '${RECORDS_WF}'")" = "t" ] \
+    || { print_error "keepLatestPerLabel was not recorded for retention"; exit 1; }
+[ "$(runtime_sql "SELECT count(*) FROM run_keys WHERE tenant_id = '${TENANT}' AND workflow_id = '${RECORDS_WF}'")" = "1" ] \
+    || { print_error "the label has no record in run_keys"; exit 1; }
+echo "  a label's runs carried its state on, and its record reads back by slug, as a plain role ✓"
+
+# b. The second tenant reads none of it: not by slug, not by id.
+for workflow in records "${RECORDS_WF}"; do
+    CODE=$(curl -sS -o "${TEST_DATA_DIR}/query_body" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+        -H "Authorization: Bearer ${SECOND_KEY}" -d "{\"workflow\": \"${workflow}\", \"query\": {}}" "${API}/runs/query")
+    [ "${CODE}" = "404" ] || { print_error "the second tenant's query of '${workflow}' answered ${CODE}: $(head -c 300 "${TEST_DATA_DIR}/query_body")"; exit 1; }
+done
+curl -sS -H "Authorization: Bearer ${SECOND_KEY}" "${API}/runs/state" \
+    | jq -e --arg wf "${RECORDS_WF}" '[.data[] | select(.workflowId == $wf)] | length == 0' >/dev/null \
+    || { print_error "the second tenant was shown the primary's workflow"; exit 1; }
+echo "  the second tenant's queries of the primary's workflow answer 404, by slug and by id ✓"
+
+# c. A label held by a run, suspended in a durable delay: a queued start
+# waits and says for whom; a refused one never starts and says why.
+held_graph() {  # held_graph POLICY
+    printf '{"name": "Held %s", "labelConcurrency": "%s",
+      "steps": {"wait": {"stepType": "Delay", "id": "wait", "durationMs": %s},
+                "finish": {"stepType": "Finish", "id": "finish", "inputMapping": {}}},
+      "entryPoint": "wait", "executionPlan": [{"fromStep": "wait", "toStep": "finish"}],
+      "variables": {}, "inputSchema": {}, "outputSchema": {}}' "$1" "$1" "$(IMM 6000)"
+}
+QUEUE_WF=$(create_and_compile "Held queue" "$(held_graph queue)")
+HOLDER=$(start_labelled "${QUEUE_WF}" o-1 '{}')
+wait_holding "${HOLDER}"
+WAITER=$(start_labelled "${QUEUE_WF}" o-1 '{}')
+PHASE=""
+for _ in {1..60}; do
+    RESP=$(curl -sS "${API}/workflows/instances/${WAITER}")
+    PHASE=$(echo "${RESP}" | jq -r '.data.executionPhase // empty')
+    [ "${PHASE}" = "waiting_for_label" ] && break
+    sleep 0.5
+done
+echo "${RESP}" | jq -e --arg holder "${HOLDER}" \
+    '.data.executionPhase == "waiting_for_label" and .data.waitingFor.label == "o-1" and .data.waitingFor.holder == $holder' >/dev/null \
+    || { print_error "the waiting run did not say what it waits for: $(echo "${RESP}" | jq -c '.data | {status, executionPhase, waitingFor}')"; exit 1; }
+[ "$(echo "$(wait_run "${WAITER}")" | jq -r '.data.status')" = "completed" ] \
+    || { print_error "the waiting run did not run after its holder"; tail -30 "${TEST_LOG}"; exit 1; }
+[ "$(runtime_sql "SELECT (SELECT started_at FROM instances WHERE instance_id = '${WAITER}') >= (SELECT finished_at FROM instances WHERE instance_id = '${HOLDER}')")" = "t" ] \
+    || { print_error "the waiting run started before its holder ended"; exit 1; }
+REFUSE_WF=$(create_and_compile "Held refuse" "$(held_graph refuse)")
+HOLDER=$(start_labelled "${REFUSE_WF}" o-1 '{}')
+wait_holding "${HOLDER}"
+REFUSED=$(start_labelled "${REFUSE_WF}" o-1 '{}')
+RESP=$(wait_run "${REFUSED}")
+echo "${RESP}" | jq -e --arg holder "${HOLDER}" \
+    '.data.status == "failed" and .data.terminationType == "label_refused" and (.data.error | contains($holder))' >/dev/null \
+    || { print_error "the refused start did not say why: $(echo "${RESP}" | jq -c '.data | {status, terminationType, error}')"; exit 1; }
+echo "  a queued start waited for its suspended holder and named it; a refused one never started, label_refused ✓"
+
+# d. A workflow reads the store: its steps look a record up by label and
+# query the workflow's runs. The second tenant's run, naming the
+# primary's workflow, finds none.
+lookup_graph() {  # lookup_graph WORKFLOW
+    printf '{"name": "Lookup",
+      "steps": {
+        "lookup": {"stepType": "Agent", "id": "lookup", "agentId": "control", "capabilityId": "get-latest-run",
+                   "inputMapping": {"workflow": %s, "label": %s}},
+        "find": {"stepType": "Agent", "id": "find", "agentId": "control", "capabilityId": "query-workflow-runs",
+                 "inputMapping": {"workflow": %s, "latestPerLabel": %s, "count": %s}},
+        "finish": {"stepType": "Finish", "id": "finish", "inputMapping": {
+            "found": %s, "last": %s, "records": %s}}},
+      "entryPoint": "lookup",
+      "executionPlan": [{"fromStep": "lookup", "toStep": "find"}, {"fromStep": "find", "toStep": "finish"}],
+      "variables": {}, "inputSchema": {}, "outputSchema": {}}' \
+      "$(IMM "\"$1\"")" "$(IMM '"r-1"')" "$(IMM "\"$1\"")" "$(IMM true)" "$(IMM true)" \
+      "$(REF steps.lookup.outputs.found)" "$(REF steps.lookup.outputs.state.last)" "$(REF steps.find.outputs.total)"
+}
+LOOKUP_WF=$(create_and_compile "Lookup" "$(lookup_graph records)")
+RUN=$(api_post "/workflows/${LOOKUP_WF}/execute" '{"inputs": {"data": {}, "variables": {}}}' | jq -r '.data.instanceId // empty')
+RESP=$(wait_run "${RUN}")
+echo "${RESP}" | jq -e '.data.status == "completed" and .data.outputs.found == true and .data.outputs.last == "two" and .data.outputs.records == 1' >/dev/null \
+    || { print_error "the workflow did not read the store: $(echo "${RESP}" | jq -c '.data | {status, error, outputs}')"; tail -30 "${TEST_LOG}"; exit 1; }
+AUTH=(-H "Authorization: Bearer ${SECOND_KEY}")
+RESP=$(api_post "/workflows/${B_WF}/update" "{\"executionGraph\": $(lookup_graph "${RECORDS_WF}")}")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "the second tenant's workflow was not changed: ${RESP}"; exit 1; }
+B_VERSION=$(curl -sS "${AUTH[@]}" "${API}/workflows/${B_WF}/versions" | jq -r '[.data[]?.version // .data[]?.versionNumber // empty] | max')
+RESP=$(api_post "/workflows/${B_WF}/versions/${B_VERSION}/compile" '{}' 900)
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "the second tenant's lookup did not compile: ${RESP}"; exit 1; }
+RUN=$(api_post "/workflows/${B_WF}/execute" '{"inputs": {"data": {}, "variables": {}}}' | jq -r '.data.instanceId // empty')
+RESP=$(wait_run "${RUN}" "${AUTH[@]}")
+AUTH=()
+echo "${RESP}" | jq -e '.data.status == "failed"' >/dev/null && echo "${RESP}" | grep -q "no workflow" \
+    || { print_error "the second tenant's run read the primary's store: $(echo "${RESP}" | jq -c '.data | {status, error, outputs}')"; exit 1; }
+echo "  a workflow's steps read another workflow's records; the second tenant's, naming the primary's, found no such workflow ✓"
 
 print_success "served tenants: webhooks, API keys, triggers, cron, OAuth callbacks and connection events reach exactly the tenants this server serves, each its own, under its own limits"

@@ -265,6 +265,26 @@ impl SmoMcpServer {
     }
 
     #[tool(
+        description = "Query one workflow's runs as records, without SQL: a workflow is a store, each run label a record, its state the record's data. Filter, group, aggregate and order by run columns (runId, label, status, version, createdAt, startedAt, finishedAt, updatedAt) and by paths into state: state.field, state.a.b, state.items.0.sku; in conditions state.items[*].sku means any element. Set latest_per_label for the current state of each label (one row per label: its latest run); leave it off for every run (history, e.g. the last completed run of a label: condition on label and status, order_by createdAt desc, limit 1). Comparisons compare values of the given JSON type; date-times are ISO strings. Run status is one of pending, running, suspended, completed, failed, cancelled. Use unnest to make an array's elements rows (item, item.<field>), e.g. to group order lines by SKU. With count, the total is returned. Call describe_run_state first for the workflows and their state fields. Returns columns, rows (arrays), total, hasMore."
+    )]
+    async fn query_runs(
+        &self,
+        params: Parameters<tools::run_query::QueryRunsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::run_query::query_runs(self, params.0).await
+    }
+
+    #[tool(
+        description = "List this tenant's workflows (id, slug, name, description) with the state schema their runs keep: each state field's type, label and description, nested properties and array items included. What to write query_runs from."
+    )]
+    async fn describe_run_state(
+        &self,
+        params: Parameters<tools::run_query::DescribeRunStateParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        tools::run_query::describe_run_state(self, params.0).await
+    }
+
+    #[tool(
         description = "Get execution result including status, outputs, timing, errors, and optional runLabel metadata. Supply run_label when starting an execution. Display runLabel when present, otherwise workflowName. Labels are preserved exactly; invalid or oversized start labels are rejected. Labels are not unique; identify executions by instance_id."
     )]
     async fn get_execution(
@@ -1287,7 +1307,7 @@ impl ServerHandler for SmoMcpServer {
                 "Runtara Runtime MCP server.\n\n\
                 ## Tool Groups\n\n\
                 **Workflows**: get_workflow_authoring_schema, list_workflows, get_workflow, create_workflow, update_workflow, compile_workflow, deploy_workflow (bulk graph), deploy_latest (after mutations), preflight_compile, set_current_version, restore_version (save an old version's graph as the latest, e.g. after a failed draft), diff_workflow_versions, validate_graph, validate_mappings — call get_workflow_authoring_schema before authoring raw workflow JSON\n\
-                **Execution**: execute_workflow, execute_workflow_sync, execute_workflow_wait, list_executions, get_execution, get_step_summaries (supports compact mode), get_step_events, stop_execution, pause_execution, resume_execution\n\
+                **Execution**: execute_workflow, execute_workflow_sync, execute_workflow_wait, list_executions, get_execution, query_runs (runs as records: filter, group, aggregate by state paths; describe_run_state first), get_step_summaries (supports compact mode), get_step_events, stop_execution, pause_execution, resume_execution\n\
                 **Debugging**: inspect_step (one-call step debugger), trace_reference (resolve a reference path at runtime), why_execution_failed (one-call failure diagnosis)\n\
                 **Object Model**: list_object_schemas, get_object_schema, create_object_schema, update_object_schema, delete_object_schema, list_object_instances, query_object_instances, query_aggregate, query_sql, query_sql_one, query_sql_raw, execute_sql, create_object_instance, update_object_instance, bulk_create_instances, bulk_update_instances, bulk_delete_instances. SQL tools use SQLx prepared statements with Postgres positional placeholders ($1, $2, ...), not named parameters; params are typed and bound in array order, and execute_sql returns rowsAffected.\n\
                 **Agents & DSL**: list_agents, get_agent, get_capability, test_capability, list_step_types, get_step_type_schema\n\

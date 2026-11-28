@@ -12,6 +12,7 @@ pub mod object_model;
 pub mod operators;
 pub mod pending_inputs;
 pub mod run_activity;
+pub mod run_query;
 pub mod schema_validator;
 pub mod triggers;
 pub mod webhook_verification;

@@ -158,6 +158,20 @@ impl EnvironmentHandlerState {
         InstanceRepository::new(self.pool.clone())
     }
 
+    /// What runs that wait for their run label wait for
+    /// ([`crate::launch_queue::LaunchRepository::label_waits`]).
+    pub async fn label_waits(
+        &self,
+        instance_ids: &[String],
+    ) -> std::result::Result<
+        std::collections::HashMap<String, crate::launch_queue::LabelWait>,
+        crate::launch_queue::LaunchQueueError,
+    > {
+        LaunchRepository::new(self.pool.clone())
+            .label_waits(instance_ids)
+            .await
+    }
+
     /// The registry that owns the `images` table.
     pub fn images(&self) -> ImageRegistry {
         ImageRegistry::new(self.pool.clone())
@@ -346,6 +360,26 @@ pub enum StartRejection {
     /// failure: the workflow is already doing the work that was asked for.
     SingleInstanceActive,
 
+    /// Another run of the workflow holds the run label, and the workflow
+    /// refuses a start while it does (`labelConcurrency: refuse` or `once`).
+    LabelHeld {
+        /// The label.
+        label: String,
+        /// The run holding it.
+        holder: String,
+    },
+
+    /// A run with the label has completed, and the workflow lets each label
+    /// complete once (`labelConcurrency: once`).
+    LabelUsed {
+        /// The label.
+        label: String,
+    },
+
+    /// The workflow requires a run label (`labelRequired`), and the start
+    /// has none.
+    LabelRequired,
+
     /// The instance id is taken by a row this request does not own, or by one
     /// with no active launch generation.
     InstanceAlreadyExists {
@@ -379,6 +413,17 @@ impl std::fmt::Display for StartRejection {
                 write!(formatter, "Image '{image_id}' is not runnable: {detail}")
             }
             Self::SingleInstanceActive => write!(formatter, "{SINGLE_INSTANCE_ACTIVE}"),
+            Self::LabelHeld { label, holder } => write!(
+                formatter,
+                "run label '{label}' is held by run {holder}, and this workflow does not start \
+                 another run for a label while one holds it"
+            ),
+            Self::LabelUsed { label } => write!(
+                formatter,
+                "a run with label '{label}' has completed, and this workflow completes each \
+                 label once"
+            ),
+            Self::LabelRequired => write!(formatter, "this workflow requires a run label"),
             Self::InstanceAlreadyExists { instance_id } => {
                 write!(formatter, "Instance '{instance_id}' already exists")
             }
@@ -714,6 +759,21 @@ pub async fn handle_start_instance(
     let single_instance = launch_env
         .remove(SINGLE_INSTANCE_LAUNCH_ENV)
         .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+    // The workflow's label settings, set by the engine from the definition
+    // it approved; consumed like the single-instance marker.
+    let label_concurrency = launch_env
+        .remove(crate::launch_queue::LABEL_CONCURRENCY_LAUNCH_ENV)
+        .and_then(|value| runtara_dsl::LabelConcurrency::parse(&value))
+        .unwrap_or_default();
+    let label_required = launch_env
+        .remove(crate::launch_queue::LABEL_REQUIRED_LAUNCH_ENV)
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+    let carry_state = launch_env
+        .remove(crate::launch_queue::CARRY_STATE_LAUNCH_ENV)
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+    let keep_latest = launch_env
+        .remove(crate::launch_queue::KEEP_LATEST_LAUNCH_ENV)
+        .map(|value| value.eq_ignore_ascii_case("true"));
     let workflow_id = launch_env
         .get("WORKFLOW_ID")
         .filter(|workflow_id| !workflow_id.is_empty())
@@ -729,7 +789,10 @@ pub async fn handle_start_instance(
     let launch = match workflow_id {
         Some(workflow_id) => launch.with_workflow_scope(workflow_id, single_instance),
         None => launch,
-    };
+    }
+    .with_label_policy(label_concurrency, label_required)
+    .with_keep_latest(keep_latest)
+    .with_carry_state(carry_state);
     let initial = InitialLaunchRequest {
         run_label: run_label.clone(),
         parent: request.parent,
@@ -753,6 +816,34 @@ pub async fn handle_start_instance(
             );
             Ok(StartInstanceResponse::accepted(instance_id, false))
         }
+        Ok(InitialLaunchOutcome::Waiting(launch)) => {
+            // Created, and queued once the label's holder ends: an accepted
+            // start, though not occupying runner/admission capacity while it
+            // waits (like a suspended run).
+            state
+                .lifecycle_observers
+                .notify_released(&launch, "waiting_for_label");
+            info!(
+                instance_id = %instance_id,
+                launch_id = %launch.launch_id,
+                "Instance start waits for its run label"
+            );
+            Ok(StartInstanceResponse::accepted(instance_id, false))
+        }
+        Ok(InitialLaunchOutcome::LabelHeld { label, holder }) => {
+            Ok(StartInstanceResponse::rejected(StartRejection::LabelHeld {
+                label,
+                holder,
+            }))
+        }
+        Ok(InitialLaunchOutcome::LabelUsed { label }) => {
+            Ok(StartInstanceResponse::rejected(StartRejection::LabelUsed {
+                label,
+            }))
+        }
+        Ok(InitialLaunchOutcome::LabelRequired) => Ok(StartInstanceResponse::rejected(
+            StartRejection::LabelRequired,
+        )),
         Ok(InitialLaunchOutcome::SingleInstanceActive) => {
             // This is a deliberate trigger skip, not a failed Environment
             // start. The embedded client maps the stable code back to the
@@ -882,11 +973,54 @@ pub async fn handle_stop_instance(
         "Stop instance request received"
     );
 
-    // A queued/leased launch has no runner handle yet. Cancel it in the same
-    // transaction that terminalizes Core, before signalling an active guest.
+    // A queued/leased or label-waiting launch has no runner handle yet. Cancel
+    // it in the same transaction that terminalizes Core, before signalling an
+    // active guest. If a waiting launch promotes to `queued` between
+    // `get_active_for_instance` and `cancel_waiting`, retry the active check
+    // once so the promoted launch is cancelled before a runner claims it.
     let launches = LaunchRepository::new(state.pool.clone());
-    match launches.get_active_for_instance(&request.instance_id).await {
-        Ok(Some(active)) => match launches.cancel_before_start(&active.launch_id).await {
+    let mut active = match launches.get_active_for_instance(&request.instance_id).await {
+        Ok(active) => active,
+        Err(error) => {
+            return Ok(StopInstanceResponse {
+                success: false,
+                error: Some(format!("Failed to inspect queued launch: {error}")),
+            });
+        }
+    };
+    if active.is_none() {
+        match launches.cancel_waiting(&request.instance_id).await {
+            // A run waiting for its label has no runner: it ends here.
+            Ok(Some(cancelled)) => {
+                state
+                    .lifecycle_observers
+                    .notify_released(&cancelled, "cancelled");
+                return Ok(StopInstanceResponse {
+                    success: true,
+                    error: None,
+                });
+            }
+            Ok(None) => {
+                active = match launches.get_active_for_instance(&request.instance_id).await {
+                    Ok(active) => active,
+                    Err(error) => {
+                        return Ok(StopInstanceResponse {
+                            success: false,
+                            error: Some(format!("Failed to inspect queued launch: {error}")),
+                        });
+                    }
+                };
+            }
+            Err(error) => {
+                return Ok(StopInstanceResponse {
+                    success: false,
+                    error: Some(format!("Failed to cancel a waiting launch: {error}")),
+                });
+            }
+        }
+    }
+    if let Some(active) = active {
+        match launches.cancel_before_start(&active.launch_id).await {
             Ok(CancelOutcome::Cancelled(cancelled)) => {
                 state
                     .lifecycle_observers
@@ -911,13 +1045,6 @@ pub async fn handle_stop_instance(
                     error: Some(format!("Failed to cancel queued launch: {error}")),
                 });
             }
-        },
-        Ok(None) => {}
-        Err(error) => {
-            return Ok(StopInstanceResponse {
-                success: false,
-                error: Some(format!("Failed to inspect queued launch: {error}")),
-            });
         }
     }
 

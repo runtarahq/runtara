@@ -1129,6 +1129,8 @@ pub async fn control(
         ControlCall::ConversationDelta(body) => {
             ("POST", "/v1/conversations/delta".to_string(), Some(body))
         }
+        ControlCall::RunsQuery(body) => ("POST", "/v1/runs/query".to_string(), Some(body)),
+        ControlCall::RunsLatest(body) => ("POST", "/v1/runs/latest".to_string(), Some(body)),
     };
     let mut headers = vec![("content-type", "application/json")];
     if let Some(operation) = operation {

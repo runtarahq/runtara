@@ -1642,6 +1642,68 @@ impl NativeControl {
 }
 
 /// A conversation's refusal, as a control error.
+/// The workflow a read of runs names: its id or slug.
+fn runs_workflow(request: &serde_json::Value) -> Result<String, ControlError> {
+    request
+        .get("workflow")
+        .and_then(serde_json::Value::as_str)
+        .filter(|workflow| !workflow.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| invalid("a read of runs names its workflow, by id or slug"))
+}
+
+/// The id of the tenant's workflow named `workflow`.
+async fn runs_workflow_id(
+    engine: &ExecutionEngine,
+    tenant: &str,
+    workflow: &str,
+) -> Result<String, ControlError> {
+    engine
+        .resolve_workflow(tenant, workflow)
+        .await
+        .map_err(|error| {
+            tracing::warn!(tenant, workflow, %error, "resolving workflow for run query failed");
+            unavailable("workflow records are not available now")
+        })?
+        .ok_or_else(|| {
+            ControlError::new(
+                ControlErrorCode::NotFound,
+                format!("no workflow '{workflow}' in this tenant"),
+            )
+        })
+}
+
+/// A read of runs that failed: a query it could not take is `invalid`, one
+/// that found the engine busy with queries is `capacity`, a database timeout
+/// is `timeout`, and any internal failure is logged without exposing details.
+fn run_query_error(error: crate::runtime_client::RuntimeError) -> ControlError {
+    use crate::runtime_client::RuntimeError;
+    match error {
+        RuntimeError::InvalidRequest(reason) => invalid(reason),
+        RuntimeError::Busy(reason) => ControlError {
+            code: ControlErrorCode::Capacity,
+            message: reason,
+            retry_after_ms: Some(1_000),
+        },
+        RuntimeError::QueryTimeout(reason) => ControlError::new(ControlErrorCode::Timeout, reason),
+        other => {
+            let text = other.to_string();
+            if let Some((_, reason)) = text.split_once("Invalid request: ") {
+                invalid(reason.to_owned())
+            } else if text.contains(runtara_environment::run_query::BUSY) {
+                ControlError {
+                    code: ControlErrorCode::Capacity,
+                    message: runtara_environment::run_query::BUSY.into(),
+                    retry_after_ms: Some(1_000),
+                }
+            } else {
+                tracing::warn!(%text, "a workflow run query failed");
+                unavailable("workflow records are not available now")
+            }
+        }
+    }
+}
+
 fn conversation_error(
     error: crate::api::services::conversations::ConversationError,
 ) -> ControlError {
@@ -1709,6 +1771,106 @@ impl ControlHost for NativeControl {
             .await
             .map_err(conversation_error)?;
         Ok(serde_json::json!({"said": true}))
+    }
+
+    async fn runs_query(
+        &self,
+        authority: &ControlAuthority,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ControlError> {
+        let tenant = self.tenant(authority)?.to_owned();
+        let caller = authority
+            .caller
+            .as_deref()
+            .ok_or_else(|| {
+                ControlError::new(
+                    ControlErrorCode::RequiresInstance,
+                    "query-workflow-runs runs only inside a workflow run; use POST /api/runtime/runs/query or the query_runs MCP tool directly",
+                )
+            })?
+            .to_owned();
+        let workflow = runs_workflow(&request)?;
+        let query: runtara_environment::run_query::RunQuery = serde_json::from_value(
+            request
+                .get("query")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
+        )
+        .map_err(|error| invalid(format!("the query: {error}")))?;
+        let (engine, runtime) = (self.engine().await?, self.runtime().await?);
+        let result = runtara_store_postgres::tenant_scope::scoped(tenant.clone(), async move {
+            let id = runs_workflow_id(&engine, &tenant, &workflow).await?;
+            tracing::info!(
+                tenant = %tenant,
+                caller = %caller,
+                target_workflow_id = %id,
+                capability = "query-workflow-runs",
+                "control read of workflow records"
+            );
+            runtime
+                .query_runs(&tenant, &id, query)
+                .await
+                .map_err(run_query_error)
+        })
+        .await?;
+        serde_json::to_value(result).map_err(|error| {
+            tracing::warn!(%error, "serializing workflow run query result failed");
+            unavailable("workflow records are not available now")
+        })
+    }
+
+    async fn runs_latest(
+        &self,
+        authority: &ControlAuthority,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ControlError> {
+        let tenant = self.tenant(authority)?.to_owned();
+        let caller = authority
+            .caller
+            .as_deref()
+            .ok_or_else(|| {
+                ControlError::new(
+                    ControlErrorCode::RequiresInstance,
+                    "get-latest-run runs only inside a workflow run; use POST /api/runtime/runs/query or the query_runs MCP tool directly",
+                )
+            })?
+            .to_owned();
+        let workflow = runs_workflow(&request)?;
+        let raw_label = request
+            .get("label")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| invalid("a latest run is asked for by its label"))?;
+        let label = runtara_dsl::run_label::normalize_run_label(Some(raw_label))
+            .map_err(invalid)?
+            .ok_or_else(|| invalid("a latest run is asked for by its label"))?;
+        let (engine, runtime) = (self.engine().await?, self.runtime().await?);
+        let result = runtara_store_postgres::tenant_scope::scoped(tenant.clone(), async move {
+            let id = runs_workflow_id(&engine, &tenant, &workflow).await?;
+            tracing::info!(
+                tenant = %tenant,
+                caller = %caller,
+                target_workflow_id = %id,
+                capability = "get-latest-run",
+                "control read of workflow record"
+            );
+            runtime
+                .latest_run_for_label(&tenant, &id, &label)
+                .await
+                .map_err(run_query_error)
+        })
+        .await?;
+        // One row of the default columns, as an object.
+        let run = result.rows.first().map(|row| {
+            serde_json::Value::Object(
+                result
+                    .columns
+                    .iter()
+                    .cloned()
+                    .zip(row.iter().cloned())
+                    .collect(),
+            )
+        });
+        Ok(serde_json::json!({ "found": run.is_some(), "run": run }))
     }
 
     async fn conversation_history(
@@ -2277,6 +2439,47 @@ mod tests {
             mutation_identity(&scoped(Some("parent"), Some("op")), "cancel").unwrap(),
             ("parent", "op")
         );
+    }
+
+    #[tokio::test]
+    async fn workflow_record_reads_require_a_caller_and_sanitize_errors() {
+        let control = NativeControl::with_install_wait(None, std::time::Duration::from_millis(5));
+        let no_caller = scoped(None, None);
+        assert_eq!(
+            control
+                .runs_query(&no_caller, json!({"workflow": "orders", "query": {}}))
+                .await
+                .unwrap_err()
+                .code,
+            ControlErrorCode::RequiresInstance
+        );
+        assert_eq!(
+            control
+                .runs_latest(&no_caller, json!({"workflow": "orders", "label": "o-1"}))
+                .await
+                .unwrap_err()
+                .code,
+            ControlErrorCode::RequiresInstance
+        );
+
+        use crate::runtime_client::RuntimeError;
+        assert_eq!(
+            run_query_error(RuntimeError::InvalidRequest("bad path".into())).code,
+            ControlErrorCode::Invalid
+        );
+        assert_eq!(
+            run_query_error(RuntimeError::Busy("busy".into())).code,
+            ControlErrorCode::Capacity
+        );
+        assert_eq!(
+            run_query_error(RuntimeError::QueryTimeout("timed out".into())).code,
+            ControlErrorCode::Timeout
+        );
+        let internal = run_query_error(RuntimeError::SdkError(
+            "database error: relation secret_table does not exist".into(),
+        ));
+        assert_eq!(internal.code, ControlErrorCode::Unavailable);
+        assert!(!internal.message.contains("secret_table"));
     }
 
     /// Decision D1 across every mutation and relation.

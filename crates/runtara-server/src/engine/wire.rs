@@ -494,6 +494,17 @@ operations! {
         .operation_requests(&op.tenant_id, &op.workflow_id, &op.key, &op.listing, &op.fields)
         .await;
 
+    // A query over one workflow's runs, read as records: paths, operators
+    // and aggregates from short lists, and no SQL.
+    QueryRuns {
+        tenant_id: String,
+        workflow_id: String,
+        query: runtara_environment::run_query::RunQuery,
+    } -> Result<runtara_environment::run_query::RunQueryResult, RuntimeError>,
+    needs [InvocationHistoryRead],
+    |engine, op| for Some(&op.tenant_id) =>
+        engine.query_runs(&op.tenant_id, &op.workflow_id, op.query).await;
+
     // ---- Input a run waits for ------------------------------------------------
     SubmitInputResponse {
         tenant_id: String,

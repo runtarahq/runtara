@@ -149,7 +149,11 @@ pub fn runtara_instance_to_dto_with_info(
             .unwrap_or_else(|| inst.created_at.to_rfc3339()),
         status,
         suspension_reason: inst.suspension_reason,
-        execution_phase: execution_phase(status, inst.suspension_reason, &inst.instance_id),
+        execution_phase: with_label_wait(
+            execution_phase(status, inst.suspension_reason, &inst.instance_id),
+            inst.waiting_for.is_some(),
+        ),
+        waiting_for: inst.waiting_for.clone(),
         termination_type: None, // Not available from Runtara summary
         error: None,            // Summary carries only `has_error`, not the message
         workflow_id,
@@ -167,6 +171,19 @@ pub fn runtara_instance_to_dto_with_info(
         queue_duration_seconds: None,
         processing_overhead_seconds: None,
         has_pending_input: false,
+    }
+}
+
+/// A run that waits for its run label is in that phase, whatever its
+/// status says.
+fn with_label_wait(
+    phase: Option<crate::types::ExecutionPhase>,
+    waits_for_label: bool,
+) -> Option<crate::types::ExecutionPhase> {
+    if waits_for_label {
+        Some(crate::types::ExecutionPhase::WaitingForLabel)
+    } else {
+        phase
     }
 }
 
@@ -221,7 +238,11 @@ pub fn runtara_info_to_dto(info: InstanceInfo) -> WorkflowInstanceDto {
         updated,
         status,
         suspension_reason: info.suspension_reason,
-        execution_phase: execution_phase(status, info.suspension_reason, &info.instance_id),
+        execution_phase: with_label_wait(
+            execution_phase(status, info.suspension_reason, &info.instance_id),
+            info.waiting_for.is_some(),
+        ),
+        waiting_for: info.waiting_for.clone(),
         termination_type: None,
         error: info.error.clone(),
         workflow_id,
@@ -254,6 +275,10 @@ pub fn request_instance_dto(
             ExecutionStatus::Cancelled,
             Some(TerminationType::UserInitiated),
         ),
+        // Refused for its run label: what the workflow asked for, not a fault.
+        "terminal" if request.terminal_reason.as_deref() == Some("label_refused") => {
+            (ExecutionStatus::Failed, Some(TerminationType::LabelRefused))
+        }
         "terminal" => (ExecutionStatus::Failed, Some(TerminationType::SystemError)),
         _ => return None,
     };
@@ -286,6 +311,7 @@ pub fn request_instance_dto(
         status,
         suspension_reason: None,
         execution_phase: None,
+        waiting_for: None,
         termination_type,
         error,
         workflow_id: request.workflow_id,
@@ -342,7 +368,11 @@ pub fn runtara_info_to_execution_with_metadata(
         updated,
         status,
         suspension_reason: info.suspension_reason,
-        execution_phase: execution_phase(status, info.suspension_reason, &info.instance_id),
+        execution_phase: with_label_wait(
+            execution_phase(status, info.suspension_reason, &info.instance_id),
+            info.waiting_for.is_some(),
+        ),
+        waiting_for: info.waiting_for.clone(),
         termination_type: None,
         error: info.error.clone(),
         workflow_id,
@@ -482,6 +512,7 @@ mod tests {
     #[test]
     fn an_execution_detail_carries_its_guest_output() {
         let info = InstanceInfo {
+            waiting_for: None,
             run_label: None,
             parent_instance_id: None,
             instance_id: "inst-1".into(),
@@ -517,6 +548,54 @@ mod tests {
     }
 
     #[test]
+    fn a_run_waiting_for_its_label_says_so_and_for_whom() {
+        let wait = runtara_environment::launch_queue::LabelWait {
+            label: "order-1".into(),
+            holder: Some("r-1".into()),
+            ahead: 2,
+        };
+        let summary = crate::runtime_types::InstanceSummary {
+            waiting_for: Some(wait.clone()),
+            run_label: Some("order-1".into()),
+            parent_instance_id: None,
+            instance_id: "r-2".into(),
+            tenant_id: "t".into(),
+            image_id: "img".into(),
+            image_name: "wf:1".into(),
+            status: crate::runtime_types::InstanceStatus::Pending,
+            created_at: Utc::now(),
+            started_at: None,
+            finished_at: None,
+            has_error: false,
+            suspension_reason: None,
+        };
+        let dto = runtara_instance_to_dto_with_info(summary.clone(), "wf".into(), 1, None);
+        assert_eq!(
+            dto.execution_phase,
+            Some(crate::types::ExecutionPhase::WaitingForLabel)
+        );
+        assert_eq!(dto.waiting_for, Some(wait));
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["executionPhase"], "waiting_for_label");
+        assert_eq!(json["waitingFor"]["holder"], "r-1");
+        assert_eq!(json["waitingFor"]["ahead"], 2);
+
+        // Without a wait, a pending run has no phase, as before.
+        let plain = crate::runtime_types::InstanceSummary {
+            waiting_for: None,
+            ..summary
+        };
+        let dto = runtara_instance_to_dto_with_info(plain, "wf".into(), 1, None);
+        assert_eq!(dto.execution_phase, None);
+        assert!(
+            serde_json::to_value(&dto)
+                .unwrap()
+                .get("waitingFor")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn request_without_runtime_instance_reports_queued_or_why_it_never_started() {
         let queued = request_instance_dto("i-1", request("queued", None)).expect("queued");
         assert_eq!(queued.status, ExecutionStatus::Queued);
@@ -543,6 +622,26 @@ mod tests {
         );
 
         assert!(request_instance_dto("i-1", request("accepted", None)).is_none());
+        assert_eq!(
+            reason_only.termination_type,
+            Some(TerminationType::SystemError)
+        );
+
+        // Refused for its label: a decision, reported as such, with why.
+        let mut refused = request(
+            "terminal",
+            Some(
+                "run label 'order-1' is held by run r-1, and this workflow does not start another run for a label while one holds it",
+            ),
+        );
+        refused.terminal_reason = Some("label_refused".into());
+        let refused = request_instance_dto("i-1", refused).expect("refused");
+        assert_eq!(refused.status, ExecutionStatus::Failed);
+        assert_eq!(
+            refused.termination_type,
+            Some(TerminationType::LabelRefused)
+        );
+        assert!(refused.error.unwrap().contains("held by run r-1"));
     }
     use serde_json::json;
 
@@ -552,6 +651,7 @@ mod tests {
     fn a_running_execution_reports_its_in_process_wait() {
         let id = format!("phase-{}", uuid::Uuid::new_v4());
         let summary = |status| crate::runtime_types::InstanceSummary {
+            waiting_for: None,
             run_label: None,
             parent_instance_id: None,
             instance_id: id.clone(),

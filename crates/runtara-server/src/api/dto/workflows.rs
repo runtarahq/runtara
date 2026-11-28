@@ -1075,6 +1075,15 @@ pub struct WorkflowInstanceDto {
         rename = "executionPhase"
     )]
     pub execution_phase: Option<crate::types::ExecutionPhase>,
+    /// What the execution waits for, while it waits for its run label: the
+    /// label, the run holding it, and how many runs wait ahead of it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "waitingFor"
+    )]
+    #[schema(value_type = Option<Object>)]
+    pub waiting_for: Option<runtara_environment::launch_queue::LabelWait>,
     /// Reason for termination (set for all terminal states including successful completion)
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "terminationType")]
@@ -1349,13 +1358,28 @@ pub struct CompileWorkflowResponse {
 // Execution DTOs
 // ============================================================================
 
-/// Start metadata for raw HTTP triggers, whose bodies remain workflow input.
+/// The run label an authenticated synchronous run may be given. Public
+/// endpoints refuse one (`refused_publicly`).
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct RunLabelQuery {
     /// Exact immutable reference: 1–1024 printable ASCII bytes, not all spaces.
     #[serde(default, rename = "runLabel")]
     pub run_label: Option<String>,
+}
+
+impl RunLabelQuery {
+    /// The answer a public endpoint (a webhook, the synchronous trigger)
+    /// gives a run label: what anyone may send does not name a record.
+    pub fn refused_publicly() -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "success": false,
+                "error": "public endpoints do not take a run label: start a labelled run with the execute API, MCP, or a workflow step (control:start)"
+            })),
+        )
+    }
 }
 
 #[allow(dead_code)]

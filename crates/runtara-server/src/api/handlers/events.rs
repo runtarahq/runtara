@@ -56,13 +56,12 @@ fn parse_webhook_max_body_bytes(raw: Option<&str>) -> usize {
     params(
         ("trigger_id" = String, Path, description = "Trigger ID"),
         ("action" = String, Path, description = "Action name"),
-        crate::api::dto::workflows::RunLabelQuery
     ),
     request_body(content = String, description = "Optional raw HTTP request body (accepts any content type including multipart/form-data)", content_type = "application/octet-stream"),
     responses(
         (status = 200, description = "Event captured/queued successfully"),
         (status = 404, description = "Trigger not found"),
-        (status = 400, description = "Trigger is inactive"),
+        (status = 400, description = "Trigger is inactive, or a run label was given (webhooks do not take one)"),
         (status = 500, description = "Internal server error")
     ),
     tag = "Event Capture"
@@ -78,6 +77,12 @@ pub async fn capture_http_event(
     request: Request,
 ) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
     use axum::response::IntoResponse;
+    // Anyone may send to a webhook: a run label names a record, so whoever
+    // sends one could take or overwrite another's. A webhook's workflow
+    // starts a labelled run itself (control:start), from what it has checked.
+    if metadata.run_label.is_some() {
+        return Err(crate::api::dto::workflows::RunLabelQuery::refused_publicly());
+    }
     // Extract parts from request
     let (parts, body) = request.into_parts();
     let method = parts.method.clone();
@@ -252,7 +257,7 @@ pub async fn capture_http_event(
             let ran = runtara_store_postgres::tenant_scope::scoped(
                 tenant_id.clone(),
                 engine.run_sync(crate::workers::execution_engine::SyncRequest {
-                    run_label: metadata.run_label,
+                    run_label: None,
                     tenant_id: &tenant_id,
                     workflow_id: &trigger.workflow_id,
                     version: None,
@@ -281,7 +286,7 @@ pub async fn capture_http_event(
             .unwrap_or(false);
 
         // Build TriggerEvent
-        let mut event = TriggerEvent::http_event(
+        let event = TriggerEvent::http_event(
             instance_id.to_string(),
             tenant_id.clone(),
             trigger.workflow_id.clone(),
@@ -295,7 +300,6 @@ pub async fn capture_http_event(
             debug,
         );
 
-        event.run_label = metadata.run_label;
         match runtara_store_postgres::tenant_scope::scoped(
             tenant_id.clone(),
             engine.enqueue_trigger_event(&tenant_id, event, idempotency_key),

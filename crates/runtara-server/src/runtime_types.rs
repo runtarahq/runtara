@@ -216,6 +216,15 @@ pub struct HealthStatus {
 /// Instance status response with full details.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceInfo {
+    /// What the run waits for, while it waits for its run label
+    /// (`labelConcurrency: queue`): the label, the run holding it, and how
+    /// many runs wait ahead of it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "waitingFor"
+    )]
+    pub waiting_for: Option<runtara_environment::launch_queue::LabelWait>,
     /// Optional immutable label supplied when the execution starts.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "runLabel")]
     pub run_label: Option<String>,
@@ -288,6 +297,15 @@ pub struct InstanceInfo {
 /// Summary of an instance (used in list results).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceSummary {
+    /// What the run waits for, while it waits for its run label
+    /// (`labelConcurrency: queue`): the label, the run holding it, and how
+    /// many runs wait ahead of it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "waitingFor"
+    )]
+    pub waiting_for: Option<runtara_environment::launch_queue::LabelWait>,
     /// Optional immutable label supplied when the execution starts.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "runLabel")]
     pub run_label: Option<String>,
@@ -2044,6 +2062,7 @@ mod tests {
     #[test]
     fn test_instance_info_with_metrics() {
         let info = InstanceInfo {
+            waiting_for: None,
             run_label: None,
             parent_instance_id: None,
             instance_id: "inst-123".to_string(),
@@ -2077,6 +2096,7 @@ mod tests {
     #[test]
     fn test_instance_info_without_metrics() {
         let info = InstanceInfo {
+            waiting_for: None,
             run_label: None,
             parent_instance_id: None,
             instance_id: "inst-123".to_string(),
@@ -2110,6 +2130,7 @@ mod tests {
     #[test]
     fn test_instance_info_serde_with_metrics() {
         let info = InstanceInfo {
+            waiting_for: None,
             run_label: None,
             parent_instance_id: None,
             instance_id: "inst-123".to_string(),
@@ -2150,6 +2171,7 @@ mod tests {
     #[test]
     fn test_instance_info_with_stderr() {
         let info = InstanceInfo {
+            waiting_for: None,
             run_label: None,
             parent_instance_id: None,
             instance_id: "inst-123".to_string(),

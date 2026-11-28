@@ -975,9 +975,10 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     // The seventh copy of the active-state list lived here, in another module
-    // from the queue that owns it. It comes from LaunchState now like the rest.
-    let active_states =
-        crate::launch_queue::LaunchState::sql_list(crate::launch_queue::LaunchState::ACTIVE);
+    // from the queue that owns it. It comes from LaunchState now like the rest,
+    // including `waiting` so runs queued behind a held label survive restarts.
+    let owned_states =
+        crate::launch_queue::LaunchState::sql_list(crate::launch_queue::LaunchState::OWNED);
     let rows: Vec<(bool,)> = sqlx::query_as(&format!(
         r#"
         WITH candidates AS (
@@ -1000,7 +1001,7 @@ where
                     SELECT 1
                     FROM instance_launches launch
                     WHERE launch.instance_id = i.instance_id
-                      AND launch.state IN ({active_states})
+                      AND launch.state IN ({owned_states})
               )
         )
         UPDATE instances i
@@ -1382,6 +1383,7 @@ mod tests {
         let bound = crate::test_support::unique_id("pending-start-recovery-bound");
         let registered = crate::test_support::unique_id("pending-start-recovery-registered");
         let preparing = crate::test_support::unique_id("pending-start-recovery-preparing");
+        let waiting = crate::test_support::unique_id("pending-start-recovery-waiting");
         let fresh = crate::test_support::unique_id("pending-start-recovery-fresh");
         let old = chrono::Utc::now() - chrono::Duration::hours(2);
         let cutoff = chrono::Utc::now() - chrono::Duration::hours(1);
@@ -1399,7 +1401,7 @@ mod tests {
         .await
         .expect("insert image");
 
-        for instance_id in [&unbound, &bound, &registered, &preparing] {
+        for instance_id in [&unbound, &bound, &registered, &preparing, &waiting] {
             sqlx::query(
                 r#"
                 INSERT INTO instances (instance_id, tenant_id, status, created_at)
@@ -1425,7 +1427,7 @@ mod tests {
         .await
         .expect("insert fresh pending instance");
 
-        for instance_id in [&bound, &registered, &preparing] {
+        for instance_id in [&bound, &registered, &preparing, &waiting] {
             sqlx::query(
                 r#"
                 INSERT INTO instance_images (instance_id, image_id, tenant_id, created_at)
@@ -1465,6 +1467,28 @@ mod tests {
         .expect("insert active preparation launch");
         sqlx::query(
             r#"
+            INSERT INTO instance_launches (
+                launch_id, instance_id, tenant_id, image_id, kind, state,
+                available_at, deadline_at, run_label, created_at, updated_at
+            ) VALUES (
+                $1, $2, $3, $4, 'start', 'waiting',
+                $5, $6, 'order-1', $5, $5
+            )
+            "#,
+        )
+        .bind(crate::test_support::unique_id(
+            "pending-start-recovery-waiting-launch",
+        ))
+        .bind(&waiting)
+        .bind(&tenant_id)
+        .bind(&image_id)
+        .bind(old)
+        .bind(old + chrono::Duration::hours(3))
+        .execute(&mut *tx)
+        .await
+        .expect("insert waiting launch");
+        sqlx::query(
+            r#"
             INSERT INTO container_registry (
                 container_id, launch_id, instance_id, tenant_id, binary_path, started_at
             ) VALUES ($1, $2, $3, $4, '/test/pending-start-recovery.wasm', $5)
@@ -1499,6 +1523,7 @@ mod tests {
             bound.clone(),
             registered.clone(),
             preparing.clone(),
+            waiting.clone(),
             fresh.clone(),
         ])
         .fetch_all(&mut *tx)
@@ -1536,6 +1561,11 @@ mod tests {
         assert_eq!(preparing_status, "pending");
         assert!(preparing_error.is_none());
         assert!(preparing_reason.is_none());
+
+        let (_, waiting_status, waiting_error, waiting_reason) = state(&waiting);
+        assert_eq!(waiting_status, "pending");
+        assert!(waiting_error.is_none());
+        assert!(waiting_reason.is_none());
 
         let (_, fresh_status, fresh_error, fresh_reason) = state(&fresh);
         assert_eq!(fresh_status, "pending");

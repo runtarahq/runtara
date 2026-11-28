@@ -16,6 +16,7 @@ pub mod object_model;
 pub mod oidc_discovery;
 pub mod operators;
 pub mod proxy_url;
+pub mod run_query;
 pub mod specs;
 pub mod step_events;
 pub mod step_summaries;

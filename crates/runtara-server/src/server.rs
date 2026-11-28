@@ -42,6 +42,8 @@ use runtime_client::RuntimeClient;
         api::handlers::executions::list_all_executions_handler,
         api::handlers::executions::query_executions_handler,
         api::handlers::executions::execution_summary_handler,
+        api::handlers::run_query::run_query_handler,
+        api::handlers::run_query::run_state_handler,
         api::handlers::operations::operation_queues,
         api::handlers::operations::operation_processes,
         api::handlers::operations::list_operation_views,
@@ -238,6 +240,8 @@ use runtime_client::RuntimeClient;
             api::dto::executions::QueryExecutionsRequest,
             api::dto::executions::ExecutionSummaryRequest,
             api::dto::executions::ExecutionSummary,
+            api::handlers::run_query::RunQueryRequest,
+            api::services::run_query::WorkflowState,
             api::dto::executions::ExecutionSummaryResponse,
             api::dto::executions::StateFilterDto,
             api::dto::executions::StateSortDto,
@@ -992,6 +996,14 @@ fn api_app(parts: ApiParts) -> Router {
             "/api/runtime/executions/summary",
             post(api::handlers::executions::execution_summary_handler),
         )
+        .route(
+            "/api/runtime/runs/query",
+            post(api::handlers::run_query::run_query_handler),
+        )
+        .route(
+            "/api/runtime/runs/state",
+            get(api::handlers::run_query::run_state_handler),
+        )
         // Workflow endpoints (refactored - using 3-layer architecture)
         .route(
             "/api/runtime/workflows/create",
@@ -1411,7 +1423,7 @@ fn api_app(parts: ApiParts) -> Router {
     // the engine like any other (`Engine::run_sync`), as that caller: the
     // engine verifies who it is and holds it to what it may run. Only what
     // anyone may send goes to the engine as it arrived.
-    let sync = api::handlers::workflows_sync::capture_http_event_sync;
+    let sync = api::handlers::workflows_sync::run_workflow_sync_for_caller;
     let internal_event_routes = Router::new()
         .route(
             "/api/runtime/events/http-sync/{workflow_id}",

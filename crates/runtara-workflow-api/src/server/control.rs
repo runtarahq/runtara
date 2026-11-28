@@ -128,6 +128,20 @@ pub(super) async fn post_conversation_delta(
     call(state, request, ControlCall::ConversationDelta).await
 }
 
+pub(super) async fn post_runs_query(
+    State(state): State<WorkflowApiState>,
+    request: Request,
+) -> Result<Response, Failure> {
+    call(state, request, ControlCall::RunsQuery).await
+}
+
+pub(super) async fn post_runs_latest(
+    State(state): State<WorkflowApiState>,
+    request: Request,
+) -> Result<Response, Failure> {
+    call(state, request, ControlCall::RunsLatest).await
+}
+
 pub(super) async fn post_conversation_history(
     State(state): State<WorkflowApiState>,
     request: Request,
